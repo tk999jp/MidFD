@@ -1,0 +1,16 @@
+.gitattributes text eol=lf
+*.md text eol=lf
+LICENSE text eol=lf
+.github/ISSUE_TEMPLATE/*.md text eol=lf
+.gitignore text eol=lf
+/Docs export-ignore
+/Docs/** export-ignore
+/.codex export-ignore
+/.codex/** export-ignore
+/AGENTS.md export-ignore
+/PROJECT_CONTEXT.md export-ignore
+/walkthrough.md export-ignore
+/*.bat export-ignore
+/*.zip export-ignore
+/*.sha256 export-ignore
+*.csproj text eol=lf

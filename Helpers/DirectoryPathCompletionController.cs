@@ -1,0 +1,839 @@
+using System.Runtime.InteropServices;
+using System.Text;
+
+namespace MidFD.Helpers;
+
+internal sealed class DirectoryPathCompletionController : IDisposable
+{
+    private static readonly PopupItem EmptyPopupItem = new(string.Empty, null);
+    private readonly Control _control;
+    private readonly ListBox _listBox;
+    private readonly DirectoryPathCompletionPopupForm _popupForm;
+    private readonly IEditorAdapter _editor;
+    private readonly CompletionMessageFilter _messageFilter;
+    private readonly List<Control> _hookedControls = new();
+    private string? _currentDirPath;
+    private string? _initialTextBeforeTab;
+    private string? _lastHandledText;
+    private bool _isUpdating;
+    private bool _isTabCycling;
+    private const int MaxCandidates = 30;
+
+    private DirectoryPathCompletionController(Control control)
+    {
+        _control = control;
+        _editor = CreateEditorAdapter(control);
+
+        _listBox = new NonSelectableListBox
+        {
+            BorderStyle = BorderStyle.None,
+            Dock = DockStyle.Fill,
+            SelectionMode = SelectionMode.One,
+            BackColor = Color.FromArgb(40, 40, 40),
+            ForeColor = Color.White,
+            Font = _control.Font,
+            DrawMode = DrawMode.OwnerDrawFixed,
+            ItemHeight = _control.Font.Height + 4,
+            IntegralHeight = false
+        };
+        _listBox.DrawItem += ListBox_DrawItem;
+        _listBox.MouseDown += (_, _) => CommitSelection();
+
+        _popupForm = new DirectoryPathCompletionPopupForm(_listBox);
+        _popupForm.VisibleChanged += (_, _) =>
+        {
+            if (!_popupForm.Visible)
+            {
+                _listBox.Items.Clear();
+                _isTabCycling = false;
+                _initialTextBeforeTab = null;
+            }
+        };
+
+        _messageFilter = new CompletionMessageFilter(this);
+        Application.AddMessageFilter(_messageFilter);
+
+        HookEvents(_control);
+        if (_control is ComboBox cb)
+        {
+            cb.ControlAdded += (_, e) => HookEvents(e.Control);
+            foreach (Control child in cb.Controls)
+            {
+                HookEvents(child);
+            }
+        }
+    }
+
+    public static DirectoryPathCompletionController Attach(Control control)
+    {
+        return new DirectoryPathCompletionController(control);
+    }
+
+    private string ControlText => _editor.Text;
+
+    private bool IsPopupVisible => _popupForm.Visible;
+
+    private void SetControlText(string text)
+    {
+        _isUpdating = true;
+        _lastHandledText = text;
+        try
+        {
+            _editor.SetText(text);
+            _editor.MoveCaretToEnd();
+        }
+        finally
+        {
+            _isUpdating = false;
+        }
+    }
+
+    private void Control_TextChanged(object? sender, EventArgs e)
+    {
+        if (_isUpdating)
+        {
+            return;
+        }
+
+        string text = ControlText;
+        if (text == _lastHandledText)
+        {
+            return;
+        }
+
+        _isTabCycling = false;
+        _initialTextBeforeTab = null;
+        _lastHandledText = text;
+
+        UpdateCandidates();
+    }
+
+    private void Control_LostFocus(object? sender, EventArgs e)
+    {
+        _control.BeginInvoke(new Action(() =>
+        {
+            _editor.RefreshHandle();
+            if (!HasFocusWithinEditorOrPopup())
+            {
+                ClosePopup();
+            }
+        }));
+    }
+
+    private void Control_PreviewKeyDown(object? sender, PreviewKeyDownEventArgs e)
+    {
+        if (e.KeyCode == Keys.Tab)
+        {
+            // ポップアップが表示されているか、あるいは入力があって補完が可能な場合は Tab を自前で処理する
+            if (IsPopupVisible || !string.IsNullOrWhiteSpace(ControlText))
+            {
+                e.IsInputKey = true;
+            }
+            return;
+        }
+
+        if (!IsPopupVisible)
+        {
+            return;
+        }
+
+        if (e.KeyCode == Keys.Enter || e.KeyCode == Keys.Up || e.KeyCode == Keys.Down || e.KeyCode == Keys.Escape)
+        {
+            e.IsInputKey = true;
+        }
+    }
+
+    private void Control_KeyDown(object? sender, KeyEventArgs e)
+    {
+        if (e.KeyCode == Keys.Tab)
+        {
+            if (!IsPopupVisible)
+            {
+                UpdateCandidates();
+                if (!IsPopupVisible)
+                {
+                    return; // 候補なし
+                }
+            }
+
+            int direction = e.Shift ? -1 : 1;
+            CycleCompletion(direction);
+            e.Handled = true;
+            e.SuppressKeyPress = true;
+            return;
+        }
+
+        if (!HandlePopupKey(e.KeyCode))
+        {
+            return;
+        }
+
+        e.Handled = true;
+        e.SuppressKeyPress = true;
+    }
+
+    private void ListBox_DrawItem(object? sender, DrawItemEventArgs e)
+    {
+        if (e.Index < 0)
+        {
+            return;
+        }
+
+        bool isSelected = (e.State & DrawItemState.Selected) == DrawItemState.Selected;
+        Color backColor = isSelected ? Color.SteelBlue : _listBox.BackColor;
+        Color foreColor = isSelected ? Color.White : _listBox.ForeColor;
+
+        using var brush = new SolidBrush(backColor);
+        e.Graphics.FillRectangle(brush, e.Bounds);
+
+        string text = (_listBox.Items[e.Index] as PopupItem)?.DisplayText ?? string.Empty;
+        TextRenderer.DrawText(e.Graphics, text, _listBox.Font, e.Bounds, foreColor, TextFormatFlags.VerticalCenter | TextFormatFlags.Left);
+    }
+
+    private void MoveSelection(int delta)
+    {
+        int count = _listBox.Items.Count;
+        if (count == 0)
+        {
+            return;
+        }
+
+        int next = _listBox.SelectedIndex + delta;
+        if (next < 0)
+        {
+            next = count - 1;
+        }
+        else if (next >= count)
+        {
+            next = 0;
+        }
+
+        _listBox.SelectedIndex = next;
+    }
+
+    private void CycleCompletion(int direction)
+    {
+        int count = _listBox.Items.Count;
+        if (count <= 1)
+        {
+            return;
+        }
+
+        if (!_isTabCycling)
+        {
+            _isTabCycling = true;
+            _initialTextBeforeTab = ControlText;
+
+            // 最初はインクリメンタル検索用の空項目(index 0)を避けて index 1 から開始
+            if (_listBox.SelectedIndex <= 0)
+            {
+                _listBox.SelectedIndex = 1;
+            }
+        }
+        else
+        {
+            // インクリメンタル用の空項目(index 0)を除いて 1..count-1 の範囲で巡回
+            int next = _listBox.SelectedIndex + direction;
+            if (next < 1)
+            {
+                next = count - 1;
+            }
+            else if (next >= count)
+            {
+                next = 1;
+            }
+            _listBox.SelectedIndex = next;
+        }
+
+        if (_listBox.SelectedItem is PopupItem item && item.Value != null && _currentDirPath != null)
+        {
+            string result = Path.Combine(_currentDirPath, item.Value) + Path.DirectorySeparatorChar;
+            SetControlText(result);
+        }
+    }
+
+    private void UpdateCandidates()
+    {
+        string text = ControlText;
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            ClosePopup();
+            return;
+        }
+
+        try
+        {
+            string? dirPath;
+            string filter;
+
+            if (text.Length == 2 && text[1] == ':' && char.IsLetter(text[0]))
+            {
+                dirPath = text + Path.DirectorySeparatorChar;
+                filter = string.Empty;
+            }
+            else if (text.EndsWith(Path.DirectorySeparatorChar) || text.EndsWith(Path.AltDirectorySeparatorChar))
+            {
+                dirPath = text;
+                filter = string.Empty;
+            }
+            else
+            {
+                dirPath = Path.GetDirectoryName(text);
+                filter = Path.GetFileName(text) ?? string.Empty;
+
+                if (string.IsNullOrEmpty(dirPath) && text.Length >= 3 && text[1] == ':' && (text[2] == '\\' || text[2] == '/'))
+                {
+                    dirPath = text.Substring(0, 3);
+                }
+            }
+
+            if (string.IsNullOrEmpty(dirPath) || !Directory.Exists(dirPath))
+            {
+                ClosePopup();
+                return;
+            }
+
+            var dirs = Directory.GetDirectories(dirPath, filter + "*")
+                .Select(Path.GetFileName)
+                .Where(static n => !string.IsNullOrEmpty(n))
+                .OrderBy(static n => n)
+                .Take(MaxCandidates)
+                .ToList();
+
+            if (dirs.Count == 0 || (dirs.Count == 1 && string.Equals(dirs[0], filter, StringComparison.OrdinalIgnoreCase)))
+            {
+                ClosePopup();
+                return;
+            }
+
+            _currentDirPath = dirPath;
+            ShowPopup(dirs);
+        }
+        catch
+        {
+            ClosePopup();
+        }
+    }
+
+    private void ShowPopup(List<string?> candidates)
+    {
+        _listBox.BeginUpdate();
+        _listBox.Items.Clear();
+        _listBox.Items.Add(EmptyPopupItem);
+        foreach (string? candidate in candidates)
+        {
+            if (candidate != null)
+            {
+                _listBox.Items.Add(new PopupItem(candidate, candidate));
+            }
+        }
+
+        _listBox.SelectedIndex = 0;
+        _listBox.EndUpdate();
+
+        int itemHeight = _listBox.ItemHeight;
+        int visibleCount = Math.Min(_listBox.Items.Count, 15);
+        int height = (itemHeight * visibleCount) + 2;
+        Rectangle popupBounds = _editor.GetPopupBounds(_control.Width, height);
+        Form? owner = _control.FindForm();
+        _popupForm.ShowPopup(owner, popupBounds);
+        _editor.RefreshHandle();
+        _editor.EnsureFocus();
+    }
+
+    private void CommitSelection()
+    {
+        if (_listBox.SelectedItem is PopupItem selectedItem && selectedItem.Value is string selected && _currentDirPath != null)
+        {
+            string result = Path.Combine(_currentDirPath, selected) + Path.DirectorySeparatorChar;
+            SetControlText(result);
+            UpdateCandidates();
+            return;
+        }
+
+        ClosePopup();
+        TriggerAcceptButton();
+    }
+
+    private void ClosePopup()
+    {
+        if (_popupForm.Visible)
+        {
+            _popupForm.Hide();
+        }
+
+        _currentDirPath = null;
+    }
+
+    private void TriggerAcceptButton()
+    {
+        Form? owner = _control.FindForm();
+        if (owner?.AcceptButton is IButtonControl button)
+        {
+            if (button is Control control && !control.Enabled)
+            {
+                return;
+            }
+
+            button.PerformClick();
+        }
+    }
+
+    private bool HandlePopupKey(Keys keyCode)
+    {
+        if (!IsPopupVisible)
+        {
+            return false;
+        }
+
+        switch (keyCode)
+        {
+            case Keys.Up:
+                MoveSelection(-1);
+                return true;
+            case Keys.Down:
+                MoveSelection(1);
+                return true;
+            case Keys.Enter:
+                CommitSelection();
+                return true;
+            case Keys.Escape:
+                ClosePopup();
+                return true;
+            default:
+                return false;
+        }
+    }
+
+    private bool HasFocusWithinEditorOrPopup()
+    {
+        _editor.RefreshHandle();
+        if (_editor.HasFocus || _control.Focused || _hookedControls.Any(static c => c.Focused))
+        {
+            return true;
+        }
+
+        if (_popupForm.HasPopupFocus)
+        {
+            return true;
+        }
+
+        IntPtr focusedHandle = GetFocus();
+        return _editor.ContainsHandle(focusedHandle) || IsOwnedHandle(focusedHandle, _control) || _popupForm.ContainsOwnedHandle(focusedHandle);
+    }
+
+    private void HookEvents(Control? target)
+    {
+        if (target == null || _hookedControls.Contains(target))
+        {
+            return;
+        }
+
+        target.TextChanged += Control_TextChanged;
+        target.KeyDown += Control_KeyDown;
+        target.PreviewKeyDown += Control_PreviewKeyDown;
+        target.LostFocus += Control_LostFocus;
+        target.LocationChanged += Control_BoundsChanged;
+        target.SizeChanged += Control_BoundsChanged;
+        target.ParentChanged += Control_ParentChanged;
+        target.VisibleChanged += Control_VisibleChanged;
+        _hookedControls.Add(target);
+    }
+
+    private void Control_BoundsChanged(object? sender, EventArgs e)
+    {
+        if (!IsPopupVisible || _listBox.Items.Count == 0)
+        {
+            return;
+        }
+
+        int height = _popupForm.Height;
+        Rectangle popupBounds = _editor.GetPopupBounds(_control.Width, height);
+        _popupForm.Bounds = popupBounds;
+    }
+
+    private void Control_ParentChanged(object? sender, EventArgs e)
+    {
+        if (sender is not Control target)
+        {
+            return;
+        }
+
+        target.LocationChanged -= Control_BoundsChanged;
+        target.SizeChanged -= Control_BoundsChanged;
+        target.LocationChanged += Control_BoundsChanged;
+        target.SizeChanged += Control_BoundsChanged;
+    }
+
+    private void Control_VisibleChanged(object? sender, EventArgs e)
+    {
+        if (!_control.Visible)
+        {
+            ClosePopup();
+        }
+    }
+
+    public void Dispose()
+    {
+        foreach (Control control in _hookedControls)
+        {
+            control.TextChanged -= Control_TextChanged;
+            control.KeyDown -= Control_KeyDown;
+            control.PreviewKeyDown -= Control_PreviewKeyDown;
+            control.LostFocus -= Control_LostFocus;
+            control.LocationChanged -= Control_BoundsChanged;
+            control.SizeChanged -= Control_BoundsChanged;
+            control.ParentChanged -= Control_ParentChanged;
+            control.VisibleChanged -= Control_VisibleChanged;
+        }
+
+        _hookedControls.Clear();
+        Application.RemoveMessageFilter(_messageFilter);
+        _popupForm.Dispose();
+    }
+
+    private static bool IsOwnedHandle(IntPtr handle, Control control)
+    {
+        if (handle == IntPtr.Zero || !control.IsHandleCreated)
+        {
+            return false;
+        }
+
+        return handle == control.Handle || IsChild(control.Handle, handle);
+    }
+
+    [DllImport("user32.dll")]
+    private static extern IntPtr GetFocus();
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool IsChild(IntPtr hWndParent, IntPtr hWnd);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GetComboBoxInfo(IntPtr hwndCombo, ref COMBOBOXINFO info);
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    private static extern int GetWindowText(IntPtr hWnd, StringBuilder lpString, int nMaxCount);
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    private static extern int GetWindowTextLength(IntPtr hWnd);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern IntPtr SetFocus(IntPtr hWnd);
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    private static extern IntPtr SendMessage(IntPtr hWnd, int msg, IntPtr wParam, IntPtr lParam);
+
+    private const int EM_SETSEL = 0x00B1;
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct COMBOBOXINFO
+    {
+        public int cbSize;
+        public RECT rcItem;
+        public RECT rcButton;
+        public int stateButton;
+        public IntPtr hwndCombo;
+        public IntPtr hwndItem;
+        public IntPtr hwndList;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct RECT
+    {
+        public int Left;
+        public int Top;
+        public int Right;
+        public int Bottom;
+    }
+
+    private static IEditorAdapter CreateEditorAdapter(Control control)
+    {
+        return control switch
+        {
+            TextBoxBase textBox => new TextBoxEditorAdapter(textBox),
+            ComboBox comboBox => new ComboBoxEditorAdapter(comboBox),
+            _ => new ControlEditorAdapter(control)
+        };
+    }
+
+    private sealed class CompletionMessageFilter : IMessageFilter
+    {
+        private const int WM_KEYDOWN = 0x0100;
+        private const int WM_SYSKEYDOWN = 0x0104;
+        private readonly DirectoryPathCompletionController _owner;
+
+        public CompletionMessageFilter(DirectoryPathCompletionController owner)
+        {
+            _owner = owner;
+        }
+
+        public bool PreFilterMessage(ref Message m)
+        {
+            if (!_owner.IsPopupVisible)
+            {
+                return false;
+            }
+
+            if (m.Msg != WM_KEYDOWN && m.Msg != WM_SYSKEYDOWN)
+            {
+                return false;
+            }
+
+            _owner._editor.RefreshHandle();
+            if (!_owner._editor.ContainsHandle(m.HWnd) && !IsOwnedHandle(m.HWnd, _owner._control))
+            {
+                return false;
+            }
+
+            Keys keyCode = (Keys)(nint)m.WParam & Keys.KeyCode;
+            return _owner.HandlePopupKey(keyCode);
+        }
+    }
+
+    private interface IEditorAdapter
+    {
+        string Text { get; }
+        bool HasFocus { get; }
+        void RefreshHandle();
+        bool ContainsHandle(IntPtr handle);
+        void EnsureFocus();
+        void SetText(string text);
+        void MoveCaretToEnd();
+        Rectangle GetPopupBounds(int width, int height);
+    }
+
+    private sealed class ControlEditorAdapter : IEditorAdapter
+    {
+        private readonly Control _control;
+
+        public ControlEditorAdapter(Control control)
+        {
+            _control = control;
+        }
+
+        public string Text => _control.Text;
+
+        public bool HasFocus => _control.Focused;
+
+        public void RefreshHandle()
+        {
+        }
+
+        public bool ContainsHandle(IntPtr handle)
+        {
+            return IsOwnedHandle(handle, _control);
+        }
+
+        public void EnsureFocus()
+        {
+            if (!_control.Focused)
+            {
+                _control.Focus();
+            }
+        }
+
+        public void SetText(string text)
+        {
+            _control.Text = text;
+        }
+
+        public void MoveCaretToEnd()
+        {
+        }
+
+        public Rectangle GetPopupBounds(int width, int height)
+        {
+            return new Rectangle(_control.PointToScreen(new Point(0, _control.Height)), new Size(width, height));
+        }
+    }
+
+    private sealed class TextBoxEditorAdapter : IEditorAdapter
+    {
+        private readonly TextBoxBase _textBox;
+
+        public TextBoxEditorAdapter(TextBoxBase textBox)
+        {
+            _textBox = textBox;
+        }
+
+        public string Text => _textBox.Text;
+
+        public bool HasFocus => _textBox.Focused;
+
+        public void RefreshHandle()
+        {
+        }
+
+        public bool ContainsHandle(IntPtr handle)
+        {
+            return IsOwnedHandle(handle, _textBox);
+        }
+
+        public void EnsureFocus()
+        {
+            if (!_textBox.Focused)
+            {
+                _textBox.Focus();
+            }
+        }
+
+        public void SetText(string text)
+        {
+            _textBox.Text = text;
+        }
+
+        public void MoveCaretToEnd()
+        {
+            _textBox.SelectionStart = _textBox.TextLength;
+            _textBox.SelectionLength = 0;
+        }
+
+        public Rectangle GetPopupBounds(int width, int height)
+        {
+            return new Rectangle(_textBox.PointToScreen(new Point(0, _textBox.Height)), new Size(width, height));
+        }
+    }
+
+    private sealed class ComboBoxEditorAdapter : IEditorAdapter
+    {
+        private readonly ComboBox _comboBox;
+        private IntPtr _editorHandle;
+
+        public ComboBoxEditorAdapter(ComboBox comboBox)
+        {
+            _comboBox = comboBox;
+            RefreshHandle();
+        }
+
+        public string Text
+        {
+            get
+            {
+                RefreshHandle();
+                if (_editorHandle != IntPtr.Zero)
+                {
+                    return GetWindowTextValue(_editorHandle);
+                }
+
+                return _comboBox.Text;
+            }
+        }
+
+        public bool HasFocus
+        {
+            get
+            {
+                RefreshHandle();
+                return ContainsHandle(GetFocus());
+            }
+        }
+
+        public void RefreshHandle()
+        {
+            if (!_comboBox.IsHandleCreated)
+            {
+                _editorHandle = IntPtr.Zero;
+                return;
+            }
+
+            COMBOBOXINFO info = new()
+            {
+                cbSize = Marshal.SizeOf<COMBOBOXINFO>()
+            };
+            if (GetComboBoxInfo(_comboBox.Handle, ref info))
+            {
+                _editorHandle = info.hwndItem;
+            }
+        }
+
+        public bool ContainsHandle(IntPtr handle)
+        {
+            if (handle == IntPtr.Zero)
+            {
+                return false;
+            }
+
+            RefreshHandle();
+            if (_editorHandle != IntPtr.Zero && (handle == _editorHandle || IsChild(_editorHandle, handle)))
+            {
+                return true;
+            }
+
+            return IsOwnedHandle(handle, _comboBox);
+        }
+
+        public void EnsureFocus()
+        {
+            RefreshHandle();
+            if (_editorHandle != IntPtr.Zero)
+            {
+                SetFocus(_editorHandle);
+                return;
+            }
+
+            if (!_comboBox.Focused)
+            {
+                _comboBox.Focus();
+            }
+        }
+
+        public void SetText(string text)
+        {
+            _comboBox.Text = text;
+        }
+
+        public void MoveCaretToEnd()
+        {
+            RefreshHandle();
+            if (_editorHandle != IntPtr.Zero)
+            {
+                SendMessage(_editorHandle, EM_SETSEL, (IntPtr)_comboBox.Text.Length, (IntPtr)_comboBox.Text.Length);
+                return;
+            }
+
+            _comboBox.SelectionStart = _comboBox.Text.Length;
+            _comboBox.SelectionLength = 0;
+        }
+
+        public Rectangle GetPopupBounds(int width, int height)
+        {
+            return new Rectangle(_comboBox.PointToScreen(new Point(0, _comboBox.Height)), new Size(width, height));
+        }
+
+        private static string GetWindowTextValue(IntPtr handle)
+        {
+            int length = GetWindowTextLength(handle);
+            if (length <= 0)
+            {
+                return string.Empty;
+            }
+
+            StringBuilder builder = new(length + 1);
+            GetWindowText(handle, builder, builder.Capacity);
+            return builder.ToString();
+        }
+    }
+
+    private sealed class NonSelectableListBox : ListBox
+    {
+        public NonSelectableListBox()
+        {
+            SetStyle(ControlStyles.Selectable, false);
+        }
+    }
+
+    private sealed class PopupItem
+    {
+        public PopupItem(string displayText, string? value)
+        {
+            DisplayText = displayText;
+            Value = value;
+        }
+
+        public string DisplayText { get; }
+
+        public string? Value { get; }
+    }
+}

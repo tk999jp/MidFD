@@ -1,0 +1,27 @@
+{
+  "SchemaVersion": 1,
+  "Tools": [
+    {
+      "Id": "external-tool-001",
+      "DisplayName": "選択ファイルをメモ帳で開く",
+      "Description": "選択中のファイルを notepad.exe に渡すサンプルです。",
+      "Alias": "notepad",
+      "AltSlot": "N",
+      "ExecutablePath": "notepad.exe",
+      "Arguments": "{selectedPath}",
+      "WorkingDirectory": "{currentDir}",
+      "Enabled": true
+    },
+    {
+      "Id": "external-tool-002",
+      "DisplayName": "マーク一覧をメモ帳で開く",
+      "Description": "{markedPathsFile} の使い方を示すサンプルです。",
+      "Alias": "marked-list",
+      "AltSlot": null,
+      "ExecutablePath": "notepad.exe",
+      "Arguments": "{markedPathsFile}",
+      "WorkingDirectory": "{currentDir}",
+      "Enabled": false
+    }
+  ]
+}

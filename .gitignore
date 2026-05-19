@@ -21,6 +21,12 @@ Data/
 workspace.db
 manifest.db
 plugins/
+tools/ffmpeg/
+ffmpeg.exe
+ffplay.exe
+ffprobe.exe
+ffmpeg-*.zip
+ffmpeg-*.7z
 scratch/
 *.tmp
 *.bak

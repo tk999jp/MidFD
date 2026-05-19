@@ -47,6 +47,11 @@ public static class SettingsManager
             var settings = JsonSerializer.Deserialize<AppSettings>(json, JsonOptions);
             AppSettings loadedSettings = settings ?? new AppSettings();
             MaterializeBrowserTabRestoreState(loadedSettings);
+            bool migrated = ApplyVideoStillInitialSecondsMigration(loadedSettings);
+            if (migrated)
+            {
+                Save(loadedSettings);
+            }
             return loadedSettings;
         }
         catch (Exception ex)
@@ -99,6 +104,25 @@ public static class SettingsManager
 
         NormalizeAllTabHistories(persistableSettings);
         return persistableSettings;
+    }
+
+    private static bool ApplyVideoStillInitialSecondsMigration(AppSettings settings)
+    {
+        settings.Preview ??= new PreviewSettings();
+        if (settings.Preview.VideoStillInitialSecondsMigratedToZero)
+        {
+            return false;
+        }
+
+        // 旧既定値(10秒)のみ一度だけ0秒へ移行する。
+        bool shouldMigrate = settings.Preview.VideoSkipSeconds == 10;
+        if (shouldMigrate)
+        {
+            settings.Preview.VideoSkipSeconds = 0;
+        }
+
+        settings.Preview.VideoStillInitialSecondsMigratedToZero = true;
+        return shouldMigrate;
     }
 
     private static void NormalizeAllTabHistories(AppSettings settings)

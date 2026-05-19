@@ -276,11 +276,7 @@ public class PreviewSettings
     public int ImageViewerHeight { get; set; } = 720;
     public int InitialFitLimitWidth { get; set; } = 1920;
     public int InitialFitLimitHeight { get; set; } = 1080;
-    public int VideoSkipSeconds { get; set; } = 0;
-    public bool VideoStillInitialSecondsMigratedToZero { get; set; } = false;
-    public bool VideoStillPreviewEnabled { get; set; } = true;
-    public string? VideoStillPreviewFfmpegPath { get; set; }
-    public int VideoPlaybackVolumePercent { get; set; } = 100;
+    public int VideoSkipSeconds { get; set; } = 10;
 
     public PreviewSettings Clone() => (PreviewSettings)MemberwiseClone();
 }

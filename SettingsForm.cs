@@ -42,11 +42,7 @@ public class SettingsForm : Form
     private readonly CheckBox _reuseImageViewerCheckBox;
     private readonly CheckBox _closeImageViewerOnNonImageCheckBox;
     private readonly CheckBox _rememberImageViewerBoundsCheckBox;
-    private readonly CheckBox _videoStillPreviewEnabledCheckBox;
     private readonly ComboBox _videoSkipSecondsCombo;
-    private readonly ComboBox _videoPlaybackVolumeCombo;
-    private readonly TextBox _videoStillPreviewFfmpegPathBox;
-    private readonly Label _videoStillPreviewFfmpegStatusLabel;
     private readonly CheckBox _confirmDeleteCheckBox;
     private readonly CheckBox _confirmPermanentDeleteCheckBox;
     private readonly CheckBox _useMidFdManagedTrashCheckBox;
@@ -63,7 +59,6 @@ public class SettingsForm : Form
     private readonly CheckBox _enableMouseGesturesCheckBox;
     private readonly CheckBox _enableLogCheckBox;
     private readonly CheckBox _enableDetailedLogCheckBox;
-    private readonly ToolTip _statusToolTip = new();
 
     public SettingsForm(AppSettings settings, FeatureProfile effectiveProfile)
     {
@@ -86,12 +81,12 @@ public class SettingsForm : Form
         StartPosition = FormStartPosition.CenterParent;
         Padding = new Padding(12);
         AutoScaleMode = AutoScaleMode.Font;
-        ClientSize = new Size(800, 520);
+        ClientSize = new Size(800, 480);
 
         var tabs = new TabControl
         {
             Dock = DockStyle.Top,
-            Height = 440
+            Height = 400
         };
 
         var tabDisplayAndPreview = CreateTab("表示 / ビューア");
@@ -117,7 +112,7 @@ public class SettingsForm : Form
         string[] sizeFormats = { "HumanReadable", "Bytes", "KB/MB" };
 
         (_filerFontCombo, _filerFontSizeBox, _colorThemeCombo, _showBrowserTabCategoryRowCheckBox, _showExtensionsCheckBox, _showDirectoryMarkerCheckBox, _showHiddenFilesCheckBox, _showItemIconsCheckBox, _dateFormatCombo, _sizeFormatCombo,
-         _viewerFontCombo, _viewerFontSizeBox, _viewerWordWrapCheckBox, _reuseImageViewerCheckBox, _closeImageViewerOnNonImageCheckBox, _rememberImageViewerBoundsCheckBox, _videoStillPreviewEnabledCheckBox, _videoSkipSecondsCombo)
+         _viewerFontCombo, _viewerFontSizeBox, _viewerWordWrapCheckBox, _reuseImageViewerCheckBox, _closeImageViewerOnNonImageCheckBox, _rememberImageViewerBoundsCheckBox, _videoSkipSecondsCombo)
             = BuildDisplayAndPreviewTab(tabDisplayAndPreview, fonts, colorThemes, dateFormats, sizeFormats);
 
         (_confirmDeleteCheckBox, _confirmPermanentDeleteCheckBox, _useMidFdManagedTrashCheckBox, _reloadAfterFileOperationCheckBox, _selectCreatedItemCheckBox,
@@ -127,12 +122,11 @@ public class SettingsForm : Form
         (_featureProfileCombo, _restoreLastPathCheckBox, _restoreTabsOnStartupCheckBox, _restoreWindowBoundsCheckBox, _restoreColumnCountCheckBox, _restoreSortCheckBox)
             = BuildLaunchAndRestoreTab(tabLaunchAndRestore);
 
-        (_sevenZipPathBox, _diffPathBox, _editorPathBox, _videoPlaybackVolumeCombo, _videoStillPreviewFfmpegPathBox, _sevenZipStatusLabel, _diffStatusLabel, _editorStatusLabel, _videoStillPreviewFfmpegStatusLabel)
+        (_sevenZipPathBox, _diffPathBox, _editorPathBox, _sevenZipStatusLabel, _diffStatusLabel, _editorStatusLabel)
             = BuildExternalTab(tabExternal);
 
         (_enableLogCheckBox, _enableDetailedLogCheckBox) = BuildLogTab(tabLog);
 
-        _videoStillPreviewFfmpegPathBox.TextChanged += (_, _) => RefreshExternalStatus();
         RefreshExternalStatus();
 
         var btnOk = new Button
@@ -140,7 +134,7 @@ public class SettingsForm : Form
             Text = "OK",
             DialogResult = DialogResult.OK,
             Size = new Size(80, 32),
-            Location = new Point(ClientSize.Width - 180, ClientSize.Height - 44),
+            Location = new Point(ClientSize.Width - 180, ClientSize.Height - 48),
             Anchor = AnchorStyles.Bottom | AnchorStyles.Right,
         };
         btnOk.Click += BtnOk_Click;
@@ -150,7 +144,7 @@ public class SettingsForm : Form
             Text = "Cancel",
             DialogResult = DialogResult.Cancel,
             Size = new Size(80, 32),
-            Location = new Point(ClientSize.Width - 92, ClientSize.Height - 44),
+            Location = new Point(ClientSize.Width - 92, ClientSize.Height - 48),
             Anchor = AnchorStyles.Bottom | AnchorStyles.Right,
         };
 
@@ -171,7 +165,7 @@ public class SettingsForm : Form
     }
 
     private (ComboBox filerFont, NumericUpDown filerSize, ComboBox colorTheme, CheckBox showBrowserTabCategoryRow, CheckBox showExtensions, CheckBox showDirectoryMarker, CheckBox showHiddenFiles, CheckBox showItemIcons, ComboBox dateFormat, ComboBox sizeFormat,
-             ComboBox viewerFont, NumericUpDown viewerSize, CheckBox viewerWordWrap, CheckBox reuseImageViewer, CheckBox closeOnNonImage, CheckBox rememberBounds, CheckBox videoStillPreviewEnabled, ComboBox videoSkipSeconds)
+             ComboBox viewerFont, NumericUpDown viewerSize, CheckBox viewerWordWrap, CheckBox reuseImageViewer, CheckBox closeOnNonImage, CheckBox rememberBounds, ComboBox videoSkipSeconds)
         BuildDisplayAndPreviewTab(TabPage tab, string[] fonts, string[] colorThemes, string[] dateFormats, string[] sizeFormats)
     {
         // Layout Constants
@@ -184,7 +178,7 @@ public class SettingsForm : Form
         int topY = 28;
 
         // --- Left: List Display ---
-        var groupList = new GroupBox { Text = "一覧表示", Location = new Point(8, 6), Size = new Size(376, 400) };
+        var groupList = new GroupBox { Text = "一覧表示", Location = new Point(8, 6), Size = new Size(376, 360) };
         tab.Controls.Add(groupList);
 
         int top = topY;
@@ -216,8 +210,8 @@ public class SettingsForm : Form
         AddLabel(groupList, "サイズ形式:", top, lblW);
         var sizeFormat = AddComboBox(groupList, inpX, top, comboW, sizeFormats, _settings.Appearance.SizeFormat);
 
-        // --- Right Top: Viewer ---
-        var groupViewer = new GroupBox { Text = "ビューア", Location = new Point(392, 6), Size = new Size(376, 188) };
+        // --- Right: Viewer / Preview ---
+        var groupViewer = new GroupBox { Text = "ビューア / プレビュー", Location = new Point(392, 6), Size = new Size(376, 360) };
         tab.Controls.Add(groupViewer);
 
         top = topY;
@@ -233,21 +227,15 @@ public class SettingsForm : Form
         var closeOnNonImage = AddCheckBox(groupViewer, "非画像時にビューアを閉じる", checkX, top, _settings.Preview.CloseImageViewerOnNonImageSelection);
         top += rowH;
         var rememberBounds = AddCheckBox(groupViewer, "ビューアの位置/サイズを記憶する", checkX, top, _settings.Preview.RememberImageViewerBounds);
-
-        // --- Right Bottom: Video Preview ---
-        var groupVideoPreview = new GroupBox { Text = "動画静止画プレビュー", Location = new Point(392, 202), Size = new Size(376, 204) };
-        tab.Controls.Add(groupVideoPreview);
-
-        top = 24;
-        var videoStillPreviewEnabled = AddCheckBox(groupVideoPreview, "有効にする", 16, top, _settings.Preview.VideoStillPreviewEnabled);
         top += rowH + 8;
-        AddLabel(groupVideoPreview, "初期位置(秒):", top, lblW);
-        var videoSkipSeconds = AddEditableComboBox(groupVideoPreview, inpX, top, 100, new[] { "0", "5", "10", "30", "60" }, _settings.Preview.VideoSkipSeconds.ToString());
-        top += rowH + 8;
-        AddHintLabel(groupVideoPreview, 16, top, 330, "※ ffmpeg設定は「外部連携」タブ");
+        AddLabel(groupViewer, "動画スキップ秒数:", top, lblW);
+        var videoSkipSeconds = AddComboBox(groupViewer, inpX, top, 120, new[] { "5", "10", "30" }, _settings.Preview.VideoSkipSeconds.ToString());
+        top += rowH;
+
+        AddHintLabel(groupViewer, checkX, top, 340, "※ 再利用と非画像時の挙動は OK 後すぐ反映されます。");
 
         return (filerFont, filerSize, colorTheme, showBrowserTabCategoryRow, showExtensions, showDirectoryMarker, showHiddenFiles, showItemIcons, dateFormat, sizeFormat,
-                viewerFont, viewerSize, viewerWordWrap, reuseImageViewer, closeOnNonImage, rememberBounds, videoStillPreviewEnabled, videoSkipSeconds);
+                viewerFont, viewerSize, viewerWordWrap, reuseImageViewer, closeOnNonImage, rememberBounds, videoSkipSeconds);
     }
 
     private (CheckBox confirmDelete, CheckBox confirmPermanentDelete, CheckBox useMidFdManagedTrash, CheckBox reloadAfterFileOperation, CheckBox selectCreatedItem,
@@ -336,7 +324,7 @@ public class SettingsForm : Form
         return (profile, restoreLastPath, restoreTabsOnStartup, restoreWindowBounds, restoreColumnCount, restoreSort);
     }
 
-    private (TextBox sevenZip, TextBox diff, TextBox editor, ComboBox videoPlaybackVolume, TextBox videoStillPreviewFfmpegPath, Label sevenZipStatus, Label diffStatus, Label editorStatus, Label videoStillPreviewFfmpegStatus)
+    private (TextBox sevenZip, TextBox diff, TextBox editor, Label sevenZipStatus, Label diffStatus, Label editorStatus)
         BuildExternalTab(TabPage tab)
     {
         int labelWidth = 120;
@@ -368,8 +356,8 @@ public class SettingsForm : Form
 
         AddHintLabel(groupArchive, 16, top, 340, "E キーで選択ファイルをこのエディタで開きます。\n未設定時は notepad.exe を使用します。");
 
-        // --- Right: External Tools / Video ---
-        var groupTools = new GroupBox { Text = "外部ツール管理", Location = new Point(392, 6), Size = new Size(376, 176) };
+        // --- Right: External Tools ---
+        var groupTools = new GroupBox { Text = "外部ツール管理", Location = new Point(392, 6), Size = new Size(376, 360) };
         tab.Controls.Add(groupTools);
 
         top = 28;
@@ -387,27 +375,13 @@ public class SettingsForm : Form
         groupTools.Controls.Add(btnManageTools);
         top += 48;
 
-        AddHintLabel(groupTools, 16, top, 340, "コマンドパレット (Ctrl+Shift+P) や Alt+スロットで起動する外部ツールを管理します。");
-
-        var groupVideoTools = new GroupBox { Text = "動画ツール", Location = new Point(392, 188), Size = new Size(376, 218) };
-        tab.Controls.Add(groupVideoTools);
-        top = 28;
-        AddLabel(groupVideoTools, "ffmpeg.exe:", top, labelWidth);
-        var videoStillPreviewFfmpegPath = AddTextBox(groupVideoTools, baseX, top, 160, _settings.Preview.VideoStillPreviewFfmpegPath ?? "");
-        AddBrowseButton(groupVideoTools, baseX + 168, top - 1, 60, videoStillPreviewFfmpegPath);
-        var videoStillPreviewFfmpegStatus = AddStatusLabel(groupVideoTools, baseX, top + 26, 240);
-        top += rowH;
-        AddLabel(groupVideoTools, "ffplay音量(%):", top, labelWidth);
-        var videoPlaybackVolume = AddEditableComboBox(groupVideoTools, baseX, top, 100, new[] { "0", "30", "50", "70", "100" }, _settings.Preview.VideoPlaybackVolumePercent.ToString());
-        top += rowH - 6;
-        AddHintLabel(groupVideoTools, 16, top, 340, "※ 静止画: ffmpeg / 再生: ffplay / 長さ取得: ffprobe");
+        AddHintLabel(groupTools, 16, top, 340, "コマンドパレット (Ctrl+Shift+P) や Alt+スロットで起動する外部ツールを管理します。\nz / x / h 導線は既存の関連付け / shell を利用します。");
 
         sevenZip.TextChanged += (_, _) => RefreshExternalStatus();
         diff.TextChanged += (_, _) => RefreshExternalStatus();
         editor.TextChanged += (_, _) => RefreshExternalStatus();
-        videoStillPreviewFfmpegPath.TextChanged += (_, _) => RefreshExternalStatus();
 
-        return (sevenZip, diff, editor, videoPlaybackVolume, videoStillPreviewFfmpegPath, sevenZipStatus, diffStatus, editorStatus, videoStillPreviewFfmpegStatus);
+        return (sevenZip, diff, editor, sevenZipStatus, diffStatus, editorStatus);
     }
 
     private (CheckBox enableLog, CheckBox enableDetail) BuildLogTab(TabPage tab)
@@ -433,10 +407,6 @@ public class SettingsForm : Form
         ApplyStatus(_sevenZipStatusLabel, GetSevenZipStatus(_sevenZipPathBox.Text));
         ApplyStatus(_diffStatusLabel, GetToolStatus(_diffPathBox.Text, fallbackToShell: false));
         ApplyStatus(_editorStatusLabel, GetToolStatus(_editorPathBox.Text, fallbackToShell: false));
-        var videoToolStatus = GetVideoToolStatus(_videoStillPreviewFfmpegPathBox.Text);
-        ApplyStatus(_videoStillPreviewFfmpegStatusLabel, (videoToolStatus.Text, videoToolStatus.Color));
-        _statusToolTip.SetToolTip(_videoStillPreviewFfmpegStatusLabel, videoToolStatus.ToolTipText);
-        _statusToolTip.SetToolTip(_videoStillPreviewFfmpegPathBox, videoToolStatus.ToolTipText);
     }
 
     private static void ApplyStatus(Label label, (string Text, Color Color) status)
@@ -580,20 +550,6 @@ public class SettingsForm : Form
         return cb;
     }
 
-    private ComboBox AddEditableComboBox(Control parent, int x, int top, int width, string[] items, string current)
-    {
-        var cb = new ComboBox
-        {
-            Location = new Point(x, top),
-            Size = new Size(width, 24),
-            DropDownStyle = ComboBoxStyle.DropDown
-        };
-        cb.Items.AddRange(items);
-        cb.Text = current;
-        parent.Controls.Add(cb);
-        return cb;
-    }
-
     private NumericUpDown AddNumericUpDown(Control parent, int x, int top, int width, decimal current)
     {
         var n = new NumericUpDown
@@ -665,18 +621,11 @@ public class SettingsForm : Form
         _settings.Preview.ReuseImageViewer = _reuseImageViewerCheckBox.Checked;
         _settings.Preview.CloseImageViewerOnNonImageSelection = _closeImageViewerOnNonImageCheckBox.Checked;
         _settings.Preview.RememberImageViewerBounds = _rememberImageViewerBoundsCheckBox.Checked;
-        _settings.Preview.VideoStillPreviewEnabled = _videoStillPreviewEnabledCheckBox.Checked;
-        _settings.Preview.VideoStillPreviewFfmpegPath = NullIfEmpty(_videoStillPreviewFfmpegPathBox.Text);
         if (!int.TryParse(_videoSkipSecondsCombo.Text, out int videoSkipSeconds))
         {
             videoSkipSeconds = 10;
         }
-        _settings.Preview.VideoSkipSeconds = Math.Clamp(videoSkipSeconds, 0, 600);
-        if (!int.TryParse(_videoPlaybackVolumeCombo.Text, out int videoPlaybackVolume))
-        {
-            videoPlaybackVolume = 100;
-        }
-        _settings.Preview.VideoPlaybackVolumePercent = Math.Clamp(videoPlaybackVolume, 0, 100);
+        _settings.Preview.VideoSkipSeconds = Math.Clamp(videoSkipSeconds, 1, 600);
 
         _settings.FileOperations.ConfirmDelete = _confirmDeleteCheckBox.Checked;
         _settings.FileOperations.ConfirmPermanentDelete = _confirmPermanentDeleteCheckBox.Checked;
@@ -722,78 +671,6 @@ public class SettingsForm : Form
         return string.Equals(displayValue, "FD互換", StringComparison.Ordinal)
             ? InputSettings.FdCompatibleProfileValue
             : InputSettings.StandardProfileValue;
-    }
-
-    private static (string Text, Color Color, string ToolTipText) GetVideoToolStatus(string pathText)
-    {
-        string? path = NullIfEmpty(pathText);
-        VideoToolResolutionResult resolution = VideoToolResolutionService.Resolve(path);
-
-        string ffmpegSummary = resolution.FfmpegFound ? "ffmpeg OK" : "ffmpeg 未検出";
-        string ffplaySummary = resolution.FfplayFound ? "ffplay OK" : "ffplay 未検出";
-        string ffprobeSummary = resolution.FfprobeFound ? "ffprobe OK" : "ffprobe 未検出";
-        string text;
-        Color color;
-
-        if (resolution.FfmpegFound && resolution.FfplayFound)
-        {
-            text = $"状態: {ffmpegSummary} / {ffplaySummary} / {ffprobeSummary}";
-            color = Color.DarkGreen;
-        }
-        else if (resolution.FfmpegFound)
-        {
-            text = $"状態: {ffmpegSummary} / {ffplaySummary}（外部再生は既定アプリ）";
-            color = Color.DarkOrange;
-        }
-        else
-        {
-            text = $"状態: {ffmpegSummary} / {ffplaySummary}";
-            color = Color.Firebrick;
-        }
-
-        string tooltipText = BuildVideoToolStatusToolTip(path, resolution);
-        return (text, color, tooltipText);
-    }
-
-    private static string BuildVideoToolStatusToolTip(string? configuredPath, VideoToolResolutionResult resolution)
-    {
-        var lines = new List<string>();
-        lines.Add($"設定値: {(string.IsNullOrWhiteSpace(configuredPath) ? "(未設定)" : configuredPath)}");
-        lines.Add($"ffmpeg: {(resolution.FfmpegFound ? resolution.FfmpegPath : "(未検出)")}");
-        lines.Add($"ffplay: {(resolution.FfplayFound ? resolution.FfplayPath : "(未検出)")}");
-        lines.Add($"ffprobe: {(resolution.FfprobeFound ? resolution.FfprobePath : "(未検出)")}");
-        if (!string.IsNullOrWhiteSpace(resolution.FfmpegSource))
-        {
-            lines.Add($"ffmpeg解決元: {resolution.FfmpegSource}");
-        }
-
-        if (!string.IsNullOrWhiteSpace(resolution.FfplaySource))
-        {
-            lines.Add($"ffplay解決元: {resolution.FfplaySource}");
-        }
-        if (!string.IsNullOrWhiteSpace(resolution.FfprobeSource))
-        {
-            lines.Add($"ffprobe解決元: {resolution.FfprobeSource}");
-        }
-
-        if (!resolution.FfplayFound && resolution.FfplayCandidates.Count > 0)
-        {
-            lines.Add("ffplay探索候補:");
-            foreach (string candidate in resolution.FfplayCandidates.Take(4))
-            {
-                lines.Add($"- {candidate}");
-            }
-        }
-        if (!resolution.FfprobeFound && resolution.FfprobeCandidates.Count > 0)
-        {
-            lines.Add("ffprobe探索候補:");
-            foreach (string candidate in resolution.FfprobeCandidates.Take(4))
-            {
-                lines.Add($"- {candidate}");
-            }
-        }
-
-        return string.Join(Environment.NewLine, lines);
     }
 
     private ComboBox CreateFeatureProfileCombo(Control parent, int x, int top, int width, string currentSettingValue)

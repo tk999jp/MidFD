@@ -4,7 +4,9 @@ param (
 
     [switch]$AllowDirty = $false,
 
-    [switch]$SkipTagCheck = $false
+    [switch]$SkipTagCheck = $false,
+
+    [switch]$SelfContained = $false
 )
 
 # 1. Validation
@@ -58,6 +60,13 @@ Write-Host "FileVersion:          $FileVersion"
 Write-Host "InformationalVersion: $InformationalVersion"
 Write-Host "-----------------------------"
 
+$deploymentType = if ($SelfContained) { "self-contained" } else { "framework-dependent" }
+Write-Host "--- Publish Settings ---"
+Write-Host "Runtime:              win-x64"
+Write-Host "SelfContained:        $($SelfContained.ToString().ToLower())"
+Write-Host "Deployment:           $deploymentType"
+Write-Host "------------------------"
+
 # 4. Resolve directories
 $rootDir = Resolve-Path (Join-Path $PSScriptRoot "..")
 $artifactsDir = Join-Path $rootDir "artifacts"
@@ -77,11 +86,12 @@ $null = New-Item -ItemType Directory -Path $tempPublishDir -Force
 # 5. Run dotnet publish
 Write-Host "Running dotnet publish..."
 $csprojPath = Join-Path $rootDir "MidFD.csproj"
+$selfContainedValue = if ($SelfContained) { "true" } else { "false" }
 
 dotnet publish $csprojPath `
   -c Release `
   -r win-x64 `
-  --self-contained true `
+  --self-contained $selfContainedValue `
   -o $tempPublishDir `
   /p:Version=$Version `
   /p:AssemblyVersion=$AssemblyVersion `
@@ -138,6 +148,20 @@ if ($productVersion -notmatch $shortHash -and $productVersion -notmatch $fullHas
 }
 
 Write-Host "ProductVersion verification passed successfully!"
+
+# 8.5. Verify absence of self-contained runtime files (for framework-dependent deployment)
+if (-not $SelfContained) {
+    Write-Host "Verifying absence of self-contained runtime files..."
+    $forbiddenFiles = @("coreclr.dll", "hostfxr.dll", "System.Private.CoreLib.dll")
+    foreach ($file in $forbiddenFiles) {
+        $filePath = Join-Path $extractedDest $file
+        if (Test-Path $filePath) {
+            Write-Error "Verification failed: '$file' was found in framework-dependent deployment."
+            exit 1
+        }
+    }
+    Write-Host "Runtime files absence verification passed!"
+}
 
 # 9. Generate SHA256 file
 $sha256Path = Join-Path $releaseDir "MidFD-win-x64.zip.sha256"

@@ -1,4 +1,4 @@
-﻿using MidFD.Models;
+using MidFD.Models;
 
 namespace MidFD.Configuration;
 
@@ -276,7 +276,15 @@ public class PreviewSettings
     public int ImageViewerHeight { get; set; } = 720;
     public int InitialFitLimitWidth { get; set; } = 1920;
     public int InitialFitLimitHeight { get; set; } = 1080;
-    public int VideoSkipSeconds { get; set; } = 10;
+    public int VideoSkipSeconds { get; set; } = 0;
+    public bool VideoStillInitialSecondsMigratedToZero { get; set; } = false;
+    public bool VideoStillPreviewEnabled { get; set; } = true;
+    public string? VideoToolDirectory { get; set; }
+
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public string? VideoStillPreviewFfmpegPath { get; set; }
+    public int VideoPlaybackVolumePercent { get; set; } = 100;
+    public bool VideoEnterPlaysExternal { get; set; } = false;
 
     public PreviewSettings Clone() => (PreviewSettings)MemberwiseClone();
 }

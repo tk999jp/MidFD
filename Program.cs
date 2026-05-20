@@ -152,7 +152,7 @@ static class Program
 
         try
         {
-            using var dialog = new Dialogs.FeatureProfileSelectionDialog();
+            using var dialog = new Dialogs.FeatureProfileSelectionDialog(settings);
             var result = dialog.ShowDialog();
             if (result != DialogResult.OK)
             {
@@ -160,6 +160,17 @@ static class Program
             }
 
             Services.FeatureProfileService.ApplyRuntimeProfile(settings, dialog.SelectedProfile, settingsLoadMetadata.IsMouseGesturesExplicit);
+            settings.Input ??= new Configuration.InputSettings();
+            settings.Preview ??= new Configuration.PreviewSettings();
+            settings.SevenZip ??= new Configuration.SevenZipSettings();
+            settings.ExternalTools ??= new Configuration.ExternalToolsSettings();
+            settings.Input.FunctionKeyProfile = dialog.UseFdCompatibleFunctionKeys
+                ? Configuration.InputSettings.FdCompatibleProfileValue
+                : Configuration.InputSettings.StandardProfileValue;
+            settings.Preview.VideoEnterPlaysExternal = dialog.VideoEnterPlaysExternal;
+            settings.SevenZip.ExePath = NormalizeOptionalPath(dialog.SevenZipPath);
+            settings.Preview.VideoToolDirectory = NormalizeOptionalPath(dialog.VideoToolDirectory);
+            settings.ExternalTools.ExternalEditorPath = NormalizeOptionalPath(dialog.ExternalEditorPath);
             Configuration.SettingsManager.Save(settings);
             startupProfileOverride = Services.FeatureProfileService.ToSettingValue(dialog.SelectedProfile);
             return true;
@@ -169,5 +180,15 @@ static class Program
             Services.StartupExceptionLogger.Write("FeatureProfileSelection", ex);
             return false;
         }
+    }
+
+    private static string? NormalizeOptionalPath(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return null;
+        }
+
+        return value.Trim();
     }
 }

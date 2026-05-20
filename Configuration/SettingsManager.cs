@@ -1,4 +1,4 @@
-﻿using System.IO;
+using System.IO;
 using System.Text.Json;
 using MidFD.Services;
 using MidFD.Helpers;
@@ -47,6 +47,12 @@ public static class SettingsManager
             var settings = JsonSerializer.Deserialize<AppSettings>(json, JsonOptions);
             AppSettings loadedSettings = settings ?? new AppSettings();
             MaterializeBrowserTabRestoreState(loadedSettings);
+            bool migrated = ApplyVideoStillInitialSecondsMigration(loadedSettings);
+            if (migrated)
+            {
+                Save(loadedSettings);
+            }
+            ApplyVideoToolDirectoryMigration(loadedSettings);
             return loadedSettings;
         }
         catch (Exception ex)
@@ -99,6 +105,53 @@ public static class SettingsManager
 
         NormalizeAllTabHistories(persistableSettings);
         return persistableSettings;
+    }
+
+    private static bool ApplyVideoStillInitialSecondsMigration(AppSettings settings)
+    {
+        settings.Preview ??= new PreviewSettings();
+        if (settings.Preview.VideoStillInitialSecondsMigratedToZero)
+        {
+            return false;
+        }
+
+        // 旧既定値(10秒)のみ一度だけ0秒へ移行する。
+        bool shouldMigrate = settings.Preview.VideoSkipSeconds == 10;
+        if (shouldMigrate)
+        {
+            settings.Preview.VideoSkipSeconds = 0;
+        }
+
+        settings.Preview.VideoStillInitialSecondsMigratedToZero = true;
+        return shouldMigrate;
+    }
+
+    private static void ApplyVideoToolDirectoryMigration(AppSettings settings)
+    {
+        settings.Preview ??= new PreviewSettings();
+        if (string.IsNullOrEmpty(settings.Preview.VideoToolDirectory) && !string.IsNullOrEmpty(settings.Preview.VideoStillPreviewFfmpegPath))
+        {
+            string oldPath = settings.Preview.VideoStillPreviewFfmpegPath;
+            if (File.Exists(oldPath))
+            {
+                string? parentDir = Path.GetDirectoryName(oldPath);
+                if (!string.IsNullOrEmpty(parentDir) && Directory.Exists(parentDir))
+                {
+                    settings.Preview.VideoToolDirectory = parentDir;
+                }
+                else
+                {
+                    settings.Preview.VideoToolDirectory = oldPath;
+                }
+            }
+            else
+            {
+                settings.Preview.VideoToolDirectory = oldPath;
+            }
+
+            // メモリ上でのみ移行し、旧設定値をクリアして不要な二重保存を防ぐ
+            settings.Preview.VideoStillPreviewFfmpegPath = null;
+        }
     }
 
     private static void NormalizeAllTabHistories(AppSettings settings)

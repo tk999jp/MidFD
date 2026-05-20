@@ -179,38 +179,55 @@ public sealed class ArchiveListDialog : Form
             _listView.Items.Add(upItem);
         }
 
-        string prefix = string.IsNullOrEmpty(_currentPath) ? "" : _currentPath.TrimEnd('/') + "/";
-        
-        // Filter entries that are direct children of _currentPath
-        // We also need to handle cases where directories are not explicit entries
-        var visibleEntries = _allEntries
-            .Select(entry => {
-                string path = entry.EntryPath.Replace('\\', '/');
-                if (!string.IsNullOrEmpty(prefix))
+        var visibleMap = new Dictionary<string, ArchiveEntry>(StringComparer.OrdinalIgnoreCase);
+
+        foreach (ArchiveEntry entry in _allEntries)
+        {
+            string path = entry.EntryPath;
+            if (!string.IsNullOrEmpty(_currentPath))
+            {
+                if (!path.StartsWith(_currentPath, StringComparison.OrdinalIgnoreCase)) continue;
+                if (path.Length <= _currentPath.Length) continue;
+            }
+
+            string relativePath = string.IsNullOrEmpty(_currentPath) ? path : path[_currentPath.Length..];
+            int firstSlash = relativePath.IndexOf('/');
+
+            if (firstSlash < 0)
+            {
+                // Direct child (file or explicit directory entry)
+                string key = entry.IsDirectory && !entry.EntryPath.EndsWith('/')
+                    ? entry.EntryPath + "/"
+                    : entry.EntryPath;
+                visibleMap[key] = entry;
+            }
+            else
+            {
+                // Nested entry -> Synthesize the intermediate directory
+                string subDirRelative = relativePath[..(firstSlash + 1)];
+                string subDirAbsolute = _currentPath + subDirRelative;
+
+                // Explicit directory entry should overwrite any synthetic directory
+                if (visibleMap.TryGetValue(subDirAbsolute, out var existing) && !existing.IsSyntheticDirectory)
                 {
-                    if (!path.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)) return null;
-                    if (path.Length <= prefix.Length) return null;
-                    path = path[prefix.Length..];
+                    continue;
                 }
-                
-                int firstSlash = path.IndexOf('/');
-                if (firstSlash < 0) return entry; // Direct child file or directory (if it doesn't end with /)
-                
-                // If it ends with / and it's the only slash, it's a direct child directory entry
-                if (firstSlash == path.Length - 1) return entry;
 
-                // Otherwise, it's a nested item. 
-                // We should represent the intermediate directory if it's not already an entry.
-                // But for simplicity in this practical subset, we'll only show explicit entries 
-                // or we could synthesize directory entries. 
-                // Let's assume most 7z list outputs have explicit folder entries for hierarchical navigation to work well.
-                return null;
-            })
-            .Where(entry => entry != null)
-            .Cast<ArchiveEntry>()
-            .DistinctBy(entry => entry.EntryPath);
+                var synthEntry = new ArchiveEntry
+                {
+                    EntryPath = subDirAbsolute,
+                    RawEntryPath = subDirAbsolute,
+                    Name = subDirRelative.TrimEnd('/'),
+                    IsDirectory = true,
+                    Size = null,
+                    ModifiedAt = null,
+                    IsSyntheticDirectory = true
+                };
+                visibleMap[subDirAbsolute] = synthEntry;
+            }
+        }
 
-        foreach (ArchiveEntry entry in visibleEntries)
+        foreach (ArchiveEntry entry in visibleMap.Values)
         {
             var item = CreateItem(entry);
             _listView.Items.Add(item);
@@ -378,8 +395,8 @@ public sealed class ArchiveListDialog : Form
     {
         if (string.IsNullOrEmpty(_currentPath)) return;
         
-        string normalized = _currentPath.TrimEnd('/', '\\');
-        int lastSlash = normalized.LastIndexOfAny(new[] { '/', '\\' });
+        string normalized = _currentPath.TrimEnd('/');
+        int lastSlash = normalized.LastIndexOf('/');
         
         if (lastSlash < 0)
         {
@@ -400,7 +417,7 @@ public sealed class ArchiveListDialog : Form
 
     private void NavigateDown(string entryPath)
     {
-        _currentPath = entryPath.EndsWith("/") || entryPath.EndsWith("\\") ? entryPath : entryPath + "/";
+        _currentPath = entryPath.EndsWith("/") ? entryPath : entryPath + "/";
         PopulateItems();
         if (_listView.Items.Count > 0)
         {
@@ -480,7 +497,7 @@ public sealed class ArchiveListDialog : Form
             .Where(IsMarked)
             .Select(item => item.Tag as ArchiveEntry)
             .Where(entry => entry != null)
-            .Select(entry => entry!.EntryPath)
+            .Select(entry => string.IsNullOrEmpty(entry!.RawEntryPath) ? entry.EntryPath : entry.RawEntryPath)
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .ToArray();
     }
@@ -519,6 +536,11 @@ public sealed class ArchiveListDialog : Form
         }
 
         if (item.Tag is not ArchiveEntry entry)
+        {
+            return;
+        }
+
+        if (entry.IsSyntheticDirectory)
         {
             return;
         }
@@ -648,7 +670,7 @@ public sealed class ArchiveListDialog : Form
 
     private static string BuildLocationText(ArchiveEntry entry)
     {
-        string normalizedPath = entry.EntryPath.Replace('\\', '/').TrimEnd('/');
+        string normalizedPath = entry.EntryPath.TrimEnd('/');
         int separatorIndex = normalizedPath.LastIndexOf('/');
         if (separatorIndex <= 0)
         {

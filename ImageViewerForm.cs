@@ -39,6 +39,17 @@ public partial class ImageViewerForm : Form
     private int _loadRequestId;
     private readonly Label _loadingLabel;
 
+    // VideoStill Fields
+    private string? _videoStillSourceVideoPath;
+    private string? _videoStillConfirmedCachePath;
+    private int _videoStillCurrentSeconds;
+    private double? _videoStillDurationSeconds;
+    private int _videoStillVolumePercent;
+    private string? _configuredFfmpegPath;
+    private CancellationTokenSource? _videoStillCts;
+    private bool _isVideoStillMode;
+    private readonly Panel _videoStillSeekBarPanel;
+
     public string? CurrentPath => _currentPath;
     public bool HasLoadedImage => _originalImage != null;
     public event Action<Keys>? BrowserNavigationRequested;
@@ -83,6 +94,19 @@ public partial class ImageViewerForm : Form
         _loadingLabel.BringToFront();
         imageScrollPanel.Resize += (s, e) => CenterLoadingLabel();
 
+        _videoStillSeekBarPanel = new Panel
+        {
+            Visible = false,
+            BackColor = SystemColors.ControlDark,
+            Height = 6,
+            Cursor = Cursors.Hand,
+            Dock = DockStyle.Bottom
+        };
+        _videoStillSeekBarPanel.Paint += VideoStillSeekBarPanel_Paint;
+        _videoStillSeekBarPanel.MouseClick += VideoStillSeekBarPanel_MouseClick;
+        Controls.Add(_videoStillSeekBarPanel);
+        _videoStillSeekBarPanel.BringToFront();
+
         UpdateQuantizeMenuState();
         UpdateZoomStatus();
     }
@@ -100,6 +124,10 @@ public partial class ImageViewerForm : Form
 
     public async void LoadImage(string path, bool showErrorMessage = true)
     {
+        _isVideoStillMode = false;
+        statusStrip1.Visible = true;
+        _videoStillSeekBarPanel.Visible = false;
+        _videoStillCts?.Cancel();
         _currentPath = path;
         Text = $"{Path.GetFileName(path)} - MidFD Image Viewer";
         int reqId = ++_loadRequestId;
@@ -365,6 +393,42 @@ public partial class ImageViewerForm : Form
 
     private void ImageViewerForm_KeyDown(object? sender, KeyEventArgs e)
     {
+        if (_isVideoStillMode)
+        {
+            if (e.Control && e.KeyCode == Keys.Enter)
+            {
+                ExecuteVideoStillExternalPlay();
+                e.Handled = true;
+                e.SuppressKeyPress = true;
+                return;
+            }
+            if (e.KeyCode == Keys.Home)
+            {
+                ChangeVideoStillPosition(0, absolute: true);
+                e.Handled = true;
+                e.SuppressKeyPress = true;
+                return;
+            }
+            if (e.KeyCode == Keys.Left)
+            {
+                int delta = GetVideoStillStepSeconds();
+                if (e.Shift) delta = GetVideoStillShiftStepSeconds();
+                ChangeVideoStillPosition(-delta, absolute: false);
+                e.Handled = true;
+                e.SuppressKeyPress = true;
+                return;
+            }
+            if (e.KeyCode == Keys.Right)
+            {
+                int delta = GetVideoStillStepSeconds();
+                if (e.Shift) delta = GetVideoStillShiftStepSeconds();
+                ChangeVideoStillPosition(delta, absolute: false);
+                e.Handled = true;
+                e.SuppressKeyPress = true;
+                return;
+            }
+        }
+
         if (e.Control && e.KeyCode == Keys.Z)
         {
             UndoImageOperation();
@@ -653,7 +717,11 @@ public partial class ImageViewerForm : Form
         int maxClientWidth = Math.Max(200, workArea.Width - nonClientWidth);
         int maxClientHeight = Math.Max(200, workArea.Height - nonClientHeight);
         int desiredClientWidth = imageWidth;
-        int desiredClientHeight = imageHeight + menuStrip1.Height + statusStrip1.Height;
+        int videoStillBarHeight = (_isVideoStillMode && _videoStillSeekBarPanel.Visible)
+            ? _videoStillSeekBarPanel.Height
+            : 0;
+        int statusStripHeight = statusStrip1.Visible ? statusStrip1.Height : 0;
+        int desiredClientHeight = imageHeight + menuStrip1.Height + statusStripHeight + videoStillBarHeight;
         int clientWidth = Math.Min(desiredClientWidth, maxClientWidth);
         int clientHeight = Math.Min(desiredClientHeight, maxClientHeight);
         ClientSize = new Size(clientWidth, clientHeight);
@@ -704,4 +772,227 @@ public partial class ImageViewerForm : Form
             stack.Push(array[i]);
         }
     }
+
+    public async void LoadVideoStill(string videoPath, string? configuredFfmpegPath, int initialSeconds, int volumePercent)
+    {
+        _isVideoStillMode = true;
+        statusStrip1.Visible = false;
+        _videoStillSourceVideoPath = videoPath;
+        _configuredFfmpegPath = configuredFfmpegPath;
+        _videoStillVolumePercent = volumePercent;
+        _currentPath = videoPath; // Copy機能などでパスが使われるため
+
+        _videoStillSeekBarPanel.Visible = true;
+        _videoStillSeekBarPanel.BringToFront();
+
+        _videoStillCts?.Cancel();
+        _videoStillCts?.Dispose();
+        _videoStillCts = new CancellationTokenSource();
+        var token = _videoStillCts.Token;
+
+        try
+        {
+            var meta = await VideoMetadataService.TryGetDurationSecondsAsync(videoPath, configuredFfmpegPath, token);
+            if (meta.Success)
+            {
+                _videoStillDurationSeconds = meta.DurationSeconds;
+            }
+            else
+            {
+                _videoStillDurationSeconds = null;
+            }
+        }
+        catch
+        {
+            _videoStillDurationSeconds = null;
+        }
+
+        int safeMax = GetVideoStillSafeMaxSeconds();
+        _videoStillCurrentSeconds = Math.Clamp(initialSeconds, 0, safeMax);
+
+        await UpdateVideoStillImageAsync(token);
+    }
+
+    private async Task UpdateVideoStillImageAsync(CancellationToken token)
+    {
+        if (_videoStillSourceVideoPath == null) return;
+        string videoPath = _videoStillSourceVideoPath;
+        int seconds = _videoStillCurrentSeconds;
+
+        statusLabel.Text = $"[VideoStill] 生成中:{seconds}秒";
+        _loadingLabel.Text = "Generating Video Still...";
+        CenterLoadingLabel();
+        _loadingLabel.Visible = true;
+        SetQuantizeMenuEnabled(false);
+
+        try
+        {
+            var cacheDir = VideoStillPreviewService.GetDefaultCacheDirectory();
+            var stillResult = await VideoStillPreviewService.GenerateStillAsync(
+                videoPath, seconds, _configuredFfmpegPath, cacheDir, token);
+
+            if (token.IsCancellationRequested) return;
+
+            if (!stillResult.Success || string.IsNullOrWhiteSpace(stillResult.ImagePath))
+            {
+                statusLabel.Text = $"[VideoStill] {seconds}秒の静止画を取得できません。前回画像を維持します。";
+                return;
+            }
+
+            _videoStillConfirmedCachePath = stillResult.ImagePath;
+            using var fs = new FileStream(stillResult.ImagePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+            using var decoded = new Bitmap(fs);
+            var previewImage = new Bitmap(decoded);
+
+            ReplaceCurrentImages(previewImage, clearHistory: true);
+            ApplyInitialZoom(previewImage);
+
+            UpdateVideoStillStatusLine();
+            _videoStillSeekBarPanel.Invalidate();
+            Text = $"{Path.GetFileName(videoPath)} @ {seconds}秒 - MidFD Image Viewer";
+        }
+        catch (Exception ex)
+        {
+            if (token.IsCancellationRequested) return;
+            statusLabel.Text = $"[VideoStill] 読み込み失敗: {ex.Message}";
+        }
+        finally
+        {
+            if (!token.IsCancellationRequested)
+            {
+                _loadingLabel.Visible = false;
+                SetQuantizeMenuEnabled(true);
+            }
+        }
+    }
+
+    private void ChangeVideoStillPosition(int value, bool absolute)
+    {
+        if (!_isVideoStillMode) return;
+        int newSeconds = absolute ? value : _videoStillCurrentSeconds + value;
+        int safeMax = GetVideoStillSafeMaxSeconds();
+        newSeconds = Math.Clamp(newSeconds, 0, safeMax);
+
+        if (newSeconds != _videoStillCurrentSeconds)
+        {
+            _videoStillCurrentSeconds = newSeconds;
+            _videoStillCts?.Cancel();
+            _videoStillCts?.Dispose();
+            _videoStillCts = new CancellationTokenSource();
+            _ = UpdateVideoStillImageAsync(_videoStillCts.Token);
+            UpdateVideoStillStatusLine();
+            _videoStillSeekBarPanel.Invalidate();
+        }
+    }
+
+    private void ExecuteVideoStillExternalPlay()
+    {
+        if (!_isVideoStillMode || string.IsNullOrWhiteSpace(_videoStillSourceVideoPath)) return;
+        int previewSeconds = _videoStillCurrentSeconds;
+        VideoPlaybackLaunchResult launchResult = VideoPlaybackLaunchService.Launch(
+            _videoStillSourceVideoPath,
+            _configuredFfmpegPath,
+            _videoStillVolumePercent,
+            previewSeconds);
+
+        if (launchResult.Success && launchResult.UsedFfplay)
+        {
+            statusLabel.Text = $"ffplay.exeで外部再生しました。位置:{launchResult.AppliedStartSeconds}秒 / 音量:{launchResult.AppliedVolumePercent}%";
+            LogService.Info(
+                $"[VideoStill] ExternalPlay success previewSeconds={previewSeconds} appliedStartSeconds={launchResult.AppliedStartSeconds} durationSeconds={_videoStillDurationSeconds?.ToString("F3") ?? "n/a"} videoPath='{_videoStillSourceVideoPath}'");
+            BeginInvoke(new Action(Close));
+            return;
+        }
+
+        if (launchResult.Success && launchResult.UsedDefaultApp)
+        {
+            statusLabel.Text = "ffplay.exeが見つからないため、既定アプリで動画を開きました。";
+            LogService.Info(
+                $"[VideoStill] ExternalPlay fallback previewSeconds={previewSeconds} appliedStartSeconds={launchResult.AppliedStartSeconds} durationSeconds={_videoStillDurationSeconds?.ToString("F3") ?? "n/a"} videoPath='{_videoStillSourceVideoPath}'");
+            BeginInvoke(new Action(Close));
+            return;
+        }
+
+        statusLabel.Text = launchResult.ErrorMessage ?? "外部再生の起動に失敗しました。";
+        if (!string.IsNullOrWhiteSpace(launchResult.ProcessError))
+        {
+            LogService.Error("[VideoStill] 外部再生起動失敗", new InvalidOperationException(launchResult.ProcessError));
+        }
+    }
+
+    private void UpdateVideoStillStatusLine()
+    {
+        if (!_isVideoStillMode) return;
+        int maxSeconds = GetVideoStillDisplayDurationSeconds();
+        string durationPart = (_videoStillDurationSeconds.HasValue && _videoStillDurationSeconds.Value > 0) ? $" / {maxSeconds}秒" : "";
+        statusLabel.Text = $"[VideoStill] 位置:{_videoStillCurrentSeconds}秒{durationPart} | ←/→:位置 | Ctrl+Enter:再生";
+    }
+
+    private int GetVideoStillDisplayDurationSeconds()
+    {
+        if (_videoStillDurationSeconds.HasValue && _videoStillDurationSeconds.Value > 0)
+            return (int)Math.Ceiling(_videoStillDurationSeconds.Value);
+        return 0;
+    }
+
+    private int GetVideoStillSafeMaxSeconds()
+    {
+        if (_videoStillDurationSeconds.HasValue && _videoStillDurationSeconds.Value > 0)
+        {
+            int max = (int)Math.Floor(_videoStillDurationSeconds.Value) - 1;
+            return Math.Max(0, max);
+        }
+        return 600;
+    }
+
+    private int GetVideoStillStepSeconds()
+    {
+        double duration = _videoStillDurationSeconds ?? 0;
+        if (duration <= 0) return 5;
+        if (duration <= 30) return 1;
+        if (duration <= 90) return 2;
+        return 5;
+    }
+
+    private int GetVideoStillShiftStepSeconds()
+    {
+        double duration = _videoStillDurationSeconds ?? 0;
+        if (duration <= 0) return 30;
+        if (duration <= 30) return 5;
+        if (duration <= 90) return 10;
+        return 30;
+    }
+
+    private void VideoStillSeekBarPanel_Paint(object? sender, PaintEventArgs e)
+    {
+        if (!_isVideoStillMode) return;
+        var rect = _videoStillSeekBarPanel.ClientRectangle;
+        if (rect.Width <= 2 || rect.Height <= 2) return;
+        e.Graphics.Clear(SystemColors.ControlDark);
+        int safeMax = GetVideoStillSafeMaxSeconds();
+        float ratio = safeMax > 0 ? (float)_videoStillCurrentSeconds / safeMax : 0f;
+        ratio = Math.Clamp(ratio, 0f, 1f);
+        int fillWidth = (int)(rect.Width * ratio);
+        if (fillWidth > 0)
+        {
+            using var fillBrush = new SolidBrush(Color.FromArgb(200, 80, 160, 255));
+            e.Graphics.FillRectangle(fillBrush, 0, 0, fillWidth, rect.Height);
+        }
+        int markerX = Math.Clamp(fillWidth, 0, rect.Width - 1);
+        using var markerPen = new Pen(Color.White, 1f);
+        e.Graphics.DrawLine(markerPen, markerX, 0, markerX, rect.Height);
+    }
+
+    private void VideoStillSeekBarPanel_MouseClick(object? sender, MouseEventArgs e)
+    {
+        if (!_isVideoStillMode || e.Button != MouseButtons.Left) return;
+        int w = _videoStillSeekBarPanel.Width;
+        if (w <= 0) return;
+        int safeMax = GetVideoStillSafeMaxSeconds();
+        double ratio = (double)e.X / w;
+        ratio = Math.Clamp(ratio, 0.0, 1.0);
+        int targetSeconds = safeMax > 0 ? (int)Math.Round(safeMax * ratio) : 0;
+        ChangeVideoStillPosition(targetSeconds, absolute: true);
+    }
+
 }

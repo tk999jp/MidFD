@@ -99,12 +99,14 @@ public static class ArchiveListService
             if (string.IsNullOrWhiteSpace(line)) continue;
 
             string entryPath = line.Trim();
-            bool isDirectory = entryPath.EndsWith("/") || entryPath.EndsWith("\\");
+            string normalizedPath = entryPath.Replace('\\', '/');
+            bool isDirectory = normalizedPath.EndsWith("/") || entryPath.EndsWith("\\");
 
             entries.Add(new ArchiveEntry
             {
-                EntryPath = entryPath,
-                Name = Path.GetFileName(entryPath.TrimEnd('\\', '/')),
+                EntryPath = normalizedPath,
+                RawEntryPath = entryPath,
+                Name = Path.GetFileName(normalizedPath.TrimEnd('/')),
                 IsDirectory = isDirectory,
                 Size = null,
                 ModifiedAt = null
@@ -156,6 +158,8 @@ public static class ArchiveListService
             return;
         }
 
+        string normalizedPath = entryPath.Replace('\\', '/');
+
         bool isDirectory = fields.TryGetValue("Folder", out string? folderValue)
             && string.Equals(folderValue, "+", StringComparison.Ordinal);
         if (!isDirectory
@@ -181,8 +185,9 @@ public static class ArchiveListService
 
         entries.Add(new ArchiveEntry
         {
-            EntryPath = entryPath,
-            Name = Path.GetFileName(entryPath.TrimEnd('\\', '/')),
+            EntryPath = normalizedPath,
+            RawEntryPath = entryPath,
+            Name = Path.GetFileName(normalizedPath.TrimEnd('/')),
             IsDirectory = isDirectory,
             Size = size,
             ModifiedAt = modifiedAt

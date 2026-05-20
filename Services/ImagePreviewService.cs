@@ -1,9 +1,8 @@
-﻿using System;
+using System;
 using System.Drawing;
 using System.IO;
 using System.Linq;
 using System.Reflection;
-using MidFD.Services.Susie;
 using Svg;
 
 namespace MidFD.Services;
@@ -53,12 +52,6 @@ public static class ImagePreviewService
             if (wicResult.Image != null)
             {
                 return wicResult;
-            }
-
-            var susieResult = SusiePreviewService.GetPreviewImage(path);
-            if (susieResult.Image != null)
-            {
-                return susieResult;
             }
 
             return (null, $"プレビュー失敗: {ex.Message}");

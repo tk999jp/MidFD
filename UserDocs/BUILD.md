@@ -106,6 +106,28 @@ bin\Release\net8.0-windows\publish\
 
 単一ファイル化などの詳細な配布設定は、今後の公開方針に合わせて変更される可能性があります。
 
+## Release ZIP 作成 (scripts/publish-release.ps1)
+
+配布用の正式なリリースZIPを作成する場合は、以下の PowerShell スクリプト（正本経路）を使用します。
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\publish-release.ps1 -ReleaseTag v2026.05.20
+```
+
+### 主要パラメータと仕様
+
+- `-ReleaseTag` (必須): `vYYYY.MM.DD` 形式でリリースバージョンを指定します。
+- `-AllowDirty` (オプション): ワーキングツリーに未コミットの変更がある状態での実行を許可します（開発検証用）。
+- `-SkipTagCheck` (オプション): 指定されたGitタグの存在チェック、およびHEADコミットとの一致チェックをスキップします（開発検証用）。
+
+### スクリプトの動作概要
+
+1. **バージョン情報の動的生成**: 指定された `ReleaseTag` から、Csproj用の各種バージョン値を動的に算出して注入します（例: `v2026.05.20` から `Version=2026.5.20`, `InformationalVersion=v2026.05.20` を生成）。
+2. **安全性の検証**: 実リリース時は、Gitワーキングツリーがクリーンであり、かつ指定したリリースタグが HEAD コミットを指していることを自動確認します。
+3. **発行と動的注入**: `/p:Version` や `/p:InformationalVersion` 等のパラメータを付与して `dotnet publish` を実行し、アセンブリおよび `Application.ProductVersion` にバージョンとGitコミットハッシュが自動的に埋め込まれます。
+4. **ZIP作成と検証**: `artifacts/release/MidFD-win-x64.zip` を作成後、自動で `artifacts/release-test/` に再解凍して `MidFD.exe` の ProductVersion に指定タグおよびコミットハッシュが正常に含まれていることを自動検証します。
+5. **SHA256ハッシュの出力**: 検証に成功した場合、ZIP のハッシュ値を `artifacts/release/MidFD-win-x64.zip.sha256` に保存します。
+
 ## 7-Zip連携
 
 MidFD は 7-Zip の基本連携に対応しています。

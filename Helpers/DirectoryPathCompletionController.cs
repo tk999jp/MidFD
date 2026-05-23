@@ -3,6 +3,11 @@ using System.Text;
 
 namespace MidFD.Helpers;
 
+internal sealed class DirectoryPathCompletionOptions
+{
+    public bool ShowOnTextChanged { get; init; } = true;
+}
+
 internal sealed class DirectoryPathCompletionController : IDisposable
 {
     private static readonly PopupItem EmptyPopupItem = new(string.Empty, null);
@@ -12,6 +17,7 @@ internal sealed class DirectoryPathCompletionController : IDisposable
     private readonly IEditorAdapter _editor;
     private readonly CompletionMessageFilter _messageFilter;
     private readonly List<Control> _hookedControls = new();
+    private readonly DirectoryPathCompletionOptions _options;
     private string? _currentDirPath;
     private string? _initialTextBeforeTab;
     private string? _lastHandledText;
@@ -19,9 +25,15 @@ internal sealed class DirectoryPathCompletionController : IDisposable
     private bool _isTabCycling;
     private const int MaxCandidates = 30;
 
-    private DirectoryPathCompletionController(Control control)
+    private bool _disposed;
+    private bool _messageFilterRegistered;
+    private CancellationTokenSource? _candidateCts;
+    private int _candidateRequestVersion;
+
+    private DirectoryPathCompletionController(Control control, DirectoryPathCompletionOptions options)
     {
         _control = control;
+        _options = options;
         _editor = CreateEditorAdapter(control);
 
         _listBox = new NonSelectableListBox
@@ -37,26 +49,19 @@ internal sealed class DirectoryPathCompletionController : IDisposable
             IntegralHeight = false
         };
         _listBox.DrawItem += ListBox_DrawItem;
-        _listBox.MouseDown += (_, _) => CommitSelection();
+        _listBox.MouseDown += ListBox_MouseDown;
 
         _popupForm = new DirectoryPathCompletionPopupForm(_listBox);
-        _popupForm.VisibleChanged += (_, _) =>
-        {
-            if (!_popupForm.Visible)
-            {
-                _listBox.Items.Clear();
-                _isTabCycling = false;
-                _initialTextBeforeTab = null;
-            }
-        };
+        _popupForm.VisibleChanged += PopupForm_VisibleChanged;
 
         _messageFilter = new CompletionMessageFilter(this);
         Application.AddMessageFilter(_messageFilter);
+        _messageFilterRegistered = true;
 
         HookEvents(_control);
         if (_control is ComboBox cb)
         {
-            cb.ControlAdded += (_, e) => HookEvents(e.Control);
+            cb.ControlAdded += ComboBox_ControlAdded;
             foreach (Control child in cb.Controls)
             {
                 HookEvents(child);
@@ -64,14 +69,56 @@ internal sealed class DirectoryPathCompletionController : IDisposable
         }
     }
 
-    public static DirectoryPathCompletionController Attach(Control control)
+    private void ListBox_MouseDown(object? sender, MouseEventArgs e)
     {
-        return new DirectoryPathCompletionController(control);
+        if (_disposed)
+        {
+            return;
+        }
+
+        CommitSelection();
+    }
+
+    private void PopupForm_VisibleChanged(object? sender, EventArgs e)
+    {
+        if (_disposed)
+        {
+            return;
+        }
+
+        if (!_popupForm.Visible)
+        {
+            _listBox.Items.Clear();
+            _isTabCycling = false;
+            _initialTextBeforeTab = null;
+        }
+    }
+
+    private void ComboBox_ControlAdded(object? sender, ControlEventArgs e)
+    {
+        if (_disposed)
+        {
+            return;
+        }
+
+        if (e.Control != null)
+        {
+            HookEvents(e.Control);
+        }
+    }
+
+    public static DirectoryPathCompletionController Attach(
+        Control control,
+        DirectoryPathCompletionOptions? options = null)
+    {
+        return new DirectoryPathCompletionController(control, options ?? new DirectoryPathCompletionOptions());
     }
 
     private string ControlText => _editor.Text;
 
     private bool IsPopupVisible => _popupForm.Visible;
+
+    public bool IsCompletionPopupVisible => IsPopupVisible;
 
     private void SetControlText(string text)
     {
@@ -90,7 +137,7 @@ internal sealed class DirectoryPathCompletionController : IDisposable
 
     private void Control_TextChanged(object? sender, EventArgs e)
     {
-        if (_isUpdating)
+        if (_disposed || _isUpdating)
         {
             return;
         }
@@ -105,13 +152,37 @@ internal sealed class DirectoryPathCompletionController : IDisposable
         _initialTextBeforeTab = null;
         _lastHandledText = text;
 
-        UpdateCandidates();
+        if (!_options.ShowOnTextChanged)
+        {
+            try
+            {
+                _candidateCts?.Cancel();
+            }
+            catch
+            {
+                // Ignore
+            }
+            ClosePopup();
+            return;
+        }
+
+        _ = UpdateCandidatesAsync();
     }
 
     private void Control_LostFocus(object? sender, EventArgs e)
     {
+        if (_disposed || _control.IsDisposed || !_control.IsHandleCreated)
+        {
+            return;
+        }
+
         _control.BeginInvoke(new Action(() =>
         {
+            if (_disposed || _control.IsDisposed)
+            {
+                return;
+            }
+
             _editor.RefreshHandle();
             if (!HasFocusWithinEditorOrPopup())
             {
@@ -122,6 +193,11 @@ internal sealed class DirectoryPathCompletionController : IDisposable
 
     private void Control_PreviewKeyDown(object? sender, PreviewKeyDownEventArgs e)
     {
+        if (_disposed)
+        {
+            return;
+        }
+
         if (e.KeyCode == Keys.Tab)
         {
             // ポップアップが表示されているか、あるいは入力があって補完が可能な場合は Tab を自前で処理する
@@ -143,14 +219,22 @@ internal sealed class DirectoryPathCompletionController : IDisposable
         }
     }
 
-    private void Control_KeyDown(object? sender, KeyEventArgs e)
+    private async void Control_KeyDown(object? sender, KeyEventArgs e)
     {
+        if (_disposed)
+        {
+            return;
+        }
+
         if (e.KeyCode == Keys.Tab)
         {
+            e.Handled = true;
+            e.SuppressKeyPress = true;
+
             if (!IsPopupVisible)
             {
-                UpdateCandidates();
-                if (!IsPopupVisible)
+                bool opened = await UpdateCandidatesAsync();
+                if (!opened || !IsPopupVisible || _disposed)
                 {
                     return; // 候補なし
                 }
@@ -158,8 +242,6 @@ internal sealed class DirectoryPathCompletionController : IDisposable
 
             int direction = e.Shift ? -1 : 1;
             CycleCompletion(direction);
-            e.Handled = true;
-            e.SuppressKeyPress = true;
             return;
         }
 
@@ -174,6 +256,11 @@ internal sealed class DirectoryPathCompletionController : IDisposable
 
     private void ListBox_DrawItem(object? sender, DrawItemEventArgs e)
     {
+        if (_disposed)
+        {
+            return;
+        }
+
         if (e.Index < 0)
         {
             return;
@@ -192,6 +279,11 @@ internal sealed class DirectoryPathCompletionController : IDisposable
 
     private void MoveSelection(int delta)
     {
+        if (_disposed)
+        {
+            return;
+        }
+
         int count = _listBox.Items.Count;
         if (count == 0)
         {
@@ -213,6 +305,11 @@ internal sealed class DirectoryPathCompletionController : IDisposable
 
     private void CycleCompletion(int direction)
     {
+        if (_disposed)
+        {
+            return;
+        }
+
         int count = _listBox.Items.Count;
         if (count <= 1)
         {
@@ -252,20 +349,18 @@ internal sealed class DirectoryPathCompletionController : IDisposable
         }
     }
 
-    private void UpdateCandidates()
+    private static bool TryBuildCandidateQuery(string text, out string dirPath, out string filter)
     {
-        string text = ControlText;
+        dirPath = string.Empty;
+        filter = string.Empty;
+
         if (string.IsNullOrWhiteSpace(text))
         {
-            ClosePopup();
-            return;
+            return false;
         }
 
         try
         {
-            string? dirPath;
-            string filter;
-
             if (text.Length == 2 && text[1] == ':' && char.IsLetter(text[0]))
             {
                 dirPath = text + Path.DirectorySeparatorChar;
@@ -278,7 +373,7 @@ internal sealed class DirectoryPathCompletionController : IDisposable
             }
             else
             {
-                dirPath = Path.GetDirectoryName(text);
+                dirPath = Path.GetDirectoryName(text) ?? string.Empty;
                 filter = Path.GetFileName(text) ?? string.Empty;
 
                 if (string.IsNullOrEmpty(dirPath) && text.Length >= 3 && text[1] == ':' && (text[2] == '\\' || text[2] == '/'))
@@ -287,36 +382,126 @@ internal sealed class DirectoryPathCompletionController : IDisposable
                 }
             }
 
-            if (string.IsNullOrEmpty(dirPath) || !Directory.Exists(dirPath))
+            return !string.IsNullOrEmpty(dirPath);
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private static List<string> EnumerateDirectoryCandidates(
+        string dirPath,
+        string filter,
+        CancellationToken token)
+    {
+        const int MaxRawCandidates = 200;
+
+        var candidates = new List<string>(MaxCandidates);
+
+        if (!Directory.Exists(dirPath))
+        {
+            return candidates;
+        }
+
+        foreach (string path in Directory.EnumerateDirectories(dirPath, filter + "*"))
+        {
+            token.ThrowIfCancellationRequested();
+
+            string? name = Path.GetFileName(path);
+            if (!string.IsNullOrEmpty(name))
             {
-                ClosePopup();
-                return;
+                candidates.Add(name);
             }
 
-            var dirs = Directory.GetDirectories(dirPath, filter + "*")
-                .Select(Path.GetFileName)
-                .Where(static n => !string.IsNullOrEmpty(n))
-                .OrderBy(static n => n)
-                .Take(MaxCandidates)
-                .ToList();
+            if (candidates.Count >= MaxRawCandidates)
+            {
+                break;
+            }
+        }
+
+        return candidates
+            .OrderBy(static n => n, StringComparer.CurrentCultureIgnoreCase)
+            .Take(MaxCandidates)
+            .ToList();
+    }
+
+    private async Task<bool> UpdateCandidatesAsync()
+    {
+        if (_disposed)
+        {
+            return false;
+        }
+
+        try
+        {
+            _candidateCts?.Cancel();
+            _candidateCts?.Dispose();
+        }
+        catch
+        {
+            // Ignore
+        }
+
+        _candidateCts = new CancellationTokenSource();
+        CancellationToken token = _candidateCts.Token;
+
+        _candidateRequestVersion++;
+        int requestVersion = _candidateRequestVersion;
+        string textSnapshot = ControlText;
+
+        if (!TryBuildCandidateQuery(textSnapshot, out string dirPath, out string filter))
+        {
+            ClosePopup();
+            return false;
+        }
+
+        try
+        {
+            List<string> dirs = await Task.Run(() => EnumerateDirectoryCandidates(dirPath, filter, token), token);
+
+            if (token.IsCancellationRequested || _disposed)
+            {
+                return false;
+            }
+
+            if (requestVersion != _candidateRequestVersion ||
+                ControlText != textSnapshot ||
+                _control.IsDisposed ||
+                !_control.IsHandleCreated ||
+                _popupForm.IsDisposed)
+            {
+                return false;
+            }
 
             if (dirs.Count == 0 || (dirs.Count == 1 && string.Equals(dirs[0], filter, StringComparison.OrdinalIgnoreCase)))
             {
                 ClosePopup();
-                return;
+                return false;
             }
 
             _currentDirPath = dirPath;
-            ShowPopup(dirs);
+            ShowPopup(dirs.Cast<string?>().ToList());
+            return true;
+        }
+        catch (OperationCanceledException)
+        {
+            return false;
         }
         catch
         {
             ClosePopup();
+            return false;
         }
     }
 
     private void ShowPopup(List<string?> candidates)
     {
+        if (_disposed)
+        {
+            return;
+        }
+
         _listBox.BeginUpdate();
         _listBox.Items.Clear();
         _listBox.Items.Add(EmptyPopupItem);
@@ -343,11 +528,16 @@ internal sealed class DirectoryPathCompletionController : IDisposable
 
     private void CommitSelection()
     {
+        if (_disposed)
+        {
+            return;
+        }
+
         if (_listBox.SelectedItem is PopupItem selectedItem && selectedItem.Value is string selected && _currentDirPath != null)
         {
             string result = Path.Combine(_currentDirPath, selected) + Path.DirectorySeparatorChar;
             SetControlText(result);
-            UpdateCandidates();
+            _ = UpdateCandidatesAsync();
             return;
         }
 
@@ -357,6 +547,12 @@ internal sealed class DirectoryPathCompletionController : IDisposable
 
     private void ClosePopup()
     {
+        if (_popupForm.IsDisposed)
+        {
+            _currentDirPath = null;
+            return;
+        }
+
         if (_popupForm.Visible)
         {
             _popupForm.Hide();
@@ -381,7 +577,7 @@ internal sealed class DirectoryPathCompletionController : IDisposable
 
     private bool HandlePopupKey(Keys keyCode)
     {
-        if (!IsPopupVisible)
+        if (_disposed || !IsPopupVisible)
         {
             return false;
         }
@@ -407,6 +603,11 @@ internal sealed class DirectoryPathCompletionController : IDisposable
 
     private bool HasFocusWithinEditorOrPopup()
     {
+        if (_disposed)
+        {
+            return false;
+        }
+
         _editor.RefreshHandle();
         if (_editor.HasFocus || _control.Focused || _hookedControls.Any(static c => c.Focused))
         {
@@ -424,6 +625,11 @@ internal sealed class DirectoryPathCompletionController : IDisposable
 
     private void HookEvents(Control? target)
     {
+        if (_disposed)
+        {
+            return;
+        }
+
         if (target == null || _hookedControls.Contains(target))
         {
             return;
@@ -442,6 +648,11 @@ internal sealed class DirectoryPathCompletionController : IDisposable
 
     private void Control_BoundsChanged(object? sender, EventArgs e)
     {
+        if (_disposed)
+        {
+            return;
+        }
+
         if (!IsPopupVisible || _listBox.Items.Count == 0)
         {
             return;
@@ -454,6 +665,11 @@ internal sealed class DirectoryPathCompletionController : IDisposable
 
     private void Control_ParentChanged(object? sender, EventArgs e)
     {
+        if (_disposed)
+        {
+            return;
+        }
+
         if (sender is not Control target)
         {
             return;
@@ -467,6 +683,11 @@ internal sealed class DirectoryPathCompletionController : IDisposable
 
     private void Control_VisibleChanged(object? sender, EventArgs e)
     {
+        if (_disposed)
+        {
+            return;
+        }
+
         if (!_control.Visible)
         {
             ClosePopup();
@@ -475,6 +696,42 @@ internal sealed class DirectoryPathCompletionController : IDisposable
 
     public void Dispose()
     {
+        if (_disposed)
+        {
+            return;
+        }
+
+        try
+        {
+            _candidateCts?.Cancel();
+            _candidateCts?.Dispose();
+            _candidateCts = null;
+        }
+        catch
+        {
+            // Ignore
+        }
+
+        _disposed = true;
+
+        if (_control is ComboBox cb)
+        {
+            cb.ControlAdded -= ComboBox_ControlAdded;
+        }
+
+        if (_listBox != null)
+        {
+            _listBox.DrawItem -= ListBox_DrawItem;
+            _listBox.MouseDown -= ListBox_MouseDown;
+        }
+
+        if (_popupForm != null)
+        {
+            _popupForm.VisibleChanged -= PopupForm_VisibleChanged;
+        }
+
+        ClosePopup();
+
         foreach (Control control in _hookedControls)
         {
             control.TextChanged -= Control_TextChanged;
@@ -488,8 +745,34 @@ internal sealed class DirectoryPathCompletionController : IDisposable
         }
 
         _hookedControls.Clear();
-        Application.RemoveMessageFilter(_messageFilter);
-        _popupForm.Dispose();
+
+        if (_messageFilterRegistered && _messageFilter != null)
+        {
+            try
+            {
+                Application.RemoveMessageFilter(_messageFilter);
+                _messageFilterRegistered = false;
+            }
+            catch
+            {
+                // Ignore
+            }
+        }
+
+        if (_popupForm != null)
+        {
+            try
+            {
+                if (!_popupForm.IsDisposed)
+                {
+                    _popupForm.Dispose();
+                }
+            }
+            catch
+            {
+                // Ignore
+            }
+        }
     }
 
     private static bool IsOwnedHandle(IntPtr handle, Control control)
@@ -571,6 +854,11 @@ internal sealed class DirectoryPathCompletionController : IDisposable
 
         public bool PreFilterMessage(ref Message m)
         {
+            if (_owner._disposed)
+            {
+                return false;
+            }
+
             if (!_owner.IsPopupVisible)
             {
                 return false;

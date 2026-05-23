@@ -1,4 +1,4 @@
-﻿using System.Drawing;
+using System.Drawing;
 
 namespace MidFD.Models;
 
@@ -19,11 +19,11 @@ public static class MidFDColors
     public static Color ListMarkedFore { get; private set; } = Color.White;
     public static Color ListSelectedMarkedBack { get; private set; } = Color.FromArgb(0, 80, 100);
 
-    public static Color BorderLine { get; private set; } = Color.Cyan;
-    public static Color SeparatorLine { get; private set; } = Color.FromArgb(0, 100, 100);
+    public static Color BorderLine { get; internal set; } = Color.Cyan;
+    public static Color SeparatorLine { get; internal set; } = Color.FromArgb(0, 100, 100);
 
-    public static Color ViewerBack { get; private set; } = Color.FromArgb(0, 0, 64);
-    public static Color ViewerFore { get; private set; } = Color.White;
+    public static Color ViewerBack { get; internal set; } = Color.FromArgb(0, 0, 64);
+    public static Color ViewerFore { get; internal set; } = Color.White;
 
     public static void ApplyTheme(string? themeKey)
     {
@@ -117,5 +117,33 @@ public static class MidFDColors
                 ViewerFore = Color.White;
                 break;
         }
+    }
+
+    public static void SetColors(
+        Color normalFore, Color normalBack,
+        Color selectedFore, Color selectedBack,
+        Color directoryFore, Color fileFore,
+        Color readOnlyFore, Color hiddenFore,
+        Color systemFore, Color markedFore,
+        Color markedBack, Color selectedMarkedBack,
+        Color viewerFore, Color viewerBack,
+        Color borderLine, Color separatorLine)
+    {
+        ListNormalFore = normalFore;
+        ListNormalBack = normalBack;
+        ListSelectedFore = selectedFore;
+        ListSelectedBack = selectedBack;
+        ListDirectoryFore = directoryFore;
+        ListFileFore = fileFore;
+        ListReadOnlyFore = readOnlyFore;
+        ListHiddenFore = hiddenFore;
+        ListSystemFore = systemFore;
+        ListMarkedFore = markedFore;
+        ListMarkedBack = markedBack;
+        ListSelectedMarkedBack = selectedMarkedBack;
+        ViewerFore = viewerFore;
+        ViewerBack = viewerBack;
+        BorderLine = borderLine;
+        SeparatorLine = separatorLine;
     }
 }

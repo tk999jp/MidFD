@@ -91,26 +91,33 @@ public sealed class FeatureProfileSelectionDialog : Form
         };
         _fdCompatibleFunctionKeysCheckBox = new CheckBox
         {
-            Text = "FD互換のファンクションキー配置を使う",
+            Text = "FD/WinFD互換の操作プリセットを使う",
             AutoSize = true,
-            Location = new Point(16, 24),
+            Location = new Point(16, 20),
             Checked = string.Equals(settings?.Input?.FunctionKeyProfile, InputSettings.FdCompatibleProfileValue, StringComparison.OrdinalIgnoreCase)
         };
         operationGroup.Controls.Add(_fdCompatibleFunctionKeysCheckBox);
+        operationGroup.Controls.Add(new Label
+        {
+            AutoSize = false,
+            Location = new Point(36, 40),
+            Size = new Size(632, 20),
+            Text = "Fキー配置・一部Shift+F・列数キー操作をWinFD寄りにします。"
+        });
 
         _videoEnterPlaysExternalCheckBox = new CheckBox
         {
             Text = "動画ファイルは Enter で外部再生する",
             AutoSize = true,
-            Location = new Point(16, 50),
+            Location = new Point(16, 64),
             Checked = settings?.Preview?.VideoEnterPlaysExternal ?? false
         };
         operationGroup.Controls.Add(_videoEnterPlaysExternalCheckBox);
         operationGroup.Controls.Add(new Label
         {
             AutoSize = false,
-            Location = new Point(36, 74),
-            Size = new Size(632, 60),
+            Location = new Point(36, 86),
+            Size = new Size(632, 40),
             Text = "OFF: Enter=静止画 / Ctrl+Enter=外部再生\r\nON : Enter=外部再生 / Ctrl+Enter=静止画\r\nVキーは常に静止画プレビュー"
         });
 

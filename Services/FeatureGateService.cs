@@ -32,7 +32,7 @@ public sealed class FeatureGateService
             FeatureId.ImageQuantization => false,
             FeatureId.SvgClipboard => false,
             FeatureId.CommandPaletteUsage => false,
-            FeatureId.FileSystemWatcherAutoRefresh => false,
+            FeatureId.FileSystemWatcherAutoRefresh => true,
             _ => true
         };
     }
@@ -47,7 +47,7 @@ public sealed class FeatureGateService
             FeatureId.ImageQuantization => false,
             FeatureId.SvgClipboard => false,
             FeatureId.CommandPaletteUsage => false,
-            FeatureId.FileSystemWatcherAutoRefresh => false,
+            FeatureId.FileSystemWatcherAutoRefresh => true,
             _ => true
         };
     }

@@ -1,4 +1,4 @@
-﻿using MidFD.Models;
+using MidFD.Models;
 using MidFD.Helpers;
 
 namespace MidFD.Dialogs;
@@ -106,7 +106,8 @@ public sealed class ArchiveExtractDestinationDialog : Form
 
         Shown += (_, _) => _pathTextBox.SelectAll();
 
-        Helpers.DirectoryPathCompletionController.Attach(_pathTextBox);
+        var completionController = Helpers.DirectoryPathCompletionController.Attach(_pathTextBox);
+        Disposed += (_, _) => completionController.Dispose();
     }
 
     public static ArchiveExtractDestinationOptions? Show(IWin32Window owner, string defaultDirectory, string archiveDisplayName, bool allowCreateFolder = true)

@@ -1,4 +1,4 @@
-﻿using System.Text.Json;
+using System.Text.Json;
 
 namespace MidFD.Services.TrashManifestStore;
 
@@ -14,7 +14,7 @@ internal static class TrashManifestStoreFactory
         return new SqliteTrashManifestStore(dbPath);
     }
 
-    public static ITrashManifestStore CreateStore(Configuration.ManagedTrashStoreMode mode, string jsonPath, string sqlitePath, JsonSerializerOptions jsonOptions)
+    public static ITrashManifestStore CreateStore(ref Configuration.ManagedTrashStoreMode mode, string jsonPath, string sqlitePath, JsonSerializerOptions jsonOptions)
     {
         if (mode == Configuration.ManagedTrashStoreMode.Sqlite)
         {
@@ -27,6 +27,7 @@ internal static class TrashManifestStoreFactory
             catch (Exception ex)
             {
                 LogService.Error($"[MidFdTrashStore] SQLite initialization failed. Falling back to JSON. path={sqlitePath}, error={ex.Message}");
+                mode = Configuration.ManagedTrashStoreMode.Json;
             }
         }
 

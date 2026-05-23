@@ -1,5 +1,6 @@
 using MidFD.Models;
 using MidFD.Services;
+using System.Threading.Tasks;
 
 namespace MidFD.Dialogs;
 
@@ -23,9 +24,12 @@ public sealed class ArchiveListDialog : Form
     private readonly Button _closeButton;
     private readonly HashSet<string> _markedEntryPaths = new(StringComparer.OrdinalIgnoreCase);
     private readonly bool _isReadOnly;
+    private readonly Label _statusLabel;
+    private readonly Label _currentPathLabel;
     private string _currentPath = string.Empty;
     private ArchiveListSortColumn _sortColumn = ArchiveListSortColumn.Name;
     private SortOrder _sortOrder = SortOrder.Ascending;
+    private ArchiveTextPreviewForm? _activeTextPreviewForm;
 
     public ArchiveExtractRequest? PendingExtractRequest { get; private set; }
 
@@ -37,7 +41,7 @@ public sealed class ArchiveListDialog : Form
         _isReadOnly = isReadOnly;
 
         Text = $"Archive Contents - {Path.GetFileName(archivePath)}";
-        ClientSize = new Size(1100, 650);
+        ClientSize = new Size(800, 650);
         StartPosition = FormStartPosition.CenterParent;
         FormBorderStyle = FormBorderStyle.FixedDialog;
         MinimizeBox = false;
@@ -49,49 +53,69 @@ public sealed class ArchiveListDialog : Form
         {
             Text = $"archive: {archivePath}",
             Location = new Point(10, 10),
-            Size = new Size(1080, 20),
+            Size = new Size(500, 20),
             AutoEllipsis = true,
-            Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right
+            Anchor = AnchorStyles.Top | AnchorStyles.Left
+        };
+
+        _statusLabel = new Label
+        {
+            Text = isReadOnly ? "状態: ReadOnly（解凍できません）" : "状態: 通常（マーク解凍できます）",
+            Location = new Point(520, 10),
+            Size = new Size(270, 20),
+            ForeColor = isReadOnly ? Color.Tomato : Color.LightGreen,
+            Font = new Font(Font, FontStyle.Bold),
+            Anchor = AnchorStyles.Top | AnchorStyles.Right,
+            TextAlign = ContentAlignment.TopRight
+        };
+
+        _currentPathLabel = new Label
+        {
+            Location = new Point(10, 32),
+            Size = new Size(780, 20),
+            ForeColor = SystemColors.GrayText,
+            AutoEllipsis = true,
+            Anchor = AnchorStyles.Top | AnchorStyles.Left
         };
 
         _summaryLabel = new Label
         {
-            AutoSize = false,
-            Location = new Point(10, 34),
-            Size = new Size(1080, 20),
+            Location = new Point(10, 54),
+            Size = new Size(400, 20),
             ForeColor = SystemColors.GrayText,
-            Text = BuildSummaryText(_allEntries, _currentPath),
-            Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right
+            Anchor = AnchorStyles.Top | AnchorStyles.Left
         };
 
         _actionHintLabel = new Label
         {
-            AutoSize = false,
-            Location = new Point(10, 56),
-            Size = new Size(1080, 20),
+            Location = new Point(420, 54),
+            Size = new Size(370, 20),
             ForeColor = SystemColors.GrayText,
-            Text = "Space: 現在行をマーク切替して次へ  U: マーク済みを解凍  すべて解凍...: 全件  一覧は読み取り専用です。",
-            Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right
+            Text = "Space: マーク  U: 解凍  Enter: 入る/プレビュー",
+            Anchor = AnchorStyles.Top | AnchorStyles.Right,
+            TextAlign = ContentAlignment.TopRight
         };
 
         _listView = new ListView
         {
             Location = new Point(10, 80),
-            Size = new Size(1080, 505),
+            Size = new Size(780, 505),
             View = View.Details,
             FullRowSelect = true,
-            GridLines = true,
+            GridLines = false,
             HideSelection = false,
             MultiSelect = true,
             ShowItemToolTips = true,
-            Anchor = AnchorStyles.Top | AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right
+            Anchor = AnchorStyles.Top | AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right,
+            BackColor = MidFDColors.ListNormalBack,
+            ForeColor = MidFDColors.ListNormalFore
         };
         _listView.Columns.Add("Mark", 52, HorizontalAlignment.Center);
         _listView.Columns.Add("Type", 68);
-        _listView.Columns.Add("名前", 360);
-        _listView.Columns.Add("サイズ", 110, HorizontalAlignment.Right);
-        _listView.Columns.Add("更新日時", 150);
-        _listView.Columns.Add("場所", 300);
+        _listView.Columns.Add("名前", 200);
+        _listView.Columns.Add("サイズ", 90, HorizontalAlignment.Right);
+        _listView.Columns.Add("更新日時", 130);
+        _listView.Columns.Add("場所", 150);
         _listView.ColumnClick += ListView_ColumnClick;
         _listView.SelectedIndexChanged += (_, _) => SyncCurrentRowFocus();
         _listView.KeyDown += ListView_KeyDown;
@@ -143,6 +167,8 @@ public sealed class ArchiveListDialog : Form
         Controls.Add(buttonPanel);
         Controls.Add(_actionHintLabel);
         Controls.Add(_summaryLabel);
+        Controls.Add(_currentPathLabel);
+        Controls.Add(_statusLabel);
         Controls.Add(titleLabel);
 
         AcceptButton = _extractSelectedButton;
@@ -160,6 +186,7 @@ public sealed class ArchiveListDialog : Form
         };
 
         KeyDown += ArchiveListDialog_KeyDown;
+        FormClosed += (_, _) => _activeTextPreviewForm?.Close();
     }
 
     private void PopulateItems()
@@ -176,6 +203,7 @@ public sealed class ArchiveListDialog : Form
             upItem.SubItems.Add(string.Empty);
             upItem.SubItems.Add(string.Empty);
             upItem.Tag = "UP";
+            upItem.ForeColor = MidFDColors.ListDirectoryFore;
             _listView.Items.Add(upItem);
         }
 
@@ -258,6 +286,7 @@ public sealed class ArchiveListDialog : Form
         item.SubItems.Add(modifiedText);
         item.SubItems.Add(locationText);
         ApplyMarkIndicator(item);
+        item.ForeColor = entry.IsDirectory ? MidFDColors.ListDirectoryFore : MidFDColors.ListFileFore;
         return item;
     }
 
@@ -337,6 +366,10 @@ public sealed class ArchiveListDialog : Form
 
             if (keyData == Keys.U)
             {
+                if (BlockReadOnlyArchiveOperation())
+                {
+                    return true;
+                }
                 QueueExtractMarked();
                 return true;
             }
@@ -368,6 +401,12 @@ public sealed class ArchiveListDialog : Form
 
         if (e.KeyCode == Keys.U)
         {
+            if (BlockReadOnlyArchiveOperation())
+            {
+                e.Handled = true;
+                e.SuppressKeyPress = true;
+                return;
+            }
             QueueExtractMarked();
             e.Handled = true;
             e.SuppressKeyPress = true;
@@ -385,10 +424,77 @@ public sealed class ArchiveListDialog : Form
             return;
         }
 
-        if (item.Tag is ArchiveEntry entry && entry.IsDirectory)
+        if (item.Tag is not ArchiveEntry entry) return;
+
+        if (entry.IsDirectory)
         {
             NavigateDown(entry.EntryPath);
+            return;
         }
+
+        // ファイルの場合の Enter 挙動
+        string archiveExt = Path.GetExtension(_archivePath);
+        bool isZip = string.Equals(archiveExt, ".zip", StringComparison.OrdinalIgnoreCase);
+        bool isText = ArchiveEntryPreviewService.IsTextFile(entry.EntryPath);
+
+        if (isZip && isText)
+        {
+            string archivePath = _archivePath;
+            string entryPath = string.IsNullOrEmpty(entry.RawEntryPath) ? entry.EntryPath : entry.RawEntryPath;
+
+            // 同期的にプレビューを読み出す
+            var result = ArchiveEntryPreviewService.GetZipEntryTextPreview(archivePath, entryPath);
+
+            _activeTextPreviewForm?.Close();
+            _activeTextPreviewForm?.Dispose();
+
+            _activeTextPreviewForm = new ArchiveTextPreviewForm(entry.Name, result.Text);
+            _activeTextPreviewForm.FormClosed += (_, _) => _activeTextPreviewForm = null;
+
+            PositionTextPreviewForm(_activeTextPreviewForm);
+
+            _activeTextPreviewForm.Show(this);
+            _activeTextPreviewForm.Activate();
+
+            // テキストプレビューを開いた後も一覧操作を継続できるようにフォーカスを戻す
+            Activate();
+            _listView.Focus();
+        }
+        else
+        {
+            System.Media.SystemSounds.Beep.Play();
+        }
+    }
+
+    private void PositionTextPreviewForm(ArchiveTextPreviewForm previewForm)
+    {
+        const int margin = 8;
+        Rectangle workingArea = Screen.FromControl(this).WorkingArea;
+
+        int x = Right + margin;
+        int y = Top + 32;
+
+        // 右側に入らない場合は左側へ
+        if (x + previewForm.Width > workingArea.Right)
+        {
+            x = Left - previewForm.Width - margin;
+        }
+
+        // 左側にも入らない場合は親の中央へ
+        if (x < workingArea.Left)
+        {
+            x = Left + (Width - previewForm.Width) / 2;
+        }
+
+        if (y + previewForm.Height > workingArea.Bottom)
+        {
+            y = workingArea.Bottom - previewForm.Height - margin;
+        }
+
+        x = Math.Max(workingArea.Left + margin, Math.Min(x, workingArea.Right - previewForm.Width - margin));
+        y = Math.Max(workingArea.Top + margin, Math.Min(y, workingArea.Bottom - previewForm.Height - margin));
+
+        previewForm.Location = new Point(x, y);
     }
 
     private void NavigateUp()
@@ -428,6 +534,10 @@ public sealed class ArchiveListDialog : Form
 
     private void QueueExtractMarked()
     {
+        if (BlockReadOnlyArchiveOperation())
+        {
+            return;
+        }
         if (!IsHandleCreated)
         {
             BeginExtractMarked();
@@ -439,10 +549,15 @@ public sealed class ArchiveListDialog : Form
 
     private void BeginExtractMarked()
     {
-        IReadOnlyList<string> markedEntryPaths = GetMarkedEntryPaths();
-        if (markedEntryPaths.Count == 0)
+        if (BlockReadOnlyArchiveOperation())
+        {
+            return;
+        }
+        IReadOnlyList<string> entryPaths = GetExtractionEntryPathsForU();
+        if (entryPaths.Count == 0)
         {
             System.Media.SystemSounds.Beep.Play();
+            MessageBox.Show(this, "解凍できるファイルまたはフォルダを選択するか、対象をマークしてください。", "警告", MessageBoxButtons.OK, MessageBoxIcon.Warning);
             return;
         }
 
@@ -456,7 +571,7 @@ public sealed class ArchiveListDialog : Form
         {
             ArchivePath = _archivePath,
             DestinationDirectory = ArchiveExtractService.ResolveDestinationDirectory(destination.BaseDirectory, _archivePath, destination.CreateArchiveRootDirectory),
-            EntryPaths = markedEntryPaths,
+            EntryPaths = entryPaths,
             ExtractAll = false
         };
 
@@ -466,6 +581,10 @@ public sealed class ArchiveListDialog : Form
 
     private void BeginExtractAll()
     {
+        if (BlockReadOnlyArchiveOperation())
+        {
+            return;
+        }
         ArchiveExtractDestinationOptions? destination = SelectDestinationOptions();
         if (destination == null)
         {
@@ -492,14 +611,29 @@ public sealed class ArchiveListDialog : Form
 
     private IReadOnlyList<string> GetMarkedEntryPaths()
     {
-        return _listView.Items
-            .Cast<ListViewItem>()
-            .Where(IsMarked)
-            .Select(item => item.Tag as ArchiveEntry)
-            .Where(entry => entry != null)
-            .Select(entry => string.IsNullOrEmpty(entry!.RawEntryPath) ? entry.EntryPath : entry.RawEntryPath)
+        if (_markedEntryPaths.Count == 0)
+        {
+            return Array.Empty<string>();
+        }
+
+        return _allEntries
+            .Where(entry => !entry.IsSyntheticDirectory)
+            .Where(entry => _markedEntryPaths.Contains(entry.EntryPath))
+            .Select(entry => string.IsNullOrEmpty(entry.RawEntryPath) ? entry.EntryPath : entry.RawEntryPath)
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .ToArray();
+    }
+
+    private bool BlockReadOnlyArchiveOperation()
+    {
+        if (!_isReadOnly)
+        {
+            return false;
+        }
+
+        System.Media.SystemSounds.Beep.Play();
+        UpdateActionHintText();
+        return true;
     }
 
     private void ToggleFocusedItemMark(bool moveNext)
@@ -591,6 +725,92 @@ public sealed class ArchiveListDialog : Form
         ListViewItem item = _listView.SelectedItems[0];
         item.Focused = true;
         UpdateDialogState();
+        UpdatePreviewIfFormOpen();
+    }
+
+    private void UpdatePreviewIfFormOpen()
+    {
+        if (_activeTextPreviewForm == null)
+        {
+            return;
+        }
+
+        ArchiveEntry? entry = GetSelectedArchiveEntry();
+        if (entry == null)
+        {
+            _activeTextPreviewForm.SetContent("なし", "[プレビューするファイルが選択されていません。]");
+            return;
+        }
+
+        if (entry.IsDirectory || entry.IsSyntheticDirectory)
+        {
+            _activeTextPreviewForm.SetContent(entry.Name, "[フォルダはプレビューできません。]");
+            return;
+        }
+
+        string archiveExt = Path.GetExtension(_archivePath);
+        bool isZip = string.Equals(archiveExt, ".zip", StringComparison.OrdinalIgnoreCase);
+        bool isText = ArchiveEntryPreviewService.IsTextFile(entry.EntryPath);
+
+        if (isZip && isText)
+        {
+            string entryPath = string.IsNullOrEmpty(entry.RawEntryPath) ? entry.EntryPath : entry.RawEntryPath;
+            var result = ArchiveEntryPreviewService.GetZipEntryTextPreview(_archivePath, entryPath);
+            _activeTextPreviewForm.SetContent(entry.Name, result.Text);
+        }
+        else if (!isZip)
+        {
+            _activeTextPreviewForm.SetContent(entry.Name, "[ZIP以外のファイルはプレビュー対象外です。]");
+        }
+        else
+        {
+            _activeTextPreviewForm.SetContent(entry.Name, "[このファイル形式はテキストプレビュー対象外です。]");
+        }
+    }
+
+    private ArchiveEntry? GetSelectedArchiveEntry()
+    {
+        ListViewItem? item = _listView.SelectedItems.Count > 0 ? _listView.SelectedItems[0] : _listView.FocusedItem;
+        if (item == null || item.Tag is not ArchiveEntry entry)
+        {
+            return null;
+        }
+        return entry;
+    }
+
+    private IReadOnlyList<string> GetExtractionEntryPathsForU()
+    {
+        IReadOnlyList<string> marked = GetMarkedEntryPaths();
+        if (marked.Count > 0)
+        {
+            return marked;
+        }
+
+        ArchiveEntry? selected = GetSelectedArchiveEntry();
+        if (selected == null || selected.IsSyntheticDirectory)
+        {
+            return Array.Empty<string>();
+        }
+
+        if (selected.IsDirectory)
+        {
+            string dirPath = !string.IsNullOrWhiteSpace(selected.RawEntryPath) ? selected.RawEntryPath : selected.EntryPath;
+            string prefix = dirPath.Replace('\\', '/').TrimEnd('/') + "/";
+            return _allEntries
+                .Where(e => !e.IsDirectory && !e.IsSyntheticDirectory)
+                .Where(e => {
+                    string ePath = (!string.IsNullOrWhiteSpace(e.RawEntryPath) ? e.RawEntryPath : e.EntryPath).Replace('\\', '/');
+                    return ePath.StartsWith(prefix, StringComparison.OrdinalIgnoreCase);
+                })
+                .Select(e => !string.IsNullOrWhiteSpace(e.RawEntryPath) ? e.RawEntryPath : e.EntryPath)
+                .ToList();
+        }
+
+        string path = !string.IsNullOrWhiteSpace(selected.RawEntryPath)
+            ? selected.RawEntryPath
+            : selected.EntryPath;
+
+        return new[] { path };
     }
 
     private void UpdateDialogState()
@@ -603,6 +823,8 @@ public sealed class ArchiveListDialog : Form
     private void UpdateSummaryText()
     {
         string pathText = string.IsNullOrEmpty(_currentPath) ? "/" : "/" + _currentPath.TrimEnd('/');
+        _currentPathLabel.Text = $"current: {pathText}";
+
         int directoryCount = _allEntries.Count(entry => entry.IsDirectory);
         int itemCount = _allEntries.Count;
         int fileCount = itemCount - directoryCount;
@@ -615,25 +837,22 @@ public sealed class ArchiveListDialog : Form
             : string.Empty;
 
         _summaryLabel.Text = itemCount == 0
-            ? $"[{pathText}] items: 0 (empty archive)"
+            ? "items: 0 (empty archive)"
             : markedCount > 0
-                ? $"[{pathText}] items: {itemCount} (this dir: {currentDirItemCount})  marks: {markedCount}{selectionText}"
-                : $"[{pathText}] items: {itemCount} (this dir: {currentDirItemCount}){selectionText}";
+                ? $"items: {itemCount} (this dir: {currentDirItemCount})  marks: {markedCount}{selectionText}"
+                : $"items: {itemCount} (this dir: {currentDirItemCount}){selectionText}";
     }
 
     private void UpdateActionHintText()
     {
         int markedCount = _markedEntryPaths.Count;
-        string currentText = _listView.SelectedItems.Count > 0
-            ? BuildCurrentRowHint(_listView.SelectedItems[0])
-            : "current: —";
         string extractHint = _isReadOnly
-            ? "ReadOnlyタブでは解凍できません"
+            ? "ReadOnly"
             : markedCount > 0
-                ? $"U: マーク {markedCount} 件を解凍"
-                : "U: マーク済みを解凍";
+                ? $"U: マーク/選択を解凍({markedCount})"
+                : "U: マーク/選択を解凍";
 
-        _actionHintLabel.Text = $"Space: 現在行をマーク切替して次へ  {extractHint}  {currentText}";
+        _actionHintLabel.Text = $"Space: マーク  {extractHint}  Enter: 入る/プレビュー";
     }
 
     private void UpdateExtractButtonState()

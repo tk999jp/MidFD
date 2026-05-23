@@ -1,4 +1,4 @@
-﻿using MidFD.Models;
+using MidFD.Models;
 using MidFD.Services;
 
 namespace MidFD.Dialogs;
@@ -171,7 +171,8 @@ public sealed class QuickAccessLocationDialog : Form
         };
 
         UpdateSummaryText();
-        Helpers.DirectoryPathCompletionController.Attach(_pathTextBox);
+        var completionController = Helpers.DirectoryPathCompletionController.Attach(_pathTextBox);
+        Disposed += (_, _) => completionController.Dispose();
     }
 
     private void BrowsePath()

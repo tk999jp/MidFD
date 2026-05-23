@@ -49,12 +49,51 @@ public class AppearanceSettings
     public bool ShowDirectoryMarker { get; set; } = true;
     public bool ShowHiddenFiles { get; set; } = false;
     public bool ShowItemIcons { get; set; } = true;
+    public bool UseUnderlineCursor { get; set; } = false;
+    public bool ShowFileSizeAndDateInBrowser { get; set; } = false;
+    public BrowserFileDisplayMode FileDisplayMode { get; set; } = BrowserFileDisplayMode.NameOnly;
     public bool ShowSystemInfo { get; set; } = true;
     public bool ShowLightweightInfo { get; set; } = true;
     public string DateFormat { get; set; } = "yyyy-MM-dd HH:mm";
     public string SizeFormat { get; set; } = "HumanReadable";
 
-    public AppearanceSettings Clone() => (AppearanceSettings)MemberwiseClone();
+    public bool UseCustomFileListColors { get; set; } = false;
+    public bool EnableSemanticColorAssist { get; set; } = true;
+    public CustomFileListColorSettings CustomFileListColors { get; set; } = new();
+    public List<CustomFileListColorPreset> CustomFileListColorPresets { get; set; } = new();
+
+    // UIクローム/Viewer手動指定色
+    public bool CustomUiThemeColorsEnabled { get; set; } = false;
+    public string? CustomFilerBackColor { get; set; }
+    public string? CustomFilerForeColor { get; set; }
+    public string? CustomViewerBackColor { get; set; }
+    public string? CustomViewerForeColor { get; set; }
+
+
+    public AppearanceSettings Clone()
+    {
+        var clone = (AppearanceSettings)MemberwiseClone();
+        clone.CustomFileListColors = CustomFileListColors.Clone();
+        clone.CustomFileListColorPresets = CustomFileListColorPresets.Select(static preset => preset.Clone()).ToList();
+        return clone;
+    }
+
+    public BrowserFileDisplayMode ResolveFileDisplayMode()
+    {
+        if (FileDisplayMode == BrowserFileDisplayMode.NameOnly && ShowFileSizeAndDateInBrowser)
+        {
+            return BrowserFileDisplayMode.NameSizeDate;
+        }
+
+        return FileDisplayMode;
+    }
+}
+
+public enum BrowserFileDisplayMode
+{
+    NameOnly = 0,
+    NameSize = 1,
+    NameSizeDate = 2
 }
 
 public class LoggingSettings
@@ -96,6 +135,8 @@ public class SessionSettings
     public int LastColumnCount { get; set; } = 3;
     public SortKind LastSortKind { get; set; } = SortKind.Name;
     public bool LastSortAscending { get; set; } = true;
+    public List<string> DirectoryMoveHistory { get; set; } = new();
+    public List<string> MoveDestinationHistory { get; set; } = new();
 
     public SessionSettings Clone()
     {
@@ -104,6 +145,8 @@ public class SessionSettings
         clone.OpenTabs = OpenTabs.Select(static tab => tab.Clone()).ToList();
         clone.BrowserTabCategories = BrowserTabCategories.Select(static category => category.Clone()).ToList();
         clone.PersistedMarkedPaths = new List<string>(PersistedMarkedPaths);
+        clone.DirectoryMoveHistory = new List<string>(DirectoryMoveHistory ?? new List<string>());
+        clone.MoveDestinationHistory = new List<string>(MoveDestinationHistory ?? new List<string>());
         return clone;
     }
 
@@ -337,4 +380,34 @@ public class FileOperationsSettings
     public bool SelectCreatedItemAfterCreate { get; set; } = true;
 
     public FileOperationsSettings Clone() => (FileOperationsSettings)MemberwiseClone();
+}
+
+public class CustomFileListColorSettings
+{
+    public string? Background { get; set; }
+    public string? NormalFile { get; set; }
+    public string? Directory { get; set; }
+    public string? ReadOnly { get; set; }
+    public string? Hidden { get; set; }
+    public string? System { get; set; }
+    public string? Marked { get; set; }
+    public string? SelectedBackground { get; set; }
+    public string? SelectedForeground { get; set; }
+
+    public CustomFileListColorSettings Clone() => (CustomFileListColorSettings)MemberwiseClone();
+}
+
+public class CustomFileListColorPreset
+{
+    public string Name { get; set; } = string.Empty;
+    public CustomFileListColorSettings Colors { get; set; } = new();
+
+    public CustomFileListColorPreset Clone()
+    {
+        return new CustomFileListColorPreset
+        {
+            Name = Name,
+            Colors = Colors.Clone()
+        };
+    }
 }

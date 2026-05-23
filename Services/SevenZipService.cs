@@ -217,7 +217,29 @@ public static class SevenZipService
         });
 
         var outputBuilder = new System.Text.StringBuilder(1024);
-        // リアルタイムで行を読み取る
+        var errorBuilder = new System.Text.StringBuilder(1024);
+
+        // 標準エラー出力を別タスクで並行してドレインし、バッファ詰まりを防止
+        var errorReadTask = System.Threading.Tasks.Task.Run(() =>
+        {
+            try
+            {
+                while (!process.StandardError.EndOfStream)
+                {
+                    string? line = process.StandardError.ReadLine();
+                    if (line != null)
+                    {
+                        errorBuilder.AppendLine(line);
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                LogService.Warn($"Error reading stderr from 7z process: {ex.Message}");
+            }
+        });
+
+        // リアルタイムで行を読み取る (標準出力)
         while (!process.StandardOutput.EndOfStream)
         {
             string? line = process.StandardOutput.ReadLine();
@@ -228,9 +250,21 @@ public static class SevenZipService
             }
         }
 
-        string output = outputBuilder.ToString();
-        string error = process.StandardError.ReadToEnd();
+        // 先にプロセス終了を確定する
         process.WaitForExit();
+
+        // 標準エラー読み取りタスクの完了を待機
+        try
+        {
+            errorReadTask.Wait(5000);
+        }
+        catch (Exception ex)
+        {
+            LogService.Warn($"Stderr reading task wait interrupted: {ex.Message}");
+        }
+
+        string output = outputBuilder.ToString();
+        string error = errorBuilder.ToString();
 
         if (token.IsCancellationRequested)
         {
@@ -288,7 +322,7 @@ public static class SevenZipService
 
             if (!containsWildcard && sourcePaths.Count > 0)
             {
-                listFilePath = CreatePackListFile(sourcePaths);
+                listFilePath = CreateTemporaryListFile(sourcePaths);
                 args.Add("-scsUTF-8");
                 args.Add($"@{listFilePath}");
             }
@@ -350,17 +384,32 @@ public static class SevenZipService
             throw new ArgumentException("解凍対象 entry がありません。", nameof(entryPaths));
         }
 
-        string joinedEntries = string.Join(" ", entryPaths.Select(path => $"\"{path}\""));
-        // archive dialog からの選択解凍は非対話実行なので、既存ファイル確認で止まらないよう -y を付ける。
-        string args = $"x \"{archivePath}\" -o\"{extractToDir}\" -y -- {joinedEntries}";
-
-        var result = ExecuteProcess(sevenZipPath, args, token, onOutputLine);
-        if (result.ExitCode != 0 && !token.IsCancellationRequested)
+        string? listFilePath = null;
+        try
         {
-            LogService.Error($"7z ExtractSelection Failure (ExitCode: {result.ExitCode})\nArgs: {args}\nError: {result.Error}");
-        }
+            listFilePath = CreateTemporaryListFile(entryPaths);
+            var args = new List<string>
+            {
+                "x",
+                archivePath,
+                $"-o{extractToDir}",
+                "-y",
+                "-scsUTF-8",
+                $"@{listFilePath}"
+            };
 
-        return result;
+            var result = ExecuteProcess(sevenZipPath, args, token, onOutputLine);
+            if (result.ExitCode != 0 && !token.IsCancellationRequested)
+            {
+                LogService.Error($"7z ExtractSelection Failure (ExitCode: {result.ExitCode})\nError: {result.Error}");
+            }
+
+            return result;
+        }
+        finally
+        {
+            TryDeleteTemporaryListFile(listFilePath);
+        }
     }
 
     public static (int ExitCode, string Output, string Error) List(string sevenZipPath, string archivePath, CancellationToken token = default)
@@ -424,11 +473,11 @@ public static class SevenZipService
             && char.IsDigit(extension[3]);
     }
 
-    private static string CreatePackListFile(IEnumerable<string> sourcePaths)
+    private static string CreateTemporaryListFile(IEnumerable<string> paths)
     {
-        string listFilePath = Path.Combine(Path.GetTempPath(), $"midfd-pack-{Guid.NewGuid():N}.lst");
+        string listFilePath = Path.Combine(Path.GetTempPath(), $"midfd-7z-{Guid.NewGuid():N}.lst");
         using var writer = new StreamWriter(listFilePath, false, new UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
-        foreach (string path in sourcePaths)
+        foreach (string path in paths)
         {
             writer.WriteLine(path);
         }

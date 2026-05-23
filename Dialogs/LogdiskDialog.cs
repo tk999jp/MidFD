@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Drawing;
 using System.IO;
 using System.Linq;
@@ -8,7 +8,9 @@ namespace MidFD.Dialogs;
 
 public static class LogdiskDialog
 {
-    public static string? Show(string defaultPath = "")
+    public static string? Show(
+        string defaultPath = "",
+        IReadOnlyList<string>? history = null)
     {
         const int sideMargin = 16;
         const int topMargin = 16;
@@ -89,58 +91,182 @@ public static class LogdiskDialog
             Top = currentTop,
             Width = contentWidth,
             Font = new Font("Consolas", 11F),
+            DropDownStyle = ComboBoxStyle.DropDown,
             Text = defaultPath
         };
-        form.Controls.Add(inputBox);
-        Helpers.DirectoryPathCompletionController.Attach(inputBox);
-        currentTop = inputBox.Bottom;
 
-        // ボタンのクリックイベントを修正
-        foreach (Control ctrl in form.Controls)
+        var normalizedHistory = new List<string>();
+        if (history != null)
         {
-            if (ctrl is Button drvBtn && drvBtn.Text.Length == 1)
+            string normDefault = (defaultPath ?? "").TrimEnd('\\', '/');
+            foreach (var h in history)
             {
-                char c = drvBtn.Text[0];
-                drvBtn.Click += (s, e) => inputBox.Text = $"{c}:\\";
+                if (string.IsNullOrWhiteSpace(h)) continue;
+                string normH = h.TrimEnd('\\', '/');
+                if (string.Equals(normH, normDefault, StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+                normalizedHistory.Add(h);
             }
         }
 
-        Button btnOk = new Button()
+        foreach (var path in normalizedHistory)
         {
-            Text = "OK(O)",
-            DialogResult = DialogResult.OK,
-            Font = new Font("Meiryo UI", 10F),
-            MinimumSize = new Size(100, 30)
-        };
+            inputBox.Items.Add(path);
+        }
 
-        Button btnCancel = new Button()
+        form.Controls.Add(inputBox);
+        Helpers.DirectoryPathCompletionController? completionController = null;
+        string? lastSetText = defaultPath;
+        int historyIndex = -1;
+
+        void ApplyHistorySelection(int index)
         {
-            Text = "キャンセル(C)",
-            DialogResult = DialogResult.Cancel,
-            Font = new Font("Meiryo UI", 10F),
-            MinimumSize = new Size(120, 30)
-        };
+            if (index < 0 || index >= normalizedHistory.Count)
+            {
+                return;
+            }
 
-        form.Controls.Add(btnOk);
-        form.Controls.Add(btnCancel);
-
-        FileOperationDialogLayoutHelper.ApplyModernBottomActionRow(
-            form,
-            new[] { btnOk, btnCancel },
-            currentTop,
-            buttonGap: 10,
-            contentGap: 16);
-
-        form.AcceptButton = btnOk;
-        form.CancelButton = btnCancel;
-
-        form.Shown += (s, e) =>
-        {
-            // 入力欄にフォーカス（全選択状態で）
+            historyIndex = index;
+            inputBox.SelectedIndex = index;
+            inputBox.Text = normalizedHistory[index];
+            lastSetText = inputBox.Text;
             inputBox.SelectAll();
-            inputBox.Focus();
+        }
+
+        void SyncHistoryIndexFromText()
+        {
+            string trimmedCurrent = inputBox.Text.TrimEnd('\\', '/');
+            int foundIndex = normalizedHistory.FindIndex(h =>
+                string.Equals(h.TrimEnd('\\', '/'), trimmedCurrent, StringComparison.OrdinalIgnoreCase));
+
+            historyIndex = foundIndex;
+            inputBox.SelectedIndex = foundIndex >= 0 ? foundIndex : -1;
+        }
+
+        inputBox.DropDown += (_, _) => SyncHistoryIndexFromText();
+
+        inputBox.SelectionChangeCommitted += (_, _) =>
+        {
+            historyIndex = inputBox.SelectedIndex;
+            lastSetText = inputBox.Text;
         };
 
-        return form.ShowDialog() == DialogResult.OK ? inputBox.Text : null;
+        try
+        {
+            completionController = Helpers.DirectoryPathCompletionController.Attach(
+                inputBox,
+                new Helpers.DirectoryPathCompletionOptions
+                {
+                    ShowOnTextChanged = false
+                });
+
+            inputBox.KeyDown += (s, e) =>
+            {
+                if (e.Handled || e.SuppressKeyPress)
+                {
+                    return;
+                }
+
+                if (completionController?.IsCompletionPopupVisible == true)
+                {
+                    return;
+                }
+
+                if (normalizedHistory.Count == 0)
+                {
+                    return;
+                }
+
+                if (e.KeyCode == Keys.Up || e.KeyCode == Keys.Down)
+                {
+                    string currentText = inputBox.Text;
+                    if (currentText != lastSetText)
+                    {
+                        string trimmedCurrent = currentText.TrimEnd('\\', '/');
+                        int foundIndex = normalizedHistory.FindIndex(h => string.Equals(h.TrimEnd('\\', '/'), trimmedCurrent, StringComparison.OrdinalIgnoreCase));
+                        historyIndex = foundIndex;
+                    }
+
+                    if (e.KeyCode == Keys.Up)
+                    {
+                        historyIndex = historyIndex < 0
+                            ? 0
+                            : Math.Min(historyIndex + 1, normalizedHistory.Count - 1);
+                    }
+                    else // Keys.Down
+                    {
+                        historyIndex = historyIndex < 0
+                            ? 0
+                            : Math.Max(historyIndex - 1, 0);
+                    }
+
+                    ApplyHistorySelection(historyIndex);
+                    e.Handled = true;
+                    e.SuppressKeyPress = true;
+                }
+            };
+
+            currentTop = inputBox.Bottom;
+
+            // ボタンのクリックイベントを修正
+            foreach (Control ctrl in form.Controls)
+            {
+                if (ctrl is Button drvBtn && drvBtn.Text.Length == 1)
+                {
+                    char c = drvBtn.Text[0];
+                    drvBtn.Click += (s, e) => inputBox.Text = $"{c}:\\";
+                }
+            }
+
+            Button btnOk = new Button()
+            {
+                Text = "OK(O)",
+                DialogResult = DialogResult.OK,
+                Font = new Font("Meiryo UI", 10F),
+                MinimumSize = new Size(100, 30)
+            };
+
+            Button btnCancel = new Button()
+            {
+                Text = "キャンセル(C)",
+                DialogResult = DialogResult.Cancel,
+                Font = new Font("Meiryo UI", 10F),
+                MinimumSize = new Size(120, 30)
+            };
+
+            form.Controls.Add(btnOk);
+            form.Controls.Add(btnCancel);
+
+            FileOperationDialogLayoutHelper.ApplyModernBottomActionRow(
+                form,
+                new[] { btnOk, btnCancel },
+                currentTop,
+                buttonGap: 10,
+                contentGap: 16);
+
+            form.AcceptButton = btnOk;
+            form.CancelButton = btnCancel;
+
+            form.Shown += (s, e) =>
+            {
+                // 入力欄にフォーカス（全選択状態で）
+                inputBox.SelectAll();
+                inputBox.Focus();
+            };
+
+            form.FormClosed += (s, e) =>
+            {
+                completionController?.Dispose();
+                completionController = null;
+            };
+
+            return form.ShowDialog() == DialogResult.OK ? inputBox.Text : null;
+        }
+        finally
+        {
+            completionController?.Dispose();
+        }
     }
 }

@@ -1,4 +1,4 @@
-﻿namespace MidFD.Dialogs;
+namespace MidFD.Dialogs;
 
 public static class SimpleInputDialog
 {
@@ -154,7 +154,8 @@ public static class SimpleInputDialog
 
         if (options?.EnableDirectoryCompletion == true)
         {
-            Helpers.DirectoryPathCompletionController.Attach(textBox);
+            var completionController = Helpers.DirectoryPathCompletionController.Attach(textBox);
+            form.Disposed += (s, e) => completionController.Dispose();
         }
 
         // selectionLength < 0: 全選択（既定）、0以上: 先頭から指定長だけ選択

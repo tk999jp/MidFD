@@ -1,4 +1,4 @@
-﻿using System.Drawing;
+using System.Drawing;
 using System.IO;
 using MidFD.Configuration;
 using MidFD.Dialogs;
@@ -807,8 +807,7 @@ public partial class ImageViewerForm : Form
             _videoStillDurationSeconds = null;
         }
 
-        int safeMax = GetVideoStillSafeMaxSeconds();
-        _videoStillCurrentSeconds = Math.Clamp(initialSeconds, 0, safeMax);
+        _videoStillCurrentSeconds = ClampVideoStillSeconds(initialSeconds);
 
         await UpdateVideoStillImageAsync(token);
     }
@@ -870,8 +869,7 @@ public partial class ImageViewerForm : Form
     {
         if (!_isVideoStillMode) return;
         int newSeconds = absolute ? value : _videoStillCurrentSeconds + value;
-        int safeMax = GetVideoStillSafeMaxSeconds();
-        newSeconds = Math.Clamp(newSeconds, 0, safeMax);
+        newSeconds = ClampVideoStillSeconds(newSeconds);
 
         if (newSeconds != _videoStillCurrentSeconds)
         {
@@ -923,9 +921,11 @@ public partial class ImageViewerForm : Form
     private void UpdateVideoStillStatusLine()
     {
         if (!_isVideoStillMode) return;
+        bool hasDuration = _videoStillDurationSeconds.HasValue && _videoStillDurationSeconds.Value > 0;
         int maxSeconds = GetVideoStillDisplayDurationSeconds();
-        string durationPart = (_videoStillDurationSeconds.HasValue && _videoStillDurationSeconds.Value > 0) ? $" / {maxSeconds}秒" : "";
-        statusLabel.Text = $"[VideoStill] 位置:{_videoStillCurrentSeconds}秒{durationPart} | ←/→:位置 | Ctrl+Enter:再生";
+        string durationPart = hasDuration ? $" / {maxSeconds}秒" : "";
+        string controlPart = hasDuration ? "←/→:位置" : "←/→:位置 (動画長不明のため位置バー無効)";
+        statusLabel.Text = $"[VideoStill] 位置:{_videoStillCurrentSeconds}秒{durationPart} | {controlPart} | Ctrl+Enter:再生";
     }
 
     private int GetVideoStillDisplayDurationSeconds()
@@ -935,14 +935,25 @@ public partial class ImageViewerForm : Form
         return 0;
     }
 
-    private int GetVideoStillSafeMaxSeconds()
+    private bool TryGetVideoStillSeekBarMaxSeconds(out int maxSeconds)
     {
         if (_videoStillDurationSeconds.HasValue && _videoStillDurationSeconds.Value > 0)
         {
             int max = (int)Math.Floor(_videoStillDurationSeconds.Value) - 1;
-            return Math.Max(0, max);
+            maxSeconds = Math.Max(0, max);
+            return true;
         }
-        return 600;
+        maxSeconds = 0;
+        return false;
+    }
+
+    private int ClampVideoStillSeconds(int seconds)
+    {
+        if (TryGetVideoStillSeekBarMaxSeconds(out int maxSeconds))
+        {
+            return Math.Clamp(seconds, 0, maxSeconds);
+        }
+        return Math.Max(0, seconds);
     }
 
     private int GetVideoStillStepSeconds()
@@ -969,26 +980,32 @@ public partial class ImageViewerForm : Form
         var rect = _videoStillSeekBarPanel.ClientRectangle;
         if (rect.Width <= 2 || rect.Height <= 2) return;
         e.Graphics.Clear(SystemColors.ControlDark);
-        int safeMax = GetVideoStillSafeMaxSeconds();
-        float ratio = safeMax > 0 ? (float)_videoStillCurrentSeconds / safeMax : 0f;
-        ratio = Math.Clamp(ratio, 0f, 1f);
-        int fillWidth = (int)(rect.Width * ratio);
-        if (fillWidth > 0)
+
+        if (TryGetVideoStillSeekBarMaxSeconds(out int safeMax))
         {
-            using var fillBrush = new SolidBrush(Color.FromArgb(200, 80, 160, 255));
-            e.Graphics.FillRectangle(fillBrush, 0, 0, fillWidth, rect.Height);
+            float ratio = safeMax > 0 ? (float)_videoStillCurrentSeconds / safeMax : 0f;
+            ratio = Math.Clamp(ratio, 0f, 1f);
+            int fillWidth = (int)(rect.Width * ratio);
+            if (fillWidth > 0)
+            {
+                using var fillBrush = new SolidBrush(Color.FromArgb(200, 80, 160, 255));
+                e.Graphics.FillRectangle(fillBrush, 0, 0, fillWidth, rect.Height);
+            }
+            int markerX = Math.Clamp(fillWidth, 0, rect.Width - 1);
+            using var markerPen = new Pen(Color.White, 1f);
+            e.Graphics.DrawLine(markerPen, markerX, 0, markerX, rect.Height);
         }
-        int markerX = Math.Clamp(fillWidth, 0, rect.Width - 1);
-        using var markerPen = new Pen(Color.White, 1f);
-        e.Graphics.DrawLine(markerPen, markerX, 0, markerX, rect.Height);
     }
 
     private void VideoStillSeekBarPanel_MouseClick(object? sender, MouseEventArgs e)
     {
         if (!_isVideoStillMode || e.Button != MouseButtons.Left) return;
+        if (!TryGetVideoStillSeekBarMaxSeconds(out int safeMax))
+        {
+            return;
+        }
         int w = _videoStillSeekBarPanel.Width;
         if (w <= 0) return;
-        int safeMax = GetVideoStillSafeMaxSeconds();
         double ratio = (double)e.X / w;
         ratio = Math.Clamp(ratio, 0.0, 1.0);
         int targetSeconds = safeMax > 0 ? (int)Math.Round(safeMax * ratio) : 0;

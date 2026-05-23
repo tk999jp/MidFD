@@ -20,17 +20,32 @@ public sealed class FileOperationDialogCoordinator
         Action<string> showStatusMessage,
         string? summaryText,
         string? warningText,
+        IReadOnlyList<string>? directoryHistory,
         out string normalizedDestinationDirectory,
         out bool needsCreateDirectory)
     {
         normalizedDestinationDirectory = string.Empty;
         needsCreateDirectory = false;
 
-        string? input = SimpleInputDialog.ShowNullable(
-            prompt,
-            title,
-            navigationService.CurrentPath,
-            new SimpleInputDialog.DisplayOptions(summaryText, warningText, EnableDirectoryCompletion: true));
+        string? input;
+        if (string.Equals(operationDisplayName, "移動", StringComparison.Ordinal) && directoryHistory != null)
+        {
+            input = MoveDestinationDialog.Show(
+                prompt,
+                title,
+                navigationService.CurrentPath,
+                directoryHistory,
+                summaryText,
+                warningText);
+        }
+        else
+        {
+            input = SimpleInputDialog.ShowNullable(
+                prompt,
+                title,
+                navigationService.CurrentPath,
+                new SimpleInputDialog.DisplayOptions(summaryText, warningText, EnableDirectoryCompletion: true));
+        }
         if (string.IsNullOrWhiteSpace(input))
         {
             showStatusMessage(canceledMessage);

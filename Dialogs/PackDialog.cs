@@ -318,7 +318,8 @@ public sealed class PackDialog : Form
         AcceptButton = okButton;
         CancelButton = cancelButton;
         DialogKeyboardHelper.AttachOkCancelBindings(this, okButton, cancelButton);
-        Helpers.DirectoryPathCompletionController.Attach(_outputDirectoryTextBox);
+        var completionController = Helpers.DirectoryPathCompletionController.Attach(_outputDirectoryTextBox);
+        Disposed += (_, _) => completionController.Dispose();
 
         Shown += (_, _) => BeginInvoke(new Action(FocusInitialControl));
     }

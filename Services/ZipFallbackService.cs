@@ -32,10 +32,99 @@ public static class ZipFallbackService
 
     public static void Unpack(string archivePath, string extractToDirectory)
     {
+        Unpack(archivePath, extractToDirectory, selectedEntries: null);
+    }
+
+    public static void Unpack(
+        string archivePath,
+        string extractToDirectory,
+        System.Collections.Generic.IEnumerable<string>? selectedEntries = null,
+        System.Threading.CancellationToken token = default,
+        System.Action<string>? onOutputLine = null)
+    {
         string fullArchivePath = Path.GetFullPath(archivePath);
         string fullExtractPath = Path.GetFullPath(extractToDirectory);
+
         Directory.CreateDirectory(fullExtractPath);
-        ZipFile.ExtractToDirectory(fullArchivePath, fullExtractPath, overwriteFiles: true);
+
+        System.Collections.Generic.HashSet<string>? selectedSet = null;
+        if (selectedEntries != null)
+        {
+            selectedSet = selectedEntries
+                .Where(path => !string.IsNullOrWhiteSpace(path))
+                .Select(NormalizeEntryName)
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+            if (selectedSet.Count == 0)
+            {
+                throw new InvalidOperationException("解凍対象のエントリが指定されていません。");
+            }
+        }
+
+        using ZipArchive archive = ZipFile.OpenRead(fullArchivePath);
+        foreach (ZipArchiveEntry entry in archive.Entries)
+        {
+            token.ThrowIfCancellationRequested();
+
+            string normalizedEntryName = NormalizeEntryName(entry.FullName);
+            if (string.IsNullOrEmpty(normalizedEntryName))
+            {
+                continue;
+            }
+
+            if (selectedSet != null)
+            {
+                if (!selectedSet.Contains(normalizedEntryName))
+                {
+                    continue;
+                }
+            }
+
+            bool isDirectory = normalizedEntryName.EndsWith("/");
+            string destinationPath = GetSafeDestinationPath(fullExtractPath, normalizedEntryName);
+
+            onOutputLine?.Invoke(entry.FullName);
+
+            if (isDirectory)
+            {
+                Directory.CreateDirectory(destinationPath);
+            }
+            else
+            {
+                string? parentDir = Path.GetDirectoryName(destinationPath);
+                if (!string.IsNullOrEmpty(parentDir))
+                {
+                    Directory.CreateDirectory(parentDir);
+                }
+
+                entry.ExtractToFile(destinationPath, overwrite: true);
+            }
+        }
+    }
+
+    private static string NormalizeEntryName(string entryName)
+    {
+        return (entryName ?? string.Empty)
+            .Replace('\\', '/')
+            .TrimStart('/')
+            .Trim();
+    }
+
+    private static string GetSafeDestinationPath(string destinationRoot, string entryName)
+    {
+        string normalizedRoot = Path.GetFullPath(destinationRoot);
+        string destinationPath = Path.GetFullPath(Path.Combine(normalizedRoot, entryName));
+
+        string rootWithSeparator = normalizedRoot.TrimEnd(
+            Path.DirectorySeparatorChar,
+            Path.AltDirectorySeparatorChar) + Path.DirectorySeparatorChar;
+
+        if (!destinationPath.StartsWith(rootWithSeparator, StringComparison.OrdinalIgnoreCase))
+        {
+            throw new InvalidOperationException($"ZIP entry の展開先が解凍先フォルダ外です: {entryName}");
+        }
+
+        return destinationPath;
     }
 
     private static void AddDirectoryToArchive(ZipArchive archive, string sourceDirectoryPath, string entryRoot)

@@ -11,6 +11,7 @@ using System.Linq;
 using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
+using System.Diagnostics.CodeAnalysis;
 using System.Runtime.InteropServices;
 using System.Media;
 using MidFD.Models;
@@ -34,6 +35,7 @@ public partial class MainForm : Form
     private const long LargeTextClipboardCopyMaxBytesEstimate = 32L * 1024 * 1024; // 32MB
     private const int CurrentDirectoryRefreshDebounceMilliseconds = 300;
     private const int CurrentDirectoryRefreshRetryDelayMilliseconds = 100;
+    private const int ExternalDirectoryRefreshBulkThreshold = 64;
     private const int WM_SIZE = 0x0005;
     private const int WM_ACTIVATE = 0x0006;
     private const int WM_SHOWWINDOW = 0x0018;
@@ -137,6 +139,7 @@ public partial class MainForm : Form
     private readonly MarkSelectionState _markedFiles = new();
     private readonly FileOperationUndoRedoService _fileOperationUndoRedoService = new();
     private AppSettings _settings;
+    private FileListColorResolver.ResolvedColors? _resolvedColors;
     private readonly string? _startupProfileOverride;
     private FeatureProfile _featureProfile = FeatureProfile.Full;
     private FeatureGateService _featureGate = new(FeatureProfile.Full);
@@ -176,6 +179,7 @@ public partial class MainForm : Form
     private readonly Stopwatch _largeTextEntryStopwatch = new Stopwatch();
     // Browser モード用（多列表示）プロパティ
     private int _columnCount = 3; // 1〜9列 (数字/テンキーで切替)
+    private int _lastColumnCountKey = 0; // WinFD互換モードでの連続押下判定用
     private int _browserCursorIndex = 0; // 現在フォーカスを持つアイテムのインデックス
     private bool _markSummaryDirty = true;
     private string _markSummaryCache = string.Empty;
@@ -225,6 +229,9 @@ public partial class MainForm : Form
     private const int MarkSlotCount = 5;
     private ToolStripMenuItem? _toggleBrowserTabLockMenuItem;
     private ToolStripMenuItem? _toggleBrowserTabReadOnlyMenuItem;
+    private ToolStripMenuItem? _fileDisplayModeNameOnlyMenuItem;
+    private ToolStripMenuItem? _fileDisplayModeNameSizeMenuItem;
+    private ToolStripMenuItem? _fileDisplayModeNameSizeDateMenuItem;
     private ToolStripMenuItem? _reloadCurrentDirectoryMenuItem;
     private ToolStripMenuItem? _clearTabFilterLockMenuItem;
     private ContextMenuStrip? _browserTabContextMenu;
@@ -249,6 +256,8 @@ public partial class MainForm : Form
     private bool _pendingExternalDirectoryRefresh;
     private string? _pendingExternalDirectoryRefreshPath;
     private string _pendingExternalDirectoryRefreshReason = "外部変更";
+    private readonly HashSet<string> _pendingExternalDirectoryRefreshReasons = new(StringComparer.OrdinalIgnoreCase);
+    private int _pendingExternalDirectoryRefreshEventCount;
     private bool _isApplyingExternalDirectoryRefresh;
     private bool _currentDirectoryRefreshRetryPending;
     private string? _browserTabCategoryContextCategoryId;
@@ -272,15 +281,38 @@ public partial class MainForm : Form
     public MainForm(string? startupProfileOverride = null)
     {
         _startupProfileOverride = startupProfileOverride;
+        InitializeCoreWindowChrome();
+        _notificationService = new NotificationService(this.statusLabel, this.messageTimer);
+        _navigationService = new NavigationService();
+        LoadSettingsAndApplyProfile();
+        InitializePersistenceStores();
+        InitializeStartupStoresAndHints();
+        _markSlotStore = MarkSlotStorage.Load(MarkSlotCount);
+        _previewPopup = new PreviewPopupForm();
+        InitializePreviewAndLargeTextControls();
+        InitializeViewerTextBoxEvents();
+        InitializeStartupSessionState();
+        InitializeRuntimeTimersAndOverlay();
+        string startupPath = ResolveStartupPath();
+        InitializeMainUiSurface();
+        RestoreBrowserStartupState(startupPath);
+        WireBrowserInputEvents();
+        // SettingsForm entry route regression corrective: Ensure KeyDown is wired and KeyPreview is active
+        KeyPreview = true;
+        KeyDown -= MainForm_KeyDown;
+        KeyDown += MainForm_KeyDown;
+        WireHeaderAndFunctionBarEvents();
+        WireWindowLifecycleEvents();
+        // 初期 FunctionBar 表示
+        UpdateFunctionBar();
+    }
+    private void InitializeCoreWindowChrome()
+    {
         InitializeComponent();
         this.MinimumSize = new Size(MinimumNormalWindowWidth, MinimumNormalWindowHeight);
         statusStrip.ShowItemToolTips = false;
         NormalizeStatusLabelLayout();
         statusStrip.Resize += (_, _) => NormalizeStatusLabelLayout();
-        // Phase 3-mainform-status1.1: 初期化失敗・読込失敗メッセージを安全に出すため前倒し
-        _notificationService = new NotificationService(this.statusLabel, this.messageTimer);
-        // Phase 3-mainform-nav1: ナビゲーション状態管理の初期化
-        _navigationService = new NavigationService();
         try
         {
             string iconPath = Path.Combine(AppContext.BaseDirectory, "Assets", "appicon", "MidFD.ico");
@@ -293,17 +325,27 @@ public partial class MainForm : Form
         {
             // アイコン設定失敗時は既定のまま続行
         }
+    }
+    [MemberNotNull(nameof(_settings))]
+    private void LoadSettingsAndApplyProfile()
+    {
         _settings = SettingsManager.Load(out SettingsManager.SettingsLoadMetadata settingsLoadMetadata);
         _settings.Input ??= new InputSettings();
         ApplyFeatureProfile(settingsLoadMetadata.IsMouseGesturesExplicit);
+    }
+    private void InitializePersistenceStores()
+    {
         _workspaceStateStore = WorkspaceStateStoreFactory.CreateDefault();
         _workspaceSnapshotStorage = new WorkspaceSnapshotStorage(WorkspaceStateStoreFactory.GetDefaultDbPath());
         MidFdManagedTrashService.Initialize(_settings);
+    }
+    [MemberNotNull(nameof(_quickAccessStore))]
+    private void InitializeStartupStoresAndHints()
+    {
         SyncActiveBrowserTabCategoryFromSession();
         LogService.ApplySettings(_settings.Logging);
-        MidFDColors.ApplyTheme(_settings.Appearance?.ColorTheme);
+        MidFDColors.ApplyTheme(FileListColorResolver.NormalizeCoreTheme(_settings.Appearance?.ColorTheme));
         _quickAccessStore = QuickAccessService.LoadOrMigrate(_settings.QuickAccess);
-        _markSlotStore = MarkSlotStorage.Load(MarkSlotCount);
         IReadOnlyList<ExternalToolAltHintRow> startupHintRows = BuildExternalToolAltHintRows();
         string startupFirstHint = startupHintRows.Count > 0
             ? $"{startupHintRows[0].SlotLabel}:{startupHintRows[0].Title}"
@@ -312,7 +354,9 @@ public partial class MainForm : Form
         // Phase 36: ヘッダ初期化
         lblTitle.Text = "<< MidFD >>";
         lblClock.Text = DateTime.Now.ToString("yyyy-MM-dd(ddd) HH:mm:ss");
-        _previewPopup = new PreviewPopupForm();
+    }
+    private void InitializePreviewAndLargeTextControls()
+    {
         // Phase: large file preview / single global scrollbar virtual line foundation
         _largeFileControl = new Controls.LargeFilePreviewControl();
         _largeFileControl.Visible = false;
@@ -361,6 +405,9 @@ public partial class MainForm : Form
         // Viewer 改行モードの復元
         viewerTextBox.WordWrap = _settings.Preview.ViewerWordWrap;
         viewerTextBox.ScrollBars = viewerTextBox.WordWrap ? RichTextBoxScrollBars.Vertical : RichTextBoxScrollBars.Both;
+    }
+    private void InitializeViewerTextBoxEvents()
+    {
         viewerTextBox.SelectionChanged += (s, e) =>
         {
             if (IsTextOrBinaryViewerActive())
@@ -396,6 +443,9 @@ public partial class MainForm : Form
                 ApplyViewerStatusLine("messageTimer viewer restore");
             }
         };
+    }
+    private void InitializeStartupSessionState()
+    {
         if (_settings.Session.RestoreColumnCount)
         {
             _columnCount = Math.Clamp(_settings.Session.LastColumnCount, 1, 9);
@@ -405,6 +455,9 @@ public partial class MainForm : Form
             _currentSort = _settings.Session.LastSortKind;
             _sortAscending = _settings.Session.LastSortAscending;
         }
+    }
+    private void InitializeRuntimeTimersAndOverlay()
+    {
         KeyUp += MainForm_KeyUp;
         Deactivate += (_, _) =>
         {
@@ -421,6 +474,9 @@ public partial class MainForm : Form
             _directoryRefreshDebounceTimer.Stop();
             TryProcessPendingCurrentDirectoryRefresh("DebounceTimer");
         };
+    }
+    private string ResolveStartupPath()
+    {
         // 初期パスの決定 (起動引数 -> 保存されたパス -> カレントディレクトリ)
         string startupPath = Environment.CurrentDirectory;
         string[] args = Environment.GetCommandLineArgs();
@@ -435,6 +491,10 @@ public partial class MainForm : Form
         {
             startupPath = _settings.Session.LastPath;
         }
+        return startupPath;
+    }
+    private void InitializeMainUiSurface()
+    {
         // ウィンドウ位置・サイズの復元
         if (_settings.Session.RestoreWindowBounds)
         {
@@ -449,6 +509,9 @@ public partial class MainForm : Form
         InitializeBrowserTabControl();
         InitializeMenuStrip();
         LogAltHintContext("InitializeMenuStrip");
+    }
+    private void RestoreBrowserStartupState(string startupPath)
+    {
         bool restoredTabs = TryRestoreBrowserTabsOnStartup(out int restoredTabCount, out int skippedTabCount, out bool hadSavedTabs);
         if (!restoredTabs)
         {
@@ -479,6 +542,9 @@ public partial class MainForm : Form
             ShowStatusMessage("前回のタブは見つからないため、通常の開始状態で開きました。");
         }
         UpdateMenuStripState();
+    }
+    private void WireBrowserInputEvents()
+    {
         this.fileListView.SelectedIndexChanged += FileListView_SelectedIndexChanged;
         // Phase 3-fix1c: browserPanel に対する基本マウス操作の追加
         this.browserPanel.MouseClick += BrowserPanel_MouseClick;
@@ -494,6 +560,11 @@ public partial class MainForm : Form
         this.browserPanel.MouseDown += BrowserPanel_MouseDown;
         this.browserPanel.MouseMove += BrowserPanel_MouseMove;
         this.browserPanel.MouseUp += BrowserPanel_MouseUp;
+        // Phase 3-layout-fix1: BrowserPanel のリサイズ再描画
+        this.browserPanel.Resize += BrowserPanel_Resize;
+    }
+    private void WireHeaderAndFunctionBarEvents()
+    {
         // Phase 5-funcbar-click-fix1: FunctionBar のクリック復旧 (描画セグメント判定)
         this.functionBarPanel.MouseClick += FunctionBarPanel_MouseClick;
         // Phase 2g-fix2: ウィンドウリサイズ時にも Row 2 の Zone 幅を再計算する
@@ -520,14 +591,15 @@ public partial class MainForm : Form
         EnableDoubleBuffering(headerZone3);
         EnableDoubleBuffering(headerZone4);
         EnableDoubleBuffering(browserPanel);
-        // Phase 3-layout-fix1: BrowserPanel のリサイズ再描画
-        this.browserPanel.Resize += BrowserPanel_Resize;
         // Phase 3-bottom-funcbar-click1: FunctionBar のラベルクリック配線
         for (int i = 0; i < lblFuncKeys.Length; i++)
         {
             int index = i; // クロージャ用
             lblFuncKeys[i].Click += (s, e) => HandleFuncKeyClick(index);
         }
+    }
+    private void WireWindowLifecycleEvents()
+    {
         // popup の初期位置を MainForm の右側に設定する
         this.Load += (s, e) =>
         {
@@ -588,8 +660,6 @@ public partial class MainForm : Form
         };
         this.Activated += MainForm_Activated;
         this.Shown += MainForm_Shown; // Phase 2g-fix6.2c: 初期フォーカス安定化
-        // 初期 FunctionBar 表示
-        UpdateFunctionBar();
     }
     private void MainForm_Shown(object? sender, EventArgs e)
     {
@@ -689,6 +759,8 @@ public partial class MainForm : Form
         _settings.Window.State = (this.WindowState == FormWindowState.Minimized)
             ? FormWindowState.Normal : this.WindowState;
         CaptureActiveBrowserTabState();
+        // Apply pending ESC‑exit marks before persisting workspace state
+        ApplyPendingEscExitMarksForWorkspaceSave();
         _settings.Session.LastPath = _navigationService.CurrentPath;
         if (!_settings.Session.RestoreTabsOnStartup)
         {
@@ -706,7 +778,25 @@ public partial class MainForm : Form
         LogService.Info($"[WindowVisibility] SaveWindowSettings State={this.WindowState} Bounds={FormatBoundsForLog(this.Bounds)} RestoreBounds={FormatBoundsForLog(this.RestoreBounds)} Saved=({_settings.Window.X},{_settings.Window.Y},{_settings.Window.Width},{_settings.Window.Height})");
         SettingsManager.Save(_settings);
     }
-    private void SavePersistedMarksToSettings()
+    // Helper: apply pending ESC‑exit marks to active tab before workspace save
+private void ApplyPendingEscExitMarksForWorkspaceSave()
+{
+    if (!_isClosingFromEscExitPath) return;
+    if (_pendingEscExitPersistedMarks == null || _pendingEscExitPersistedMarks.Count == 0) return;
+    if (!_settings.Session.RestoreTabsOnStartup) return;
+    if (_activeBrowserTabIndex < 0 || _activeBrowserTabIndex >= _browserTabs.Count) return;
+
+    var activeTab = _browserTabs[_activeBrowserTabIndex];
+    var existing = activeTab.MarkedPaths?.ToHashSet(StringComparer.OrdinalIgnoreCase) ?? new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+    foreach (var path in _pendingEscExitPersistedMarks)
+    {
+        existing.Add(path);
+    }
+    activeTab.MarkedPaths = existing.ToList();
+    LogService.Info($"[EscExitSnapshot] Applied {_pendingEscExitPersistedMarks.Count} pending marks to active tab for workspace persistence.");
+}
+
+private void SavePersistedMarksToSettings()
     {
         _settings.Session ??= new SessionSettings();
         if (!_settings.Session.PersistMarksAcrossRestart)
@@ -834,7 +924,7 @@ private void InitializeBrowserTabControl()
         ActiveTabBackColor = MidFDColors.ListSelectedBack,
         InactiveTabBackColor = MidFDColors.ListNormalBack,
         TabBorderColor = MidFDColors.BorderLine,
-        ActiveTabTextColor = _settings.Appearance?.ColorTheme == "Light" ? Color.Black : Color.Yellow,
+        ActiveTabTextColor = FileListColorResolver.NormalizeCoreTheme(_settings.Appearance?.ColorTheme) == "Light" ? Color.Black : Color.Yellow,
         InactiveTabTextColor = MidFDColors.ListNormalFore,
         ShowCategoryRow = ShouldShowBrowserTabCategoryRow()
     };
@@ -1348,68 +1438,79 @@ private void InitializeBrowserTabControl()
         restoredTabCount = 0;
         skippedTabCount = 0;
         hadSavedTabs = false;
-        EnsureBrowserTabCategoryConfiguration();
-        _settings.Session ??= new SessionSettings();
-        if (!_settings.Session.RestoreTabsOnStartup)
+        try
         {
-            LogService.Info("[BrowserTabs] Restore skipped because tab restore is disabled.");
-            _restoredBrowserTabsFromWorkspaceStore = false;
-            return false;
-        }
-        bool workspaceStoreLoaded = TryLoadWorkspaceStateStore(out BrowserTabRestoreSnapshot? workspaceSnapshot);
-        _restoredBrowserTabsFromWorkspaceStore = workspaceStoreLoaded;
-        if (workspaceSnapshot != null)
-        {
-            ApplyWorkspaceRestoreSnapshotToSettings(workspaceSnapshot);
-        }
-        EnsureBrowserTabCategoryConfiguration();
-        BrowserTabRestoreSnapshot snapshot = EnsureBrowserTabRestoreSnapshot();
-        string restoredCategoryId = ResolveExistingBrowserTabCategoryId(snapshot.ActiveCategoryId);
-        List<BrowserTabSessionState> savedTabs = GetBrowserTabSessionStatesForRestore(ref restoredCategoryId);
-        hadSavedTabs = savedTabs.Count > 0;
-        if (!hadSavedTabs)
-        {
-            LogService.Info("[BrowserTabs] Restore skipped because no saved tabs were found.");
-            return false;
-        }
-        int maxTabCount = GetMaxBrowserTabsPerCategory();
-        if (savedTabs.Count > maxTabCount)
-        {
-            LogService.Warn($"[BrowserTabs] Restore source exceeded max tabs. Source={savedTabs.Count} Max={maxTabCount}");
-            savedTabs = savedTabs.Take(maxTabCount).ToList();
-            ShowStatusMessage($"保存タブが上限を超えたため、{maxTabCount} 個まで復元しました。");
-        }
-        var restoredTabs = new List<BrowserTabState>();
-        foreach (BrowserTabSessionState sessionTab in savedTabs)
-        {
-            if (!TryCreateBrowserTabStateFromSession(sessionTab, out BrowserTabState? restoredTab))
+            EnsureBrowserTabCategoryConfiguration();
+            _settings.Session ??= new SessionSettings();
+            if (!_settings.Session.RestoreTabsOnStartup)
             {
-                skippedTabCount++;
-                continue;
+                LogService.Info("[BrowserTabs] Restore skipped because tab restore is disabled.");
+                _restoredBrowserTabsFromWorkspaceStore = false;
+                return false;
             }
-            restoredTabs.Add(restoredTab!);
+            bool workspaceStoreLoaded = TryLoadWorkspaceStateStore(out BrowserTabRestoreSnapshot? workspaceSnapshot);
+            _restoredBrowserTabsFromWorkspaceStore = workspaceStoreLoaded;
+            if (workspaceSnapshot != null)
+            {
+                ApplyWorkspaceRestoreSnapshotToSettings(workspaceSnapshot);
+            }
+            EnsureBrowserTabCategoryConfiguration();
+            BrowserTabRestoreSnapshot snapshot = EnsureBrowserTabRestoreSnapshot();
+            string restoredCategoryId = ResolveExistingBrowserTabCategoryId(snapshot.ActiveCategoryId);
+            List<BrowserTabSessionState> savedTabs = GetBrowserTabSessionStatesForRestore(ref restoredCategoryId);
+            hadSavedTabs = savedTabs.Count > 0;
+            if (!hadSavedTabs)
+            {
+                LogService.Info("[BrowserTabs] Restore skipped because no saved tabs were found.");
+                return false;
+            }
+            int maxTabCount = GetMaxBrowserTabsPerCategory();
+            if (savedTabs.Count > maxTabCount)
+            {
+                LogService.Warn($"[BrowserTabs] Restore source exceeded max tabs. Source={savedTabs.Count} Max={maxTabCount}");
+                savedTabs = savedTabs.Take(maxTabCount).ToList();
+                ShowStatusMessage($"保存タブが上限を超えたため、{maxTabCount} 個まで復元しました。");
+            }
+            var restoredTabs = new List<BrowserTabState>();
+            foreach (BrowserTabSessionState sessionTab in savedTabs)
+            {
+                if (!TryCreateBrowserTabStateFromSession(sessionTab, out BrowserTabState? restoredTab))
+                {
+                    skippedTabCount++;
+                    continue;
+                }
+                restoredTabs.Add(restoredTab!);
+            }
+            if (restoredTabs.Count == 0)
+            {
+                LogService.Info($"[BrowserTabs] Restore skipped because all saved tabs were unavailable. Missing={skippedTabCount}");
+                return false;
+            }
+            _browserTabs.Clear();
+            _browserTabs.AddRange(restoredTabs);
+            restoredTabCount = restoredTabs.Count;
+            _activeBrowserTabCategoryId = restoredCategoryId;
+            _settings.Session.ActiveBrowserTabCategoryId = restoredCategoryId;
+            int targetIndex = ResolveBrowserTabCategoryActiveIndex(restoredCategoryId, restoredTabs.Count);
+            _activeBrowserTabIndex = targetIndex;
+            RefreshBrowserTabHeaders();
+            _activeBrowserTabIndex = -1;
+            SwitchBrowserTab(targetIndex);
+            LogService.Info($"[BrowserTabs] Restored Category={restoredCategoryId} Tabs={restoredTabCount} Missing={skippedTabCount} ActiveIndex={targetIndex}");
+            if (!workspaceStoreLoaded)
+            {
+                SaveWorkspaceStateStore();
+            }
+            return true;
         }
-        if (restoredTabs.Count == 0)
+        catch (Exception ex)
         {
-            LogService.Info($"[BrowserTabs] Restore skipped because all saved tabs were unavailable. Missing={skippedTabCount}");
+            LogService.Error("Unexpected error during startup browser tabs restoration. Falling back to default startup.", ex);
+            restoredTabCount = 0;
+            skippedTabCount = 0;
+            hadSavedTabs = false;
             return false;
         }
-        _browserTabs.Clear();
-        _browserTabs.AddRange(restoredTabs);
-        restoredTabCount = restoredTabs.Count;
-        _activeBrowserTabCategoryId = restoredCategoryId;
-        _settings.Session.ActiveBrowserTabCategoryId = restoredCategoryId;
-        int targetIndex = ResolveBrowserTabCategoryActiveIndex(restoredCategoryId, restoredTabs.Count);
-        _activeBrowserTabIndex = targetIndex;
-        RefreshBrowserTabHeaders();
-        _activeBrowserTabIndex = -1;
-        SwitchBrowserTab(targetIndex);
-        LogService.Info($"[BrowserTabs] Restored Category={restoredCategoryId} Tabs={restoredTabCount} Missing={skippedTabCount} ActiveIndex={targetIndex}");
-        if (!workspaceStoreLoaded)
-        {
-            SaveWorkspaceStateStore();
-        }
-        return true;
     }
     private List<BrowserTabSessionState> GetBrowserTabSessionStatesForRestore(ref string restoredCategoryId)
     {
@@ -3437,29 +3538,43 @@ private void InitializeBrowserTabControl()
         _menuItemRules.Clear();
         var fileMenu = new ToolStripMenuItem("ファイル(&F)");
         fileMenu.DropDownItems.Add(CreateMenuItem("内容確認/実行(eXecute)(&O)", (s, e) => ExecuteCurrentFile(), browserOnly: true, requiresIdle: true, requiresSelection: true, requiresFile: true, shortcutHint: GetFunctionAwareShortcutHint(FunctionKeyAction.Execute, "X")));
+        fileMenu.DropDownItems.Add(CreateMenuItem("属性変更(&A)", (s, e) => ExecuteAttribute(), browserOnly: true, requiresIdle: true, requiresSelection: true, shortcutHint: GetFunctionAwareShortcutHint(FunctionKeyAction.None, "", "Shift+F1")));
         fileMenu.DropDownItems.Add(CreateMenuItem("コピー(&C)", (s, e) => _ = ExecuteCopy(), browserOnly: true, requiresIdle: true, requiresSelection: true, shortcutHint: GetFunctionAwareShortcutHint(FunctionKeyAction.Copy, "C")));
-        fileMenu.DropDownItems.Add(CreateMenuItem("移動(&M)", (s, e) => _ = ExecuteMove(), browserOnly: true, requiresIdle: true, requiresSelection: true, shortcutHint: "M"));
+        fileMenu.DropDownItems.Add(CreateMenuItem("移動(&M)", (s, e) => _ = ExecuteMove(), browserOnly: true, requiresIdle: true, requiresSelection: true, shortcutHint: GetFunctionAwareShortcutHint(FunctionKeyAction.None, "M", "Shift+F3")));
         fileMenu.DropDownItems.Add(CreateMenuItem("名前変更(&R)", (s, e) => ExecuteRename(), browserOnly: true, requiresIdle: true, requiresSelection: true, shortcutHint: GetFunctionAwareShortcutHint(FunctionKeyAction.Rename, "R")));
         fileMenu.DropDownItems.Add(CreateMenuItem("削除(&D)", (s, e) => _ = ExecuteDelete(), browserOnly: true, requiresIdle: true, requiresSelection: true, shortcutHint: "D / Delete"));
         fileMenu.DropDownItems.Add(CreateMenuItem("MidFD管理ゴミ箱を空にする(&T)", (s, e) => EmptyMidFdManagedTrash(), browserOnly: true, requiresIdle: true));
         fileMenu.DropDownItems.Add(new ToolStripSeparator());
-        fileMenu.DropDownItems.Add(CreateMenuItem("新規フォルダ(&K)", (s, e) => ExecuteCreateDirectory(), browserOnly: true, requiresIdle: true, shortcutHint: "K"));
+        fileMenu.DropDownItems.Add(CreateMenuItem("新規フォルダ(&K)", (s, e) => ExecuteCreateDirectory(), browserOnly: true, requiresIdle: true, shortcutHint: GetFunctionAwareShortcutHint(FunctionKeyAction.None, "K", "Shift+F5")));
         fileMenu.DropDownItems.Add(CreateMenuItem("新規ファイル(&N)", (s, e) => ExecuteCreateFile(), browserOnly: true, requiresIdle: true, shortcutHint: "N"));
         fileMenu.DropDownItems.Add(new ToolStripSeparator());
         fileMenu.DropDownItems.Add(CreateMenuItem("終了(&X)", (s, e) => Close()));
         var viewMenu = new ToolStripMenuItem("表示(&V)");
         viewMenu.DropDownItems.Add(CreateMenuItem("ソート(&S)", (s, e) => ExecuteSort(), browserOnly: true, requiresIdle: true, shortcutHint: GetFunctionAwareShortcutHint(FunctionKeyAction.Sort, "S")));
         viewMenu.DropDownItems.Add(CreateMenuItem("フィルタ(&F)", (s, e) => ExecuteFilter(), browserOnly: true, requiresIdle: true, shortcutHint: GetFunctionAwareShortcutHint(FunctionKeyAction.Filter, "F / Ctrl+F")));
-        _reloadCurrentDirectoryMenuItem = CreateMenuItem("現在ディレクトリを再読込(&R)", (s, e) => ExecuteCurrentDirectoryReloadCommand(), browserOnly: true, shortcutHint: GetFunctionAwareShortcutHint(FunctionKeyAction.Reload, "Ctrl+R"));
+        var fileDisplayModeSubMenu = new ToolStripMenuItem("一覧表示");
+        _fileDisplayModeNameOnlyMenuItem = CreateMenuItem("ファイル名のみ", (s, e) => SetBrowserFileDetailDisplayMode(BrowserFileDisplayMode.NameOnly), browserOnly: true, requiresIdle: true, shortcutHint: "Ctrl+1");
+        _fileDisplayModeNameSizeMenuItem = CreateMenuItem("サイズ", (s, e) => SetBrowserFileDetailDisplayMode(BrowserFileDisplayMode.NameSize), browserOnly: true, requiresIdle: true, shortcutHint: "Ctrl+2");
+        _fileDisplayModeNameSizeDateMenuItem = CreateMenuItem("サイズ・更新日時", (s, e) => SetBrowserFileDetailDisplayMode(BrowserFileDisplayMode.NameSizeDate), browserOnly: true, requiresIdle: true, shortcutHint: "Ctrl+3");
+        fileDisplayModeSubMenu.DropDownItems.Add(_fileDisplayModeNameOnlyMenuItem);
+        fileDisplayModeSubMenu.DropDownItems.Add(_fileDisplayModeNameSizeMenuItem);
+        fileDisplayModeSubMenu.DropDownItems.Add(_fileDisplayModeNameSizeDateMenuItem);
+        viewMenu.DropDownItems.Add(fileDisplayModeSubMenu);
+        viewMenu.DropDownOpening += (_, _) => UpdateFileDisplayModeMenuChecks();
+        fileDisplayModeSubMenu.DropDownOpening += (_, _) => UpdateFileDisplayModeMenuChecks();
+        _reloadCurrentDirectoryMenuItem = CreateMenuItem("現在ディレクトリを再読込(&R)", (s, e) => ExecuteCurrentDirectoryReloadCommand(), browserOnly: true, shortcutHint: GetFunctionAwareShortcutHint(FunctionKeyAction.Reload, "Ctrl+R", "Shift+F7"));
         viewMenu.DropDownItems.Add(_reloadCurrentDirectoryMenuItem);
         viewMenu.DropDownItems.Add(CreateMenuItem("現在タブのフィルタロック...(&L)", (s, e) => OpenActiveTabFilterLockDialog(), browserOnly: true, requiresIdle: true, shortcutHint: "Ctrl+Shift+L"));
         _clearTabFilterLockMenuItem = CreateMenuItem("現在タブのフィルタロックを解除(&U)", (s, e) => ClearActiveTabFilterLock(), browserOnly: true, requiresIdle: true);
         viewMenu.DropDownItems.Add(_clearTabFilterLockMenuItem);
-        viewMenu.DropDownItems.Add(CreateMenuItem("内蔵Viewer / 画像Viewer(&P)", (s, e) => ExecutePreviewLaunch(), browserOnly: true, requiresIdle: true, requiresSelection: true, requiresFile: true, shortcutHint: "V / Enter"));
+        viewMenu.DropDownItems.Add(CreateMenuItem("内蔵Viewer / 画像Viewer(&P)", (s, e) => ExecutePreviewLaunch(), browserOnly: true, requiresIdle: true, requiresSelection: true, requiresFile: true, shortcutHint: GetFunctionAwareShortcutHint(FunctionKeyAction.None, "V / Enter", "Shift+F9")));
         viewMenu.DropDownItems.Add(CreateMenuItem("Logdisk(&L)", (s, e) => ExecuteLogdisk(), browserOnly: true, requiresIdle: true, shortcutHint: GetFunctionAwareShortcutHint(FunctionKeyAction.Logdisk, "L")));
+        viewMenu.DropDownItems.Add(new ToolStripSeparator());
+        viewMenu.DropDownItems.Add(CreateMenuItem("配色設定...(&A)", (s, e) => OpenFileListColorSettings(), browserOnly: false, requiresIdle: false));
         var moveMenu = new ToolStripMenuItem("移動(&G)");
         moveMenu.DropDownItems.Add(CreateMenuItem("親へ(&U)", (s, e) => ExecuteBackspace(), browserOnly: true, requiresIdle: true, shortcutHint: "Backspace"));
         moveMenu.DropDownItems.Add(CreateMenuItem("ルートへ(&R)", (s, e) => ExecuteDriveRoot(), browserOnly: true, requiresIdle: true, shortcutHint: "\\"));
+        moveMenu.DropDownItems.Add(CreateMenuItem("エクスプローラーで開く(&X)", (s, e) => ExecuteOpenCurrentPathInExplorer(), browserOnly: true, requiresIdle: true, shortcutHint: "Alt+F2"));
         moveMenu.DropDownItems.Add(CreateMenuItem("Top(&T)", (s, e) => ExecuteFunctionKey(11), browserOnly: true, requiresIdle: true, shortcutHint: GetFunctionAwareShortcutHint(FunctionKeyAction.Top, "")));
         moveMenu.DropDownItems.Add(CreateMenuItem("Bottom(&B)", (s, e) => ExecuteFunctionKey(12), browserOnly: true, requiresIdle: true, shortcutHint: GetFunctionAwareShortcutHint(FunctionKeyAction.Bottom, "")));
         moveMenu.DropDownItems.Add(CreateMenuItem("Tree(&E)", (s, e) => ExecuteTreeDialog(), browserOnly: true, requiresIdle: true, shortcutHint: GetFunctionAwareShortcutHint(FunctionKeyAction.Tree, "T")));
@@ -3491,10 +3606,12 @@ private void InitializeBrowserTabControl()
             }
         };
         var toolsMenu = new ToolStripMenuItem("ツール(&T)");
-        toolsMenu.DropDownItems.Add(CreateMenuItem("圧縮(&P)", (s, e) => _ = ExecutePack(), browserOnly: true, requiresIdle: true, requiresSelection: true, shortcutHint: "P"));
+        toolsMenu.DropDownItems.Add(CreateMenuItem("圧縮(&P)", (s, e) => _ = ExecutePack(), browserOnly: true, requiresIdle: true, requiresSelection: true, shortcutHint: GetFunctionAwareShortcutHint(FunctionKeyAction.None, "P", "Shift+F10")));
         toolsMenu.DropDownItems.Add(CreateMenuItem("解凍(&U)", (s, e) => _ = ExecuteUnpack(), browserOnly: true, requiresIdle: true, requiresSelection: true, shortcutHint: GetFunctionAwareShortcutHint(FunctionKeyAction.Unpack, "U")));
-        toolsMenu.DropDownItems.Add(CreateMenuItem("外部エディタで開く(&E)", (s, e) => ExecuteOpenWithEditor(), browserOnly: true, requiresIdle: true, requiresSelection: true, requiresFile: true, shortcutHint: "E"));
+        toolsMenu.DropDownItems.Add(CreateMenuItem("外部エディタで開く(&E)", (s, e) => ExecuteOpenWithEditor(), browserOnly: true, requiresIdle: true, requiresSelection: true, requiresFile: true, shortcutHint: GetFunctionAwareShortcutHint(FunctionKeyAction.Edit, "E", "Shift+F8 / Shift+Enter")));
         toolsMenu.DropDownItems.Add(CreateMenuItem("外部 Diff (2件比較専用)(&D)", (s, e) => ExecuteOpenWithDiff(), browserOnly: true, requiresIdle: true, requiresSelection: true, requiresExactlyTwoSelection: true, requiresTwoFiles: true));
+        toolsMenu.DropDownItems.Add(CreateMenuItem("PowerShellをここで開く(&P)", (s, e) => { if (!GuardClipboardBusy()) OpenTerminalInCurrentDirectory(ShellKind.PowerShell); }, browserOnly: true, requiresIdle: true, shortcutHint: GetFunctionAwareShortcutHint(FunctionKeyAction.None, "H", "Shift+F6")));
+        toolsMenu.DropDownItems.Add(CreateMenuItem("フルパスをコピー(&Y)", (s, e) => CopySelectedOrMarkedFullPathsToClipboard(), browserOnly: true, requiresIdle: true, requiresSelection: true, shortcutHint: GetFunctionAwareShortcutHint(FunctionKeyAction.None, "", "Shift+Ctrl+C")));
         toolsMenu.DropDownItems.Add(new ToolStripSeparator());
         toolsMenu.DropDownItems.Add(CreateMenuItem("マーク一覧 / スロット(&M)", (s, e) => OpenMarkSlotDialog(), browserOnly: true, requiresIdle: true, shortcutHint: "Ctrl+M"));
         if (_featureGate.IsEnabled(FeatureId.WorkspaceSnapshot))
@@ -3502,7 +3619,7 @@ private void InitializeBrowserTabControl()
             toolsMenu.DropDownItems.Add(CreateMenuItem("Workspace スナップショット...(&W)", (s, e) => OpenWorkspaceSnapshotDialog(), browserOnly: true, requiresIdle: true));
         }
         toolsMenu.DropDownItems.Add(new ToolStripSeparator());
-        toolsMenu.DropDownItems.Add(CreateMenuItem("設定(&O)", (s, e) => OpenSettingsForm(), shortcutHint: "O"));
+        toolsMenu.DropDownItems.Add(CreateMenuItem("設定(&O)", (s, e) => OpenSettingsForm(), shortcutHint: GetFunctionAwareShortcutHint(FunctionKeyAction.None, "O", "Alt+F5")));
         var helpMenu = new ToolStripMenuItem("ヘルプ(&H)");
         helpMenu.DropDownItems.Add(CreateMenuItem("主なキー操作ヒント(&K)", (s, e) => ShowMenuKeyHint()));
         helpMenu.DropDownItems.Add(CreateMenuItem("バージョン情報(&A)", (s, e) => ShowVersionInfo()));
@@ -3958,19 +4075,40 @@ private void InitializeBrowserTabControl()
     }
     private string CurrentFunctionKeyProfileValue =>
         _settings.Input?.FunctionKeyProfile ?? InputSettings.StandardProfileValue;
-    private string GetFunctionAwareShortcutHint(FunctionKeyAction action, string primaryShortcut)
+    private string GetFunctionAwareShortcutHint(FunctionKeyAction action, string primaryShortcut, string? fdShortcut = null)
     {
-        int? fKey = FunctionKeyProfileService.ResolveKeyNumber(CurrentFunctionKeyProfileValue, action);
-        if (!fKey.HasValue)
+        int? fKey = action != FunctionKeyAction.None
+            ? FunctionKeyProfileService.ResolveKeyNumber(CurrentFunctionKeyProfileValue, action)
+            : null;
+        string currentShortcut = primaryShortcut;
+
+        if (fKey.HasValue)
         {
-            return primaryShortcut;
+            string functionKeyShortcut = $"F{fKey.Value}";
+            if (string.IsNullOrWhiteSpace(currentShortcut))
+            {
+                currentShortcut = functionKeyShortcut;
+            }
+            else
+            {
+                currentShortcut = $"{currentShortcut} / {functionKeyShortcut}";
+            }
         }
-        string functionKeyShortcut = $"F{fKey.Value}";
-        if (string.IsNullOrWhiteSpace(primaryShortcut))
+
+        if (FunctionKeyProfileService.ResolveProfile(CurrentFunctionKeyProfileValue) == FunctionKeyProfile.FDCompatible
+            && !string.IsNullOrEmpty(fdShortcut))
         {
-            return functionKeyShortcut;
+            if (string.IsNullOrWhiteSpace(currentShortcut))
+            {
+                currentShortcut = fdShortcut;
+            }
+            else
+            {
+                currentShortcut = $"{currentShortcut} / {fdShortcut}";
+            }
         }
-        return $"{primaryShortcut} / {functionKeyShortcut}";
+
+        return currentShortcut;
     }
     private bool IsFunctionKeyAssignedToAction(int fKey, FunctionKeyAction expectedAction)
     {
@@ -4103,20 +4241,13 @@ private void InitializeBrowserTabControl()
     }
     private PreviewKind GetEffectivePreviewKind(string path, PreviewKind rawKind)
     {
-        if (rawKind == PreviewKind.Video)
-        {
-            var res = VideoToolResolutionService.Resolve(_settings.Preview?.VideoToolDirectory);
-            if (!res.FfmpegFound)
-            {
-                return PreviewKind.Binary;
-            }
-        }
-        return rawKind;
+        var result = PreviewRoutingService.Route(path, rawKind, _settings.Preview?.VideoToolDirectory);
+        return result.EffectiveKind;
     }
     private PreviewKind GetEffectivePreviewKind(string path)
     {
-        var rawKind = PreviewService.GetPreviewKind(path);
-        return GetEffectivePreviewKind(path, rawKind);
+        var result = PreviewRoutingService.Route(path, _settings.Preview?.VideoToolDirectory);
+        return result.EffectiveKind;
     }
     private void ApplyViewerChromeState()
     {
@@ -4905,6 +5036,8 @@ private void InitializeBrowserTabControl()
         _pendingExternalDirectoryRefresh = true;
         _pendingExternalDirectoryRefreshPath = watchedDirectoryPath;
         _pendingExternalDirectoryRefreshReason = reason;
+        _pendingExternalDirectoryRefreshReasons.Add(reason);
+        _pendingExternalDirectoryRefreshEventCount++;
         _directoryRefreshDebounceTimer.Stop();
         _directoryRefreshDebounceTimer.Start();
     }
@@ -4931,7 +5064,7 @@ private void InitializeBrowserTabControl()
         _isApplyingExternalDirectoryRefresh = true;
         try
         {
-            string reason = _pendingExternalDirectoryRefreshReason;
+            string reason = BuildExternalDirectoryRefreshReason();
             ClearPendingCurrentDirectoryRefresh();
             ReloadCurrentDirectory($"外部変更を反映しました: {reason}", force: true);
         }
@@ -4945,7 +5078,22 @@ private void InitializeBrowserTabControl()
         _pendingExternalDirectoryRefresh = false;
         _pendingExternalDirectoryRefreshPath = null;
         _pendingExternalDirectoryRefreshReason = "外部変更";
+        _pendingExternalDirectoryRefreshReasons.Clear();
+        _pendingExternalDirectoryRefreshEventCount = 0;
         _directoryRefreshDebounceTimer.Stop();
+    }
+    private string BuildExternalDirectoryRefreshReason()
+    {
+        int eventCount = _pendingExternalDirectoryRefreshEventCount;
+        if (eventCount > ExternalDirectoryRefreshBulkThreshold)
+        {
+            return $"Bulk({eventCount})";
+        }
+        if (_pendingExternalDirectoryRefreshReasons.Count > 0)
+        {
+            return string.Join("+", _pendingExternalDirectoryRefreshReasons.OrderBy(static value => value));
+        }
+        return _pendingExternalDirectoryRefreshReason;
     }
     private void UpdateCurrentDirectoryWatcher(string? currentPath, string reason)
     {
@@ -4974,9 +5122,16 @@ private void InitializeBrowserTabControl()
             var watcher = new FileSystemWatcher(currentPath)
             {
                 IncludeSubdirectories = false,
-                NotifyFilter = NotifyFilters.FileName | NotifyFilters.DirectoryName,
+                NotifyFilter = NotifyFilters.FileName |
+                               NotifyFilters.DirectoryName |
+                               NotifyFilters.LastWrite |
+                               NotifyFilters.Size |
+                               NotifyFilters.CreationTime |
+                               NotifyFilters.LastAccess |
+                               NotifyFilters.Attributes,
                 EnableRaisingEvents = false
             };
+            watcher.Changed += (_, _) => QueueCurrentDirectoryRefresh(currentPath, "Changed");
             watcher.Created += (_, _) => QueueCurrentDirectoryRefresh(currentPath, "Created");
             watcher.Deleted += (_, _) => QueueCurrentDirectoryRefresh(currentPath, "Deleted");
             watcher.Renamed += (_, _) => QueueCurrentDirectoryRefresh(currentPath, "Renamed");
@@ -5483,6 +5638,11 @@ private void InitializeBrowserTabControl()
         {
             return false;
         }
+        // Shift+D / Shift+Delete は例外的にここで処理するため、それ以外のShiftキー付き入力は弾く
+        if (e.Shift && e.KeyCode != Keys.D && e.KeyCode != Keys.Delete)
+        {
+            return false;
+        }
         // 単キーコマンド群
         if (e.KeyCode == Keys.R && !e.Shift)
         {
@@ -5529,7 +5689,7 @@ private void InitializeBrowserTabControl()
             return true;
         }
         // E キーで外部エディタ起動を復活。F4+Edit profile の場合も同様。
-        if (e.KeyCode == Keys.E || (e.KeyCode == Keys.F4 && IsFunctionKeyAssignedToAction(4, FunctionKeyAction.Edit)))
+        if ((e.KeyCode == Keys.E && !e.Shift && !e.Alt && !e.Control) || (e.KeyCode == Keys.F4 && !e.Shift && !e.Alt && !e.Control && IsFunctionKeyAssignedToAction(4, FunctionKeyAction.Edit)))
         {
             if (GuardClipboardBusy()) { e.Handled = true; return true; }
             ExecuteOpenWithEditor();
@@ -5910,6 +6070,10 @@ private void InitializeBrowserTabControl()
     /// </summary>
     private bool TryHandleBrowserCmdKeyAliases(Keys keyData)
     {
+        if (TryHandleFdCompatibleShortcutAliases(keyData))
+        {
+            return true;
+        }
         if (keyData == (Keys.Control | Keys.M))
         {
             if (GuardClipboardBusy()) return true;
@@ -5942,6 +6106,125 @@ private void InitializeBrowserTabControl()
         }
         return false;
     }
+
+    private bool TryHandleFdCompatibleShortcutAliases(Keys keyData)
+    {
+        if (FunctionKeyProfileService.ResolveProfile(CurrentFunctionKeyProfileValue) != FunctionKeyProfile.FDCompatible)
+        {
+            return false;
+        }
+
+        if (keyData == (Keys.Shift | Keys.F4))
+        {
+            // Shift+F4 は WinFD ではディレクトリ削除系だが、誤操作リスクが高いため今回非対象。
+            return false;
+        }
+
+        if (keyData == (Keys.Shift | Keys.F1))
+        {
+            if (GuardClipboardBusy()) return true;
+            ExecuteAttribute();
+            return true;
+        }
+        if (keyData == (Keys.Shift | Keys.F3))
+        {
+            if (GuardClipboardBusy()) return true;
+            _ = ExecuteMove();
+            return true;
+        }
+        if (keyData == (Keys.Shift | Keys.F5))
+        {
+            if (GuardClipboardBusy()) return true;
+            ExecuteCreateDirectory();
+            return true;
+        }
+        if (keyData == (Keys.Shift | Keys.F6))
+        {
+            if (GuardClipboardBusy()) return true;
+            OpenTerminalInCurrentDirectory(ShellKind.PowerShell);
+            return true;
+        }
+        if (keyData == (Keys.Shift | Keys.F7))
+        {
+            return ExecuteCurrentDirectoryReloadCommand();
+        }
+        if (keyData == (Keys.Shift | Keys.F8) || keyData == (Keys.Shift | Keys.Enter))
+        {
+            if (GuardClipboardBusy()) return true;
+            ExecuteOpenWithEditor();
+            return true;
+        }
+        if (keyData == (Keys.Shift | Keys.F9))
+        {
+            if (GuardClipboardBusy()) return true;
+            ExecutePreviewLaunch();
+            return true;
+        }
+        if (keyData == (Keys.Shift | Keys.F10))
+        {
+            if (GuardClipboardBusy()) return true;
+            _ = ExecutePack();
+            return true;
+        }
+        if (keyData == (Keys.Alt | Keys.F5))
+        {
+            OpenSettingsForm();
+            return true;
+        }
+        if (keyData == (Keys.Control | Keys.Shift | Keys.C))
+        {
+            if (GuardClipboardBusy()) return true;
+            CopySelectedOrMarkedFullPathsToClipboard();
+            return true;
+        }
+
+        return false;
+    }
+
+    private BrowserFileDisplayMode GetBrowserFileDisplayMode()
+    {
+        return _settings.Appearance.ResolveFileDisplayMode();
+    }
+    private void SetBrowserFileDetailDisplayMode(BrowserFileDisplayMode mode)
+    {
+        BrowserFileDisplayMode currentMode = GetBrowserFileDisplayMode();
+        if (currentMode == mode)
+        {
+            return;
+        }
+        _settings.Appearance.FileDisplayMode = mode;
+        _settings.Appearance.ShowFileSizeAndDateInBrowser = mode == BrowserFileDisplayMode.NameSizeDate;
+        browserPanel.Invalidate();
+        CaptureActiveBrowserTabState();
+        UpdateFileDisplayModeMenuChecks();
+        ShowStatusMessage(mode switch
+        {
+            BrowserFileDisplayMode.NameSize => "表示モード: サイズ",
+            BrowserFileDisplayMode.NameSizeDate => "表示モード: サイズ・更新日時",
+            _ => "表示モード: ファイル名のみ"
+        });
+    }
+    private void UpdateFileDisplayModeMenuChecks()
+    {
+        BrowserFileDisplayMode mode = GetBrowserFileDisplayMode();
+        if (_fileDisplayModeNameOnlyMenuItem != null)
+        {
+            _fileDisplayModeNameOnlyMenuItem.Checked = mode == BrowserFileDisplayMode.NameOnly;
+        }
+        if (_fileDisplayModeNameSizeMenuItem != null)
+        {
+            _fileDisplayModeNameSizeMenuItem.Checked = mode == BrowserFileDisplayMode.NameSize;
+        }
+        if (_fileDisplayModeNameSizeDateMenuItem != null)
+        {
+            _fileDisplayModeNameSizeDateMenuItem.Checked = mode == BrowserFileDisplayMode.NameSizeDate;
+        }
+    }
+    private void OpenFileListColorSettings()
+    {
+        OpenSettingsForm(SettingsForm.InitialTab.Color);
+    }
+
     /// <summary>
     /// Phase 3-input-cmdkey-launch1: ProcessCmdKey における Browser 文脈の起動系操作 (外部アプリ / プロパティ) を helper 化。
     /// </summary>
@@ -6012,14 +6295,7 @@ private void InitializeBrowserTabControl()
         if (keyData == (Keys.Alt | Keys.F2))
         {
             if (GuardClipboardBusy()) return true;
-            try
-            {
-                System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo("explorer.exe", $"\"{_navigationService.CurrentPath}\"") { UseShellExecute = true });
-            }
-            catch (Exception ex)
-            {
-                LogService.Error($"Explorer 起動失敗: {ex.Message}");
-            }
+            ExecuteOpenCurrentPathInExplorer();
             return true;
         }
         if (keyData == (Keys.Alt | Keys.F3))
@@ -6068,17 +6344,67 @@ private void InitializeBrowserTabControl()
         }
         return false;
     }
+    private void ExecuteOpenCurrentPathInExplorer()
+    {
+        try
+        {
+            System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo("explorer.exe", $"\"{_navigationService.CurrentPath}\"") { UseShellExecute = true });
+        }
+        catch (Exception ex)
+        {
+            LogService.Error($"Explorer 起動失敗: {ex.Message}");
+        }
+    }
     /// <summary>
     /// Phase 3-input-cmdkey-clipui1: ProcessCmdKey における Browser 文脈の列数設定 (1-9) を helper 化。
     /// </summary>
     private bool TryHandleBrowserCmdKeyColumnCount(Keys keyData)
     {
+        // Ctrl+1/2/3 および Ctrl+NumPad1/2/3 による明示的な表示モード切替
+        if (keyData == (Keys.Control | Keys.D1) || keyData == (Keys.Control | Keys.NumPad1))
+        {
+            SetBrowserFileDetailDisplayMode(BrowserFileDisplayMode.NameOnly);
+            return true;
+        }
+        if (keyData == (Keys.Control | Keys.D2) || keyData == (Keys.Control | Keys.NumPad2))
+        {
+            SetBrowserFileDetailDisplayMode(BrowserFileDisplayMode.NameSize);
+            return true;
+        }
+        if (keyData == (Keys.Control | Keys.D3) || keyData == (Keys.Control | Keys.NumPad3))
+        {
+            SetBrowserFileDetailDisplayMode(BrowserFileDisplayMode.NameSizeDate);
+            return true;
+        }
+
+        // 通常の数字キー / NumPadキーによる列数選択
         int val = 0;
         if (keyData >= Keys.D1 && keyData <= Keys.D9) val = (int)(keyData - Keys.D0);
         else if (keyData >= Keys.NumPad1 && keyData <= Keys.NumPad9) val = (int)(keyData - Keys.NumPad0);
+
         if (val > 0)
         {
-            _columnCount = val; // 1キー=1列 ... 9キー=9列
+            bool isWinFD = FunctionKeyProfileService.ResolveProfile(CurrentFunctionKeyProfileValue) == FunctionKeyProfile.FDCompatible;
+            bool isRepeat = (val == _lastColumnCountKey);
+            _lastColumnCountKey = val;
+
+            if (_columnCount != val)
+            {
+                _columnCount = val;
+                SetBrowserFileDetailDisplayMode(BrowserFileDisplayMode.NameOnly);
+            }
+            else if (isRepeat && isWinFD)
+            {
+                BrowserFileDisplayMode currentMode = GetBrowserFileDisplayMode();
+                BrowserFileDisplayMode nextMode = currentMode switch
+                {
+                    BrowserFileDisplayMode.NameOnly => BrowserFileDisplayMode.NameSize,
+                    BrowserFileDisplayMode.NameSize => BrowserFileDisplayMode.NameSizeDate,
+                    _ => BrowserFileDisplayMode.NameOnly
+                };
+                SetBrowserFileDetailDisplayMode(nextMode);
+            }
+
             _settings.Session.LastColumnCount = _columnCount;
             UpdateInfoPanel();
             browserPanel.Invalidate();
@@ -6248,28 +6574,43 @@ private void InitializeBrowserTabControl()
     {
         // Phase 2g-fix6.4b: 文字列への '*' 挿入を廃止。描画スロット方式へ移行
         // ここではファイル種別に応じた基本色の再設定のみを行う
-        bool isDir = IsDirectoryListItem(item, fullPath);
-        if (TryGetAttributesForColor(item, fullPath, out FileAttributes attrs))
-        {
-            item.ForeColor = ResolveAttributeColor(attrs, isDir);
-        }
-        else
-        {
-            item.ForeColor = isDir ? MidFDColors.ListDirectoryFore : MidFDColors.ListFileFore;
-        }
+        var resolved = _resolvedColors ?? FileListColorResolver.ResolveColors(_settings);
+        item.ForeColor = ResolveBrowserItemForeColor(item, fullPath, resolved);
         // 背景色は常に通常色 (Black) を維持。マーク背景塗りは BrowserPanel_Paint 側の
         // 選択状態との組み合わせで処理される。
-        item.BackColor = MidFDColors.ListNormalBack;
+        item.BackColor = resolved.Background;
     }
-    private static Color ResolveAttributeColor(FileAttributes attrs, bool isDirectory)
+    private Color ResolveBrowserItemForeColor(ListViewItem item, string? fullPath, FileListColorResolver.ResolvedColors resolved)
     {
+        if (item.Text == "..")
+        {
+            return resolved.Directory;
+        }
+
+        bool isDir = IsDirectoryListItem(item, fullPath);
+        if (TryGetAttributesForColor(item, fullPath ?? string.Empty, out FileAttributes attrs))
+        {
+            return ResolveAttributeColor(attrs, isDir);
+        }
+
+        return isDir ? resolved.Directory : resolved.NormalFile;
+    }
+
+    private static Color ResolveMarkGlyphColor(Color background, Color preferredColor)
+    {
+        _ = preferredColor;
+        return FileListColorResolver.GetRelativeLuminance(background) > 0.5 ? Color.Black : Color.White;
+    }
+    private Color ResolveAttributeColor(FileAttributes attrs, bool isDirectory)
+    {
+        var resolved = _resolvedColors ?? FileListColorResolver.ResolveColors(_settings);
         if (attrs.HasFlag(FileAttributes.System))
-            return MidFDColors.ListSystemFore;
+            return resolved.System;
         if (attrs.HasFlag(FileAttributes.Hidden))
-            return MidFDColors.ListHiddenFore;
+            return resolved.Hidden;
         if (attrs.HasFlag(FileAttributes.ReadOnly))
-            return MidFDColors.ListReadOnlyFore;
-        return isDirectory ? MidFDColors.ListDirectoryFore : MidFDColors.ListFileFore;
+            return resolved.ReadOnly;
+        return isDirectory ? resolved.Directory : resolved.NormalFile;
     }
     private static bool TryGetAttributesForColor(ListViewItem item, string fullPath, out FileAttributes attrs)
     {
@@ -6353,24 +6694,26 @@ private void InitializeBrowserTabControl()
     private void FileListView_DrawSubItem(object? sender, DrawListViewSubItemEventArgs e)
     {
         if (e.Item == null) return;
+        var resolved = _resolvedColors ?? FileListColorResolver.ResolveColors(_settings);
         bool selected = e.Item.Selected;
-        Color bg = selected ? MidFDColors.ListSelectedBack : MidFDColors.ListNormalBack;
-        Color fg = e.Item.ForeColor;
-        // マークされた行は元色を優先（BackColorがシアンならそのまま）
-        if (e.Item.BackColor == MidFDColors.ListMarkedBack)
+        bool useUnderline = _settings.Appearance?.UseUnderlineCursor == true;
+
+        bool isMarked = e.Item.Tag is string fullPath && _markedFiles.Contains(fullPath);
+
+        Color bg = resolved.Background;
+
+        // 選択時でも元のファイル種類・属性色を維持するため、動的に色を解決する
+        Color fg = ResolveBrowserItemForeColor(e.Item, e.Item.Tag as string, resolved);
+
+        if (selected && !useUnderline)
         {
-            bg = MidFDColors.ListMarkedBack;
-            fg = MidFDColors.ListMarkedFore;
+            bg = resolved.SelectedBackground;
+            fg = FileListColorResolver.ResolveSelectedForegroundForPreset(_settings.Appearance?.ColorTheme, fg, bg);
         }
-        else if (selected)
-        {
-            // 局面選択中は文字を白っぽく
-            fg = MidFDColors.ListSelectedFore;
-        }
+
         using var bgBrush = new SolidBrush(bg);
         e.Graphics.FillRectangle(bgBrush, e.Bounds);
         Font font = e.Item.ListView?.Font ?? SystemFonts.DefaultFont;
-        bool isMarked = e.Item.Tag is string fullPath && _markedFiles.Contains(fullPath);
         Rectangle textBounds = e.Bounds;
         if (e.ColumnIndex == 0 && isMarked)
         {
@@ -6381,12 +6724,16 @@ private void InitializeBrowserTabControl()
                 e.Bounds.Y,
                 Math.Max(0, e.Bounds.Width - markSlotWidth),
                 e.Bounds.Height);
+
+            Color preferredMarkColor = GetCurrentThemeMarkGlyphColor();
+            Color markColor = ResolveMarkGlyphColor(bg, preferredMarkColor);
+
             TextRenderer.DrawText(
                 e.Graphics,
                 "*",
                 font,
                 markRect,
-                GetCurrentThemeMarkGlyphColor(),
+                markColor,
                 TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine);
         }
         TextRenderer.DrawText(
@@ -6396,6 +6743,10 @@ private void InitializeBrowserTabControl()
             textBounds,
             fg,
             TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine);
+        if (_settings.Appearance?.UseUnderlineCursor == true && e.Item.Selected && e.ColumnIndex == 0)
+        {
+            DrawCursorUnderline(e.Graphics, e.Item.Bounds, fg);
+        }
     }
     private void FileListView_DrawColumnHeader(object? sender, DrawListViewColumnHeaderEventArgs e)
     {
@@ -6406,8 +6757,9 @@ private void InitializeBrowserTabControl()
     private void BrowserPanel_Paint(object? sender, PaintEventArgs e)
     {
         if (_uiMode != UIMode.Browser) return;
+        var resolved = _resolvedColors ?? FileListColorResolver.ResolveColors(_settings);
         Graphics g = e.Graphics;
-        g.Clear(browserPanel.BackColor);
+        g.Clear(resolved.Background);
         if (fileListView.Items.Count == 0)
         {
             DrawCommandHintOverlay(g);
@@ -6435,14 +6787,18 @@ private void InitializeBrowserTabControl()
             // 描画領域の矩形
             Rectangle rect = new Rectangle(x, y, colWidth - 10, itemHeight);
             // 描画設定の決定
-            Color bg = MidFDColors.ListNormalBack;
-            Color fg = item.ForeColor;
+            Color bg = resolved.Background;
+
+            // 選択時でも元のファイル種類・属性色を維持するため、動的に色を解決する
+            Color fg = ResolveBrowserItemForeColor(item, item.Tag as string, resolved);
+
             // item.Tag にフルパスが入っている前提でマーク状態を判定 (文字列依存からの脱却)
             bool isMarked = _markedFiles.Contains(item.Tag as string ?? string.Empty);
-            if (isSelected)
+            bool useUnderline = _settings.Appearance?.UseUnderlineCursor == true;
+            if (isSelected && !useUnderline)
             {
-                // 選択中：マークの有無で背景色を微調整
-                bg = isMarked ? MidFDColors.ListSelectedMarkedBack : MidFDColors.ListSelectedBack;
+                bg = resolved.SelectedBackground;
+                fg = FileListColorResolver.ResolveSelectedForegroundForPreset(_settings.Appearance?.ColorTheme, fg, bg);
             }
             // 背景描画
             using (SolidBrush bgBrush = new SolidBrush(bg))
@@ -6457,22 +6813,42 @@ private void InitializeBrowserTabControl()
             Rectangle textRect = new Rectangle(rect.X + markSlotWidth + iconSlotWidth, rect.Y, rect.Width - markSlotWidth - iconSlotWidth, rect.Height);
             if (isMarked)
             {
-                TextRenderer.DrawText(g, "*", font, markRect, GetCurrentThemeMarkGlyphColor(), TextFormatFlags.Left | TextFormatFlags.VerticalCenter);
+                Color preferredMarkColor = GetCurrentThemeMarkGlyphColor();
+                Color markColor = ResolveMarkGlyphColor(bg, preferredMarkColor);
+                TextRenderer.DrawText(g, "*", font, markRect, markColor, TextFormatFlags.Left | TextFormatFlags.VerticalCenter);
             }
             if ((_settings.Appearance?.ShowItemIcons ?? true) && textRect.Width > 24)
             {
                 DrawBrowserItemIcon(g, item, iconRect);
             }
-            string text = BuildBrowserDisplayText(item, textRect.Width, font, g);
-            TextRenderer.DrawText(g, text, font, textRect, fg, Color.Transparent, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix);
+            bool detailDrawn = false;
+            BrowserFileDisplayMode fileDisplayMode = GetBrowserFileDisplayMode();
+            if (fileDisplayMode != BrowserFileDisplayMode.NameOnly)
+            {
+                detailDrawn = DrawBrowserItemTextWithDetails(g, item, textRect, font, fg, fileDisplayMode);
+            }
+            if (!detailDrawn)
+            {
+                string text = BuildBrowserDisplayText(item, textRect.Width, font, g);
+                TextRenderer.DrawText(g, text, font, textRect, fg, Color.Transparent, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix);
+            }
+            if ((_settings.Appearance?.UseUnderlineCursor ?? false) && isSelected)
+            {
+                DrawCursorUnderline(g, rect, fg);
+            }
         }
         DrawCommandHintOverlay(g);
     }
+    private void DrawCursorUnderline(Graphics graphics, Rectangle bounds, Color underlineColor)
+    {
+        int y = bounds.Bottom - 2;
+        using var underlinePen = new Pen(underlineColor, 1);
+        graphics.DrawLine(underlinePen, bounds.Left + 2, y, bounds.Right - 2, y);
+    }
     private Color GetCurrentThemeMarkGlyphColor()
     {
-        return _settings.Appearance?.ColorTheme == "Light"
-            ? Color.Black
-            : Color.White;
+        var resolved = _resolvedColors ?? FileListColorResolver.ResolveColors(_settings);
+        return resolved.Marked;
     }
     private void DrawBrowserItemIcon(Graphics g, ListViewItem item, Rectangle iconRect)
     {
@@ -6510,6 +6886,106 @@ private void InitializeBrowserTabControl()
             return FitTextWithTrailingEllipsis(baseName, availableWidth, font, g);
         }
         return FitFileNamePreservingExtension(baseName, extension, availableWidth, font, g);
+    }
+    private bool DrawBrowserItemTextWithDetails(Graphics g, ListViewItem item, Rectangle textRect, Font font, Color fg, BrowserFileDisplayMode mode)
+    {
+        const int minNameChars = 8;
+        const string dateSample = "00-00-00 00:00";
+        const string sizeSample = "9999.9M";
+
+        bool isDirectory = IsDirectoryListItem(item);
+        bool showDirectoryMarker = _settings.Appearance?.ShowDirectoryMarker ?? true;
+        bool showExtensions = _settings.Appearance?.ShowExtensions ?? true;
+
+        if (isDirectory && item.Text == "..")
+        {
+            return false;
+        }
+
+        string dateText = item.SubItems.Count > 3 ? NormalizeBrowserDateText(item.SubItems[3].Text) : string.Empty;
+        string sizeText = isDirectory
+            ? "<DIR>"
+            : (item.SubItems.Count > 2 ? item.SubItems[2].Text : string.Empty);
+
+        bool includeDate = mode == BrowserFileDisplayMode.NameSizeDate;
+        if (includeDate && string.IsNullOrWhiteSpace(dateText))
+        {
+            return false;
+        }
+        if (string.IsNullOrWhiteSpace(sizeText))
+        {
+            return false;
+        }
+
+        int charWidth = MeasureBrowserTextWidth(g, "0", font);
+        int gapWidth = charWidth;
+        int dateFieldWidth = includeDate
+            ? Math.Max(MeasureBrowserTextWidth(g, dateSample, font), MeasureBrowserTextWidth(g, dateText, font))
+            : 0;
+        int sizeFieldWidth = Math.Max(MeasureBrowserTextWidth(g, sizeSample, font), MeasureBrowserTextWidth(g, "<DIR>", font));
+        int minimumNameWidth = charWidth * minNameChars;
+        int requiredWidth = includeDate
+            ? minimumNameWidth + sizeFieldWidth + dateFieldWidth + (gapWidth * 2)
+            : minimumNameWidth + sizeFieldWidth + gapWidth;
+
+        if (textRect.Width < requiredWidth)
+        {
+            return false;
+        }
+
+        int reservedDetailWidth = includeDate
+            ? sizeFieldWidth + dateFieldWidth + (gapWidth * 2)
+            : sizeFieldWidth + gapWidth;
+        int remainingNameWidth = textRect.Width - reservedDetailWidth;
+        int preferredNameChars = includeDate ? 7 : 10;
+        int preferredNameWidth = charWidth * preferredNameChars;
+        int nameFieldWidth = Math.Max(minimumNameWidth, Math.Min(preferredNameWidth, remainingNameWidth));
+
+        Rectangle nameRect = new Rectangle(textRect.X, textRect.Y, nameFieldWidth, textRect.Height);
+        Rectangle sizeRect = new Rectangle(nameRect.Right + gapWidth, textRect.Y, sizeFieldWidth, textRect.Height);
+        Rectangle dateRect = includeDate
+            ? new Rectangle(sizeRect.Right + gapWidth, textRect.Y, dateFieldWidth, textRect.Height)
+            : Rectangle.Empty;
+
+        if (nameRect.Width < minimumNameWidth)
+        {
+            return false;
+        }
+
+        string nameText;
+        if (isDirectory)
+        {
+            nameText = FitTextWithTrailingEllipsis(item.Text, nameRect.Width, font, g);
+        }
+        else
+        {
+            string baseName = item.Text;
+            string extension = showExtensions && item.SubItems.Count > 1 && !string.IsNullOrEmpty(item.SubItems[1].Text)
+                ? "." + item.SubItems[1].Text
+                : string.Empty;
+            nameText = string.IsNullOrEmpty(extension)
+                ? FitTextWithTrailingEllipsis(baseName, nameRect.Width, font, g)
+                : FitFileNamePreservingExtension(baseName, extension, nameRect.Width, font, g);
+        }
+
+        TextRenderer.DrawText(g, nameText, font, nameRect, fg, Color.Transparent, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix | TextFormatFlags.EndEllipsis);
+        TextRenderer.DrawText(g, sizeText, font, sizeRect, fg, Color.Transparent, TextFormatFlags.Right | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix);
+        if (includeDate)
+        {
+            TextRenderer.DrawText(g, dateText, font, dateRect, fg, Color.Transparent, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix);
+        }
+        return true;
+    }
+    private static string NormalizeBrowserDateText(string raw)
+    {
+        if (string.IsNullOrWhiteSpace(raw))
+        {
+            return string.Empty;
+        }
+
+        return DateTime.TryParse(raw, out DateTime parsed)
+            ? parsed.ToString("yyyy-MM-dd HH:mm")
+            : raw;
     }
     private static string FitFileNamePreservingExtension(string baseName, string extension, int availableWidth, Font font, Graphics g)
     {
@@ -7557,7 +8033,16 @@ private void InitializeBrowserTabControl()
     }
     protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
     {
+        Keys modifiers = keyData & Keys.Modifiers;
         Keys keyCode = keyData & Keys.KeyCode;
+        bool isPlainNumberKey = (modifiers == Keys.None) &&
+                                ((keyCode >= Keys.D1 && keyCode <= Keys.D9) ||
+                                 (keyCode >= Keys.NumPad1 && keyCode <= Keys.NumPad9));
+        if (!isPlainNumberKey)
+        {
+            _lastColumnCountKey = 0;
+        }
+
         if (keyCode == Keys.Escape)
         {
             LogService.Info(
@@ -8017,7 +8502,7 @@ private void InitializeBrowserTabControl()
             rootItem.ShowDropDown();
         }
     }
-    private void MainForm_KeyDown(object sender, KeyEventArgs e)
+    private void MainForm_KeyDown(object? sender, KeyEventArgs e)
     {
         if (e.KeyCode == Keys.Menu || e.KeyCode == Keys.LMenu || e.KeyCode == Keys.RMenu || (e.Control && e.Alt))
         {
@@ -9755,7 +10240,9 @@ private void InitializeBrowserTabControl()
     }
     private void BeginPendingEscExitMarkPersistence(IReadOnlyList<string> markedPaths)
     {
-        if (!_settings.Session.PersistMarksAcrossRestart || markedPaths.Count == 0)
+        // Preserve pending marks when either restart persistence is enabled or workspace restore is enabled
+        bool shouldPreserve = _settings.Session.PersistMarksAcrossRestart || _settings.Session.RestoreTabsOnStartup;
+        if (!shouldPreserve || markedPaths.Count == 0)
         {
             ClearPendingEscExitMarkPersistence();
             return;
@@ -10055,9 +10542,14 @@ private void InitializeBrowserTabControl()
         string defaultPath = string.IsNullOrWhiteSpace(_navigationService.CurrentPath)
             ? (Path.GetPathRoot(_navigationService.CurrentPath) ?? "C:\\")
             : _navigationService.CurrentPath;
-        string? selected = LogdiskDialog.Show(defaultPath);
+        string? selected = LogdiskDialog.Show(defaultPath, GetSharedDirectoryMoveHistory());
         if (!string.IsNullOrWhiteSpace(selected))
         {
+            if (TryNormalizeDriveOnlyInputToRoot(selected, out string driveRoot))
+            {
+                selected = driveRoot;
+            }
+
             string resolved = _navigationService.NormalizeDestinationDirectory(selected);
             try
             {
@@ -10068,6 +10560,7 @@ private void InitializeBrowserTabControl()
                         return;
                     }
                     LoadDirectory(resolved);
+                    AddDirectoryMoveHistory(resolved);
                 }
                 else
                 {
@@ -10079,6 +10572,121 @@ private void InitializeBrowserTabControl()
                 MessageBox.Show(ex.Message, "エラー", MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
         }
+    }
+
+    private static bool TryNormalizeDriveOnlyInputToRoot(string input, out string normalizedPath)
+    {
+        normalizedPath = string.Empty;
+        if (string.IsNullOrWhiteSpace(input))
+        {
+            return false;
+        }
+
+        string trimmed = input.Trim();
+        if (trimmed.Length == 1 && char.IsLetter(trimmed[0]))
+        {
+            normalizedPath = $"{char.ToUpperInvariant(trimmed[0])}:\\";
+            return true;
+        }
+
+        if (trimmed.Length == 2 && char.IsLetter(trimmed[0]) && trimmed[1] == ':')
+        {
+            normalizedPath = $"{char.ToUpperInvariant(trimmed[0])}:\\";
+            return true;
+        }
+
+        return false;
+    }
+    private List<string> GetSharedDirectoryMoveHistory()
+    {
+        MigrateLegacyMoveDestinationHistory();
+        return _settings.Session.DirectoryMoveHistory;
+    }
+
+    private void MigrateLegacyMoveDestinationHistory()
+    {
+        var session = _settings.Session;
+        var legacy = session.MoveDestinationHistory;
+        if (legacy == null || legacy.Count == 0)
+        {
+            return;
+        }
+
+        bool changed = false;
+        foreach (var path in legacy)
+        {
+            changed |= AddNormalizedDirectoryHistoryEntry(session.DirectoryMoveHistory, path, maxCount: 30);
+        }
+
+        if (changed)
+        {
+            legacy.Clear();
+            SettingsManager.Save(_settings);
+        }
+    }
+
+    private void AddDirectoryMoveHistory(string path)
+    {
+        if (string.IsNullOrWhiteSpace(path)) return;
+        try
+        {
+            MigrateLegacyMoveDestinationHistory();
+            if (AddNormalizedDirectoryHistoryEntry(_settings.Session.DirectoryMoveHistory, path, maxCount: 30))
+            {
+                SettingsManager.Save(_settings);
+            }
+        }
+        catch (Exception ex)
+        {
+            LogService.Error($"AddDirectoryMoveHistory 失敗: {ex.Message}");
+        }
+    }
+
+    private static bool AddNormalizedDirectoryHistoryEntry(IList<string> history, string path, int maxCount)
+    {
+        if (history == null || string.IsNullOrWhiteSpace(path))
+        {
+            return false;
+        }
+
+        string normalized = Path.GetFullPath(path);
+        if (!Directory.Exists(normalized))
+        {
+            return false;
+        }
+
+        if (!normalized.EndsWith(Path.DirectorySeparatorChar))
+        {
+            normalized += Path.DirectorySeparatorChar;
+        }
+
+        int index = -1;
+        for (int i = 0; i < history.Count; i++)
+        {
+            if (string.Equals(history[i], normalized, StringComparison.OrdinalIgnoreCase))
+            {
+                index = i;
+                break;
+            }
+        }
+
+        if (index == 0)
+        {
+            return false;
+        }
+
+        if (index > 0)
+        {
+            history.RemoveAt(index);
+        }
+
+        history.Insert(0, normalized);
+        while (history.Count > maxCount)
+        {
+            history.RemoveAt(history.Count - 1);
+        }
+
+        return true;
     }
     private void ExecuteSort()
     {
@@ -12430,6 +13038,11 @@ private void InitializeBrowserTabControl()
                 return;
             }
             string destDir = pasteEntryPlan.CurrentPath;
+            if (isCut && validPaths.Count >= 2 && !ConfirmBulkCutPasteMove(validPaths.Count, validPaths[0], destDir))
+            {
+                ShowStatusMessage("貼り付け(移動)はキャンセルされました。");
+                return;
+            }
             string pasteOperationDisplayName = isCut ? "貼り付け(移動)" : "貼り付け(コピー)";
             CancellationToken token = PrepareFileOperation(pasteOperationDisplayName);
             int pasteStatusVersion = _fileOperationStatusVersion;
@@ -12450,9 +13063,11 @@ private void InitializeBrowserTabControl()
                 int failCount = 0;
                 int renamedCount = 0;
                 bool wasCancelled = false;
+                bool canRecordMoveUndoBatch = isCut;
                 bool applyRenameCopyToAllSameDirectory = false;
                 CopyCollisionDecision? applyToAllDecision = null;
                 DirectoryMergeDecision? directoryApplyToAllDecision = null;
+                var successfulMoveUndoItems = new List<(string SourcePath, string DestinationPath)>();
                 foreach (var sourcePath in validPaths)
                 {
                     if (token.IsCancellationRequested)
@@ -12528,10 +13143,12 @@ private void InitializeBrowserTabControl()
                             string conflictPath = destPath;
                             this.Invoke(() => _fileOperationDialogCoordinator.ShowTypeMismatchConflict(this, conflictPath));
                             failCount++;
+                            canRecordMoveUndoBatch = false;
                             continue;
                         }
                         if (sourceIsDir)
                         {
+                            canRecordMoveUndoBatch = false;
                             if (!TryResolvePasteDirectoryMerge(sourcePath, destPath, isCut, ref directoryApplyToAllDecision, out bool pasteShouldSkip, out bool pasteShouldCancel))
                             {
                                 if (pasteShouldCancel)
@@ -12610,6 +13227,7 @@ private void InitializeBrowserTabControl()
                         if (collisionResolution.ShouldSkip)
                         {
                             skipCount++;
+                            canRecordMoveUndoBatch = false;
                             continue;
                         }
                         ShowFileOperationProgressIfCurrent(
@@ -12623,6 +13241,10 @@ private void InitializeBrowserTabControl()
                         destPath = collisionResolution.DestinationPath;
                         fileName = Path.GetFileName(destPath);
                         overwriteMove = collisionResolution.OverwriteExisting;
+                        if (overwriteMove)
+                        {
+                            canRecordMoveUndoBatch = false;
+                        }
                         if (collisionResolution.UsedRenameCopy)
                         {
                             renamedCount++;
@@ -12634,6 +13256,10 @@ private void InitializeBrowserTabControl()
                         if (isCut)
                         {
                             FileOperationService.Move(sourcePath, destPath, overwriteMove, suppressLogging: validPaths.Count > 100);
+                            if (canRecordMoveUndoBatch)
+                            {
+                                successfulMoveUndoItems.Add((sourcePath, destPath));
+                            }
                         }
                         else
                         {
@@ -12647,9 +13273,19 @@ private void InitializeBrowserTabControl()
                         string opErrName = isCut ? "切り取り(移動)" : "コピー";
                         LogService.Error($"{opErrName}失敗: {fileName}", ex);
                         failCount++;
+                        canRecordMoveUndoBatch = false;
                     }
                 }
-                return (successCount, skipCount, failCount, wasCancelled, firstSuccessName, renamedCount, firstRenamedName);
+                IReadOnlyList<FileOperationUndoRedoItem> moveUndoItems =
+                    canRecordMoveUndoBatch &&
+                    !wasCancelled &&
+                    failCount == 0 &&
+                    skipCount == 0 &&
+                    successCount == validPaths.Count &&
+                    successfulMoveUndoItems.Count == validPaths.Count
+                        ? FileOperationUndoRedoService.CreateMoveBatch(successfulMoveUndoItems)
+                        : Array.Empty<FileOperationUndoRedoItem>();
+                return (successCount, skipCount, failCount, wasCancelled, firstSuccessName, renamedCount, firstRenamedName, moveUndoItems);
             }, token);
             if (isCut && !result.wasCancelled && result.successCount > 0 && result.failCount == 0 && result.skipCount == 0 && beforeSnapshot != null)
             {
@@ -12687,6 +13323,11 @@ private void InitializeBrowserTabControl()
                 result.renamedCount,
                 result.firstRenamedName,
                 preserveClipboardOnIncomplete: true);
+            if (result.moveUndoItems.Count > 0)
+            {
+                _fileOperationUndoRedoService.RecordBatch(FileOperationUndoRedoOperation.Move, result.moveUndoItems);
+                resultMsg = BuildMoveUndoReadyMessage(result.successCount, validPaths.Count);
+            }
             HandlePostOperation(new FileOperationResult("Paste", pasteExitStatus, result.successCount, validPaths.Count, result.firstSuccessName,
                 customMessage: resultMsg, skipCount: result.skipCount, failCount: result.failCount));
         }
@@ -12699,6 +13340,23 @@ private void InitializeBrowserTabControl()
             LogService.Error("貼り付け処理中に致命的なエラーが発生しました", ex);
             HandlePostOperation(new FileOperationResult("Paste", FileOpExitStatus.Error, 0, 0));
         }
+    }
+    private bool ConfirmBulkCutPasteMove(int itemCount, string firstSourcePath, string destinationDirectory)
+    {
+        string sourceDirectory = Path.GetDirectoryName(firstSourcePath) ?? firstSourcePath;
+        string message =
+            $"切り取り済みの {itemCount} 件を現在のフォルダへ移動します。{Environment.NewLine}{Environment.NewLine}" +
+            $"移動元:{Environment.NewLine}{sourceDirectory}{Environment.NewLine}{Environment.NewLine}" +
+            $"移動先:{Environment.NewLine}{destinationDirectory}{Environment.NewLine}{Environment.NewLine}" +
+            "この操作は元の場所からファイルを移動します。実行しますか？" +
+            $"{Environment.NewLine}{Environment.NewLine}※ 成功した移動は、このセッション中に限り「元に戻す」できます。";
+        return MessageBox.Show(
+            this,
+            message,
+            "複数項目の移動確認",
+            MessageBoxButtons.YesNo,
+            MessageBoxIcon.Warning,
+            MessageBoxDefaultButton.Button2) == DialogResult.Yes;
     }
     private void HandlePostOperation(FileOperationResult result)
     {
@@ -14018,6 +14676,7 @@ private void InitializeBrowserTabControl()
                 ShowStatusMessage,
                 selectionSummary,
                 outsideWarning,
+                null,
                 out string destDir,
                 out bool copyNeedsCreateDirectory))
         {
@@ -14249,6 +14908,7 @@ private void InitializeBrowserTabControl()
                 ShowStatusMessage,
                 selectionSummary,
                 outsideWarning,
+                GetSharedDirectoryMoveHistory(),
                 out string normalizedDestDir,
                 out bool moveNeedsCreateDirectory))
         {
@@ -14502,6 +15162,11 @@ private void InitializeBrowserTabControl()
                 $"destinationCheckMs={result.Item11} progressReportMs={result.Item12} progressReportCount={result.Item13} " +
                 $"unmarkCollectCount={result.Item7.Count} unmarkApplyMs={unmarkApplyMs} collisionCheckCount={result.Item14} " +
                 $"collisionDialogCount={result.Item15} undoCreateMs={result.Item16}");
+
+            if (exitStatus == FileOpExitStatus.Success && successCount > 0)
+            {
+                AddDirectoryMoveHistory(normalizedDestDir);
+            }
         }
         catch (OperationCanceledException)
         {
@@ -15870,29 +16535,33 @@ private void InitializeBrowserTabControl()
                         // Phase 3-keybind-cleanup1.2: 手動オーバーライドがある場合は優先
                         if (_viewerEncodingOverride == ViewerEncoding.UTF8)
                         {
+                            string manualUtf8 = NormalizeNewlinesForViewerTextBox(System.Text.Encoding.UTF8.GetString(buffer, 0, readCount));
                             return (
-                                System.Text.Encoding.UTF8.GetString(buffer, 0, readCount) + (fs.Length > maxBytes ? "\n\n[... 表示節減されました ...]" : ""),
+                                manualUtf8 + (fs.Length > maxBytes ? $"{Environment.NewLine}{Environment.NewLine}[... 表示節減されました ...]" : ""),
                                 "UTF-8 (manual)");
                         }
                         else if (_viewerEncodingOverride == ViewerEncoding.SJIS)
                         {
                             System.Text.Encoding.RegisterProvider(System.Text.CodePagesEncodingProvider.Instance);
                             var sjisManual = System.Text.Encoding.GetEncoding("shift_jis");
+                            string manualSjis = NormalizeNewlinesForViewerTextBox(sjisManual.GetString(buffer, 0, readCount));
                             return (
-                                sjisManual.GetString(buffer, 0, readCount) + (fs.Length > maxBytes ? "\n\n[... 表示節減されました ...]" : ""),
+                                manualSjis + (fs.Length > maxBytes ? $"{Environment.NewLine}{Environment.NewLine}[... 表示節減されました ...]" : ""),
                                 "CP932 (manual)");
                         }
                         // 1. BOMチェック (StreamReader の標準機能に相当する処理)
                         if (readCount >= 3 && buffer[0] == 0xEF && buffer[1] == 0xBB && buffer[2] == 0xBF)
                         {
+                            string utf8Bom = NormalizeNewlinesForViewerTextBox(System.Text.Encoding.UTF8.GetString(buffer, 3, readCount - 3));
                             return (
-                                System.Text.Encoding.UTF8.GetString(buffer, 3, readCount - 3) + (fs.Length > maxBytes ? "\n\n[... 表示節減されました ...]" : ""),
+                                utf8Bom + (fs.Length > maxBytes ? $"{Environment.NewLine}{Environment.NewLine}[... 表示節減されました ...]" : ""),
                                 "UTF-8 BOM");
                         }
                         if (readCount >= 2 && buffer[0] == 0xFF && buffer[1] == 0xFE)
                         {
+                            string utf16Bom = NormalizeNewlinesForViewerTextBox(System.Text.Encoding.Unicode.GetString(buffer, 2, readCount - 2));
                             return (
-                                System.Text.Encoding.Unicode.GetString(buffer, 2, readCount - 2) + (fs.Length > maxBytes ? "\n\n[... 表示節減されました ...]" : ""),
+                                utf16Bom + (fs.Length > maxBytes ? $"{Environment.NewLine}{Environment.NewLine}[... 表示節減されました ...]" : ""),
                                 "UTF-16 LE BOM");
                         }
                         // 2. BOMなし UTF-8 試行 (例外を投げる設定で厳密に判定)
@@ -15901,9 +16570,9 @@ private void InitializeBrowserTabControl()
                             var utf8Strict = new System.Text.UTF8Encoding(false, true);
                             // 読み込み上限境界でマルチバイト文字が切断されている場合に備え、安全な長さまでトリミングする
                             int safeLength = GetSafeUtf8Length(buffer, readCount);
-                            string utf8Result = utf8Strict.GetString(buffer, 0, safeLength);
+                            string utf8Result = NormalizeNewlinesForViewerTextBox(utf8Strict.GetString(buffer, 0, safeLength));
                             return (
-                                utf8Result + (fs.Length > maxBytes ? "\n\n[... 表示節減されました ...]" : ""),
+                                utf8Result + (fs.Length > maxBytes ? $"{Environment.NewLine}{Environment.NewLine}[... 表示節減されました ...]" : ""),
                                 "UTF-8");
                         }
                         catch (ArgumentException)
@@ -15913,8 +16582,9 @@ private void InitializeBrowserTabControl()
                         // 3. Shift_JIS (CP932) フォールバック
                         System.Text.Encoding.RegisterProvider(System.Text.CodePagesEncodingProvider.Instance);
                         var sjis = System.Text.Encoding.GetEncoding("shift_jis");
+                        string sjisText = NormalizeNewlinesForViewerTextBox(sjis.GetString(buffer, 0, readCount));
                         return (
-                            sjis.GetString(buffer, 0, readCount) + (fs.Length > maxBytes ? "\n\n[... 表示節減されました ...]" : ""),
+                            sjisText + (fs.Length > maxBytes ? $"{Environment.NewLine}{Environment.NewLine}[... 表示節減されました ...]" : ""),
                             "CP932");
                     }
                 }, token);
@@ -16721,46 +17391,91 @@ private void InitializeBrowserTabControl()
         _ = UpdatePreviewAsync(reqId, requestPath, _previewCts.Token);
     }
     /// <summary>O キー: 設定画面を開く。OK 保存後は _settings を再読込して次のコマンドに反映する。</summary>
-    private void OpenSettingsForm()
+    private void OpenSettingsForm(SettingsForm.InitialTab initialTab = SettingsForm.InitialTab.DisplayAndViewer)
     {
-        HideTransientOverlaysBeforeModalDialog();
-        BrowserTabRuntimeStateSnapshot runtimeBrowserTabState = CaptureBrowserTabRuntimeStateSnapshot();
-        using var form = new SettingsForm(_settings, _featureProfile);
-        var result = form.ShowDialog(this);
-        if (result == DialogResult.OK)
+        try
         {
-            // SettingsForm が Save した内容を読み直してインメモリ設定と一致させる
-            var reloaded = MidFD.Configuration.SettingsManager.Load(out SettingsManager.SettingsLoadMetadata settingsLoadMetadata);
-            _settings.Profile = reloaded.Profile;
-            _settings.Input = reloaded.Input ?? new InputSettings();
-            _settings.SevenZip = reloaded.SevenZip;
-            _settings.ExternalTools = reloaded.ExternalTools;
-            _settings.Appearance = reloaded.Appearance;
-            _settings.Logging = reloaded.Logging;
-            _settings.Preview = reloaded.Preview;
-            _settings.FileOperations = reloaded.FileOperations;
-            _settings.BrowserTabs = reloaded.BrowserTabs;
-            _settings.Fonts = reloaded.Fonts;
-            _settings.Session = reloaded.Session;
-            ApplyFeatureProfile(settingsLoadMetadata.IsMouseGesturesExplicit);
-            RestoreBrowserTabRuntimeStateSnapshot(runtimeBrowserTabState);
-            LogService.ApplySettings(_settings.Logging);
-            ApplyFontSettings();
-            ApplyColorSettings();
-            viewerTextBox.WordWrap = _settings.Preview.ViewerWordWrap;
-            viewerTextBox.ScrollBars = viewerTextBox.WordWrap ? RichTextBoxScrollBars.Vertical : RichTextBoxScrollBars.Both;
-            if (_settings.Session.RestoreColumnCount)
+            LogService.Info($"Opening SettingsForm. initialTab={initialTab}");
+            HideTransientOverlaysBeforeModalDialog();
+            BrowserTabRuntimeStateSnapshot runtimeBrowserTabState = CaptureBrowserTabRuntimeStateSnapshot();
+            using var form = new SettingsForm(_settings, _featureProfile, initialTab);
+            form.SettingsApplied += (s, e) =>
             {
-                _columnCount = Math.Clamp(_settings.Session.LastColumnCount, 1, 9);
-            }
-            if (_settings.Session.RestoreSort)
+                var reloaded = MidFD.Configuration.SettingsManager.Load(out SettingsManager.SettingsLoadMetadata settingsLoadMetadata);
+                _settings.Profile = reloaded.Profile;
+                _settings.Input = reloaded.Input ?? new InputSettings();
+                _settings.SevenZip = reloaded.SevenZip;
+                _settings.ExternalTools = reloaded.ExternalTools;
+                _settings.Appearance = reloaded.Appearance;
+                _settings.Logging = reloaded.Logging;
+                _settings.Preview = reloaded.Preview;
+                _settings.FileOperations = reloaded.FileOperations;
+                _settings.BrowserTabs = reloaded.BrowserTabs;
+                _settings.Fonts = reloaded.Fonts;
+                _settings.Session = reloaded.Session;
+                ApplyFeatureProfile(settingsLoadMetadata.IsMouseGesturesExplicit);
+                RestoreBrowserTabRuntimeStateSnapshot(runtimeBrowserTabState);
+                LogService.ApplySettings(_settings.Logging);
+                ApplyFontSettings();
+                ApplyColorSettings();
+                viewerTextBox.WordWrap = _settings.Preview.ViewerWordWrap;
+                viewerTextBox.ScrollBars = viewerTextBox.WordWrap ? RichTextBoxScrollBars.Vertical : RichTextBoxScrollBars.Both;
+                if (_settings.Session.RestoreColumnCount)
+                {
+                    _columnCount = Math.Clamp(_settings.Session.LastColumnCount, 1, 9);
+                }
+                if (_settings.Session.RestoreSort)
+                {
+                    _currentSort = _settings.Session.LastSortKind;
+                    _sortAscending = _settings.Session.LastSortAscending;
+                }
+                LoadDirectory(_navigationService.CurrentPath);
+                RebuildMenuStripAfterSettingsApply();
+                ShowStatusMessage("設定を適用しました。");
+            };
+            var result = form.ShowDialog(this);
+            LogService.Info($"SettingsForm closed. result={result}");
+            if (result == DialogResult.OK)
             {
-                _currentSort = _settings.Session.LastSortKind;
-                _sortAscending = _settings.Session.LastSortAscending;
+                // SettingsForm が Save した内容を読み直してインメモリ設定と一致させる
+                var reloaded = MidFD.Configuration.SettingsManager.Load(out SettingsManager.SettingsLoadMetadata settingsLoadMetadata);
+                _settings.Profile = reloaded.Profile;
+                _settings.Input = reloaded.Input ?? new InputSettings();
+                _settings.SevenZip = reloaded.SevenZip;
+                _settings.ExternalTools = reloaded.ExternalTools;
+                _settings.Appearance = reloaded.Appearance;
+                _settings.Logging = reloaded.Logging;
+                _settings.Preview = reloaded.Preview;
+                _settings.FileOperations = reloaded.FileOperations;
+                _settings.BrowserTabs = reloaded.BrowserTabs;
+                _settings.Fonts = reloaded.Fonts;
+                _settings.Session = reloaded.Session;
+                ApplyFeatureProfile(settingsLoadMetadata.IsMouseGesturesExplicit);
+                RestoreBrowserTabRuntimeStateSnapshot(runtimeBrowserTabState);
+                LogService.ApplySettings(_settings.Logging);
+                ApplyFontSettings();
+                ApplyColorSettings();
+                viewerTextBox.WordWrap = _settings.Preview.ViewerWordWrap;
+                viewerTextBox.ScrollBars = viewerTextBox.WordWrap ? RichTextBoxScrollBars.Vertical : RichTextBoxScrollBars.Both;
+                if (_settings.Session.RestoreColumnCount)
+                {
+                    _columnCount = Math.Clamp(_settings.Session.LastColumnCount, 1, 9);
+                }
+                if (_settings.Session.RestoreSort)
+                {
+                    _currentSort = _settings.Session.LastSortKind;
+                    _sortAscending = _settings.Session.LastSortAscending;
+                }
+                LoadDirectory(_navigationService.CurrentPath);
+                RebuildMenuStripAfterSettingsApply();
+                ShowStatusMessage("設定を保存しました。");
             }
-            LoadDirectory(_navigationService.CurrentPath);
-            RebuildMenuStripAfterSettingsApply();
-            ShowStatusMessage("設定を保存しました。");
+        }
+        catch (Exception ex)
+        {
+            LogService.Error("SettingsForm open failed.", ex);
+            LogService.Error(ex.ToString());
+            ShowStatusMessage($"設定画面を開けませんでした: {ex.Message}");
         }
     }
     private void HideTransientOverlaysBeforeModalDialog()
@@ -17343,6 +18058,18 @@ private void InitializeBrowserTabControl()
     /// <summary>
     /// UTF-8 マルチバイト文字の途中で切断されない安全な長さを取得する（バッファ末尾の切り出し境界用）。
     /// </summary>
+    private static string NormalizeNewlinesForViewerTextBox(string text)
+    {
+        if (string.IsNullOrEmpty(text))
+        {
+            return string.Empty;
+        }
+
+        text = text.Replace("\r\n", "\n");
+        text = text.Replace('\r', '\n');
+        return text.Replace("\n", Environment.NewLine);
+    }
+
     private int GetSafeUtf8Length(byte[] buffer, int length)
     {
         if (length <= 0) return 0;
@@ -17447,7 +18174,7 @@ private void InitializeBrowserTabControl()
     {
         var panel = sender as Panel;
         if (panel == null) return;
-        if (_settings.Appearance?.ColorTheme == "Light")
+        if (FileListColorResolver.NormalizeCoreTheme(_settings.Appearance?.ColorTheme) == "Light")
         {
             // Light テーマ: 左右線はスキップ、下辺は SeparatorLine で弱めに描画
             using (var pen = new Pen(MidFDColors.SeparatorLine, 1))
@@ -17495,7 +18222,17 @@ private void InitializeBrowserTabControl()
     /// </summary>
         private void ApplyColorSettings()
     {
-        MidFDColors.ApplyTheme(_settings.Appearance?.ColorTheme);
+        // UIクローム/Viewerは既存テーマ基調を維持し、一覧配色プリセットには連動させない。
+        MidFDColors.ApplyTheme(FileListColorResolver.NormalizeCoreTheme(_settings.Appearance?.ColorTheme));
+
+        var uiThemeColors = UiThemeResolver.Resolve(_settings.Appearance);
+        MidFDColors.BorderLine = uiThemeColors.BorderColor;
+        MidFDColors.SeparatorLine = uiThemeColors.SeparatorColor;
+        MidFDColors.ViewerBack = uiThemeColors.ViewerBackColor;
+        MidFDColors.ViewerFore = uiThemeColors.ViewerForeColor;
+
+        _resolvedColors = FileListColorResolver.ResolveColors(_settings);
+
         var headerColors = GetHeaderColors();
         // Row 2 (現在は monolithic データストア、表示は Paint へ移譲)
         lblPage.ForeColor = headerColors.HeaderRow2Fore;
@@ -17514,70 +18251,87 @@ private void InitializeBrowserTabControl()
         lblFileStats.ForeColor = headerColors.HeaderMetaFore;
         lblFileStatsEx.ForeColor = headerColors.HeaderMetaFore;
         lblClock.ForeColor = headerColors.HeaderClockFore;
-        lblClock.BackColor = MidFDColors.ListNormalBack;
+        lblClock.BackColor = uiThemeColors.HeaderBackColor;
         // Row 4 (Path)
         lblPath.ForeColor = headerColors.HeaderPathFore;
         // Row 5 (Name)
         lblName.ForeColor = headerColors.HeaderNameFore;
         // 一覧部
-        fileListView.ForeColor = MidFDColors.ListNormalFore;
-        fileListView.BackColor = MidFDColors.ListNormalBack;
-        browserPanel.ForeColor = MidFDColors.ListNormalFore;
-        browserPanel.BackColor = MidFDColors.ListNormalBack;
-        mainMenuStrip.BackColor = MidFDColors.ListNormalBack;
-        mainMenuStrip.ForeColor = MidFDColors.ListNormalFore;
+        fileListView.ForeColor = _resolvedColors.NormalFile;
+        fileListView.BackColor = _resolvedColors.Background;
+        browserPanel.ForeColor = _resolvedColors.NormalFile;
+        browserPanel.BackColor = _resolvedColors.Background;
+        mainMenuStrip.BackColor = uiThemeColors.ChromeBackColor;
+        mainMenuStrip.ForeColor = uiThemeColors.ChromeForeColor;
         foreach (ToolStripMenuItem rootItem in mainMenuStrip.Items.OfType<ToolStripMenuItem>())
         {
-            rootItem.BackColor = MidFDColors.ListNormalBack;
-            rootItem.ForeColor = MidFDColors.ListNormalFore;
-            ApplyDropDownTheme(rootItem);
+            rootItem.BackColor = uiThemeColors.ChromeBackColor;
+            rootItem.ForeColor = uiThemeColors.ChromeForeColor;
+            ApplyDropDownTheme(rootItem, uiThemeColors.ChromeBackColor, uiThemeColors.ChromeForeColor);
         }
-        viewerPanel.BackColor = MidFDColors.ViewerBack;
-        viewerTextBox.BackColor = MidFDColors.ViewerBack;
-        viewerTextBox.ForeColor = MidFDColors.ViewerFore;
-        viewerMessageLabel.BackColor = MidFDColors.ViewerBack;
-        viewerMessageLabel.ForeColor = MidFDColors.ViewerFore;
+        viewerPanel.BackColor = uiThemeColors.ViewerBackColor;
+        viewerTextBox.BackColor = uiThemeColors.ViewerBackColor;
+        viewerTextBox.ForeColor = uiThemeColors.ViewerForeColor;
+        viewerMessageLabel.BackColor = uiThemeColors.ViewerBackColor;
+        viewerMessageLabel.ForeColor = uiThemeColors.ViewerForeColor;
         // セパレーター
-        sepBeforeTopPanel.BackColor = MidFDColors.BorderLine;
-        sepAfterRow2.BackColor = MidFDColors.SeparatorLine;
-        sepAfterRow3.BackColor = MidFDColors.SeparatorLine;
-        sepAfterRow4.BackColor = MidFDColors.BorderLine;
+        sepBeforeTopPanel.BackColor = uiThemeColors.BorderColor;
+        sepAfterRow2.BackColor = uiThemeColors.SeparatorColor;
+        sepAfterRow3.BackColor = uiThemeColors.SeparatorColor;
+        sepAfterRow4.BackColor = uiThemeColors.BorderColor;
         // 背景色の一貫性
-        outerHostPanel.BackColor = MidFDColors.ListNormalBack;
-        mainAreaPanel.BackColor = MidFDColors.ListNormalBack;
-        headerPanel.BackColor = MidFDColors.ListNormalBack;
-        topPanel.BackColor = MidFDColors.ListNormalBack;
-        infoRow2Panel.BackColor = MidFDColors.ListNormalBack;
-        infoRow3Panel.BackColor = MidFDColors.ListNormalBack;
-        infoRow4Panel.BackColor = MidFDColors.ListNormalBack;
-        titleHeaderPanel.BackColor = MidFDColors.ListNormalBack;
-        contentFramePanel.BackColor = MidFDColors.ListNormalBack;
-        functionBarPanel.BackColor = MidFDColors.ListNormalBack;
+        outerHostPanel.BackColor = uiThemeColors.ChromeBackColor;
+        mainAreaPanel.BackColor = uiThemeColors.ChromeBackColor;
+        headerPanel.BackColor = uiThemeColors.HeaderBackColor;
+        topPanel.BackColor = uiThemeColors.HeaderBackColor;
+        infoRow2Panel.BackColor = uiThemeColors.HeaderBackColor;
+        infoRow3Panel.BackColor = uiThemeColors.HeaderBackColor;
+        infoRow4Panel.BackColor = uiThemeColors.HeaderBackColor;
+        titleHeaderPanel.BackColor = uiThemeColors.HeaderBackColor;
+        contentFramePanel.BackColor = uiThemeColors.HeaderBackColor;
+        functionBarPanel.BackColor = uiThemeColors.ChromeBackColor;
+
+        headerZone1.BackColor = uiThemeColors.HeaderBackColor;
+        headerZone2.BackColor = uiThemeColors.HeaderBackColor;
+        headerZone3.BackColor = uiThemeColors.HeaderBackColor;
+        headerZone4.BackColor = uiThemeColors.HeaderBackColor;
+        lblClock.BackColor = uiThemeColors.HeaderBackColor;
+        lblPath.BackColor = uiThemeColors.HeaderBackColor;
+        lblSort.BackColor = uiThemeColors.HeaderBackColor;
+        lblItemAttr.BackColor = uiThemeColors.HeaderBackColor;
+        lblFileDate.BackColor = uiThemeColors.HeaderBackColor;
+        lblFileStats.BackColor = uiThemeColors.HeaderBackColor;
+        lblFileStatsEx.BackColor = uiThemeColors.HeaderBackColor;
+        lblName.BackColor = uiThemeColors.HeaderBackColor;
+        lblTitle.BackColor = uiThemeColors.HeaderBackColor;
+
         // FunctionBar のラベル色を更新
         if (lblFuncKeys != null)
         {
             foreach (var lbl in lblFuncKeys)
             {
-                lbl.BackColor = MidFDColors.ListNormalBack;
-                lbl.ForeColor = MidFDColors.ListNormalFore;
+                lbl.BackColor = uiThemeColors.ChromeBackColor;
+                lbl.ForeColor = uiThemeColors.ChromeForeColor;
             }
         }
-        statusStrip.BackColor = MidFDColors.ListNormalBack;
-        statusStrip.ForeColor = MidFDColors.ListNormalFore;
+        statusStrip.BackColor = uiThemeColors.StatusBackColor;
+        statusStrip.ForeColor = uiThemeColors.StatusForeColor;
+        statusLabel.BackColor = uiThemeColors.StatusBackColor;
+        statusLabel.ForeColor = uiThemeColors.StatusForeColor;
         if (_browserTabHostPanel != null)
         {
-            _browserTabHostPanel.BackColor = MidFDColors.ListNormalBack;
+            _browserTabHostPanel.BackColor = uiThemeColors.ChromeBackColor;
         }
         if (_browserTabStrip != null)
         {
             ApplyBrowserTabStripDisplaySettings();
-            _browserTabStrip.BackColor = MidFDColors.ListNormalBack;
-            _browserTabStrip.ForeColor = MidFDColors.ListNormalFore;
+            _browserTabStrip.BackColor = uiThemeColors.ChromeBackColor;
+            _browserTabStrip.ForeColor = uiThemeColors.ChromeForeColor;
             _browserTabStrip.ActiveTabBackColor = MidFDColors.ListSelectedBack;
-            _browserTabStrip.InactiveTabBackColor = MidFDColors.ListNormalBack;
-            _browserTabStrip.TabBorderColor = MidFDColors.BorderLine;
-            _browserTabStrip.ActiveTabTextColor = _settings.Appearance?.ColorTheme == "Light" ? Color.Black : Color.Yellow;
-            _browserTabStrip.InactiveTabTextColor = MidFDColors.ListNormalFore;
+            _browserTabStrip.InactiveTabBackColor = uiThemeColors.ChromeBackColor;
+            _browserTabStrip.TabBorderColor = uiThemeColors.BorderColor;
+            _browserTabStrip.ActiveTabTextColor = uiThemeColors.AccentColor;
+            _browserTabStrip.InactiveTabTextColor = uiThemeColors.ChromeForeColor;
             _browserTabStrip.Invalidate();
         }
         foreach (ListViewItem item in fileListView.Items)
@@ -17590,17 +18344,17 @@ private void InitializeBrowserTabControl()
         fileListView.Invalidate();
         browserPanel.Invalidate();
     }
-    private void ApplyDropDownTheme(ToolStripDropDownItem item)
+    private void ApplyDropDownTheme(ToolStripDropDownItem item, Color backColor, Color foreColor)
     {
-        item.DropDown.BackColor = MidFDColors.ListNormalBack;
-        item.DropDown.ForeColor = MidFDColors.ListNormalFore;
+        item.DropDown.BackColor = backColor;
+        item.DropDown.ForeColor = foreColor;
         foreach (ToolStripItem child in item.DropDownItems)
         {
-            child.BackColor = MidFDColors.ListNormalBack;
-            child.ForeColor = MidFDColors.ListNormalFore;
+            child.BackColor = backColor;
+            child.ForeColor = foreColor;
             if (child is ToolStripDropDownItem childDropDown)
             {
-                ApplyDropDownTheme(childDropDown);
+                ApplyDropDownTheme(childDropDown, backColor, foreColor);
             }
         }
     }
@@ -17619,47 +18373,63 @@ private void InitializeBrowserTabControl()
     }
     private HeaderColorPalette GetHeaderColors()
     {
-        return _settings.Appearance?.ColorTheme switch
+        // ColorTheme から UI 基調色を自動解決し、手動指定ON時はその文字色を優先する。
+        string resolvedPreset = UiThemeResolver.MapFromDisplayColor(_settings.Appearance?.ColorTheme);
+        var resolvedUiColors = UiThemeResolver.Resolve(_settings.Appearance);
+        bool useCustomUiTheme = _settings.Appearance?.CustomUiThemeColorsEnabled == true;
+
+        return resolvedPreset switch
         {
-            "Green" => new HeaderColorPalette
+            "Terminal Green" => new HeaderColorPalette
             {
-                HeaderTitleFore = Color.Yellow,
-                HeaderClockFore = Color.Yellow,
-                HeaderRow2Fore = Color.Lime,
+                HeaderTitleFore = useCustomUiTheme ? resolvedUiColors.ChromeForeColor : Color.Yellow,
+                HeaderClockFore = useCustomUiTheme ? resolvedUiColors.ChromeForeColor : Color.Yellow,
+                HeaderRow2Fore = useCustomUiTheme ? resolvedUiColors.ChromeForeColor : Color.Lime,
                 HeaderRow2Value = Color.White,
-                HeaderPathFore = Color.Lime,
-                HeaderMetaFore = Color.Lime,
-                HeaderNameFore = Color.LightGreen
+                HeaderPathFore = useCustomUiTheme ? resolvedUiColors.ChromeForeColor : Color.Lime,
+                HeaderMetaFore = useCustomUiTheme ? resolvedUiColors.ChromeForeColor : Color.Lime,
+                HeaderNameFore = useCustomUiTheme ? resolvedUiColors.ChromeForeColor : Color.LightGreen
             },
             "Amber" => new HeaderColorPalette
             {
-                HeaderTitleFore = Color.FromArgb(255, 220, 120),
-                HeaderClockFore = Color.FromArgb(255, 220, 120),
-                HeaderRow2Fore = Color.FromArgb(255, 190, 80),
+                HeaderTitleFore = useCustomUiTheme ? resolvedUiColors.ChromeForeColor : Color.FromArgb(255, 220, 120),
+                HeaderClockFore = useCustomUiTheme ? resolvedUiColors.ChromeForeColor : Color.FromArgb(255, 220, 120),
+                HeaderRow2Fore = useCustomUiTheme ? resolvedUiColors.ChromeForeColor : Color.FromArgb(255, 190, 80),
                 HeaderRow2Value = Color.White,
-                HeaderPathFore = Color.FromArgb(255, 210, 120),
-                HeaderMetaFore = Color.FromArgb(255, 210, 120),
-                HeaderNameFore = Color.FromArgb(255, 235, 180)
+                HeaderPathFore = useCustomUiTheme ? resolvedUiColors.ChromeForeColor : Color.FromArgb(255, 210, 120),
+                HeaderMetaFore = useCustomUiTheme ? resolvedUiColors.ChromeForeColor : Color.FromArgb(255, 210, 120),
+                HeaderNameFore = useCustomUiTheme ? resolvedUiColors.ChromeForeColor : Color.FromArgb(255, 235, 180)
             },
-                        "Light" => new HeaderColorPalette
+            "Classic Blue" => new HeaderColorPalette
             {
-                HeaderTitleFore = Color.Black,
-                HeaderClockFore = Color.Black,
-                HeaderRow2Fore = Color.FromArgb(80, 80, 80),
-                HeaderRow2Value = Color.Black,
-                HeaderPathFore = Color.Black,
-                HeaderMetaFore = Color.FromArgb(80, 80, 80),
-                HeaderNameFore = Color.Black
+                HeaderTitleFore = useCustomUiTheme ? resolvedUiColors.ChromeForeColor : Color.Cyan,
+                HeaderClockFore = useCustomUiTheme ? resolvedUiColors.ChromeForeColor : Color.Cyan,
+                HeaderRow2Fore = useCustomUiTheme ? resolvedUiColors.ChromeForeColor : Color.Cyan,
+                HeaderRow2Value = Color.White,
+                HeaderPathFore = useCustomUiTheme ? resolvedUiColors.ChromeForeColor : Color.Cyan,
+                HeaderMetaFore = useCustomUiTheme ? resolvedUiColors.ChromeForeColor : Color.Cyan,
+                HeaderNameFore = useCustomUiTheme ? resolvedUiColors.ChromeForeColor : Color.LightCyan
             },
+            "Light" => new HeaderColorPalette
+            {
+                HeaderTitleFore = useCustomUiTheme ? resolvedUiColors.ChromeForeColor : Color.Black,
+                HeaderClockFore = useCustomUiTheme ? resolvedUiColors.ChromeForeColor : Color.Black,
+                HeaderRow2Fore = useCustomUiTheme ? resolvedUiColors.ChromeForeColor : Color.FromArgb(80, 80, 80),
+                HeaderRow2Value = Color.Black,
+                HeaderPathFore = useCustomUiTheme ? resolvedUiColors.ChromeForeColor : Color.Black,
+                HeaderMetaFore = useCustomUiTheme ? resolvedUiColors.ChromeForeColor : Color.FromArgb(80, 80, 80),
+                HeaderNameFore = useCustomUiTheme ? resolvedUiColors.ChromeForeColor : Color.Black
+            },
+            // "MidFD Default" / ClassicCyan連動 / Default: 黒+シアン基調（従来MidFD寄り）
             _ => new HeaderColorPalette
             {
-                HeaderTitleFore = Color.Yellow,
-                HeaderClockFore = Color.Yellow,
-                HeaderRow2Fore = Color.Cyan,
+                HeaderTitleFore = useCustomUiTheme ? resolvedUiColors.ChromeForeColor : Color.Yellow,
+                HeaderClockFore = useCustomUiTheme ? resolvedUiColors.ChromeForeColor : Color.Yellow,
+                HeaderRow2Fore = useCustomUiTheme ? resolvedUiColors.ChromeForeColor : Color.Cyan,
                 HeaderRow2Value = Color.White,
-                HeaderPathFore = Color.Cyan,
-                HeaderMetaFore = Color.Cyan,
-                HeaderNameFore = Color.LightCyan
+                HeaderPathFore = useCustomUiTheme ? resolvedUiColors.ChromeForeColor : Color.Cyan,
+                HeaderMetaFore = useCustomUiTheme ? resolvedUiColors.ChromeForeColor : Color.Cyan,
+                HeaderNameFore = useCustomUiTheme ? resolvedUiColors.ChromeForeColor : Color.LightCyan
             }
         };
     }
@@ -18007,6 +18777,19 @@ private void InitializeBrowserTabControl()
     {
         string? fullPath = GetSelectedItemFullPathForHeaderCopy();
         CopyTextToClipboardWithStatus(fullPath, "フルパスをコピーしました。");
+    }
+    private void CopySelectedOrMarkedFullPathsToClipboard()
+    {
+        SelectionResult selection = ResolveSelection();
+        if (!selection.FullPaths.Any())
+        {
+            ShowStatusMessage("コピーできるパスがありません。");
+            return;
+        }
+
+        CopyTextToClipboardWithStatus(
+            string.Join(Environment.NewLine, selection.FullPaths),
+            $"{selection.FullPaths.Count} 件のパスをクリップボードにコピーしました。");
     }
     private void CopySelectedItemNameFromHeader()
     {

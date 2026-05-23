@@ -48,32 +48,44 @@ public static class FileOperationService
     /// <summary>完全に削除する (物理削除)</summary>
     public static void Delete(string path)
     {
-        RemoveReadOnlyRecursive(path);
-        
         if (Directory.Exists(path))
         {
-            Directory.Delete(path, true);
+            DeleteDirectoryTreeWithoutFollowingReparsePoints(path);
         }
         else if (File.Exists(path))
         {
+            File.SetAttributes(path, FileAttributes.Normal);
             File.Delete(path);
         }
     }
 
-    private static void RemoveReadOnlyRecursive(string path)
+    private static void DeleteDirectoryTreeWithoutFollowingReparsePoints(string directoryPath)
     {
-        if (Directory.Exists(path))
+        if (ReparsePointHelper.IsReparsePoint(directoryPath))
         {
-            foreach (var subPath in Directory.GetFileSystemEntries(path))
+            Directory.Delete(directoryPath, false);
+            return;
+        }
+
+        foreach (string filePath in Directory.EnumerateFiles(directoryPath))
+        {
+            File.SetAttributes(filePath, FileAttributes.Normal);
+            File.Delete(filePath);
+        }
+
+        foreach (string childDirectory in Directory.EnumerateDirectories(directoryPath))
+        {
+            if (ReparsePointHelper.IsReparsePoint(childDirectory))
             {
-                RemoveReadOnlyRecursive(subPath);
+                Directory.Delete(childDirectory, false);
+                continue;
             }
-            File.SetAttributes(path, FileAttributes.Normal);
+
+            DeleteDirectoryTreeWithoutFollowingReparsePoints(childDirectory);
         }
-        else if (File.Exists(path))
-        {
-            File.SetAttributes(path, FileAttributes.Normal);
-        }
+
+        File.SetAttributes(directoryPath, FileAttributes.Normal);
+        Directory.Delete(directoryPath, false);
     }
 
     public static void Copy(string sourcePath, string destPath)
@@ -119,8 +131,13 @@ public static class FileOperationService
             {
                 if (Directory.Exists(sourcePath))
                 {
+                    if (ReparsePointHelper.IsReparsePoint(sourcePath))
+                    {
+                        throw new IOException($"Reparse point directory move fallback is not allowed: {sourcePath}");
+                    }
+
                     CopyDirectory(sourcePath, destPath);
-                    Directory.Delete(sourcePath, true);
+                    DeleteDirectoryTreeWithoutFollowingReparsePoints(sourcePath);
                     if (!suppressLogging) LogService.Info($"[FileOp] Directory Move fallback (Copy+Delete) success: {sourcePath}");
                 }
                 else
@@ -155,6 +172,9 @@ public static class FileOperationService
         if (!dir.Exists)
             throw new DirectoryNotFoundException($"Source directory not found: {dir.FullName}");
 
+        if (ReparsePointHelper.IsReparsePoint(sourceDir))
+            throw new IOException($"Reparse point directory copy is not allowed: {sourceDir}");
+
         DirectoryInfo[] dirs = dir.GetDirectories();
         Directory.CreateDirectory(destinationDir);
 
@@ -178,27 +198,43 @@ public static class FileOperationService
             throw new DirectoryNotFoundException($"Source directory not found: {dir.FullName}");
 
         var entries = new List<DirectoryCopyPlanEntry>();
+        var stack = new Stack<string>();
+        stack.Push(sourceDir);
 
-        foreach (string directoryPath in Directory.EnumerateDirectories(sourceDir, "*", SearchOption.AllDirectories))
+        while (stack.Count > 0)
         {
-            string relativePath = Path.GetRelativePath(sourceDir, directoryPath);
-            entries.Add(new DirectoryCopyPlanEntry
+            string current = stack.Pop();
+            if (!ReparsePointHelper.ShouldRecurseIntoDirectory(current))
             {
-                SourcePath = directoryPath,
-                DestinationPath = Path.Combine(destinationDir, relativePath),
-                IsDirectory = true
-            });
-        }
+                continue;
+            }
 
-        foreach (string filePath in Directory.EnumerateFiles(sourceDir, "*", SearchOption.AllDirectories))
-        {
-            string relativePath = Path.GetRelativePath(sourceDir, filePath);
-            entries.Add(new DirectoryCopyPlanEntry
+            foreach (string directoryPath in Directory.EnumerateDirectories(current))
             {
-                SourcePath = filePath,
-                DestinationPath = Path.Combine(destinationDir, relativePath),
-                IsDirectory = false
-            });
+                string relativePath = Path.GetRelativePath(sourceDir, directoryPath);
+                entries.Add(new DirectoryCopyPlanEntry
+                {
+                    SourcePath = directoryPath,
+                    DestinationPath = Path.Combine(destinationDir, relativePath),
+                    IsDirectory = true
+                });
+
+                if (ReparsePointHelper.ShouldRecurseIntoDirectory(directoryPath))
+                {
+                    stack.Push(directoryPath);
+                }
+            }
+
+            foreach (string filePath in Directory.EnumerateFiles(current))
+            {
+                string relativePath = Path.GetRelativePath(sourceDir, filePath);
+                entries.Add(new DirectoryCopyPlanEntry
+                {
+                    SourcePath = filePath,
+                    DestinationPath = Path.Combine(destinationDir, relativePath),
+                    IsDirectory = false
+                });
+            }
         }
 
         return entries;
@@ -411,6 +447,21 @@ public static class FileOperationService
                 };
             }
 
+            if (ReparsePointHelper.IsReparsePoint(directoryPath))
+            {
+                if (Directory.Exists(destinationSubDirectory))
+                {
+                    return new DirectoryPasteMergeGuardResult
+                    {
+                        CanMerge = false,
+                        AbortReason = DirectoryPasteMergeAbortReason.TypeMismatch,
+                        BlockingPath = destinationSubDirectory,
+                        Message = $"移動先に同名フォルダがあるためリンクを安全に移動できません。\n宛先: {destinationSubDirectory}"
+                    };
+                }
+                continue;
+            }
+
             if (Directory.Exists(destinationSubDirectory))
             {
                 var childResult = AnalyzeDirectoryPasteCutMergeRecursive(directoryPath, destinationSubDirectory);
@@ -432,6 +483,17 @@ public static class FileOperationService
 
     public static void MoveDirectoryIntoExisting(string sourceDir, string destinationDir)
     {
+        if (ReparsePointHelper.IsReparsePoint(sourceDir))
+        {
+            string destinationLinkPath = Path.Combine(destinationDir, Path.GetFileName(sourceDir));
+            if (File.Exists(destinationLinkPath) || Directory.Exists(destinationLinkPath))
+            {
+                throw new IOException($"移動先に同名項目が残っています: {destinationLinkPath}");
+            }
+            Directory.Move(sourceDir, destinationLinkPath);
+            return;
+        }
+
         var guard = AnalyzeDirectoryMoveMerge(sourceDir, destinationDir);
         if (!guard.CanMerge)
         {
@@ -451,6 +513,17 @@ public static class FileOperationService
 
         foreach (string directoryPath in Directory.EnumerateDirectories(sourceDir))
         {
+            if (ReparsePointHelper.IsReparsePoint(directoryPath))
+            {
+                string destinationLinkPath = Path.Combine(destinationDir, Path.GetFileName(directoryPath));
+                if (File.Exists(destinationLinkPath) || Directory.Exists(destinationLinkPath))
+                {
+                    throw new IOException($"移動先に同名項目が残っています: {destinationLinkPath}");
+                }
+                Directory.Move(directoryPath, destinationLinkPath);
+                continue;
+            }
+
             string destinationSubDirectory = Path.Combine(destinationDir, Path.GetFileName(directoryPath));
             if (Directory.Exists(destinationSubDirectory))
             {
@@ -553,6 +626,21 @@ public static class FileOperationService
                 };
             }
 
+            if (ReparsePointHelper.IsReparsePoint(directoryPath))
+            {
+                if (Directory.Exists(destinationSubDirectory))
+                {
+                    return new DirectoryMoveMergeGuardResult
+                    {
+                        CanMerge = false,
+                        AbortReason = DirectoryMoveMergeAbortReason.TypeMismatch,
+                        BlockingPath = destinationSubDirectory,
+                        Message = $"移動先に同名フォルダがあるためリンクを安全に移動できません。\n宛先: {destinationSubDirectory}"
+                    };
+                }
+                continue;
+            }
+
             if (Directory.Exists(destinationSubDirectory))
             {
                 var childResult = AnalyzeDirectoryMoveMergeRecursive(directoryPath, destinationSubDirectory);
@@ -600,6 +688,21 @@ public static class FileOperationService
                     BlockingPath = destinationSubDirectory,
                     Message = $"型が異なるためフォルダ統合移動はできません。\n宛先: {destinationSubDirectory}"
                 };
+            }
+
+            if (ReparsePointHelper.IsReparsePoint(directoryPath))
+            {
+                if (Directory.Exists(destinationSubDirectory))
+                {
+                    return new DirectoryMoveMergeGuardResult
+                    {
+                        CanMerge = false,
+                        AbortReason = DirectoryMoveMergeAbortReason.TypeMismatch,
+                        BlockingPath = destinationSubDirectory,
+                        Message = $"移動先に同名フォルダがあるためリンクを安全に移動できません。\n宛先: {destinationSubDirectory}"
+                    };
+                }
+                continue;
             }
 
             if (Directory.Exists(destinationSubDirectory))

@@ -356,11 +356,13 @@ public static class PreviewService
                 // 1. BOMチェック (StreamReader の標準機能に相当する処理)
                 if (readCount >= 3 && buffer[0] == 0xEF && buffer[1] == 0xBB && buffer[2] == 0xBF)
                 {
-                    return System.Text.Encoding.UTF8.GetString(buffer, 3, readCount - 3) + (fs.Length > maxBytes ? "\n\n[... 表示節減されました ...]" : "");
+                    return NormalizeNewlinesForViewer(System.Text.Encoding.UTF8.GetString(buffer, 3, readCount - 3))
+                        + (fs.Length > maxBytes ? $"{Environment.NewLine}{Environment.NewLine}[... 表示節減されました ...]" : "");
                 }
                 if (readCount >= 2 && buffer[0] == 0xFF && buffer[1] == 0xFE)
                 {
-                    return System.Text.Encoding.Unicode.GetString(buffer, 2, readCount - 2) + (fs.Length > maxBytes ? "\n\n[... 表示節減されました ...]" : "");
+                    return NormalizeNewlinesForViewer(System.Text.Encoding.Unicode.GetString(buffer, 2, readCount - 2))
+                        + (fs.Length > maxBytes ? $"{Environment.NewLine}{Environment.NewLine}[... 表示節減されました ...]" : "");
                 }
 
                 // 2. BOMなし UTF-8 試行 (例外を投げる設定で厳密に判定)
@@ -369,8 +371,8 @@ public static class PreviewService
                     var utf8Strict = new System.Text.UTF8Encoding(false, true);
                     // 読み込み上限境界でマルチバイト文字が切断されている場合に備え、安全な長さまでトリミングする
                     int safeLength = GetSafeUtf8Length(buffer, readCount);
-                    string utf8Result = utf8Strict.GetString(buffer, 0, safeLength);
-                    return utf8Result + (fs.Length > maxBytes ? "\n\n[... 表示節減されました ...]" : "");
+                    string utf8Result = NormalizeNewlinesForViewer(utf8Strict.GetString(buffer, 0, safeLength));
+                    return utf8Result + (fs.Length > maxBytes ? $"{Environment.NewLine}{Environment.NewLine}[... 表示節減されました ...]" : "");
                 }
                 catch (ArgumentException)
                 {
@@ -380,9 +382,22 @@ public static class PreviewService
                 // 3. Shift_JIS (CP932) フォールバック
                 System.Text.Encoding.RegisterProvider(System.Text.CodePagesEncodingProvider.Instance);
                 var sjis = System.Text.Encoding.GetEncoding("shift_jis");
-                return sjis.GetString(buffer, 0, readCount) + (fs.Length > maxBytes ? "\n\n[... 表示節減されました ...]" : "");
+                return NormalizeNewlinesForViewer(sjis.GetString(buffer, 0, readCount))
+                    + (fs.Length > maxBytes ? $"{Environment.NewLine}{Environment.NewLine}[... 表示節減されました ...]" : "");
             }
         }, token);
+    }
+
+    private static string NormalizeNewlinesForViewer(string text)
+    {
+        if (string.IsNullOrEmpty(text))
+        {
+            return string.Empty;
+        }
+
+        text = text.Replace("\r\n", "\n");
+        text = text.Replace('\r', '\n');
+        return text.Replace("\n", Environment.NewLine);
     }
 
     /// <summary>

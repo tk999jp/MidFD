@@ -8,6 +8,7 @@ namespace MidFD.Services;
 /// </summary>
 public sealed class FileOperationUndoRedoService
 {
+    private const int MaxBatchCount = 10;
     private readonly Stack<FileOperationUndoRedoBatch> _undoStack = new();
     private readonly Stack<FileOperationUndoRedoBatch> _redoStack = new();
 
@@ -28,6 +29,7 @@ public sealed class FileOperationUndoRedoService
             Items = normalizedItems,
             IsPartialCancellation = isPartialCancellation
         });
+        TrimStackToMax(_undoStack, MaxBatchCount);
         _redoStack.Clear();
     }
 
@@ -63,6 +65,7 @@ public sealed class FileOperationUndoRedoService
         }
 
         _redoStack.Push(_undoStack.Pop());
+        TrimStackToMax(_redoStack, MaxBatchCount);
     }
 
     public void CommitRedo()
@@ -73,6 +76,7 @@ public sealed class FileOperationUndoRedoService
         }
 
         _undoStack.Push(_redoStack.Pop());
+        TrimStackToMax(_undoStack, MaxBatchCount);
     }
 
     public void Reset()
@@ -171,6 +175,24 @@ public sealed class FileOperationUndoRedoService
         var preserved = stack
             .Where(batch => !predicate(batch))
             .Reverse()
+            .ToList();
+        stack.Clear();
+        foreach (FileOperationUndoRedoBatch batch in preserved)
+        {
+            stack.Push(batch);
+        }
+    }
+
+    private static void TrimStackToMax(Stack<FileOperationUndoRedoBatch> stack, int maxCount)
+    {
+        if (maxCount <= 0 || stack.Count <= maxCount)
+        {
+            return;
+        }
+
+        var preserved = stack
+            .Reverse()
+            .Skip(stack.Count - maxCount)
             .ToList();
         stack.Clear();
         foreach (FileOperationUndoRedoBatch batch in preserved)

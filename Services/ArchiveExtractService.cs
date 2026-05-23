@@ -121,8 +121,19 @@ public static class ArchiveExtractService
                 try
                 {
                     Directory.CreateDirectory(request.DestinationDirectory);
-                    ZipFallbackService.Unpack(request.ArchivePath, request.DestinationDirectory);
-                    return new ArchiveExtractResult { Success = true, DestinationDirectory = request.DestinationDirectory };
+                    var entriesToExtract = request.ExtractAll ? null : entryPaths;
+                    ZipFallbackService.Unpack(
+                        request.ArchivePath,
+                        request.DestinationDirectory,
+                        entriesToExtract,
+                        token,
+                        onOutputLine);
+                    return new ArchiveExtractResult
+                    {
+                        Success = true,
+                        DestinationDirectory = request.DestinationDirectory,
+                        ExtractedEntryCount = request.ExtractAll ? 0 : entryPaths.Length
+                    };
                 }
                 catch (Exception ex)
                 {

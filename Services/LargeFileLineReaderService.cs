@@ -39,6 +39,7 @@ public static class LargeFileLineReaderService
             int linesFound = 0;
             long scanLimit = Math.Min(Math.Max(0, maxInitialScanBytes), state.TotalBytes);
             int carry = -1;
+            bool pendingCr = false;
 
             while (linesFound < count && currentOffset < scanLimit && (bytesRead = fs.Read(buffer, 0, buffer.Length)) > 0)
             {
@@ -56,17 +57,21 @@ public static class LargeFileLineReaderService
                 }
                 else
                 {
-                    for (int i = 0; i < bytesRead && linesFound < count; i++)
-                    {
-                        if (buffer[i] == 0x0A)
-                        {
-                            state.LineOffsets.Add(currentOffset + i + 1);
-                            linesFound++;
-                        }
-                    }
+                    linesFound += AddSingleByteLineOffsets(
+                        state.LineOffsets,
+                        buffer,
+                        bytesRead,
+                        currentOffset,
+                        ref pendingCr,
+                        count - linesFound);
                 }
 
                 currentOffset += bytesRead;
+            }
+
+            if (pendingCr && linesFound < count)
+            {
+                state.LineOffsets.Add(currentOffset);
             }
         }, token);
     }
@@ -100,6 +105,7 @@ public static class LargeFileLineReaderService
             int bytesRead;
             int lastProgress = -1;
             int carry = -1;
+            bool pendingCr = false;
 
             while ((bytesRead = fs.Read(buffer, 0, buffer.Length)) > 0)
             {
@@ -110,13 +116,7 @@ public static class LargeFileLineReaderService
                 }
                 else
                 {
-                    for (int i = 0; i < bytesRead; i++)
-                    {
-                        if (buffer[i] == 0x0A)
-                        {
-                            offsets.Add(currentOffset + i + 1);
-                        }
-                    }
+                    AddSingleByteLineOffsets(offsets, buffer, bytesRead, currentOffset, ref pendingCr);
                 }
 
                 currentOffset += bytesRead;
@@ -130,6 +130,11 @@ public static class LargeFileLineReaderService
                         progressCallback(progress);
                     }
                 }
+            }
+
+            if (pendingCr)
+            {
+                offsets.Add(currentOffset);
             }
 
             return new LargeFileLineIndexResult(offsets, totalBytes);
@@ -269,6 +274,47 @@ public static class LargeFileLineReaderService
 
         int normalizedStart = Math.Clamp(startColumn, 0, lineText.Length);
         return lineText.IndexOf(query, normalizedStart, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static int AddSingleByteLineOffsets(
+        List<long> offsets,
+        byte[] buffer,
+        int bytesRead,
+        long currentOffset,
+        ref bool pendingCr,
+        int maxLinesToAdd = int.MaxValue)
+    {
+        int added = 0;
+        for (int i = 0; i < bytesRead && added < maxLinesToAdd; i++)
+        {
+            byte current = buffer[i];
+            if (pendingCr)
+            {
+                if (current == 0x0A)
+                {
+                    offsets.Add(currentOffset + i + 1);
+                    added++;
+                    pendingCr = false;
+                    continue;
+                }
+
+                offsets.Add(currentOffset + i);
+                added++;
+                pendingCr = false;
+            }
+
+            if (current == 0x0D)
+            {
+                pendingCr = true;
+            }
+            else if (current == 0x0A)
+            {
+                offsets.Add(currentOffset + i + 1);
+                added++;
+            }
+        }
+
+        return added;
     }
 
     private static bool IsUtf16Encoding(Encoding? encoding)

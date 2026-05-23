@@ -1,4 +1,4 @@
-﻿using System.Text.Json;
+using System.Text.Json;
 using System.Diagnostics;
 using MidFD.Models;
 using MidFD.Services.TrashManifestStore;
@@ -43,10 +43,15 @@ public static class MidFdManagedTrashService
         }
 
         ManifestStore = TrashManifestStoreFactory.CreateStore(
-            mode,
+            ref mode,
             ManifestPath,
             SqliteManifestPath,
             JsonOptions);
+
+        if (settings != null && settings.FileOperations != null)
+        {
+            settings.FileOperations.ManagedTrashStoreMode = mode;
+        }
 
         // Telemetry
         var manifest = LoadManifest();

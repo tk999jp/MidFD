@@ -6768,8 +6768,9 @@ private void InitializeBrowserTabControl()
         int totalItems = fileListView.Items.Count;
         Font font = browserPanel.Font;
         int itemsPerPage = GetBrowserItemsPerPage(out int itemHeight, out int rowsPerColumn);
+        int effectiveColumnCount = GetEffectiveBrowserColumnCount();
         // 列幅の計算
-        int colWidth = browserPanel.Width / _columnCount;
+        int colWidth = Math.Max(1, browserPanel.Width / effectiveColumnCount);
         // 現在のページをカーソル位置から計算
         int currentPage = _browserCursorIndex / itemsPerPage;
         int startIndex = currentPage * itemsPerPage;
@@ -6826,6 +6827,11 @@ private void InitializeBrowserTabControl()
             if (fileDisplayMode != BrowserFileDisplayMode.NameOnly)
             {
                 detailDrawn = DrawBrowserItemTextWithDetails(g, item, textRect, font, fg, fileDisplayMode);
+                if (!detailDrawn && fileDisplayMode == BrowserFileDisplayMode.NameSizeDate)
+                {
+                    // 狭い列幅では日時欄を省略してサイズ表示まで維持する
+                    detailDrawn = DrawBrowserItemTextWithDetails(g, item, textRect, font, fg, BrowserFileDisplayMode.NameSize);
+                }
             }
             if (!detailDrawn)
             {
@@ -6890,11 +6896,8 @@ private void InitializeBrowserTabControl()
     private bool DrawBrowserItemTextWithDetails(Graphics g, ListViewItem item, Rectangle textRect, Font font, Color fg, BrowserFileDisplayMode mode)
     {
         const int minNameChars = 8;
-        const string dateSample = "00-00-00 00:00";
-        const string sizeSample = "9999.9M";
 
         bool isDirectory = IsDirectoryListItem(item);
-        bool showDirectoryMarker = _settings.Appearance?.ShowDirectoryMarker ?? true;
         bool showExtensions = _settings.Appearance?.ShowExtensions ?? true;
 
         if (isDirectory && item.Text == "..")
@@ -6903,9 +6906,14 @@ private void InitializeBrowserTabControl()
         }
 
         string dateText = item.SubItems.Count > 3 ? NormalizeBrowserDateText(item.SubItems[3].Text) : string.Empty;
+        if (DateTime.TryParse(item.SubItems.Count > 3 ? item.SubItems[3].Text : string.Empty, out DateTime parsedDate))
+        {
+            dateText = FileSystemItemFactory.FormatDisplayDate(parsedDate, _settings.Appearance?.DateFormat);
+        }
+
         string sizeText = isDirectory
             ? "<DIR>"
-            : (item.SubItems.Count > 2 ? item.SubItems[2].Text : string.Empty);
+            : BuildBrowserFileSizeText(item);
 
         bool includeDate = mode == BrowserFileDisplayMode.NameSizeDate;
         if (includeDate && string.IsNullOrWhiteSpace(dateText))
@@ -6918,7 +6926,9 @@ private void InitializeBrowserTabControl()
         }
 
         int charWidth = MeasureBrowserTextWidth(g, "0", font);
-        int gapWidth = charWidth;
+        int gapWidth = Math.Max(6, charWidth);
+        string sizeSample = GetBrowserSizeFieldSample();
+        string dateSample = GetBrowserDateFieldSample();
         int dateFieldWidth = includeDate
             ? Math.Max(MeasureBrowserTextWidth(g, dateSample, font), MeasureBrowserTextWidth(g, dateText, font))
             : 0;
@@ -6937,9 +6947,10 @@ private void InitializeBrowserTabControl()
             ? sizeFieldWidth + dateFieldWidth + (gapWidth * 2)
             : sizeFieldWidth + gapWidth;
         int remainingNameWidth = textRect.Width - reservedDetailWidth;
-        int preferredNameChars = includeDate ? 7 : 10;
+        int preferredNameChars = includeDate ? 14 : 18;
         int preferredNameWidth = charWidth * preferredNameChars;
-        int nameFieldWidth = Math.Max(minimumNameWidth, Math.Min(preferredNameWidth, remainingNameWidth));
+        int targetNameWidth = Math.Max(minimumNameWidth, preferredNameWidth);
+        int nameFieldWidth = Math.Max(minimumNameWidth, Math.Min(targetNameWidth, remainingNameWidth));
 
         Rectangle nameRect = new Rectangle(textRect.X, textRect.Y, nameFieldWidth, textRect.Height);
         Rectangle sizeRect = new Rectangle(nameRect.Right + gapWidth, textRect.Y, sizeFieldWidth, textRect.Height);
@@ -6972,7 +6983,7 @@ private void InitializeBrowserTabControl()
         TextRenderer.DrawText(g, sizeText, font, sizeRect, fg, Color.Transparent, TextFormatFlags.Right | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix);
         if (includeDate)
         {
-            TextRenderer.DrawText(g, dateText, font, dateRect, fg, Color.Transparent, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix);
+            TextRenderer.DrawText(g, dateText, font, dateRect, fg, Color.Transparent, TextFormatFlags.Right | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix);
         }
         return true;
     }
@@ -7098,6 +7109,59 @@ private void InitializeBrowserTabControl()
             font,
             new Size(int.MaxValue, int.MaxValue),
             TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix).Width;
+    }
+    private string BuildBrowserFileSizeText(ListViewItem item)
+    {
+        if (item.Tag is not string fullPath || string.IsNullOrWhiteSpace(fullPath))
+        {
+            return item.SubItems.Count > 2 ? item.SubItems[2].Text : string.Empty;
+        }
+
+        try
+        {
+            if (!File.Exists(fullPath))
+            {
+                return item.SubItems.Count > 2 ? item.SubItems[2].Text : string.Empty;
+            }
+
+            long length = new FileInfo(fullPath).Length;
+            return FileSystemItemFactory.FormatDisplaySize(length, _settings.Appearance?.SizeFormat);
+        }
+        catch
+        {
+            return item.SubItems.Count > 2 ? item.SubItems[2].Text : string.Empty;
+        }
+    }
+    private string GetBrowserDateFieldSample()
+    {
+        DateTime sampleDate = new DateTime(2099, 12, 31, 23, 59, 59);
+        return FileSystemItemFactory.FormatDisplayDate(sampleDate, _settings.Appearance?.DateFormat);
+    }
+    private string GetBrowserSizeFieldSample()
+    {
+        string? sizeFormat = _settings.Appearance?.SizeFormat;
+        return sizeFormat switch
+        {
+            "Bytes" => "9,999,999,999,999B",
+            "KB/MB" => "9,999.9GB",
+            _ => "999.99PB"
+        };
+    }
+    private int GetEffectiveBrowserColumnCount()
+    {
+        int desiredColumns = Math.Max(1, _columnCount);
+        int minimumColumnWidth = GetMinimumBrowserColumnWidthForMode(GetBrowserFileDisplayMode());
+        int maxColumnsByWidth = Math.Max(1, browserPanel.Width / Math.Max(1, minimumColumnWidth));
+        return Math.Max(1, Math.Min(desiredColumns, maxColumnsByWidth));
+    }
+    private static int GetMinimumBrowserColumnWidthForMode(BrowserFileDisplayMode mode)
+    {
+        return mode switch
+        {
+            BrowserFileDisplayMode.NameSize => 220,
+            BrowserFileDisplayMode.NameSizeDate => 340,
+            _ => 140
+        };
     }
     private void BrowserPanel_Resize(object? sender, EventArgs e)
     {
@@ -8015,17 +8079,18 @@ private void InitializeBrowserTabControl()
         // Phase 5-ui-visual-fix1.2: 実測ベースの行高を採用
         itemHeight = HeaderLayoutHelper.GetMeasuredLineHeight(browserPanel.Font, 4);
         rowsPerColumn = Math.Max(1, (browserPanel.Height - 10) / itemHeight);
-        return _columnCount * rowsPerColumn;
+        return GetEffectiveBrowserColumnCount() * rowsPerColumn;
     }
     private int CalculateBrowserIndexFromPoint(int x, int y)
     {
         if (fileListView.Items.Count == 0) return -1;
         int itemsPerPage = GetBrowserItemsPerPage(out int itemHeight, out int rowsPerColumn);
-        int colWidth = browserPanel.Width / _columnCount;
+        int effectiveColumnCount = GetEffectiveBrowserColumnCount();
+        int colWidth = Math.Max(1, browserPanel.Width / effectiveColumnCount);
         int targetCol = x / colWidth;
         int targetRow = y / itemHeight;
         // 論理的な行・列の範囲外なら無効
-        if (targetCol < 0 || targetCol >= _columnCount || targetRow < 0 || targetRow >= rowsPerColumn)
+        if (targetCol < 0 || targetCol >= effectiveColumnCount || targetRow < 0 || targetRow >= rowsPerColumn)
             return -1;
         int pageIndex = targetCol * rowsPerColumn + targetRow;
         int currentPage = _browserCursorIndex / itemsPerPage;

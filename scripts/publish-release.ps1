@@ -10,8 +10,8 @@ param (
 )
 
 # 1. Validation
-if ($ReleaseTag -notmatch '^v\d{4}\.\d{2}\.\d{2}$') {
-    Write-Error "ReleaseTag must follow the format 'vYYYY.MM.DD' (e.g., v2026.05.20)."
+if ($ReleaseTag -notmatch '^v\d{4}\.\d{2}\.\d{2}(\.\d+)?$') {
+    Write-Error "ReleaseTag must follow the format 'vYYYY.MM.DD' or 'vYYYY.MM.DD.N' (e.g., v2026.05.20, v2026.05.24.1)."
     exit 1
 }
 
@@ -46,10 +46,11 @@ $parts = $ReleaseTag.Substring(1).Split('.')
 $year = [int]$parts[0]
 $month = [int]$parts[1]
 $day = [int]$parts[2]
+$revision = if ($parts.Length -ge 4) { [int]$parts[3] } else { 0 }
 
-$Version = "$year.$month.$day"
-$AssemblyVersion = "$year.$month.$day.0"
-$FileVersion = "$year.$month.$day.0"
+$Version = "$year.$month.$day.$revision"
+$AssemblyVersion = "$year.$month.$day.$revision"
+$FileVersion = "$year.$month.$day.$revision"
 $InformationalVersion = $ReleaseTag
 
 Write-Host "--- Version Configurations ---"
@@ -101,6 +102,22 @@ dotnet publish $csprojPath `
 if ($LASTEXITCODE -ne 0) {
     Write-Error "dotnet publish failed."
     exit 1
+}
+
+# 5.5 Include public documentation and license in package
+$docsToCopy = @("README.md", "CHANGELOG.md", "LICENSE")
+foreach ($doc in $docsToCopy) {
+    $source = Join-Path $rootDir $doc
+    if (Test-Path $source) {
+        Copy-Item $source -Destination (Join-Path $tempPublishDir $doc) -Force
+    }
+}
+
+$userDocsSource = Join-Path $rootDir "UserDocs"
+$userDocsDest = Join-Path $tempPublishDir "UserDocs"
+if (Test-Path $userDocsSource) {
+    Remove-Item $userDocsDest -Recurse -Force -ErrorAction SilentlyContinue
+    Copy-Item $userDocsSource -Destination $userDocsDest -Recurse -Force
 }
 
 # 6. Create ZIP archive

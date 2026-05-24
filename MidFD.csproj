@@ -26,4 +26,11 @@
     </Content>
   </ItemGroup>
 
+  <ItemGroup>
+    <Compile Remove="artifacts\**\*;scratch\**\*" />
+    <EmbeddedResource Remove="artifacts\**\*;scratch\**\*" />
+    <Content Remove="artifacts\**\*;scratch\**\*" />
+    <None Remove="artifacts\**\*;scratch\**\*" />
+  </ItemGroup>
+
 </Project>

@@ -47,8 +47,9 @@ public static class SettingsManager
             var settings = JsonSerializer.Deserialize<AppSettings>(json, JsonOptions);
             AppSettings loadedSettings = settings ?? new AppSettings();
             MaterializeBrowserTabRestoreState(loadedSettings);
-            bool migrated = ApplyVideoStillInitialSecondsMigration(loadedSettings);
-            if (migrated)
+            bool videoStillMigrated = ApplyVideoStillInitialSecondsMigration(loadedSettings);
+            bool loggingMigrated = ApplyLoggingDefaultOffMigration(loadedSettings);
+            if (videoStillMigrated || loggingMigrated)
             {
                 Save(loadedSettings);
             }
@@ -152,6 +153,23 @@ public static class SettingsManager
             // メモリ上でのみ移行し、旧設定値をクリアして不要な二重保存を防ぐ
             settings.Preview.VideoStillPreviewFfmpegPath = null;
         }
+    }
+
+    private static bool ApplyLoggingDefaultOffMigration(AppSettings settings)
+    {
+        settings.Logging ??= new LoggingSettings();
+        if (settings.Logging.DefaultOffMigrationApplied)
+        {
+            return false;
+        }
+
+        if (settings.Logging.IsEnabled && !settings.Logging.IsDetailedEnabled)
+        {
+            settings.Logging.IsEnabled = false;
+        }
+
+        settings.Logging.DefaultOffMigrationApplied = true;
+        return true;
     }
 
     private static void NormalizeAllTabHistories(AppSettings settings)

@@ -98,8 +98,11 @@ public enum BrowserFileDisplayMode
 
 public class LoggingSettings
 {
-    public bool IsEnabled { get; set; } = true;
+    public bool IsEnabled { get; set; } = false;
     public bool IsDetailedEnabled { get; set; } = false;
+    public bool DefaultOffMigrationApplied { get; set; } = false;
+    public long MaxFileSizeBytes { get; set; } = 5 * 1024 * 1024;
+    public int RetentionDays { get; set; } = 14;
 
     public LoggingSettings Clone() => (LoggingSettings)MemberwiseClone();
 }

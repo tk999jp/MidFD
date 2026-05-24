@@ -279,19 +279,20 @@ public class SettingsForm : Form
         var filerSize = AddNumericUpDown(groupList, sizeX, top, 60, (decimal)_settings.Fonts.FileListFontSize);
         top += rowH + 8;
 
-        // チェックボックス群（2列配置）
+        // チェックボックス群（1列配置）
         int checkY = top;
         var showBrowserTabCategoryRow = AddCheckBox(groupList, "上段のカテゴリタブを表示する", 16, checkY, _settings.Appearance.ShowBrowserTabCategoryRow);
-        var showHiddenFiles = AddCheckBox(groupList, "隠しファイルを表示する", 200, checkY, _settings.Appearance.ShowHiddenFiles);
-        checkY += 22;
-
+        checkY += 24;
+        var showHiddenFiles = AddCheckBox(groupList, "隠しファイルを表示する", 16, checkY, _settings.Appearance.ShowHiddenFiles);
+        checkY += 24;
         var showExtensions = AddCheckBox(groupList, "拡張子を表示する", 16, checkY, _settings.Appearance.ShowExtensions);
-        var showItemIcons = AddCheckBox(groupList, "一覧にアイコンを表示する", 200, checkY, _settings.Appearance.ShowItemIcons);
-        checkY += 22;
-
+        checkY += 24;
+        var showItemIcons = AddCheckBox(groupList, "一覧にアイコンを表示する", 16, checkY, _settings.Appearance.ShowItemIcons);
+        checkY += 24;
         var showDirectoryMarker = AddCheckBox(groupList, "ディレクトリに <DIR> を表示", 16, checkY, _settings.Appearance.ShowDirectoryMarker);
-        var useUnderlineCursor = AddCheckBox(groupList, "カーソル行をアンダーライン表示", 200, checkY, _settings.Appearance.UseUnderlineCursor);
-        top = checkY + 28;
+        checkY += 24;
+        var useUnderlineCursor = AddCheckBox(groupList, "カーソル行をアンダーライン表示", 16, checkY, _settings.Appearance.UseUnderlineCursor);
+        top = checkY + 30;
 
         AddLabel(groupList, "一覧表示:", top, lblW);
         var fileDisplayMode = AddFileDisplayModeCombo(groupList, inpX, top, 248, _settings.Appearance.ResolveFileDisplayMode());
@@ -532,7 +533,7 @@ public class SettingsForm : Form
         var enableDetail = AddCheckBox(groupLog, "詳細ログを有効化（調査用）", 16, top, _settings.Logging.IsDetailedEnabled);
         top += rowH + 8;
 
-        AddHintLabel(groupLog, 16, top, 340, "通常ログは障害追跡用、詳細ログは drag/drop などの切り分け時だけ使います。");
+        AddHintLabel(groupLog, 16, top, 340, "通常はOFF推奨です。問題調査時のみONにしてください。ログはサイズローテーションされ、古いログは自動削除されます。");
 
         return (enableLog, enableDetail);
     }

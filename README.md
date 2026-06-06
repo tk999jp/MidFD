@@ -38,6 +38,24 @@ FDライクな操作感を参考にしつつも、
 > 実行には [.NET 8 Windows Desktop Runtime](https://dotnet.microsoft.com/ja-jp/download/dotnet/8.0) が必要です。
 > 「.NET Desktop Runtime」の Windows x64 版をインストールしてください。
 
+## スクリーンショット
+
+### Browser画面
+
+![MidFD Browser画面](UserDocs/images/screenshot-main-browser.png)
+
+### Command Palette
+
+![MidFD Command Palette](UserDocs/images/screenshot-command-palette.png)
+
+### 操作カスタマイズ
+
+![MidFD 操作カスタマイズ](UserDocs/images/screenshot-input-customize.png)
+
+### 画像ビューア
+
+![MidFD Image Viewer](UserDocs/images/screenshot-image-viewer.png)
+
 ## 重要な注意・免責
 
 MidFD は、ファイルの表示、コピー、移動、削除、リネーム、

@@ -5,8 +5,6 @@ namespace MidFD.Dialogs;
 
 public class QuickAccessDialog : Form
 {
-    private const string KeyboardHintText = "起動直後は絞り込みへ入力できます / Enter=移動 / ↓=一覧へ / Insert,N=登録を追加 / F4=選択を編集 / Delete=登録先を削除 / Ctrl+Tab=タブ切替";
-
     private readonly TabControl _tabControl;
     private readonly TextBox _queryTextBox;
     private readonly ListView _registeredListView;
@@ -33,19 +31,20 @@ public class QuickAccessDialog : Form
     public QuickAccessDialog(QuickAccessStore store, string currentPath, IReadOnlyList<QuickAccessEntry> historyEntries)
     {
         const int sideMargin = 16;
-        const int topMargin = 16;
+        const int topMargin = 8;
         _workingStore = store.Clone();
         _currentPath = currentPath;
         _historyEntries = historyEntries;
 
         Text = "QuickAccess";
-        ClientSize = new Size(760, 560);
+        ClientSize = new Size(920, 690);
         FormBorderStyle = FormBorderStyle.FixedDialog;
         StartPosition = FormStartPosition.CenterParent;
         MinimizeBox = false;
         MaximizeBox = false;
         KeyPreview = true;
         AutoScaleMode = AutoScaleMode.Font;
+        MinimumSize = new Size(820, 600);
 
         int contentWidth = ClientSize.Width - (sideMargin * 2);
         int currentTop = topMargin;
@@ -55,12 +54,12 @@ public class QuickAccessDialog : Form
             Left = sideMargin,
             Top = currentTop,
             Width = contentWidth,
-            Height = 36,
+            Height = 32,
             ForeColor = SystemColors.ControlText,
             AutoEllipsis = true
         };
         Controls.Add(_tabDescriptionLabel);
-        currentTop = _tabDescriptionLabel.Bottom + 8;
+        currentTop = _tabDescriptionLabel.Bottom + 4;
 
         var queryLabel = new Label
         {
@@ -72,7 +71,7 @@ public class QuickAccessDialog : Form
             AutoSize = true
         };
         Controls.Add(queryLabel);
-        currentTop = queryLabel.Bottom + 4;
+        currentTop = queryLabel.Bottom + 1;
 
         _queryTextBox = new TextBox
         {
@@ -82,14 +81,14 @@ public class QuickAccessDialog : Form
             Height = 24
         };
         Controls.Add(_queryTextBox);
-        currentTop = _queryTextBox.Bottom + 8;
+        currentTop = _queryTextBox.Bottom + 6;
 
         _tabControl = new TabControl
         {
             Left = sideMargin,
             Top = currentTop,
             Width = contentWidth,
-            Height = 280
+            Height = 350
         };
         _tabControl.TabPages.Add("登録先");
         _tabControl.TabPages.Add("最近");
@@ -100,9 +99,10 @@ public class QuickAccessDialog : Form
             BeginInvoke(new Action(FocusActiveListView));
             UpdateContextText();
             UpdateButtonState();
+            UpdateSummaryText();
         };
         Controls.Add(_tabControl);
-        currentTop = _tabControl.Bottom + 12;
+        currentTop = _tabControl.Bottom + 6;
 
         _registeredListView = CreateListView();
         _recentListView = CreateListView();
@@ -118,7 +118,7 @@ public class QuickAccessDialog : Form
             Left = sideMargin,
             Top = currentTop,
             Width = contentWidth,
-            Height = 34,
+            Height = 30,
             FlowDirection = FlowDirection.LeftToRight,
             WrapContents = false
         };
@@ -128,7 +128,7 @@ public class QuickAccessDialog : Form
             Text = "登録を追加...",
             Width = 120,
             Height = 30,
-            Margin = new Padding(0, 0, 8, 0)
+            Margin = new Padding(0, 0, 4, 0)
         };
         _addButton.Click += AddEntry;
 
@@ -137,7 +137,7 @@ public class QuickAccessDialog : Form
             Text = "選択を編集",
             Width = 104,
             Height = 30,
-            Margin = new Padding(0, 0, 8, 0)
+            Margin = new Padding(0, 0, 4, 0)
         };
         _editButton.Click += EditSelected;
 
@@ -154,27 +154,27 @@ public class QuickAccessDialog : Form
         middleButtonPanel.Controls.Add(_editButton);
         middleButtonPanel.Controls.Add(_deleteButton);
         Controls.Add(middleButtonPanel);
-        currentTop = middleButtonPanel.Bottom + 10;
+        currentTop = middleButtonPanel.Bottom + 6;
 
         _hintLabel = new Label
         {
-            Text = KeyboardHintText,
+            Text = GetBottomHintText(),
             Left = sideMargin,
             Top = currentTop,
             Width = contentWidth,
-            Height = 32,
+            Height = 26,
             ForeColor = SystemColors.GrayText,
             AutoEllipsis = true
         };
         Controls.Add(_hintLabel);
-        currentTop = _hintLabel.Bottom + 2;
+        currentTop = _hintLabel.Bottom + 1;
 
         _summaryLabel = new Label
         {
             Left = sideMargin,
             Top = currentTop,
             Width = contentWidth,
-            Height = 18,
+            Height = 16,
             ForeColor = SystemColors.GrayText,
             AutoEllipsis = true
         };
@@ -213,8 +213,8 @@ public class QuickAccessDialog : Form
             this,
             new[] { _okButton, _saveButton, _cancelButton },
             currentTop,
-            buttonGap: 10,
-            contentGap: 16);
+            buttonGap: 12,
+            contentGap: 12);
 
         AcceptButton = _okButton;
         CancelButton = _cancelButton;
@@ -244,10 +244,10 @@ public class QuickAccessDialog : Form
             BackColor = Color.Black,
             ForeColor = Color.Cyan
         };
-        listView.Columns.Add("表示名", 200);
-        listView.Columns.Add("移動先", 300);
+        listView.Columns.Add("表示名", 220);
+        listView.Columns.Add("移動先", 340);
         listView.Columns.Add("区分", 90);
-        listView.Columns.Add("状態", 120);
+        listView.Columns.Add("状態", 180);
         listView.DoubleClick += (_, _) => ConfirmSelection();
         listView.SelectedIndexChanged += (_, _) => UpdateButtonState();
         return listView;
@@ -368,11 +368,11 @@ public class QuickAccessDialog : Form
             item.ToolTipText = QuickAccessService.GetEntryTooltipText(entry, _currentPath);
             item.Tag = entry;
             string status = QuickAccessService.GetEntryStatusLabel(entry, _currentPath);
-            if (string.Equals(status, "見つからない", StringComparison.Ordinal))
+            if (status.StartsWith("見つからない", StringComparison.Ordinal))
             {
                 item.ForeColor = Color.DarkSalmon;
             }
-            else if (string.Equals(status, "現在地", StringComparison.Ordinal))
+            else if (status.StartsWith("現在地", StringComparison.Ordinal))
             {
                 item.ForeColor = Color.LightGreen;
             }
@@ -434,26 +434,39 @@ public class QuickAccessDialog : Form
 
     private void UpdateContextText()
     {
+        _hintLabel.Text = GetBottomHintText();
         _tabDescriptionLabel.Text = _tabControl.SelectedIndex switch
         {
             1 => "最近: 起動直後は絞り込みへ入力できます。状態列を見ながら、そのまま移動または登録できます。",
             2 => "履歴: 起動直後は絞り込みへ入力できます。状態列で戻る候補 / 進む候補を見ながら移動または登録できます。",
-            _ => "登録先: 起動直後は絞り込みへ入力できます。状態列で現在地 / 移動可 / 見つからないを確認できます。"
+            _ => "登録先: 起動直後は絞り込みへ入力できます。状態列で現在地 / 移動可 / 見つからないと、外部コマンドの対象 / 実行可否を確認できます。"
         };
     }
 
     private void UpdateSummaryText()
     {
         ListView listView = GetActiveListView();
-        QuickAccessEntry? entry = GetSelectedEntry();
         int visibleCount = listView.Items.Count;
+        string tabName = _tabControl.SelectedIndex switch
+        {
+            1 => "最近",
+            2 => "履歴",
+            _ => "登録先"
+        };
         string stateGuide = _tabControl.SelectedIndex == 2
-            ? "状態: 戻る候補 / 進む候補 / 現在地 / 見つからない"
-            : "状態: 現在地 / 移動可 / 見つからない";
-        string selectedText = entry == null
-            ? "選択なし"
-            : $"{QuickAccessService.GetEntryKindLabel(entry)} / {QuickAccessService.GetEntryStatusLabel(entry, _currentPath)}";
-        _summaryLabel.Text = $"表示 {visibleCount} 件 / {selectedText} / {stateGuide} / Enter=移動 / ↓=一覧 / 閉じる=反映して終了";
+            ? "戻る候補・進む候補・現在地・見つからない"
+            : "現在地・移動可・見つからない";
+        _summaryLabel.Text = $"表示 {visibleCount} 件 / {tabName} / 状態: {stateGuide}";
+    }
+
+    private string GetBottomHintText()
+    {
+        return _tabControl.SelectedIndex switch
+        {
+            1 => "Enter=移動 / ↓=一覧 / Insert,N=選択を登録 / Ctrl+Tab=タブ切替",
+            2 => "Enter=移動 / ↓=一覧 / Insert,N=選択を登録 / Ctrl+Tab=タブ切替",
+            _ => "Enter=移動 / ↓=一覧 / Insert,N=登録 / F4=編集 / Delete=削除 / Ctrl+Tab=タブ切替"
+        };
     }
 
     private void UpdateTabText(int registeredCount, int recentCount, int historyCount)

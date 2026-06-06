@@ -17,6 +17,7 @@ public sealed class BrowserInputRouter
         public bool CanUseCommandLauncherCommands { get; init; }
 
         public required Func<Keys, bool> TryHandleTabs { get; init; }
+        public required Func<Keys, bool> TryHandleCustomBindings { get; init; }
         public required Action OpenMenuStripFromKeyboard { get; init; }
         public required Func<Keys, bool> TryHandleNavigation { get; init; }
         public required Func<Keys, bool> TryHandleFileOperationUndoRedo { get; init; }
@@ -46,10 +47,15 @@ public sealed class BrowserInputRouter
             return true;
         }
 
-        if (keyData == Keys.F10)
+        if (keyData == Keys.F10 && !context.IsBrowserFocused)
         {
             context.OpenMenuStripFromKeyboard();
             return true;
+        }
+
+        if (context.IsBrowserFocused)
+        {
+            if (context.TryHandleCustomBindings(keyData)) return true;
         }
 
         if (context.IsBrowserFocused || context.IsAuxPreviewActive)

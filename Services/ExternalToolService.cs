@@ -1,4 +1,4 @@
-﻿using System.Diagnostics;
+using System.Diagnostics;
 
 namespace MidFD.Services;
 
@@ -17,8 +17,13 @@ public enum ShellKind
 /// </summary>
 public static class ExternalToolService
 {
+    private static readonly HashSet<string> AllowedBinaryExtensions = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ".exe", ".com", ".bat", ".cmd"
+    };
+
     // F4 = Editor 起動の対象拡張子（テキスト系）
-    private static readonly HashSet<string> _editorExtensions = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+    private static readonly HashSet<string> EditorExtensions = new(StringComparer.OrdinalIgnoreCase)
     {
         ".txt", ".log", ".ini", ".json", ".xml", ".csv", ".md",
         ".yml", ".yaml", ".cs", ".csproj", ".sln", ".bat", ".ps1",
@@ -29,7 +34,7 @@ public static class ExternalToolService
     public static bool IsEditorTargetExtension(string path)
     {
         string ext = Path.GetExtension(path);
-        return _editorExtensions.Contains(ext);
+        return EditorExtensions.Contains(ext);
     }
 
     /// <summary>
@@ -66,27 +71,65 @@ public static class ExternalToolService
         return ExecuteCommand(exePath, commandArgs, workingDir);
     }
 
-    private static string? LaunchProcess(string exePath, params string[] arguments)
+    /// <summary>
+    /// OSの既定関連付けでファイルまたはフォルダを開く。
+    /// </summary>
+    public static string? OpenWithShellAssociation(string path)
     {
-        if (string.IsNullOrWhiteSpace(exePath) || !File.Exists(exePath))
+        if (string.IsNullOrWhiteSpace(path))
         {
-            LogService.Warn($"ExternalTool exe not found: {exePath}");
-            return $"実行ファイルが見つかりません: {exePath}";
+            return "対象パスが空です。";
         }
 
         try
         {
+            string normalized = Path.GetFullPath(path);
+            if (!File.Exists(normalized) && !Directory.Exists(normalized))
+            {
+                return $"対象が見つかりません: {normalized}";
+            }
+
             Process.Start(new ProcessStartInfo
             {
-                FileName = exePath,
-                Arguments = string.Join(" ", arguments.Select(QuoteArgument)),
-                UseShellExecute = false,
+                FileName = normalized,
+                UseShellExecute = true
             });
             return null;
         }
         catch (Exception ex)
         {
-            LogService.Error($"LaunchProcess failed. Exe: {exePath}, Args: {string.Join(" ", arguments)}", ex);
+            LogService.Error($"OpenWithShellAssociation failed. Path: {path}", ex);
+            return $"起動に失敗しました: {ex.Message}";
+        }
+    }
+
+    private static string? LaunchProcess(string exePath, params string[] arguments)
+    {
+        if (!TryNormalizeExecutablePath(exePath, out string normalizedExePath, out string error))
+        {
+            LogService.Warn($"ExternalTool exe validation failed: {exePath} reason={error}");
+            return error;
+        }
+
+        try
+        {
+            var psi = new ProcessStartInfo
+            {
+                FileName = normalizedExePath,
+                UseShellExecute = false
+            };
+
+            foreach (string argument in arguments)
+            {
+                psi.ArgumentList.Add(argument ?? string.Empty);
+            }
+
+            Process.Start(psi);
+            return null;
+        }
+        catch (Exception ex)
+        {
+            LogService.Error($"LaunchProcess failed. Exe: {normalizedExePath}", ex);
             return $"起動に失敗しました: {ex.Message}";
         }
     }
@@ -97,9 +140,9 @@ public static class ExternalToolService
     /// <returns>起動成功時は null、失敗時はエラーメッセージ。</returns>
     public static string? OpenTerminal(string workingDir, ShellKind kind)
     {
-        if (!Directory.Exists(workingDir))
+        if (!TryNormalizeExistingDirectory(workingDir, out string normalizedWorkingDir, out string error))
         {
-            return $"ディレクトリが見つかりません: {workingDir}";
+            return error;
         }
 
         string fileName = kind == ShellKind.PowerShell ? "powershell.exe" : "cmd.exe";
@@ -108,14 +151,14 @@ public static class ExternalToolService
             Process.Start(new ProcessStartInfo
             {
                 FileName = fileName,
-                WorkingDirectory = workingDir,
+                WorkingDirectory = normalizedWorkingDir,
                 UseShellExecute = true,
             });
             return null;
         }
         catch (Exception ex)
         {
-            LogService.Error($"OpenTerminal failed. Kind: {kind}, Dir: {workingDir}", ex);
+            LogService.Error($"OpenTerminal failed. Kind: {kind}, Dir: {normalizedWorkingDir}", ex);
             return $"{fileName} の起動に失敗しました: {ex.Message}";
         }
     }
@@ -127,12 +170,17 @@ public static class ExternalToolService
     {
         try
         {
+            if (!TryNormalizeExistingDirectory(workingDir, out string normalizedWorkingDir, out string directoryError))
+            {
+                return directoryError;
+            }
+
             if (string.IsNullOrWhiteSpace(command))
             {
                 Process.Start(new ProcessStartInfo
                 {
                     FileName = "cmd.exe",
-                    WorkingDirectory = workingDir,
+                    WorkingDirectory = normalizedWorkingDir,
                     UseShellExecute = true
                 });
                 return null;
@@ -140,11 +188,11 @@ public static class ExternalToolService
 
             command = command.Trim();
             string fileName;
-            string arguments = "";
+            string arguments = string.Empty;
 
-            if (command.StartsWith("\""))
+            if (command.StartsWith("\"", StringComparison.Ordinal))
             {
-                int endQuote = command.IndexOf("\"", 1);
+                int endQuote = command.IndexOf("\"", 1, StringComparison.Ordinal);
                 if (endQuote > 0)
                 {
                     fileName = command.Substring(1, endQuote - 1);
@@ -160,11 +208,11 @@ public static class ExternalToolService
             }
             else
             {
-                int spaceIndex = command.IndexOf(" ");
+                int spaceIndex = command.IndexOf(" ", StringComparison.Ordinal);
                 if (spaceIndex > 0)
                 {
-                    fileName = command.Substring(0, spaceIndex);
-                    arguments = command.Substring(spaceIndex + 1).Trim();
+                    fileName = command[..spaceIndex];
+                    arguments = command[(spaceIndex + 1)..].Trim();
                 }
                 else
                 {
@@ -176,7 +224,7 @@ public static class ExternalToolService
             {
                 FileName = fileName,
                 Arguments = arguments,
-                WorkingDirectory = workingDir,
+                WorkingDirectory = normalizedWorkingDir,
                 UseShellExecute = true
             });
 
@@ -196,16 +244,21 @@ public static class ExternalToolService
     {
         try
         {
-            if (string.IsNullOrWhiteSpace(exePath))
+            if (!TryNormalizeExecutablePath(exePath, out string normalizedExePath, out string error))
             {
-                return "実行ファイルが指定されていません。";
+                return error;
+            }
+
+            if (!TryNormalizeExistingDirectory(workingDir, out string normalizedWorkingDir, out _))
+            {
+                normalizedWorkingDir = Path.GetDirectoryName(normalizedExePath) ?? Environment.CurrentDirectory;
             }
 
             Process.Start(new ProcessStartInfo
             {
-                FileName = exePath,
+                FileName = normalizedExePath,
                 Arguments = arguments,
-                WorkingDirectory = workingDir,
+                WorkingDirectory = normalizedWorkingDir,
                 UseShellExecute = true // OSの関連付けや標準の起動フローを利用
             });
             return null;
@@ -217,9 +270,68 @@ public static class ExternalToolService
         }
     }
 
-    private static string QuoteArgument(string value)
+    private static bool TryNormalizeExecutablePath(string? exePath, out string normalizedPath, out string error)
     {
-        string escaped = (value ?? string.Empty).Replace("\"", "\\\"");
-        return $"\"{escaped}\"";
+        normalizedPath = string.Empty;
+        error = string.Empty;
+        if (string.IsNullOrWhiteSpace(exePath))
+        {
+            error = "実行ファイルが指定されていません。";
+            return false;
+        }
+
+        try
+        {
+            normalizedPath = Path.GetFullPath(exePath);
+        }
+        catch (Exception ex)
+        {
+            error = $"実行ファイルパスが不正です: {ex.Message}";
+            return false;
+        }
+
+        if (!File.Exists(normalizedPath))
+        {
+            error = $"実行ファイルが見つかりません: {normalizedPath}";
+            return false;
+        }
+
+        if (!AllowedBinaryExtensions.Contains(Path.GetExtension(normalizedPath)))
+        {
+            error = $"許可されていない実行ファイル形式です: {Path.GetExtension(normalizedPath)}";
+            return false;
+        }
+
+        return true;
+    }
+
+    private static bool TryNormalizeExistingDirectory(string? directoryPath, out string normalizedPath, out string error)
+    {
+        normalizedPath = string.Empty;
+        error = string.Empty;
+
+        if (string.IsNullOrWhiteSpace(directoryPath))
+        {
+            error = "ディレクトリが指定されていません。";
+            return false;
+        }
+
+        try
+        {
+            normalizedPath = Path.GetFullPath(directoryPath);
+        }
+        catch (Exception ex)
+        {
+            error = $"ディレクトリパスが不正です: {ex.Message}";
+            return false;
+        }
+
+        if (!Directory.Exists(normalizedPath))
+        {
+            error = $"ディレクトリが見つかりません: {normalizedPath}";
+            return false;
+        }
+
+        return true;
     }
 }

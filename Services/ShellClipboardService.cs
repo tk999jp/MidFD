@@ -37,6 +37,19 @@ namespace MidFD.Services
             }
         }
 
+        public static bool HasText()
+        {
+            try
+            {
+                return Clipboard.ContainsText(TextDataFormat.UnicodeText);
+            }
+            catch (Exception ex)
+            {
+                LogService.Error("HasText failed", ex);
+                return false;
+            }
+        }
+
         public static bool TryHasFileDrop(out bool hasFileDrop, out string? errorMessage)
         {
             hasFileDrop = false;
@@ -71,6 +84,23 @@ namespace MidFD.Services
             }
         }
 
+        public static bool TryHasText(out bool hasText, out string? errorMessage)
+        {
+            hasText = false;
+            errorMessage = null;
+            try
+            {
+                hasText = Clipboard.ContainsText(TextDataFormat.UnicodeText);
+                return true;
+            }
+            catch (Exception ex)
+            {
+                errorMessage = ex.Message;
+                LogService.Error("TryHasText failed", ex);
+                return false;
+            }
+        }
+
         public static bool TryGetImage(out Image? image, out string? errorMessage)
         {
             image = null;
@@ -89,6 +119,28 @@ namespace MidFD.Services
             {
                 errorMessage = ex.Message;
                 LogService.Error("TryGetImage failed", ex);
+                return false;
+            }
+        }
+
+        public static bool TryGetText(out string? text, out string? errorMessage)
+        {
+            text = null;
+            errorMessage = null;
+            try
+            {
+                if (!Clipboard.ContainsText(TextDataFormat.UnicodeText))
+                {
+                    return false;
+                }
+
+                text = Clipboard.GetText(TextDataFormat.UnicodeText);
+                return true;
+            }
+            catch (Exception ex)
+            {
+                errorMessage = ex.Message;
+                LogService.Error("TryGetText failed", ex);
                 return false;
             }
         }

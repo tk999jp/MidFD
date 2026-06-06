@@ -4,7 +4,8 @@ public enum FileOperationUndoRedoOperation
 {
     Rename,
     Move,
-    DeleteToMidFdTrash
+    DeleteToMidFdTrash,
+    CreateFromPaste
 }
 
 public sealed class FileOperationUndoRedoItem
@@ -15,6 +16,8 @@ public sealed class FileOperationUndoRedoItem
     public string AfterName { get; init; } = string.Empty;
     public string RecycleBinPath { get; init; } = string.Empty;
     public DateTime RecycleBinDeletedAtUtc { get; init; } = DateTime.MinValue;
+    public long CreatedFileLength { get; init; } = -1;
+    public long CreatedFileLastWriteTimeUtcTicks { get; init; } = 0;
 }
 
 public sealed class FileOperationUndoRedoBatch

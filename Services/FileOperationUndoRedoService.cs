@@ -64,7 +64,14 @@ public sealed class FileOperationUndoRedoService
             return;
         }
 
-        _redoStack.Push(_undoStack.Pop());
+        FileOperationUndoRedoBatch popped = _undoStack.Pop();
+        if (popped.Operation == FileOperationUndoRedoOperation.CreateFromPaste)
+        {
+            // 作成Undoは安全性優先でRedo対象にしない。
+            return;
+        }
+
+        _redoStack.Push(popped);
         TrimStackToMax(_redoStack, MaxBatchCount);
     }
 
@@ -123,6 +130,36 @@ public sealed class FileOperationUndoRedoService
         return NormalizeItems(FileOperationUndoRedoOperation.DeleteToMidFdTrash, items);
     }
 
+    public static IReadOnlyList<FileOperationUndoRedoItem> CreateCreatedFilesBatch(IEnumerable<string> paths)
+    {
+        var result = new List<FileOperationUndoRedoItem>();
+        foreach (string? path in paths)
+        {
+            if (string.IsNullOrWhiteSpace(path) || !File.Exists(path))
+            {
+                continue;
+            }
+
+            try
+            {
+                var info = new FileInfo(path);
+                result.Add(new FileOperationUndoRedoItem
+                {
+                    BeforePath = path,
+                    BeforeName = Path.GetFileName(path),
+                    CreatedFileLength = info.Length,
+                    CreatedFileLastWriteTimeUtcTicks = info.LastWriteTimeUtc.Ticks
+                });
+            }
+            catch
+            {
+                // 安全側: 状態が取れない項目はUndo記録しない。
+            }
+        }
+
+        return NormalizeItems(FileOperationUndoRedoOperation.CreateFromPaste, result);
+    }
+
     private static IReadOnlyList<FileOperationUndoRedoItem> NormalizeItems(IEnumerable<FileOperationUndoRedoItem> items)
     {
         return NormalizeItems(FileOperationUndoRedoOperation.Rename, items);
@@ -141,7 +178,9 @@ public sealed class FileOperationUndoRedoService
                 BeforeName = item.BeforeName,
                 AfterName = item.AfterName,
                 RecycleBinPath = item.RecycleBinPath,
-                RecycleBinDeletedAtUtc = item.RecycleBinDeletedAtUtc
+                RecycleBinDeletedAtUtc = item.RecycleBinDeletedAtUtc,
+                CreatedFileLength = item.CreatedFileLength,
+                CreatedFileLastWriteTimeUtcTicks = item.CreatedFileLastWriteTimeUtcTicks
             })
             .ToList();
     }
@@ -156,6 +195,13 @@ public sealed class FileOperationUndoRedoService
         if (operation == FileOperationUndoRedoOperation.DeleteToMidFdTrash)
         {
             return !string.IsNullOrWhiteSpace(item.RecycleBinPath);
+        }
+
+        if (operation == FileOperationUndoRedoOperation.CreateFromPaste)
+        {
+            return !string.IsNullOrWhiteSpace(item.BeforePath) &&
+                   item.CreatedFileLength >= 0 &&
+                   item.CreatedFileLastWriteTimeUtcTicks > 0;
         }
 
         return

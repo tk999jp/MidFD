@@ -465,13 +465,29 @@ public static class QuickAccessService
 
     public static string GetEntryValueLabel(QuickAccessEntry entry)
     {
-        return entry.Kind == QuickAccessEntryKind.ExternalCommand
-            ? entry.ExecutablePath
-            : entry.Path;
+        if (entry.Kind == QuickAccessEntryKind.ExternalCommand)
+        {
+            return string.IsNullOrWhiteSpace(entry.ExecutablePath)
+                ? "(未設定)"
+                : entry.ExecutablePath;
+        }
+
+        return entry.Path;
     }
 
     public static string GetEntryTooltipText(QuickAccessEntry entry, string? currentPath)
     {
+        if (entry.Kind == QuickAccessEntryKind.ExternalCommand)
+        {
+            return $"表示名: {entry.DisplayName}\r\n" +
+                   $"実行ファイル: {GetEntryValueLabel(entry)}\r\n" +
+                   $"区分: {GetEntryKindLabel(entry)}\r\n" +
+                   $"状態: {GetEntryStatusLabel(entry, currentPath)}\r\n" +
+                   $"対象: {GetExternalCommandTargetLabel(entry.TargetMode)}\r\n" +
+                   $"作業: {GetExternalCommandWorkingDirectoryLabel(entry.WorkingDirectoryMode)}\r\n" +
+                   $"引数: {(string.IsNullOrWhiteSpace(entry.Arguments) ? "(なし)" : entry.Arguments)}";
+        }
+
         return $"表示名: {entry.DisplayName}\r\n" +
                $"移動先: {GetEntryValueLabel(entry)}\r\n" +
                $"区分: {GetEntryKindLabel(entry)}\r\n" +
@@ -486,7 +502,7 @@ public static class QuickAccessService
         }
 
         return TryResolveExternalCommand(entry, context, out _, out _, out _, out string message)
-            ? "実行可"
+            ? $"実行可 / {GetExternalCommandTargetLabel(entry.TargetMode)}"
             : message;
     }
 
@@ -494,7 +510,8 @@ public static class QuickAccessService
     {
         if (entry.Kind == QuickAccessEntryKind.ExternalCommand)
         {
-            return string.Empty;
+            string availability = GetExternalCommandAvailabilityLabel(entry);
+            return $"{availability} / {GetExternalCommandTargetLabel(entry.TargetMode)}";
         }
 
         string candidatePath = entry.Path ?? string.Empty;
@@ -521,6 +538,30 @@ public static class QuickAccessService
         }
 
         return "移動可";
+    }
+
+    public static string GetExternalCommandTargetLabel(QuickAccessCommandTargetMode targetMode)
+    {
+        return targetMode switch
+        {
+            QuickAccessCommandTargetMode.None => "対象: なし",
+            QuickAccessCommandTargetMode.CurrentPath => "対象: 現在地",
+            QuickAccessCommandTargetMode.CurrentItem => "対象: 選択項目",
+            QuickAccessCommandTargetMode.CurrentFile => "対象: 選択ファイル",
+            QuickAccessCommandTargetMode.CurrentDirectory => "対象: 選択フォルダ",
+            QuickAccessCommandTargetMode.MarkedItems => "対象: マーク項目",
+            _ => "対象: なし"
+        };
+    }
+
+    public static string GetExternalCommandWorkingDirectoryLabel(QuickAccessCommandWorkingDirectoryMode workingDirectoryMode)
+    {
+        return workingDirectoryMode switch
+        {
+            QuickAccessCommandWorkingDirectoryMode.CurrentPath => "作業: 現在地",
+            QuickAccessCommandWorkingDirectoryMode.ExecutableDirectory => "作業: 実行ファイルのフォルダ",
+            _ => "作業: 現在地"
+        };
     }
 
     public static bool TryExecuteExternalCommand(QuickAccessEntry entry, QuickAccessCommandContext context, out string message)
@@ -562,13 +603,13 @@ public static class QuickAccessService
         executablePath = NormalizePath(entry.ExecutablePath, context.CurrentPath) ?? string.Empty;
         if (string.IsNullOrWhiteSpace(executablePath))
         {
-            message = "実行ファイル未設定";
+            message = "外部コマンドの実行ファイルが未設定です。";
             return false;
         }
 
         if (!File.Exists(executablePath))
         {
-            message = "実行ファイルなし";
+            message = "外部コマンドの実行ファイルが見つかりません。";
             return false;
         }
 
@@ -595,6 +636,17 @@ public static class QuickAccessService
 
         message = string.Empty;
         return true;
+    }
+
+    private static string GetExternalCommandAvailabilityLabel(QuickAccessEntry entry)
+    {
+        string executablePath = NormalizePath(entry.ExecutablePath, null) ?? string.Empty;
+        if (string.IsNullOrWhiteSpace(executablePath))
+        {
+            return "未設定";
+        }
+
+        return File.Exists(executablePath) ? "実行可" : "見つからない";
     }
 
     public static IReadOnlyList<QuickAccessEntry> BuildHistoryEntries(IEnumerable<string> backHistory, IEnumerable<string> forwardHistory)
@@ -895,7 +947,7 @@ public static class QuickAccessService
         {
             QuickAccessCommandTargetMode.None => true,
             QuickAccessCommandTargetMode.CurrentPath => true,
-            QuickAccessCommandTargetMode.CurrentItem => EnsureCurrentItem(context, "項目未選択", out message),
+            QuickAccessCommandTargetMode.CurrentItem => EnsureCurrentItem(context, "現在項目がありません。", out message),
             QuickAccessCommandTargetMode.CurrentFile => EnsureCurrentFile(context, out message),
             QuickAccessCommandTargetMode.CurrentDirectory => EnsureCurrentDirectory(context, out message),
             QuickAccessCommandTargetMode.MarkedItems => EnsureMarkedItems(context, out message),
@@ -910,7 +962,7 @@ public static class QuickAccessService
 
         if (expandedArguments.Contains("{CurrentItemPath}", StringComparison.Ordinal))
         {
-            if (!EnsureCurrentItem(context, "項目未選択", out message))
+            if (!EnsureCurrentItem(context, "現在項目がありません。", out message))
             {
                 return false;
             }
@@ -920,9 +972,9 @@ public static class QuickAccessService
 
         if (expandedArguments.Contains("{CurrentItemName}", StringComparison.Ordinal))
         {
-            if (!EnsureCurrentItem(context, "項目未選択", out message) || string.IsNullOrWhiteSpace(context.CurrentItemName))
+            if (!EnsureCurrentItem(context, "現在項目がありません。", out message) || string.IsNullOrWhiteSpace(context.CurrentItemName))
             {
-                message = "項目未選択";
+                message = "現在項目がありません。";
                 return false;
             }
 
@@ -933,7 +985,7 @@ public static class QuickAccessService
         {
             if (!EnsureCurrentFile(context, out message) || string.IsNullOrWhiteSpace(context.CurrentItemPath))
             {
-                message = "ファイル未選択";
+                message = "選択ファイルがありません。";
                 return false;
             }
 
@@ -970,14 +1022,14 @@ public static class QuickAccessService
 
     private static bool EnsureCurrentFile(QuickAccessCommandContext context, out string message)
     {
-        if (!EnsureCurrentItem(context, "ファイル未選択", out message))
+        if (!EnsureCurrentItem(context, "選択ファイルがありません。", out message))
         {
             return false;
         }
 
         if (context.CurrentItemIsDirectory)
         {
-            message = "ファイル未選択";
+            message = "選択ファイルがありません。";
             return false;
         }
 
@@ -986,14 +1038,14 @@ public static class QuickAccessService
 
     private static bool EnsureCurrentDirectory(QuickAccessCommandContext context, out string message)
     {
-        if (!EnsureCurrentItem(context, "フォルダ未選択", out message))
+        if (!EnsureCurrentItem(context, "選択フォルダがありません。", out message))
         {
             return false;
         }
 
         if (!context.CurrentItemIsDirectory)
         {
-            message = "フォルダ未選択";
+            message = "選択フォルダがありません。";
             return false;
         }
 
@@ -1004,7 +1056,7 @@ public static class QuickAccessService
     {
         if (context.MarkedPaths.Count == 0)
         {
-            message = "マーク対象なし";
+            message = "マーク対象がありません。";
             return false;
         }
 

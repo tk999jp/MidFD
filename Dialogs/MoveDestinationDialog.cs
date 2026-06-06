@@ -1,5 +1,6 @@
 using System.Drawing;
 using System.Linq;
+using MidFD.Services;
 
 namespace MidFD.Dialogs;
 
@@ -62,6 +63,10 @@ public static class MoveDestinationDialog
         currentTop = inputBox.Bottom + 12;
 
         var normalizedHistory = new List<string>();
+        int filteredEmpty = 0;
+        int filteredNotExists = 0;
+        int filteredDuplicate = 0;
+        int keptSameAsDefault = 0;
         if (history != null)
         {
             string normDefault = (defaultPath ?? string.Empty).TrimEnd('\\', '/');
@@ -69,29 +74,37 @@ public static class MoveDestinationDialog
             {
                 if (string.IsNullOrWhiteSpace(h))
                 {
+                    filteredEmpty++;
                     continue;
                 }
 
                 string normalized = h.Trim();
                 if (!Directory.Exists(normalized))
                 {
+                    filteredNotExists++;
                     continue;
                 }
 
                 string normH = normalized.TrimEnd('\\', '/');
                 if (string.Equals(normH, normDefault, StringComparison.OrdinalIgnoreCase))
                 {
-                    continue;
+                    keptSameAsDefault++;
                 }
 
                 if (normalizedHistory.Any(x => string.Equals(x.TrimEnd('\\', '/'), normH, StringComparison.OrdinalIgnoreCase)))
                 {
+                    filteredDuplicate++;
                     continue;
                 }
 
                 normalizedHistory.Add(normalized);
             }
         }
+
+        LogService.Info(
+            $"[DirectoryMoveHistory] source=MoveDestinationDialog rawCount={history?.Count ?? 0} visibleCount={normalizedHistory.Count} " +
+            $"filteredEmpty={filteredEmpty} filteredNotExists={filteredNotExists} filteredDuplicate={filteredDuplicate} " +
+            $"keptSameAsDefault={keptSameAsDefault} defaultPath='{defaultPath ?? string.Empty}'");
 
         foreach (var path in normalizedHistory)
         {
@@ -228,11 +241,14 @@ public static class MoveDestinationDialog
                 else // Keys.Down
                 {
                     historyIndex = historyIndex < 0
-                        ? 0
+                        ? -1
                         : Math.Max(historyIndex - 1, 0);
                 }
 
-                ApplyHistorySelection(historyIndex);
+                if (historyIndex >= 0)
+                {
+                    ApplyHistorySelection(historyIndex);
+                }
                 e.Handled = true;
                 e.SuppressKeyPress = true;
             };

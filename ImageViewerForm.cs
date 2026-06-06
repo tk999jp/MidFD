@@ -34,6 +34,11 @@ public partial class ImageViewerForm : Form
     private readonly ToolStripMenuItem _menuQuantize;
     private readonly ToolStripMenuItem _menuResetImage;
     private readonly ToolStripMenuItem _menuCopySvg;
+    private readonly ToolStripMenuItem _menuRotateRight;
+    private readonly ToolStripMenuItem _menuRotateLeft;
+    private readonly ToolStripMenuItem _menuFlipHorizontal;
+    private readonly ToolStripMenuItem _menuFlipVertical;
+    private readonly ToolStripMenuItem _menuImageInfo;
     private readonly Stack<ImageHistoryEntry> _undoStack = new();
     private readonly Stack<ImageHistoryEntry> _redoStack = new();
     private int _loadRequestId;
@@ -44,11 +49,51 @@ public partial class ImageViewerForm : Form
     private string? _videoStillConfirmedCachePath;
     private int _videoStillCurrentSeconds;
     private double? _videoStillDurationSeconds;
+    private VideoMetadataService.VideoMetadataDetails? _videoStillMetadataDetails;
     private int _videoStillVolumePercent;
     private string? _configuredFfmpegPath;
     private CancellationTokenSource? _videoStillCts;
     private bool _isVideoStillMode;
     private readonly Panel _videoStillSeekBarPanel;
+    private bool _isSelectingRectangle;
+    private Point _selectionStartClientPoint;
+    private Point _selectionCurrentClientPoint;
+    private Rectangle? _selectionClientRectangle;
+    private int _displayRotationQuarterTurns;
+    private bool _displayFlipHorizontal;
+    private bool _displayFlipVertical;
+    private ImageSourceKind _imageSourceKind = ImageSourceKind.Unknown;
+
+    private enum ImageSourceKind
+    {
+        Unknown,
+        File,
+        VideoStill,
+        Clipboard
+    }
+
+    private sealed class ImageViewerInfo
+    {
+        public string SourceKind { get; init; } = "-";
+        public string FileName { get; init; } = "-";
+        public string FullPath { get; init; } = "-";
+        public string FileSizeText { get; init; } = "-";
+        public string LastWriteTimeText { get; init; } = "-";
+        public string ImageFormatText { get; init; } = "-";
+        public string OriginalSizeText { get; init; } = "-";
+        public string DisplaySizeText { get; init; } = "-";
+        public string PixelFormatText { get; init; } = "-";
+        public string DpiText { get; init; } = "-";
+        public string VideoContainerText { get; init; } = "-";
+        public string VideoContainerDetailText { get; init; } = "-";
+        public string VideoContainerIdentifierText { get; init; } = "-";
+        public string VideoCodecText { get; init; } = "-";
+        public string AudioCodecText { get; init; } = "-";
+        public string VideoDurationText { get; init; } = "-";
+        public string VideoResolutionText { get; init; } = "-";
+        public string VideoFrameRateText { get; init; } = "-";
+        public string VideoBitRateText { get; init; } = "-";
+    }
 
     public string? CurrentPath => _currentPath;
     public bool HasLoadedImage => _originalImage != null;
@@ -65,6 +110,10 @@ public partial class ImageViewerForm : Form
         MouseWheel += ImageViewerForm_MouseWheel;
         imageScrollPanel.MouseWheel += ImageViewerForm_MouseWheel;
         pictureBox1.MouseWheel += ImageViewerForm_MouseWheel;
+        pictureBox1.MouseDown += pictureBox1_MouseDown;
+        pictureBox1.MouseMove += pictureBox1_MouseMove;
+        pictureBox1.MouseUp += pictureBox1_MouseUp;
+        pictureBox1.Paint += pictureBox1_Paint;
         FormClosed += ImageViewerForm_FormClosed;
 
         _menuQuantize = new ToolStripMenuItem("減色(&Q)");
@@ -78,6 +127,35 @@ public partial class ImageViewerForm : Form
         _menuCopySvg = new ToolStripMenuItem("SVGをコピー(&C)");
         _menuCopySvg.Click += menuCopySvg_Click;
         menuStrip1.Items.Add(_menuCopySvg);
+
+        _menuRotateRight = new ToolStripMenuItem("右90度回転(&R)");
+        _menuRotateRight.ShortcutKeyDisplayString = "R";
+        _menuRotateRight.Click += menuRotateRight_Click;
+
+        _menuRotateLeft = new ToolStripMenuItem("左90度回転(&L)");
+        _menuRotateLeft.ShortcutKeyDisplayString = "L";
+        _menuRotateLeft.Click += menuRotateLeft_Click;
+
+        _menuFlipHorizontal = new ToolStripMenuItem("左右反転(&H)");
+        _menuFlipHorizontal.ShortcutKeyDisplayString = "H";
+        _menuFlipHorizontal.Click += menuFlipHorizontal_Click;
+
+        _menuFlipVertical = new ToolStripMenuItem("上下反転(&V)");
+        _menuFlipVertical.ShortcutKeyDisplayString = "V";
+        _menuFlipVertical.Click += menuFlipVertical_Click;
+
+        _menuImageInfo = new ToolStripMenuItem("画像情報(&I)...");
+        _menuImageInfo.Click += menuImageInfo_Click;
+
+        _menuResetImage.ShortcutKeys = Keys.Control | Keys.R;
+
+        menuEdit.DropDownItems.Add(new ToolStripSeparator());
+        menuEdit.DropDownItems.Add(_menuRotateRight);
+        menuEdit.DropDownItems.Add(_menuRotateLeft);
+        menuEdit.DropDownItems.Add(_menuFlipHorizontal);
+        menuEdit.DropDownItems.Add(_menuFlipVertical);
+        menuEdit.DropDownItems.Add(new ToolStripSeparator());
+        menuEdit.DropDownItems.Add(_menuImageInfo);
 
         _loadingLabel = new Label
         {
@@ -125,12 +203,14 @@ public partial class ImageViewerForm : Form
     public async void LoadImage(string path, bool showErrorMessage = true)
     {
         _isVideoStillMode = false;
+        _imageSourceKind = ImageSourceKind.File;
         statusStrip1.Visible = true;
         _videoStillSeekBarPanel.Visible = false;
         _videoStillCts?.Cancel();
         _currentPath = path;
         Text = $"{Path.GetFileName(path)} - MidFD Image Viewer";
         int reqId = ++_loadRequestId;
+        ClearSelection();
 
         bool isSvg = string.Equals(Path.GetExtension(path), ".svg", StringComparison.OrdinalIgnoreCase);
 
@@ -220,7 +300,7 @@ public partial class ImageViewerForm : Form
     {
         if (!_featureGate.IsEnabled(FeatureId.ImageQuantization))
         {
-            statusLabel.Text = "PracticalStable では画像減色は無効です。";
+            statusLabel.Text = "標準機能（推奨）では画像減色は無効です。";
             return;
         }
 
@@ -266,6 +346,7 @@ public partial class ImageViewerForm : Form
             return;
         }
         PushUndoState("元画像へ戻す前");
+        ResetDisplayTransformState();
         SetDisplayImage(new Bitmap(_originalImage));
         ApplyInitialZoom(_displayImage);
         statusLabel.Text = "元画像に戻しました";
@@ -276,7 +357,7 @@ public partial class ImageViewerForm : Form
     {
         if (!_featureGate.IsEnabled(FeatureId.SvgClipboard))
         {
-            statusLabel.Text = "PracticalStable では SVG コピーは無効です。";
+            statusLabel.Text = "標準機能（推奨）では SVG コピーは無効です。";
             return;
         }
 
@@ -294,6 +375,8 @@ public partial class ImageViewerForm : Form
 
     private void ReplaceCurrentImages(Bitmap source, bool clearHistory)
     {
+        ClearSelection();
+        ResetDisplayTransformState();
         DisposeImage(_originalImage);
         DisposeImage(_displayImage);
         _originalImage = new Bitmap(source);
@@ -308,10 +391,58 @@ public partial class ImageViewerForm : Form
 
     private void SetDisplayImage(Bitmap bitmap)
     {
+        ClearSelection();
         DisposeImage(_displayImage);
         _displayImage = bitmap;
         pictureBox1.Image = _displayImage;
         UpdateQuantizeMenuState();
+    }
+
+    private void ResetDisplayTransformState()
+    {
+        _displayRotationQuarterTurns = 0;
+        _displayFlipHorizontal = false;
+        _displayFlipVertical = false;
+    }
+
+    private void RotateDisplayImage(RotateFlipType rotateFlipType, string undoLabel, string statusText)
+    {
+        if (_displayImage == null)
+        {
+            return;
+        }
+
+        PushUndoState(undoLabel);
+        Bitmap transformed = new Bitmap(_displayImage);
+        transformed.RotateFlip(rotateFlipType);
+        SetDisplayImage(transformed);
+        ApplyInitialZoom(transformed);
+        statusLabel.Text = statusText;
+        ClearRedoStack();
+    }
+
+    private void menuRotateRight_Click(object? sender, EventArgs e)
+    {
+        _displayRotationQuarterTurns = (_displayRotationQuarterTurns + 1) % 4;
+        RotateDisplayImage(RotateFlipType.Rotate90FlipNone, "右90度回転前", "右90度回転");
+    }
+
+    private void menuRotateLeft_Click(object? sender, EventArgs e)
+    {
+        _displayRotationQuarterTurns = (_displayRotationQuarterTurns + 3) % 4;
+        RotateDisplayImage(RotateFlipType.Rotate270FlipNone, "左90度回転前", "左90度回転");
+    }
+
+    private void menuFlipHorizontal_Click(object? sender, EventArgs e)
+    {
+        _displayFlipHorizontal = !_displayFlipHorizontal;
+        RotateDisplayImage(RotateFlipType.RotateNoneFlipX, "左右反転前", "左右反転");
+    }
+
+    private void menuFlipVertical_Click(object? sender, EventArgs e)
+    {
+        _displayFlipVertical = !_displayFlipVertical;
+        RotateDisplayImage(RotateFlipType.RotateNoneFlipY, "上下反転前", "上下反転");
     }
 
     private void UpdateQuantizeMenuState()
@@ -328,6 +459,7 @@ public partial class ImageViewerForm : Form
                       string.Equals(Path.GetExtension(_currentPath), ".svgz", StringComparison.OrdinalIgnoreCase));
         _menuCopySvg.Visible = allowSvgClipboard && isSvg;
         _menuCopySvg.Enabled = allowSvgClipboard && _displayImage != null;
+        _menuImageInfo.Enabled = _displayImage != null || _originalImage != null;
     }
 
     private void SetQuantizeMenuEnabled(bool enabled)
@@ -335,6 +467,7 @@ public partial class ImageViewerForm : Form
         _menuQuantize.Enabled = _featureGate.IsEnabled(FeatureId.ImageQuantization) && enabled && _displayImage != null;
         _menuResetImage.Enabled = enabled && _displayImage != null;
         _menuCopySvg.Enabled = _featureGate.IsEnabled(FeatureId.SvgClipboard) && enabled && _displayImage != null;
+        _menuImageInfo.Enabled = enabled && (_displayImage != null || _originalImage != null);
     }
 
     private void PushUndoState(string label)
@@ -389,6 +522,72 @@ public partial class ImageViewerForm : Form
         SetDisplayImage(entry.Image);
         ApplyInitialZoom(entry.Image);
         statusLabel.Text = $"Redo: {entry.Label}";
+    }
+
+    protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
+    {
+        if (HandleViewerShortcutKey(keyData))
+        {
+            return true;
+        }
+
+        return base.ProcessCmdKey(ref msg, keyData);
+    }
+
+    private bool HandleViewerShortcutKey(Keys keyData)
+    {
+        Keys modifiers = keyData & (Keys.Control | Keys.Shift | Keys.Alt);
+        Keys keyCode = keyData & Keys.KeyCode;
+
+        if (modifiers == Keys.Control)
+        {
+            if (keyCode == Keys.C)
+            {
+                CopyImageToClipboard();
+                return true;
+            }
+
+            if (keyCode == Keys.V)
+            {
+                PasteImageFromClipboard();
+                return true;
+            }
+
+            if (keyCode == Keys.R)
+            {
+                menuResetImage_Click(this, EventArgs.Empty);
+                return true;
+            }
+        }
+
+        if (modifiers == Keys.None)
+        {
+            if (keyCode == Keys.R)
+            {
+                menuRotateRight_Click(this, EventArgs.Empty);
+                return true;
+            }
+
+            if (keyCode == Keys.L)
+            {
+                menuRotateLeft_Click(this, EventArgs.Empty);
+                return true;
+            }
+
+            if (keyCode == Keys.H)
+            {
+                menuFlipHorizontal_Click(this, EventArgs.Empty);
+                return true;
+            }
+
+            if (keyCode == Keys.V)
+            {
+                menuFlipVertical_Click(this, EventArgs.Empty);
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private void ImageViewerForm_KeyDown(object? sender, KeyEventArgs e)
@@ -492,16 +691,8 @@ public partial class ImageViewerForm : Form
             e.SuppressKeyPress = true;
             return;
         }
-        if (e.Control && e.KeyCode == Keys.C)
+        if (HandleViewerShortcutKey(e.KeyData))
         {
-            CopyImageToClipboard();
-            e.Handled = true;
-            e.SuppressKeyPress = true;
-            return;
-        }
-        if (e.Control && e.KeyCode == Keys.V)
-        {
-            PasteImageFromClipboard();
             e.Handled = true;
             e.SuppressKeyPress = true;
             return;
@@ -534,6 +725,15 @@ public partial class ImageViewerForm : Form
     {
         try
         {
+            if (TryGetSelectionImage(out Bitmap? selectionBitmap) && selectionBitmap != null)
+            {
+                using (selectionBitmap)
+                {
+                    Clipboard.SetImage(selectionBitmap);
+                }
+                return;
+            }
+
             if (pictureBox1.Image != null)
             {
                 Clipboard.SetImage(pictureBox1.Image);
@@ -560,8 +760,10 @@ public partial class ImageViewerForm : Form
                 return;
             }
             PushUndoState("貼り付け前");
+            ResetDisplayTransformState();
             SetDisplayImage(new Bitmap(img));
             _currentPath = null;
+            _imageSourceKind = ImageSourceKind.Clipboard;
             Text = "Clipboard Image - MidFD Image Viewer";
             ApplyInitialZoom(img);
             statusLabel.Text = "貼り付け";
@@ -634,6 +836,326 @@ public partial class ImageViewerForm : Form
     private void menuSaveAs_Click(object sender, EventArgs e) => SaveImageAs();
     private void menuCopy_Click(object sender, EventArgs e) => CopyImageToClipboard();
     private void menuPaste_Click(object sender, EventArgs e) => PasteImageFromClipboard();
+    private void menuImageInfo_Click(object? sender, EventArgs e) => ShowImageInformationDialog();
+
+    private void ShowImageInformationDialog()
+    {
+        if (_displayImage == null && _originalImage == null)
+        {
+            MessageBox.Show("表示中の画像がありません。", "情報", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
+
+        var info = BuildImageViewerInfo();
+        string message =
+            $"種別: {info.SourceKind}{Environment.NewLine}" +
+            $"ファイル名: {info.FileName}{Environment.NewLine}" +
+            $"フルパス: {info.FullPath}{Environment.NewLine}" +
+            $"ファイルサイズ: {info.FileSizeText}{Environment.NewLine}" +
+            $"更新日時: {info.LastWriteTimeText}{Environment.NewLine}" +
+            $"画像形式: {info.ImageFormatText}{Environment.NewLine}" +
+            $"画像サイズ: {info.OriginalSizeText}{Environment.NewLine}" +
+            $"表示中画像サイズ: {info.DisplaySizeText}{Environment.NewLine}" +
+            $"PixelFormat: {info.PixelFormatText}{Environment.NewLine}" +
+            $"DPI: {info.DpiText}";
+
+        if (_imageSourceKind == ImageSourceKind.VideoStill)
+        {
+            message += Environment.NewLine + Environment.NewLine +
+                       $"コンテナ形式: {info.VideoContainerText}{Environment.NewLine}" +
+                       $"コンテナ詳細: {info.VideoContainerDetailText}{Environment.NewLine}" +
+                       $"コンテナ識別子: {info.VideoContainerIdentifierText}{Environment.NewLine}" +
+                       $"動画codec: {info.VideoCodecText}{Environment.NewLine}" +
+                       $"音声codec: {info.AudioCodecText}{Environment.NewLine}" +
+                       $"動画解像度: {info.VideoResolutionText}{Environment.NewLine}" +
+                       $"フレームレート: {info.VideoFrameRateText}{Environment.NewLine}" +
+                       $"動画長: {info.VideoDurationText}{Environment.NewLine}" +
+                       $"ビットレート: {info.VideoBitRateText}";
+        }
+
+        using var dialog = new Form
+        {
+            Text = "画像情報",
+            StartPosition = FormStartPosition.CenterParent,
+            FormBorderStyle = FormBorderStyle.SizableToolWindow,
+            Width = 720,
+            Height = 440,
+            MinimizeBox = false,
+            MaximizeBox = false,
+            ShowInTaskbar = false
+        };
+
+        var infoTextBox = new TextBox
+        {
+            Multiline = true,
+            ReadOnly = true,
+            ScrollBars = ScrollBars.Both,
+            WordWrap = false,
+            Dock = DockStyle.Fill,
+            Text = message
+        };
+
+        var closeButton = new Button
+        {
+            Text = "閉じる",
+            DialogResult = DialogResult.OK,
+            Anchor = AnchorStyles.Bottom | AnchorStyles.Right,
+            Width = 96,
+            Height = 30
+        };
+
+        var bottomPanel = new Panel
+        {
+            Dock = DockStyle.Bottom,
+            Height = 48
+        };
+        bottomPanel.Controls.Add(closeButton);
+        bottomPanel.Resize += (_, _) =>
+        {
+            closeButton.Left = bottomPanel.Width - closeButton.Width - 12;
+            closeButton.Top = 9;
+        };
+        closeButton.Left = bottomPanel.Width - closeButton.Width - 12;
+        closeButton.Top = 9;
+
+        dialog.AcceptButton = closeButton;
+        dialog.CancelButton = closeButton;
+        dialog.Controls.Add(infoTextBox);
+        dialog.Controls.Add(bottomPanel);
+        dialog.ShowDialog(this);
+    }
+
+    private ImageViewerInfo BuildImageViewerInfo()
+    {
+        string? sourcePath = GetInfoSourcePath();
+
+        string fileName = "-";
+        string fullPath = "-";
+        string fileSize = "-";
+        string lastWrite = "-";
+
+        if (!string.IsNullOrWhiteSpace(sourcePath))
+        {
+            fileName = Path.GetFileName(sourcePath);
+            fullPath = sourcePath;
+            try
+            {
+                if (File.Exists(sourcePath))
+                {
+                    var fileInfo = new FileInfo(sourcePath);
+                    fileSize = FormatFileSize(fileInfo.Length);
+                    lastWrite = fileInfo.LastWriteTime.ToString("yyyy/MM/dd HH:mm:ss");
+                }
+            }
+            catch
+            {
+                fileSize = "-";
+                lastWrite = "-";
+            }
+        }
+        else if (_imageSourceKind == ImageSourceKind.Clipboard)
+        {
+            fileName = "(クリップボード画像)";
+        }
+
+        string videoContainer = "-";
+        string videoContainerDetail = "-";
+        string videoContainerIdentifier = "-";
+        string videoCodec = "-";
+        string audioCodec = "-";
+        string videoDuration = "-";
+        string videoResolution = "-";
+        string videoFrameRate = "-";
+        string videoBitRate = "-";
+
+        if (_imageSourceKind == ImageSourceKind.VideoStill && _videoStillMetadataDetails != null)
+        {
+            string formatName = _videoStillMetadataDetails.FormatName ?? "-";
+            string formatLongName = _videoStillMetadataDetails.FormatLongName ?? "-";
+            videoContainer = ResolveContainerLabelFromPath(sourcePath, formatLongName, formatName);
+            videoContainerDetail = formatLongName;
+            videoContainerIdentifier = formatName;
+            videoCodec = _videoStillMetadataDetails.VideoCodec ?? "-";
+            audioCodec = _videoStillMetadataDetails.AudioCodec ?? "なし";
+            if (_videoStillMetadataDetails.Width is int vw && _videoStillMetadataDetails.Height is int vh)
+            {
+                videoResolution = $"{vw} x {vh} px";
+            }
+
+            if (_videoStillMetadataDetails.FrameRate is double fps && fps > 0)
+            {
+                videoFrameRate = $"{fps:0.##} fps";
+            }
+
+            if (_videoStillMetadataDetails.DurationSeconds is double duration && duration > 0)
+            {
+                videoDuration = FormatDuration(duration);
+            }
+
+            if (_videoStillMetadataDetails.BitRate is long bitRate && bitRate > 0)
+            {
+                videoBitRate = FormatBitRate(bitRate);
+            }
+        }
+
+        return new ImageViewerInfo
+        {
+            SourceKind = GetSourceKindText(),
+            FileName = fileName,
+            FullPath = fullPath,
+            FileSizeText = fileSize,
+            LastWriteTimeText = lastWrite,
+            ImageFormatText = GetImageFormatText(sourcePath),
+            OriginalSizeText = _originalImage != null ? $"{_originalImage.Width} x {_originalImage.Height} px" : "-",
+            DisplaySizeText = _displayImage != null ? $"{_displayImage.Width} x {_displayImage.Height} px" : "-",
+            PixelFormatText = _displayImage?.PixelFormat.ToString() ?? _originalImage?.PixelFormat.ToString() ?? "-",
+            DpiText = _displayImage != null
+                ? $"{_displayImage.HorizontalResolution:0.##} x {_displayImage.VerticalResolution:0.##}"
+                : _originalImage != null
+                    ? $"{_originalImage.HorizontalResolution:0.##} x {_originalImage.VerticalResolution:0.##}"
+                    : "-",
+            VideoContainerText = videoContainer,
+            VideoContainerDetailText = videoContainerDetail,
+            VideoContainerIdentifierText = videoContainerIdentifier,
+            VideoCodecText = videoCodec,
+            AudioCodecText = audioCodec,
+            VideoDurationText = videoDuration,
+            VideoResolutionText = videoResolution,
+            VideoFrameRateText = videoFrameRate,
+            VideoBitRateText = videoBitRate
+        };
+    }
+
+    private string GetSourceKindText()
+    {
+        return _imageSourceKind switch
+        {
+            ImageSourceKind.File => "画像ファイル",
+            ImageSourceKind.VideoStill => "VideoStill",
+            ImageSourceKind.Clipboard => "クリップボード画像",
+            _ => "不明"
+        };
+    }
+
+    private string? GetInfoSourcePath()
+    {
+        if (_imageSourceKind == ImageSourceKind.VideoStill)
+        {
+            return _videoStillSourceVideoPath;
+        }
+
+        if (_imageSourceKind == ImageSourceKind.File)
+        {
+            return _currentPath;
+        }
+
+        return null;
+    }
+
+    private string GetImageFormatText(string? sourcePath)
+    {
+        if (_imageSourceKind == ImageSourceKind.VideoStill)
+        {
+            return "VideoStill";
+        }
+
+        if (_imageSourceKind == ImageSourceKind.Clipboard)
+        {
+            return "Clipboard Bitmap";
+        }
+
+        string? ext = Path.GetExtension(sourcePath ?? _currentPath)?.ToLowerInvariant();
+        return ext switch
+        {
+            ".png" => "PNG",
+            ".jpg" => "JPEG",
+            ".jpeg" => "JPEG",
+            ".bmp" => "BMP",
+            ".gif" => "GIF",
+            ".tif" => "TIFF",
+            ".tiff" => "TIFF",
+            ".ico" => "Icon",
+            ".svg" => "SVG",
+            _ => "不明"
+        };
+    }
+
+    private static string ResolveContainerLabelFromPath(string? sourcePath, string? formatLongName, string? formatName)
+    {
+        string? ext = Path.GetExtension(sourcePath)?.ToLowerInvariant();
+        string container = ext switch
+        {
+            ".mp4" => "MP4",
+            ".mov" => "MOV",
+            ".m4v" => "M4V",
+            ".mkv" => "Matroska / MKV",
+            ".webm" => "WebM",
+            ".avi" => "AVI",
+            ".wmv" => "WMV / ASF",
+            ".asf" => "ASF",
+            ".ts" => "MPEG-TS",
+            ".m2ts" => "MPEG-TS",
+            ".mpg" => "MPEG-PS",
+            ".mpeg" => "MPEG-PS",
+            _ => "-"
+        };
+
+        if (container != "-")
+        {
+            return container;
+        }
+
+        if (!string.IsNullOrWhiteSpace(formatLongName))
+        {
+            return formatLongName;
+        }
+
+        return string.IsNullOrWhiteSpace(formatName) ? "-" : formatName;
+    }
+
+    private static string FormatFileSize(long bytes)
+    {
+        string[] units = { "B", "KB", "MB", "GB", "TB", "PB" };
+        double value = bytes;
+        int unitIndex = 0;
+        while (value >= 1024.0 && unitIndex < units.Length - 1)
+        {
+            value /= 1024.0;
+            unitIndex++;
+        }
+
+        return unitIndex == 0
+            ? $"{bytes:N0} B"
+            : $"{value:0.##} {units[unitIndex]}";
+    }
+
+    private static string FormatDuration(double seconds)
+    {
+        if (seconds <= 0)
+        {
+            return "-";
+        }
+
+        TimeSpan ts = TimeSpan.FromSeconds(seconds);
+        return $"{(int)ts.TotalHours:00}:{ts.Minutes:00}:{ts.Seconds:00}.{ts.Milliseconds:000}";
+    }
+
+    private static string FormatBitRate(long bitsPerSecond)
+    {
+        if (bitsPerSecond <= 0)
+        {
+            return "-";
+        }
+
+        double mbps = bitsPerSecond / 1_000_000d;
+        if (mbps >= 1d)
+        {
+            return $"{mbps:0.##} Mbps";
+        }
+
+        double kbps = bitsPerSecond / 1_000d;
+        return $"{kbps:0.##} kbps";
+    }
 
     private void ApplyInitialZoom(Image image)
     {
@@ -654,6 +1176,7 @@ public partial class ImageViewerForm : Form
         _zoom = Math.Clamp(zoom, MinZoom, MaxZoom);
         UpdateScaledImageBounds();
         UpdateZoomStatus();
+        pictureBox1.Invalidate();
     }
 
     private void UpdateZoomStatus()
@@ -671,6 +1194,7 @@ public partial class ImageViewerForm : Form
         int height = Math.Max(1, (int)Math.Round(pictureBox1.Image.Height * _zoom));
         pictureBox1.Size = new Size(width, height);
         AdjustWindowSizeToImage(width, height);
+        pictureBox1.Invalidate();
     }
 
     private void ToggleFullscreen()
@@ -749,6 +1273,196 @@ public partial class ImageViewerForm : Form
         ClearHistory();
     }
 
+    private void pictureBox1_MouseDown(object? sender, MouseEventArgs e)
+    {
+        if (e.Button != MouseButtons.Left || _displayImage == null)
+        {
+            return;
+        }
+
+        Rectangle displayedImageRect = GetDisplayedImageRectangle();
+        if (!displayedImageRect.Contains(e.Location))
+        {
+            return;
+        }
+
+        pictureBox1.Focus();
+        _isSelectingRectangle = true;
+        _selectionStartClientPoint = ClampPointToDisplayedImage(e.Location);
+        _selectionCurrentClientPoint = _selectionStartClientPoint;
+        _selectionClientRectangle = null;
+        pictureBox1.Invalidate();
+    }
+
+    private void pictureBox1_MouseMove(object? sender, MouseEventArgs e)
+    {
+        if (!_isSelectingRectangle)
+        {
+            return;
+        }
+
+        _selectionCurrentClientPoint = ClampPointToDisplayedImage(e.Location);
+        Rectangle selectionRect = CreateNormalizedRectangle(_selectionStartClientPoint, _selectionCurrentClientPoint);
+        _selectionClientRectangle = selectionRect.Width < 1 || selectionRect.Height < 1
+            ? null
+            : selectionRect;
+        pictureBox1.Invalidate();
+    }
+
+    private void pictureBox1_MouseUp(object? sender, MouseEventArgs e)
+    {
+        if (!_isSelectingRectangle)
+        {
+            return;
+        }
+
+        _isSelectingRectangle = false;
+        _selectionCurrentClientPoint = ClampPointToDisplayedImage(e.Location);
+        Rectangle selectionRect = CreateNormalizedRectangle(_selectionStartClientPoint, _selectionCurrentClientPoint);
+        _selectionClientRectangle = selectionRect.Width < 2 || selectionRect.Height < 2
+            ? null
+            : selectionRect;
+        pictureBox1.Invalidate();
+    }
+
+    private void pictureBox1_Paint(object? sender, PaintEventArgs e)
+    {
+        Rectangle? selectionRect = _selectionClientRectangle;
+        if (selectionRect == null || _displayImage == null)
+        {
+            return;
+        }
+
+        Rectangle clientRect = selectionRect.Value;
+        using var outlinePen = new Pen(Color.DeepSkyBlue, 1f) { DashStyle = System.Drawing.Drawing2D.DashStyle.Dash };
+        using var fillBrush = new SolidBrush(Color.FromArgb(40, Color.DeepSkyBlue));
+        e.Graphics.FillRectangle(fillBrush, clientRect);
+        e.Graphics.DrawRectangle(outlinePen, clientRect);
+
+        Rectangle imageRect = ClientSelectionRectToImageRect(clientRect);
+        if (imageRect.Width <= 0 || imageRect.Height <= 0)
+        {
+            return;
+        }
+
+        string sizeText = $"{imageRect.Width}x{imageRect.Height}";
+        Size textSize = TextRenderer.MeasureText(e.Graphics, sizeText, Font, Size.Empty, TextFormatFlags.NoPadding);
+        Rectangle labelRect = new Rectangle(clientRect.Left, clientRect.Top - textSize.Height - 6, textSize.Width + 8, textSize.Height + 4);
+        Rectangle displayedImageRect = GetDisplayedImageRectangle();
+        if (labelRect.Top < displayedImageRect.Top)
+        {
+            labelRect.Y = Math.Min(displayedImageRect.Bottom - labelRect.Height, clientRect.Bottom + 2);
+        }
+        if (labelRect.Right > displayedImageRect.Right)
+        {
+            labelRect.X = displayedImageRect.Right - labelRect.Width;
+        }
+        if (labelRect.Left < displayedImageRect.Left)
+        {
+            labelRect.X = displayedImageRect.Left;
+        }
+
+        using var labelBackBrush = new SolidBrush(Color.FromArgb(180, 0, 0, 0));
+        e.Graphics.FillRectangle(labelBackBrush, labelRect);
+        TextRenderer.DrawText(
+            e.Graphics,
+            sizeText,
+            Font,
+            labelRect,
+            Color.White,
+            TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding);
+    }
+
+    private void ClearSelection()
+    {
+        _isSelectingRectangle = false;
+        _selectionClientRectangle = null;
+        _selectionStartClientPoint = Point.Empty;
+        _selectionCurrentClientPoint = Point.Empty;
+        if (!IsDisposed)
+        {
+            pictureBox1.Invalidate();
+        }
+    }
+
+    private Rectangle GetDisplayedImageRectangle()
+    {
+        if (_displayImage == null || pictureBox1.Width <= 0 || pictureBox1.Height <= 0)
+        {
+            return Rectangle.Empty;
+        }
+
+        return new Rectangle(0, 0, pictureBox1.ClientSize.Width, pictureBox1.ClientSize.Height);
+    }
+
+    private Point ClampPointToDisplayedImage(Point point)
+    {
+        Rectangle displayedImageRect = GetDisplayedImageRectangle();
+        if (displayedImageRect.IsEmpty)
+        {
+            return Point.Empty;
+        }
+
+        int x = Math.Clamp(point.X, displayedImageRect.Left, displayedImageRect.Right - 1);
+        int y = Math.Clamp(point.Y, displayedImageRect.Top, displayedImageRect.Bottom - 1);
+        return new Point(x, y);
+    }
+
+    private Rectangle ClientSelectionRectToImageRect(Rectangle clientRect)
+    {
+        if (_displayImage == null)
+        {
+            return Rectangle.Empty;
+        }
+
+        Rectangle displayedImageRect = GetDisplayedImageRectangle();
+        Rectangle clampedClientRect = Rectangle.Intersect(displayedImageRect, clientRect);
+        if (clampedClientRect.Width <= 0 || clampedClientRect.Height <= 0)
+        {
+            return Rectangle.Empty;
+        }
+
+        double scaleX = _displayImage.Width / (double)displayedImageRect.Width;
+        double scaleY = _displayImage.Height / (double)displayedImageRect.Height;
+        int left = (int)Math.Floor(clampedClientRect.Left * scaleX);
+        int top = (int)Math.Floor(clampedClientRect.Top * scaleY);
+        int right = (int)Math.Ceiling(clampedClientRect.Right * scaleX);
+        int bottom = (int)Math.Ceiling(clampedClientRect.Bottom * scaleY);
+
+        left = Math.Clamp(left, 0, _displayImage.Width - 1);
+        top = Math.Clamp(top, 0, _displayImage.Height - 1);
+        right = Math.Clamp(right, left + 1, _displayImage.Width);
+        bottom = Math.Clamp(bottom, top + 1, _displayImage.Height);
+        return Rectangle.FromLTRB(left, top, right, bottom);
+    }
+
+    private static Rectangle CreateNormalizedRectangle(Point start, Point end)
+    {
+        int left = Math.Min(start.X, end.X);
+        int top = Math.Min(start.Y, end.Y);
+        int right = Math.Max(start.X, end.X);
+        int bottom = Math.Max(start.Y, end.Y);
+        return Rectangle.FromLTRB(left, top, right, bottom);
+    }
+
+    private bool TryGetSelectionImage(out Bitmap? selectionBitmap)
+    {
+        selectionBitmap = null;
+        if (_displayImage == null || _selectionClientRectangle == null)
+        {
+            return false;
+        }
+
+        Rectangle imageRect = ClientSelectionRectToImageRect(_selectionClientRectangle.Value);
+        if (imageRect.Width <= 0 || imageRect.Height <= 0)
+        {
+            return false;
+        }
+
+        selectionBitmap = _displayImage.Clone(imageRect, _displayImage.PixelFormat);
+        return true;
+    }
+
     private static void DisposeImage(Image? image)
     {
         image?.Dispose();
@@ -776,6 +1490,9 @@ public partial class ImageViewerForm : Form
     public async void LoadVideoStill(string videoPath, string? configuredFfmpegPath, int initialSeconds, int volumePercent)
     {
         _isVideoStillMode = true;
+        _imageSourceKind = ImageSourceKind.VideoStill;
+        _videoStillMetadataDetails = null;
+        ClearSelection();
         statusStrip1.Visible = false;
         _videoStillSourceVideoPath = videoPath;
         _configuredFfmpegPath = configuredFfmpegPath;
@@ -792,10 +1509,11 @@ public partial class ImageViewerForm : Form
 
         try
         {
-            var meta = await VideoMetadataService.TryGetDurationSecondsAsync(videoPath, configuredFfmpegPath, token);
-            if (meta.Success)
+            var details = await VideoMetadataService.TryGetDetailsAsync(videoPath, configuredFfmpegPath, token);
+            if (details.Success)
             {
-                _videoStillDurationSeconds = meta.DurationSeconds;
+                _videoStillMetadataDetails = details;
+                _videoStillDurationSeconds = details.DurationSeconds;
             }
             else
             {

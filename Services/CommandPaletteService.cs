@@ -42,6 +42,33 @@ public static class CommandPaletteService
             },
             new()
             {
+                Id = "browser.open.explorer",
+                DisplayName = "Explorerで開く",
+                Description = "現在ディレクトリをExplorerで開きます",
+                Category = "Browser",
+                SearchText = "explorer open current directory 現在地",
+                Execute = () => mainForm.InvokeOpenExplorer()
+            },
+            new()
+            {
+                Id = "browser.open.shell",
+                DisplayName = "PowerShellをここで開く",
+                Description = "現在ディレクトリでPowerShellを開きます",
+                Category = "Browser",
+                SearchText = "powershell open shell current directory 現在地",
+                Execute = () => mainForm.InvokeOpenShell()
+            },
+            new()
+            {
+                Id = "browser.open.externalEditor",
+                DisplayName = "外部エディタで開く",
+                Description = "選択ファイルを外部エディタで開きます",
+                Category = "Browser",
+                SearchText = "external editor open selected file 選択ファイル",
+                Execute = () => mainForm.InvokeOpenExternalEditor()
+            },
+            new()
+            {
                 Id = "app.openSettings",
                 DisplayName = "設定を開く",
                 Description = "アプリケーションの設定画面を表示します",
@@ -86,8 +113,8 @@ public static class CommandPaletteService
             .Select(t => new CommandLauncherCommand
             {
                 Id = $"external.{t.Id}",
-                DisplayName = string.IsNullOrWhiteSpace(t.DisplayName) ? Path.GetFileName(t.ExecutablePath) : t.DisplayName,
-                Description = t.Description ?? t.ExecutablePath,
+                DisplayName = ResolveExternalDisplayName(t),
+                Description = BuildExternalDescription(t),
                 Category = "External",
                 SearchText = string.Join(" ", new[]
                 {
@@ -111,7 +138,7 @@ public static class CommandPaletteService
         string altSlot = tool.AltSlot?.Trim() ?? string.Empty;
         if (string.IsNullOrWhiteSpace(alias) && string.IsNullOrWhiteSpace(altSlot))
         {
-            return null;
+            return string.IsNullOrWhiteSpace(tool.ExecutablePath) ? "未設定" : null;
         }
 
         if (string.IsNullOrWhiteSpace(alias))
@@ -125,5 +152,35 @@ public static class CommandPaletteService
         }
 
         return $"{alias} / Alt+{altSlot}";
+    }
+
+    private static string ResolveExternalDisplayName(ExternalToolCommandDefinition tool)
+    {
+        if (!string.IsNullOrWhiteSpace(tool.DisplayName))
+        {
+            return tool.DisplayName;
+        }
+
+        if (!string.IsNullOrWhiteSpace(tool.ExecutablePath))
+        {
+            string fileName = Path.GetFileNameWithoutExtension(tool.ExecutablePath);
+            if (!string.IsNullOrWhiteSpace(fileName))
+            {
+                return fileName;
+            }
+        }
+
+        return "未設定の外部ツール";
+    }
+
+    private static string BuildExternalDescription(ExternalToolCommandDefinition tool)
+    {
+        if (string.IsNullOrWhiteSpace(tool.ExecutablePath))
+        {
+            return "実行ファイル未設定";
+        }
+
+        string description = tool.Description?.Trim() ?? string.Empty;
+        return string.IsNullOrWhiteSpace(description) ? tool.ExecutablePath : description;
     }
 }

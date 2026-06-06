@@ -48,9 +48,9 @@ public static class FeatureProfileService
     {
         return profile switch
         {
-            FeatureProfile.PracticalStable => "実用安定版（推奨）",
-            FeatureProfile.MinimalCore => "最小構成（実験用）",
-            _ => "高度機能α版"
+            FeatureProfile.PracticalStable => "標準機能（推奨）",
+            FeatureProfile.MinimalCore => "最小構成（内部用）",
+            _ => "拡張機能"
         };
     }
 

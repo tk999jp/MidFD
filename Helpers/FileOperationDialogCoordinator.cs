@@ -28,7 +28,7 @@ public sealed class FileOperationDialogCoordinator
         needsCreateDirectory = false;
 
         string? input;
-        if (string.Equals(operationDisplayName, "移動", StringComparison.Ordinal) && directoryHistory != null)
+        if (directoryHistory != null)
         {
             input = MoveDestinationDialog.Show(
                 prompt,

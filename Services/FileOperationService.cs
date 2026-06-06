@@ -727,14 +727,17 @@ public static class FileOperationService
     /// <summary>サイズを人間が読みやすい形式 (B, KB, MB, GB, TB) に変換する。</summary>
     public static string FormatSize(long bytes)
     {
-        string[] Suffix = { "B", "KB", "MB", "GB", "TB" };
-        int i;
-        double dblSByte = bytes;
-        for (i = 0; i < Suffix.Length && bytes >= 1024; i++, bytes /= 1024)
+        string[] suffix = { "B", "KB", "MB", "GB", "TB", "PB" };
+        double value = bytes;
+        int unitIndex = 0;
+
+        while (value >= 1024d && unitIndex < suffix.Length - 1)
         {
-            dblSByte = bytes / 1024.0;
+            value /= 1024d;
+            unitIndex++;
         }
-        return string.Format("{0:0.##}{1}", dblSByte, Suffix[i]);
+
+        return string.Format("{0:0.##}{1}", value, suffix[unitIndex]);
     }
     #endregion
 }

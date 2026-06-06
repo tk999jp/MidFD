@@ -22,7 +22,16 @@ public static class ExternalToolLauncherService
         {
             if (string.IsNullOrWhiteSpace(definition.ExecutablePath))
             {
-                return "実行ファイルパスが指定されていません。";
+                return "外部ツールの実行ファイルが未設定です。";
+            }
+            if (!Path.IsPathRooted(definition.ExecutablePath))
+            {
+                return "外部ツールの実行ファイルは絶対パスで指定してください。";
+            }
+            string normalizedExePath = Path.GetFullPath(definition.ExecutablePath);
+            if (!File.Exists(normalizedExePath))
+            {
+                return $"外部ツールの実行ファイルが見つかりません: {normalizedExePath}";
             }
 
             // 引数の展開
@@ -50,18 +59,12 @@ public static class ExternalToolLauncherService
 
             var startInfo = new ProcessStartInfo
             {
-                FileName = definition.ExecutablePath,
+                FileName = normalizedExePath,
                 Arguments = resolvedArgs,
                 WorkingDirectory = workingDir,
                 UseShellExecute = false,
                 CreateNoWindow = false
             };
-
-            // 実行ファイルが存在するか（相対パスや PATH 上のファイルも考慮するため、存在確認は絶対パスの場合のみ厳密に行う）
-            if (Path.IsPathRooted(definition.ExecutablePath) && !File.Exists(definition.ExecutablePath))
-            {
-                return $"実行ファイルが見つかりません: {definition.ExecutablePath}";
-            }
 
             Process.Start(startInfo);
             return null;

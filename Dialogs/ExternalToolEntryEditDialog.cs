@@ -85,7 +85,7 @@ public class ExternalToolEntryEditDialog : Form
         AddLabel("Altスロット:", labelX, currentY);
         _altSlotTextBox = new TextBox { Location = new Point(controlX, currentY), Width = 40, MaxLength = 1, Text = definition.AltSlot };
         Controls.Add(_altSlotTextBox);
-        AddHint("(Alt+1文字 で直起動。F,V,G,T,H は予約済)", controlX + 50, currentY);
+        AddHint("(Alt+英数字 で直起動。F,V,G,T,H は予約済。Alt+F1〜F12 とは別 namespace)", controlX + 50, currentY);
         currentY += rowGap;
 
         AddLabel("実行ファイル:", labelX, currentY);

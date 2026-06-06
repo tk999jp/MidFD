@@ -38,6 +38,7 @@ public sealed class FileOperationEntryCoordinator
         string? StatusMessage,
         bool HasFileDrop,
         bool HasImage,
+        bool HasText,
         string CurrentPath);
 
     public readonly record struct SelectionDialogContext(
@@ -133,11 +134,12 @@ public sealed class FileOperationEntryCoordinator
         bool isCancelRequested,
         bool hasFileDrop,
         bool hasImage,
+        bool hasText,
         string? currentPath)
     {
         if (!isBrowserMode)
         {
-            return new ClipboardPasteEntryPlan(false, "この画面では貼り付けできません", hasFileDrop, hasImage, string.Empty);
+            return new ClipboardPasteEntryPlan(false, "この画面では貼り付けできません", hasFileDrop, hasImage, hasText, string.Empty);
         }
 
         if (isClipboardBusy)
@@ -147,19 +149,20 @@ public sealed class FileOperationEntryCoordinator
                 FileOperationPresentationHelper.GetBusyBlockedMessage("貼り付け", canCancel, isCancelRequested),
                 hasFileDrop,
                 hasImage,
+                hasText,
                 string.Empty);
         }
 
-        if (!hasFileDrop && !hasImage)
+        if (!hasFileDrop && !hasImage && !hasText)
         {
-            return new ClipboardPasteEntryPlan(false, "貼り付けできる項目がありません", hasFileDrop, hasImage, string.Empty);
+            return new ClipboardPasteEntryPlan(false, "貼り付けできる項目がありません", hasFileDrop, hasImage, hasText, string.Empty);
         }
 
         if (string.IsNullOrWhiteSpace(currentPath))
         {
-            return new ClipboardPasteEntryPlan(false, null, hasFileDrop, hasImage, string.Empty);
+            return new ClipboardPasteEntryPlan(false, null, hasFileDrop, hasImage, hasText, string.Empty);
         }
 
-        return new ClipboardPasteEntryPlan(true, null, hasFileDrop, hasImage, currentPath);
+        return new ClipboardPasteEntryPlan(true, null, hasFileDrop, hasImage, hasText, currentPath);
     }
 }

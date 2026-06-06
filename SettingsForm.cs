@@ -2,6 +2,7 @@ using System.Drawing.Text;
 using MidFD.Configuration;
 using MidFD.Services;
 using MidFD.Dialogs;
+using MidFD.Commands;
 using MidFD.Models;
 
 namespace MidFD;
@@ -11,13 +12,6 @@ namespace MidFD;
 /// </summary>
 public class SettingsForm : Form
 {
-    private sealed record FeatureProfileOption(string DisplayName, string SettingValue);
-    private static readonly FeatureProfileOption[] FeatureProfileOptions =
-    {
-        new("実用安定版（推奨）", FeatureProfile.PracticalStable.ToString()),
-        new("高度機能α版", FeatureProfile.Full.ToString())
-    };
-
     private readonly AppSettings _settings;
 
     private readonly TextBox _sevenZipPathBox;
@@ -57,18 +51,42 @@ public class SettingsForm : Form
     private readonly CheckBox _useMidFdManagedTrashCheckBox;
     private readonly CheckBox _reloadAfterFileOperationCheckBox;
     private readonly CheckBox _selectCreatedItemCheckBox;
+    private readonly CheckBox _clipboardPasteTextAsFileCheckBox;
+    private CheckBox _enableDragArchiveHandoffCheckBox = null!;
+    private CheckBox _includeDragZipManifestCheckBox = null!;
     private readonly CheckBox _restoreLastPathCheckBox;
     private readonly CheckBox _restoreTabsOnStartupCheckBox;
     private readonly CheckBox _restoreWindowBoundsCheckBox;
     private readonly CheckBox _restoreColumnCountCheckBox;
     private readonly CheckBox _restoreSortCheckBox;
-    private readonly ComboBox _featureProfileCombo;
     private readonly ComboBox _functionKeyProfileCombo;
     private readonly ComboBox _commandLauncherShortcutCombo;
     private readonly CheckBox _enableMouseGesturesCheckBox;
+    private readonly CheckBox _enableWorkspaceSnapshotCheckBox;
+    private readonly InputAssignmentDialog _embeddedInputAssignmentView;
     private readonly CheckBox _enableLogCheckBox;
     private readonly CheckBox _enableDetailedLogCheckBox;
     private readonly ToolTip _statusToolTip = new();
+    private readonly CommandRegistry _commandRegistry = new();
+    private Dictionary<string, string> _mouseGestureCommandMapDraft;
+    private Dictionary<string, List<string>> _browserKeyCommandOverridesDraft;
+    private Dictionary<string, string?> _functionBarCommandOverridesStandardDraft;
+    private Dictionary<string, string?> _functionBarCommandOverridesFdCompatibleDraft;
+    private Dictionary<string, string?> _functionBarCommandOverridesShiftStandardDraft = new(StringComparer.OrdinalIgnoreCase);
+    private Dictionary<string, string?> _functionBarCommandOverridesShiftFdCompatibleDraft = new(StringComparer.OrdinalIgnoreCase);
+    private Dictionary<string, string?> _functionBarCommandOverridesCtrlStandardDraft = new(StringComparer.OrdinalIgnoreCase);
+    private Dictionary<string, string?> _functionBarCommandOverridesCtrlFdCompatibleDraft = new(StringComparer.OrdinalIgnoreCase);
+    private Dictionary<string, string?> _functionBarCommandOverridesAltStandardDraft = new(StringComparer.OrdinalIgnoreCase);
+    private Dictionary<string, string?> _functionBarCommandOverridesAltFdCompatibleDraft = new(StringComparer.OrdinalIgnoreCase);
+    private Dictionary<string, FunctionBarLabelOverride> _functionBarLabelOverridesStandardDraft;
+    private Dictionary<string, FunctionBarLabelOverride> _functionBarLabelOverridesFdCompatibleDraft;
+    private Dictionary<string, FunctionBarLabelOverride> _functionBarLabelOverridesShiftStandardDraft;
+    private Dictionary<string, FunctionBarLabelOverride> _functionBarLabelOverridesShiftFdCompatibleDraft;
+    private Dictionary<string, FunctionBarLabelOverride> _functionBarLabelOverridesCtrlStandardDraft = new(StringComparer.OrdinalIgnoreCase);
+    private Dictionary<string, FunctionBarLabelOverride> _functionBarLabelOverridesCtrlFdCompatibleDraft = new(StringComparer.OrdinalIgnoreCase);
+    private Dictionary<string, FunctionBarLabelOverride> _functionBarLabelOverridesAltStandardDraft = new(StringComparer.OrdinalIgnoreCase);
+    private Dictionary<string, FunctionBarLabelOverride> _functionBarLabelOverridesAltFdCompatibleDraft = new(StringComparer.OrdinalIgnoreCase);
+    private CheckBox? _showFunctionBarTooltipsCheckBox;
 
     // 配色タブ用の新規追加フィールド
     private readonly Button _deleteColorPresetButton;
@@ -95,17 +113,17 @@ public class SettingsForm : Form
 
     public enum InitialTab
     {
-        DisplayAndViewer = 0,
+        Display = 0,
         Color = 1,
-        OperationAndInput = 2,
-        LaunchAndRestore = 3,
+        Operation = 2,
+        InputAssignment = 3,
         External = 4,
-        Log = 5
+        StartupAndLog = 5
     }
 
     public event EventHandler? SettingsApplied;
 
-    public SettingsForm(AppSettings settings, FeatureProfile effectiveProfile, InitialTab initialTab = InitialTab.DisplayAndViewer)
+    public SettingsForm(AppSettings settings, FeatureProfile effectiveProfile, InitialTab initialTab = InitialTab.Display)
     {
         ArgumentNullException.ThrowIfNull(settings);
         _settings = settings.Clone();
@@ -119,6 +137,38 @@ public class SettingsForm : Form
         _settings.ExternalTools ??= new ExternalToolsSettings();
         _settings.FileOperations ??= new FileOperationsSettings();
         _settings.Fonts ??= new FontSettings();
+        _settings.Input.MouseGestureCommandMap ??= new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        _settings.Input.BrowserKeyCommandOverrides ??= new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
+        InputSettings.NormalizeAndMigrateFunctionKeyChords(_settings.Input);
+        _settings.Input.FunctionBarCommandOverridesStandard ??= new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
+        _settings.Input.FunctionBarCommandOverridesFdCompatible ??= new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
+        _settings.Input.FunctionBarCommandOverridesShiftStandard ??= new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
+        _settings.Input.FunctionBarCommandOverridesShiftFdCompatible ??= new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
+        _settings.Input.FunctionBarCommandOverridesCtrlStandard ??= new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
+        _settings.Input.FunctionBarCommandOverridesCtrlFdCompatible ??= new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
+        _settings.Input.FunctionBarCommandOverridesAltStandard ??= new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
+        _settings.Input.FunctionBarCommandOverridesAltFdCompatible ??= new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
+        _settings.Input.FunctionBarLabelOverridesStandard ??= new Dictionary<string, FunctionBarLabelOverride>(StringComparer.OrdinalIgnoreCase);
+        _settings.Input.FunctionBarLabelOverridesFdCompatible ??= new Dictionary<string, FunctionBarLabelOverride>(StringComparer.OrdinalIgnoreCase);
+        _settings.Input.FunctionBarLabelOverridesShiftStandard ??= new Dictionary<string, FunctionBarLabelOverride>(StringComparer.OrdinalIgnoreCase);
+        _settings.Input.FunctionBarLabelOverridesShiftFdCompatible ??= new Dictionary<string, FunctionBarLabelOverride>(StringComparer.OrdinalIgnoreCase);
+        _settings.Input.FunctionBarLabelOverridesCtrlStandard ??= new Dictionary<string, FunctionBarLabelOverride>(StringComparer.OrdinalIgnoreCase);
+        _settings.Input.FunctionBarLabelOverridesCtrlFdCompatible ??= new Dictionary<string, FunctionBarLabelOverride>(StringComparer.OrdinalIgnoreCase);
+        _settings.Input.FunctionBarLabelOverridesAltStandard ??= new Dictionary<string, FunctionBarLabelOverride>(StringComparer.OrdinalIgnoreCase);
+        _settings.Input.FunctionBarLabelOverridesAltFdCompatible ??= new Dictionary<string, FunctionBarLabelOverride>(StringComparer.OrdinalIgnoreCase);
+
+        _mouseGestureCommandMapDraft = InputSettings.NormalizeMouseGestureCommandMap(_settings.Input.MouseGestureCommandMap);
+        _browserKeyCommandOverridesDraft = InputSettings.NormalizeBrowserKeyCommandOverrides(_settings.Input.BrowserKeyCommandOverrides);
+        _functionBarCommandOverridesStandardDraft = new Dictionary<string, string?>(_settings.Input.FunctionBarCommandOverridesStandard, StringComparer.OrdinalIgnoreCase);
+        _functionBarCommandOverridesFdCompatibleDraft = new Dictionary<string, string?>(_settings.Input.FunctionBarCommandOverridesFdCompatible, StringComparer.OrdinalIgnoreCase);
+        _functionBarLabelOverridesStandardDraft = _settings.Input.FunctionBarLabelOverridesStandard.ToDictionary(kv => kv.Key, kv => kv.Value.Clone(), StringComparer.OrdinalIgnoreCase);
+        _functionBarLabelOverridesFdCompatibleDraft = _settings.Input.FunctionBarLabelOverridesFdCompatible.ToDictionary(kv => kv.Key, kv => kv.Value.Clone(), StringComparer.OrdinalIgnoreCase);
+        _functionBarLabelOverridesShiftStandardDraft = _settings.Input.FunctionBarLabelOverridesShiftStandard.ToDictionary(kv => kv.Key, kv => kv.Value.Clone(), StringComparer.OrdinalIgnoreCase);
+        _functionBarLabelOverridesShiftFdCompatibleDraft = _settings.Input.FunctionBarLabelOverridesShiftFdCompatible.ToDictionary(kv => kv.Key, kv => kv.Value.Clone(), StringComparer.OrdinalIgnoreCase);
+        _functionBarLabelOverridesCtrlStandardDraft = _settings.Input.FunctionBarLabelOverridesCtrlStandard.ToDictionary(kv => kv.Key, kv => kv.Value.Clone(), StringComparer.OrdinalIgnoreCase);
+        _functionBarLabelOverridesCtrlFdCompatibleDraft = _settings.Input.FunctionBarLabelOverridesCtrlFdCompatible.ToDictionary(kv => kv.Key, kv => kv.Value.Clone(), StringComparer.OrdinalIgnoreCase);
+        _functionBarLabelOverridesAltStandardDraft = _settings.Input.FunctionBarLabelOverridesAltStandard.ToDictionary(kv => kv.Key, kv => kv.Value.Clone(), StringComparer.OrdinalIgnoreCase);
+        _functionBarLabelOverridesAltFdCompatibleDraft = _settings.Input.FunctionBarLabelOverridesAltFdCompatible.ToDictionary(kv => kv.Key, kv => kv.Value.Clone(), StringComparer.OrdinalIgnoreCase);
         _fileListCustomColorsEnabledForSave = _settings.Appearance.UseCustomFileListColors;
         _suppressColorUiEvents = true;
 
@@ -132,32 +182,38 @@ public class SettingsForm : Form
         StartPosition = FormStartPosition.CenterParent;
         Padding = new Padding(12);
         AutoScaleMode = AutoScaleMode.Font;
-        ClientSize = new Size(800, 610);
+        ClientSize = new Size(1040, 720);
 
         var tabs = new TabControl
         {
-            Dock = DockStyle.Top,
-            Height = 530
+            Dock = DockStyle.Fill
         };
 
-        var tabDisplayAndPreview = CreateTab("表示 / ビューア");
+        var tabDisplay = CreateTab("表示");
         var tabColor = CreateTab("配色");
-        var tabOpAndInput = CreateTab("操作 / 入力");
-        var tabLaunchAndRestore = CreateTab("起動 / 復元");
+        var tabOperation = CreateTab("操作");
+        var tabInputAssignment = CreateTab("入力割り当て");
         var tabExternal = CreateTab("外部連携");
-        var tabLog = CreateTab("ログ / 詳細");
+        var tabStartupAndLog = CreateTab("起動・ログ");
 
         tabs.TabPages.AddRange(new[]
         {
-            tabDisplayAndPreview,
+            tabDisplay,
             tabColor,
-            tabOpAndInput,
-            tabLaunchAndRestore,
+            tabOperation,
+            tabInputAssignment,
             tabExternal,
-            tabLog
+            tabStartupAndLog
         });
 
+        var bottomPanel = new Panel
+        {
+            Dock = DockStyle.Bottom,
+            Height = 52
+        };
+
         Controls.Add(tabs);
+        Controls.Add(bottomPanel);
         tabs.SelectedIndex = Math.Clamp((int)initialTab, 0, tabs.TabPages.Count - 1);
         Shown += (_, _) =>
         {
@@ -168,9 +224,12 @@ public class SettingsForm : Form
         string[] dateFormats = { "yyyy-MM-dd HH:mm", "yyyy/MM/dd HH:mm:ss", "yyyy-MM-dd(ddd) HH:mm" };
         string[] sizeFormats = { "HumanReadable", "Bytes", "KB/MB" };
 
+        tabDisplay.AutoScroll = false;
+        tabColor.AutoScroll = false;
+
         (_filerFontCombo, _filerFontSizeBox, _showBrowserTabCategoryRowCheckBox, _showExtensionsCheckBox, _showDirectoryMarkerCheckBox, _showHiddenFilesCheckBox, _showItemIconsCheckBox, _useUnderlineCursorCheckBox, _fileDisplayModeCombo, _dateFormatCombo, _sizeFormatCombo,
-         _viewerFontCombo, _viewerFontSizeBox, _viewerWordWrapCheckBox, _reuseImageViewerCheckBox, _closeImageViewerOnNonImageCheckBox, _rememberImageViewerBoundsCheckBox, _videoStillPreviewEnabledCheckBox, _videoSkipSecondsCombo)
-            = BuildDisplayAndPreviewTab(tabDisplayAndPreview, fonts, dateFormats, sizeFormats);
+         _viewerFontCombo, _viewerFontSizeBox, _viewerWordWrapCheckBox, _reuseImageViewerCheckBox, _closeImageViewerOnNonImageCheckBox, _rememberImageViewerBoundsCheckBox)
+            = BuildDisplayAndPreviewTab(tabDisplay, fonts, dateFormats, sizeFormats);
 
         ColorTabResult colorTabResult = BuildColorTab(tabColor);
         _enableColorAssistCheckBox = colorTabResult.EnableColorAssistCheckBox;
@@ -192,17 +251,21 @@ public class SettingsForm : Form
         _customViewerBackPreview = colorTabResult.CustomViewerBackPreview;
         _customViewerForePreview = colorTabResult.CustomViewerForePreview;
 
-        (_confirmDeleteCheckBox, _confirmPermanentDeleteCheckBox, _useMidFdManagedTrashCheckBox, _reloadAfterFileOperationCheckBox, _selectCreatedItemCheckBox,
-         _functionKeyProfileCombo, _commandLauncherShortcutCombo, _enableMouseGesturesCheckBox)
-            = BuildOperationAndInputTab(tabOpAndInput);
+        (_confirmDeleteCheckBox, _confirmPermanentDeleteCheckBox, _useMidFdManagedTrashCheckBox, _reloadAfterFileOperationCheckBox, _selectCreatedItemCheckBox, _clipboardPasteTextAsFileCheckBox,
+         _functionKeyProfileCombo, _commandLauncherShortcutCombo, _enableMouseGesturesCheckBox, _enableWorkspaceSnapshotCheckBox, _restoreLastPathCheckBox)
+            = BuildOperationAndInputTab(tabOperation);
 
-        (_featureProfileCombo, _restoreLastPathCheckBox, _restoreTabsOnStartupCheckBox, _restoreWindowBoundsCheckBox, _restoreColumnCountCheckBox, _restoreSortCheckBox)
-            = BuildLaunchAndRestoreTab(tabLaunchAndRestore);
+        _embeddedInputAssignmentView = BuildInputAssignmentTab(tabInputAssignment);
 
-        (_sevenZipPathBox, _diffPathBox, _editorPathBox, _videoPlaybackVolumeCombo, _videoStillPreviewFfmpegPathBox, _videoEnterPlaysExternalCheckBox, _sevenZipStatusLabel, _diffStatusLabel, _editorStatusLabel, _videoStillPreviewFfmpegStatusLabel)
+        tabStartupAndLog.AutoScroll = false;
+
+        (_restoreTabsOnStartupCheckBox, _restoreWindowBoundsCheckBox, _restoreColumnCountCheckBox, _restoreSortCheckBox)
+            = BuildLaunchAndRestoreTab(tabStartupAndLog);
+
+        (_sevenZipPathBox, _diffPathBox, _editorPathBox, _videoPlaybackVolumeCombo, _videoStillPreviewFfmpegPathBox, _videoEnterPlaysExternalCheckBox, _sevenZipStatusLabel, _diffStatusLabel, _editorStatusLabel, _videoStillPreviewFfmpegStatusLabel, _videoStillPreviewEnabledCheckBox, _videoSkipSecondsCombo)
             = BuildExternalTab(tabExternal);
 
-        (_enableLogCheckBox, _enableDetailedLogCheckBox) = BuildLogTab(tabLog);
+        (_enableLogCheckBox, _enableDetailedLogCheckBox) = BuildLogTab(tabStartupAndLog);
 
         InitializeColorTabState();
         _suppressColorUiEvents = false;
@@ -215,8 +278,8 @@ public class SettingsForm : Form
             Text = "OK",
             DialogResult = DialogResult.OK,
             Size = new Size(80, 32),
-            Location = new Point(ClientSize.Width - 180, ClientSize.Height - 44),
-            Anchor = AnchorStyles.Bottom | AnchorStyles.Right,
+            Location = new Point(bottomPanel.Width - 176, 10),
+            Anchor = AnchorStyles.Top | AnchorStyles.Right,
         };
         btnOk.Click += BtnOk_Click;
 
@@ -225,22 +288,22 @@ public class SettingsForm : Form
             Text = "キャンセル",
             DialogResult = DialogResult.Cancel,
             Size = new Size(80, 32),
-            Location = new Point(ClientSize.Width - 92, ClientSize.Height - 44),
-            Anchor = AnchorStyles.Bottom | AnchorStyles.Right,
+            Location = new Point(bottomPanel.Width - 88, 10),
+            Anchor = AnchorStyles.Top | AnchorStyles.Right,
         };
 
         var btnApply = new Button
         {
             Text = "適用",
             Size = new Size(80, 32),
-            Location = new Point(ClientSize.Width - 268, ClientSize.Height - 44),
-            Anchor = AnchorStyles.Bottom | AnchorStyles.Right,
+            Location = new Point(bottomPanel.Width - 264, 10),
+            Anchor = AnchorStyles.Top | AnchorStyles.Right,
         };
         btnApply.Click += BtnApply_Click;
 
-        Controls.Add(btnOk);
-        Controls.Add(btnCancel);
-        Controls.Add(btnApply);
+        bottomPanel.Controls.Add(btnOk);
+        bottomPanel.Controls.Add(btnCancel);
+        bottomPanel.Controls.Add(btnApply);
 
         AcceptButton = btnOk;
         CancelButton = btnCancel;
@@ -256,20 +319,19 @@ public class SettingsForm : Form
     }
 
     private (ComboBox filerFont, NumericUpDown filerSize, CheckBox showBrowserTabCategoryRow, CheckBox showExtensions, CheckBox showDirectoryMarker, CheckBox showHiddenFiles, CheckBox showItemIcons, CheckBox useUnderlineCursor, ComboBox fileDisplayMode, ComboBox dateFormat, ComboBox sizeFormat,
-             ComboBox viewerFont, NumericUpDown viewerSize, CheckBox viewerWordWrap, CheckBox reuseImageViewer, CheckBox closeOnNonImage, CheckBox rememberBounds, CheckBox videoStillPreviewEnabled, ComboBox videoSkipSeconds)
+             ComboBox viewerFont, NumericUpDown viewerSize, CheckBox viewerWordWrap, CheckBox reuseImageViewer, CheckBox closeOnNonImage, CheckBox rememberBounds)
         BuildDisplayAndPreviewTab(TabPage tab, string[] fonts, string[] dateFormats, string[] sizeFormats)
     {
         // Layout Constants
         int lblW = 100;
         int inpX = 110;
-        int comboW = 190;
         int sizeX = 308;
         int checkX = 32;
         int rowH = 28;
         int topY = 22;
 
         // --- Left: List Display ---
-        var groupList = new GroupBox { Text = "一覧表示", Location = new Point(8, 6), Size = new Size(376, 400) };
+        var groupList = new GroupBox { Text = "一覧表示", Location = new Point(8, 6), Size = new Size(500, 390) };
         tab.Controls.Add(groupList);
 
         int top = topY;
@@ -306,17 +368,63 @@ public class SettingsForm : Form
         var sizeFormat = AddComboBox(groupList, inpX, top, 248, sizeFormats, _settings.Appearance.SizeFormat);
         top += rowH + 16;
 
-        AddHintLabel(groupList, 16, top, 330, "※ 配色は「配色」タブで設定します。");
+        AddHintLabel(groupList, 16, top, 460, "※ 配色は「配色」タブで設定します。");
 
         // --- Right Top: Viewer ---
-        var groupViewer = new GroupBox { Text = "ビューア", Location = new Point(392, 6), Size = new Size(376, 188) };
+        var groupViewer = new GroupBox { Text = "ビューア", Location = new Point(520, 6), Size = new Size(500, 180) };
         tab.Controls.Add(groupViewer);
 
         top = topY;
-        AddLabel(groupViewer, "Viewer フォント:", top, lblW);
-        var viewerFont = AddComboBox(groupViewer, inpX, top, comboW, fonts, _settings.Fonts.ViewerFontFamily);
+        AddLabel(groupViewer, "Viewer フォント:", top, 110);
+        var viewerFont = AddComboBox(groupViewer, 120, top, 178, fonts, _settings.Fonts.ViewerFontFamily);
         var viewerSize = AddNumericUpDown(groupViewer, sizeX, top, 60, (decimal)_settings.Fonts.ViewerFontSize);
-        top += rowH;
+
+        var viewerFontSample = new TextBox
+        {
+            Text = "貴社の記者が汽車で帰社した。\r\nAaあぁアァ亜宇 0123456789 ()[]{}<>\r\nYesterday all my troubles seemed so far away.",
+            Location = new Point(16, top + 40),
+            Size = new Size(460,90),
+            Multiline = true,
+            ScrollBars = ScrollBars.Vertical
+        };
+        groupViewer.Controls.Add(viewerFontSample);
+
+        viewerFont.DrawMode = DrawMode.OwnerDrawFixed;
+        viewerFont.ItemHeight = 20;
+        viewerFont.DrawItem += (s, e) =>
+        {
+            if (e.Index < 0) return;
+            e.DrawBackground();
+            string fontName = viewerFont.Items[e.Index]?.ToString() ?? "";
+            Font fontToDraw;
+            try
+            {
+                fontToDraw = new Font(fontName, 10);
+            }
+            catch
+            {
+                fontToDraw = e.Font ?? viewerFont.Font;
+            }
+
+            using (fontToDraw)
+            {
+                using var brush = new SolidBrush(e.ForeColor);
+                var textBounds = new Rectangle(e.Bounds.X + 2, e.Bounds.Y, e.Bounds.Width - 2, e.Bounds.Height);
+                e.Graphics.DrawString(fontName, fontToDraw, brush, textBounds);
+            }
+            e.DrawFocusRectangle();
+        };
+
+        var updateSample = new EventHandler((_, _) =>
+        {
+            try { viewerFontSample.Font = new Font(viewerFont.Text, (float)viewerSize.Value); } catch { }
+        });
+        viewerFont.SelectedIndexChanged += updateSample;
+        viewerFont.TextChanged += updateSample;
+        viewerSize.ValueChanged += updateSample;
+        updateSample(null!, EventArgs.Empty);
+
+        top += 140;
 
         var viewerWordWrap = AddCheckBox(groupViewer, "折り返しを既定で ON にする", checkX, top, _settings.Preview.ViewerWordWrap);
         top += rowH;
@@ -325,33 +433,20 @@ public class SettingsForm : Form
         var closeOnNonImage = AddCheckBox(groupViewer, "非画像時にビューアを閉じる", checkX, top, _settings.Preview.CloseImageViewerOnNonImageSelection);
         top += rowH;
         var rememberBounds = AddCheckBox(groupViewer, "ビューアの位置/サイズを記憶する", checkX, top, _settings.Preview.RememberImageViewerBounds);
-
-        // --- Right Bottom: Video Preview ---
-        var groupVideoPreview = new GroupBox { Text = "動画静止画プレビュー", Location = new Point(392, 202), Size = new Size(376, 204) };
-        tab.Controls.Add(groupVideoPreview);
-
-        top = 24;
-        var videoStillPreviewEnabled = AddCheckBox(groupVideoPreview, "有効にする", 16, top, _settings.Preview.VideoStillPreviewEnabled);
-        top += rowH + 8;
-        AddLabel(groupVideoPreview, "初期位置(秒):", top, lblW);
-        var videoSkipSeconds = AddEditableComboBox(groupVideoPreview, inpX, top, 100, new[] { "0", "5", "10", "30", "60" }, _settings.Preview.VideoSkipSeconds.ToString());
-        top += rowH + 8;
-        AddHintLabel(groupVideoPreview, 16, top, 330, "※ ffmpeg設定は「外部連携」タブ");
+        groupViewer.Height = rememberBounds.Bottom + 16;
 
         return (filerFont, filerSize, showBrowserTabCategoryRow, showExtensions, showDirectoryMarker, showHiddenFiles, showItemIcons, useUnderlineCursor, fileDisplayMode, dateFormat, sizeFormat,
-                viewerFont, viewerSize, viewerWordWrap, reuseImageViewer, closeOnNonImage, rememberBounds, videoStillPreviewEnabled, videoSkipSeconds);
+                viewerFont, viewerSize, viewerWordWrap, reuseImageViewer, closeOnNonImage, rememberBounds);
     }
 
-    private (CheckBox confirmDelete, CheckBox confirmPermanentDelete, CheckBox useMidFdManagedTrash, CheckBox reloadAfterFileOperation, CheckBox selectCreatedItem,
-             ComboBox functionKeyProfile, ComboBox commandLauncherShortcut, CheckBox enableMouseGestures)
+    private (CheckBox confirmDelete, CheckBox confirmPermanentDelete, CheckBox useMidFdManagedTrash, CheckBox reloadAfterFileOperation, CheckBox selectCreatedItem, CheckBox clipboardPasteTextAsFile,
+             ComboBox functionKeyProfile, ComboBox commandLauncherShortcut, CheckBox enableMouseGestures, CheckBox enableWorkspaceSnapshot, CheckBox restoreLastPath)
         BuildOperationAndInputTab(TabPage tab)
     {
-        int labelWidth = 140;
-        int baseX = labelWidth + 12;
-        int rowH = 32;
+        int rowH = 28;
 
         // --- Left: File Operation ---
-        var groupFile = new GroupBox { Text = "ファイル操作", Location = new Point(8, 6), Size = new Size(376, 360) };
+        var groupFile = new GroupBox { Text = "ファイル操作", Location = new Point(8, 6), Size = new Size(490, 480) };
         tab.Controls.Add(groupFile);
 
         int top = 28;
@@ -361,64 +456,116 @@ public class SettingsForm : Form
         top += rowH;
         var useMidFdManagedTrash = AddCheckBox(groupFile, "削除時に MidFD管理ゴミ箱を使う", 16, top, _settings.FileOperations.UseMidFdManagedTrash);
         top += rowH;
-
-
-
-
-        AddHintLabel(groupFile, 32, top, 330, "ON: Ctrl+Z による復元が可能になります。\n環境に応じ SQLite / JSON を自動選択します。");
-        top += rowH + 20;
+        Label managedTrashHint = AddWrappedHintLabel(groupFile, 32, top, 430, "ON: Ctrl+Z による復元が可能になります。\n環境に応じ SQLite / JSON を自動選択します。");
+        top = managedTrashHint.Bottom + 10;
 
         var reloadAfterFileOperation = AddCheckBox(groupFile, "操作後に一覧を再読込する", 16, top, _settings.FileOperations.ReloadAfterFileOperation);
         top += rowH;
         var selectCreatedItem = AddCheckBox(groupFile, "新規作成後に自動選択する", 16, top, _settings.FileOperations.SelectCreatedItemAfterCreate);
-
-        // --- Right: Input / Shortcut ---
-        var groupInput = new GroupBox { Text = "キー操作 / ショートカット", Location = new Point(392, 6), Size = new Size(376, 360) };
-        tab.Controls.Add(groupInput);
-
-        top = 28;
-        AddLabel(groupInput, "操作プリセット:", top, labelWidth);
-        var functionKeyProfile = AddComboBox(groupInput, baseX, top, 160, new[] { "MidFD標準", "FD/WinFD互換" }, ToFunctionKeyProfileDisplayValue(_settings.Input.FunctionKeyProfile));
         top += rowH;
-        AddHintLabel(groupInput, 16, top, 340, "FD/WinFD互換: Fキー配置・一部Shift+F・列数キー操作をWinFD寄りにします。");
-        top += rowH + 8;
+        var clipboardPasteTextAsFile = AddCheckBox(groupFile, "テキストクリップボードをファイルとして貼り付ける", 16, top, _settings.FileOperations.ClipboardPasteTextAsFileEnabled);
+        top += rowH - 4;
+        Label clipboardHint = AddWrappedHintLabel(groupFile, 32, top, 430, "Ctrl+Vで .txt ファイルを作成します。\n誤作成防止のため通常はOFF推奨です。");
+        top = clipboardHint.Bottom + 18;
 
-        AddLabel(groupInput, "ランチャー起動:", top, labelWidth);
-        var commandLauncherShortcut = AddComboBox(groupInput, baseX, top, 160, new[] { "Ctrl+Shift+P", "Ctrl+Space", "None" }, _settings.Input.CommandLauncherShortcut);
-        top += rowH + 8;
+        var sectionDragZip = new Label
+        {
+            Text = "Drag ZIP",
+            Location = new Point(16, top),
+            Size = new Size(220, 20),
+            Font = new Font(Font, FontStyle.Bold)
+        };
+        groupFile.Controls.Add(sectionDragZip);
+        top += 24;
 
-        AddHintLabel(groupInput, 16, top, 340, "コマンドランチャー（コマンドパレット）を起動するショートカットキーを選択します。");
-        top += rowH + 18;
+        _enableDragArchiveHandoffCheckBox = AddCheckBox(groupFile, "Shift/Ctrl+ドラッグでマーク対象をZIP化して渡す", 16, top, _settings.FileOperations.EnableDragArchiveHandoff);
+        _enableDragArchiveHandoffCheckBox.CheckedChanged += (_, _) => UpdateDragArchiveManifestCheckboxEnabledState();
+        top += rowH - 4;
+        Label dragHint = AddWrappedHintLabel(
+            groupFile,
+            32,
+            top,
+            430,
+            "ChatGPT等へ複数ソースをまとめて渡す場合に便利です。通常のドラッグ操作と挙動が変わります。");
+        top = dragHint.Bottom + 8;
 
-        var enableMouseGestures = AddCheckBox(groupInput, "マウスジェスチャーを有効にする", 16, top, _settings.Input.EnableMouseGestures);
-        top += rowH;
-        AddHintLabel(groupInput, 32, top, 320, "右ドラッグで戻る/進む、親へ移動、再読込、タブ/カテゴリ移動を行います。");
+        _includeDragZipManifestCheckBox = AddCheckBox(groupFile, "ZIPに内容一覧manifestを同梱する", 32, top, _settings.FileOperations.IncludeDragZipManifest);
+        top += rowH - 4;
+        AddWrappedHintLabel(
+            groupFile,
+            48,
+            top,
+            414,
+            "対象ファイル一覧を確認しやすくします。\nローカルパス情報を含む場合があります。");
+        UpdateDragArchiveManifestCheckboxEnabledState();
 
-        return (confirmDelete, confirmPermanentDelete, useMidFdManagedTrash, reloadAfterFileOperation, selectCreatedItem, functionKeyProfile, commandLauncherShortcut, enableMouseGestures);
+        // --- Right: Operation/Input Information Architecture ---
+        int rightX = 506;
+        int rightW = 490;
+        int rightTop = 6;
+
+        var groupProfile = new GroupBox { Text = "操作プロファイル", Location = new Point(rightX, rightTop), Size = new Size(rightW, 80) };
+        tab.Controls.Add(groupProfile);
+        AddLabel(groupProfile, "既定操作感:", 24, 100);
+        var functionKeyProfile = AddComboBox(groupProfile, 116, 24, 240, new[] { "MidFD標準", "FD/WinFD互換" }, ToFunctionKeyProfileDisplayValue(_settings.Input.FunctionKeyProfile));
+        var profHint = AddWrappedHintLabel(groupProfile, 16, 56, 460, "全体の既定の操作感を選びます。（個別変更は「入力割り当て」タブ）");
+        groupProfile.Height = profHint.Bottom + 12;
+        rightTop = groupProfile.Bottom + 6;
+
+        var groupInputCustom = new GroupBox { Text = "入力カスタマイズ", Location = new Point(rightX, rightTop), Size = new Size(rightW, 80) };
+        tab.Controls.Add(groupInputCustom);
+        var inHint1 = AddWrappedHintLabel(groupInputCustom, 16, 24, 460, "キーやマウスジェスチャーは「入力割り当て」タブで編集します。\n（機能別タブは内部のCommandId正本ビューです）");
+        var inHint2 = AddWrappedHintLabel(groupInputCustom, 16, inHint1.Bottom + 4, 460, "文字キーFとFunctionキーF1〜F12は別導線です。");
+        groupInputCustom.Height = inHint2.Bottom + 12;
+        rightTop = groupInputCustom.Bottom + 6;
+
+        var groupAdvanced = new GroupBox { Text = "高度な使い方 / 詳細オプション", Location = new Point(rightX, rightTop), Size = new Size(rightW, 260) };
+        tab.Controls.Add(groupAdvanced);
+        int advancedTop = 24;
+        var enableMouseGestures = AddCheckBox(groupAdvanced, "マウスジェスチャーを使う", 16, advancedTop, _settings.Input.EnableMouseGestures);
+        var mouseHint = AddWrappedHintLabel(groupAdvanced, 32, advancedTop + 24, 444, "右ドラッグで戻る/進む等の操作を行います。");
+        advancedTop = mouseHint.Bottom + 8;
+
+        _showFunctionBarTooltipsCheckBox = AddCheckBox(groupAdvanced, "Functionバーの詳細説明を表示する", 16, advancedTop, _settings.Input.ShowFunctionBarTooltips);
+        var tooltipHint = AddWrappedHintLabel(groupAdvanced, 32, advancedTop + 24, 444, "Functionバーのマウスオーバー時に説明とキーヒントを表示します。");
+        advancedTop = tooltipHint.Bottom + 8;
+
+        var restoreLastPath = AddCheckBox(groupAdvanced, "前回フォルダを復元する", 16, advancedTop, _settings.Session.RestoreLastPath);
+        var restoreLastPathHint = AddWrappedHintLabel(groupAdvanced, 32, advancedTop + 24, 444, "起動時に前回見ていたフォルダへ戻ります。");
+        advancedTop = restoreLastPathHint.Bottom + 8;
+
+        var enableWorkspaceSnapshot = AddCheckBox(groupAdvanced, "Workspace Snapshot / 作業状態復元を使う", 16, advancedTop, IsAdvancedWorkspaceFeaturesEnabled(_settings.Profile));
+        var workspaceHint = AddWrappedHintLabel(groupAdvanced, 32, advancedTop + 24, 444, "作業状態の復元と拡張管理導線を有効にします。\n復元内容は「起動・ログ」で調整します。");
+        advancedTop = workspaceHint.Bottom + 8;
+
+        var groupAssist = new GroupBox { Text = "補助導線", Location = new Point(rightX, groupAdvanced.Bottom + 6), Size = new Size(rightW, 100) };
+        tab.Controls.Add(groupAssist);
+        AddLabel(groupAssist, "ランチャー起動:", 24, 100);
+        var commandLauncherShortcut = AddComboBox(groupAssist, 116, 24, 240, new[] { "Ctrl+Shift+P", "Ctrl+Space", "None" }, _settings.Input.CommandLauncherShortcut);
+        var assistHint = AddWrappedHintLabel(groupAssist, 16, 56, 460, "コマンドランチャーを起動するショートカットキーを選択します。");
+        var assistHint2 = AddWrappedHintLabel(groupAssist, 16, assistHint.Bottom + 4, 460, "Alt+英数字ランチャーや外部ツール定義は「外部連携」と「入力割り当て」から利用します。");
+        groupAssist.Height = assistHint2.Bottom + 12;
+
+        return (confirmDelete, confirmPermanentDelete, useMidFdManagedTrash, reloadAfterFileOperation, selectCreatedItem, clipboardPasteTextAsFile, functionKeyProfile, commandLauncherShortcut, enableMouseGestures, enableWorkspaceSnapshot, restoreLastPath);
     }
 
-    private (ComboBox profile, CheckBox restoreLastPath, CheckBox restoreTabsOnStartup, CheckBox restoreWindowBounds, CheckBox restoreColumnCount, CheckBox restoreSort)
+    private (CheckBox restoreTabsOnStartup, CheckBox restoreWindowBounds, CheckBox restoreColumnCount, CheckBox restoreSort)
         BuildLaunchAndRestoreTab(TabPage tab)
     {
         int rowH = 32;
 
         // --- Left: Startup ---
-        var groupStartup = new GroupBox { Text = "起動時の復元", Location = new Point(8, 6), Size = new Size(376, 360) };
+        var groupStartup = new GroupBox { Text = "起動時の復元", Location = new Point(8, 6), Size = new Size(490, 320) };
         tab.Controls.Add(groupStartup);
 
         int top = 28;
-        AddLabel(groupStartup, "機能プロファイル:", top, 140);
-        var profile = CreateFeatureProfileCombo(groupStartup, 160, top, 180, _settings.Profile);
-        top += rowH;
-        AddHintLabel(groupStartup, 16, top, 340, "高度機能α版は開発中機能を含みます。通常利用は実用安定版（推奨）を選択してください。");
-        top += rowH + 8;
-        var restoreLastPath = AddCheckBox(groupStartup, "前回フォルダを復元する", 16, top, _settings.Session.RestoreLastPath);
-        top += rowH;
+        var hint1 = AddWrappedHintLabel(groupStartup, 16, top, 460, "Workspace Snapshot / 作業状態復元の利用有無は「操作」タブの高度な使い方から切り替えます。\nここでは、起動時にどこまで復元するかを設定します。");
+        top = hint1.Bottom + 8;
         var restoreTabsOnStartup = AddCheckBox(groupStartup, "前回の作業状態(タブ等)を復元する", 16, top, _settings.Session.RestoreTabsOnStartup);
         top += rowH + 8;
 
-        AddHintLabel(groupStartup, 16, top, 340, "作業状態復元が ON の場合、カテゴリ、タブ構成、タブごとのマーク、固定状態等を復元します。");
-        top += rowH + 24;
+        var hint2 = AddWrappedHintLabel(groupStartup, 16, top, 460, "作業状態復元が ON の場合、カテゴリ、タブ構成、タブごとのマーク、固定状態等を復元します。");
+        top = hint2.Bottom + 16;
         var btnOpenFirstSetup = new Button
         {
             Text = "初回セットアップを開く...",
@@ -428,10 +575,11 @@ public class SettingsForm : Form
         btnOpenFirstSetup.Click += (_, _) => OpenFirstLaunchSetupDialog();
         groupStartup.Controls.Add(btnOpenFirstSetup);
         top += rowH + 4;
-        AddHintLabel(groupStartup, 16, top, 340, "利用モード、Fキー配置、動画Enter動作、外部連携の基本設定を再設定できます。\n初期化ではありません。", 52);
+        var hint3 = AddWrappedHintLabel(groupStartup, 16, top, 460, "初回オプション、Fキー配置、動画Enter動作、外部連携の基本設定を再設定できます。\n初期化ではありません。");
+        groupStartup.Height = hint3.Bottom + 16;
 
-        // --- Right: Display State ---
-        var groupDisplay = new GroupBox { Text = "表示状態の復元", Location = new Point(392, 6), Size = new Size(376, 360) };
+        // --- Left Bottom: Display State ---
+        var groupDisplay = new GroupBox { Text = "表示状態の復元", Location = new Point(8, groupStartup.Bottom + 12), Size = new Size(490, 150) };
         tab.Controls.Add(groupDisplay);
 
         top = 28;
@@ -441,43 +589,110 @@ public class SettingsForm : Form
         top += rowH;
         var restoreSort = AddCheckBox(groupDisplay, "前回のソートを復元する", 16, top, _settings.Session.RestoreSort);
 
-        return (profile, restoreLastPath, restoreTabsOnStartup, restoreWindowBounds, restoreColumnCount, restoreSort);
+        return (restoreTabsOnStartup, restoreWindowBounds, restoreColumnCount, restoreSort);
     }
 
-    private (TextBox sevenZip, TextBox diff, TextBox editor, ComboBox videoPlaybackVolume, TextBox videoStillPreviewFfmpegPath, CheckBox videoEnterPlaysExternal, Label sevenZipStatus, Label diffStatus, Label editorStatus, Label videoStillPreviewFfmpegStatus)
+    private InputAssignmentDialog BuildInputAssignmentTab(TabPage tab)
+    {
+        var embedded = new InputAssignmentDialog(_settings.Input, _commandRegistry)
+        {
+            TopLevel = false,
+            FormBorderStyle = FormBorderStyle.None,
+            Dock = DockStyle.Fill
+        };
+
+        tab.Controls.Add(embedded);
+        embedded.Show();
+        return embedded;
+    }
+
+    private void SyncInputAssignmentDraftFromEmbeddedView()
+    {
+        if (_embeddedInputAssignmentView == null)
+        {
+            return;
+        }
+
+        InputSettings result = _embeddedInputAssignmentView.ResultSettings;
+        _settings.Input.BrowserKeyCommandOverrides = InputSettings.NormalizeBrowserKeyCommandOverrides(result.BrowserKeyCommandOverrides);
+        _settings.Input.MouseGestureCommandMap = InputSettings.NormalizeMouseGestureCommandMap(result.MouseGestureCommandMap);
+        _settings.Input.FunctionBarCommandOverridesStandard = new Dictionary<string, string?>(result.FunctionBarCommandOverridesStandard, StringComparer.OrdinalIgnoreCase);
+        _settings.Input.FunctionBarCommandOverridesFdCompatible = new Dictionary<string, string?>(result.FunctionBarCommandOverridesFdCompatible, StringComparer.OrdinalIgnoreCase);
+        _settings.Input.FunctionBarCommandOverridesShiftStandard = new Dictionary<string, string?>(result.FunctionBarCommandOverridesShiftStandard, StringComparer.OrdinalIgnoreCase);
+        _settings.Input.FunctionBarCommandOverridesShiftFdCompatible = new Dictionary<string, string?>(result.FunctionBarCommandOverridesShiftFdCompatible, StringComparer.OrdinalIgnoreCase);
+        _settings.Input.FunctionBarCommandOverridesCtrlStandard = new Dictionary<string, string?>(result.FunctionBarCommandOverridesCtrlStandard, StringComparer.OrdinalIgnoreCase);
+        _settings.Input.FunctionBarCommandOverridesCtrlFdCompatible = new Dictionary<string, string?>(result.FunctionBarCommandOverridesCtrlFdCompatible, StringComparer.OrdinalIgnoreCase);
+        _settings.Input.FunctionBarCommandOverridesAltStandard = new Dictionary<string, string?>(result.FunctionBarCommandOverridesAltStandard, StringComparer.OrdinalIgnoreCase);
+        _settings.Input.FunctionBarCommandOverridesAltFdCompatible = new Dictionary<string, string?>(result.FunctionBarCommandOverridesAltFdCompatible, StringComparer.OrdinalIgnoreCase);
+        _settings.Input.FunctionBarLabelOverridesStandard = result.FunctionBarLabelOverridesStandard.ToDictionary(kv => kv.Key, kv => kv.Value.Clone(), StringComparer.OrdinalIgnoreCase);
+        _settings.Input.FunctionBarLabelOverridesFdCompatible = result.FunctionBarLabelOverridesFdCompatible.ToDictionary(kv => kv.Key, kv => kv.Value.Clone(), StringComparer.OrdinalIgnoreCase);
+        _settings.Input.FunctionBarLabelOverridesShiftStandard = result.FunctionBarLabelOverridesShiftStandard.ToDictionary(kv => kv.Key, kv => kv.Value.Clone(), StringComparer.OrdinalIgnoreCase);
+        _settings.Input.FunctionBarLabelOverridesShiftFdCompatible = result.FunctionBarLabelOverridesShiftFdCompatible.ToDictionary(kv => kv.Key, kv => kv.Value.Clone(), StringComparer.OrdinalIgnoreCase);
+        _settings.Input.FunctionBarLabelOverridesCtrlStandard = result.FunctionBarLabelOverridesCtrlStandard.ToDictionary(kv => kv.Key, kv => kv.Value.Clone(), StringComparer.OrdinalIgnoreCase);
+        _settings.Input.FunctionBarLabelOverridesCtrlFdCompatible = result.FunctionBarLabelOverridesCtrlFdCompatible.ToDictionary(kv => kv.Key, kv => kv.Value.Clone(), StringComparer.OrdinalIgnoreCase);
+        _settings.Input.FunctionBarLabelOverridesAltStandard = result.FunctionBarLabelOverridesAltStandard.ToDictionary(kv => kv.Key, kv => kv.Value.Clone(), StringComparer.OrdinalIgnoreCase);
+        _settings.Input.FunctionBarLabelOverridesAltFdCompatible = result.FunctionBarLabelOverridesAltFdCompatible.ToDictionary(kv => kv.Key, kv => kv.Value.Clone(), StringComparer.OrdinalIgnoreCase);
+
+        InputSettings.NormalizeAndMigrateFunctionKeyChords(_settings.Input);
+
+        _browserKeyCommandOverridesDraft = InputSettings.NormalizeBrowserKeyCommandOverrides(_settings.Input.BrowserKeyCommandOverrides);
+        _mouseGestureCommandMapDraft = InputSettings.NormalizeMouseGestureCommandMap(_settings.Input.MouseGestureCommandMap);
+        _functionBarCommandOverridesStandardDraft = new Dictionary<string, string?>(_settings.Input.FunctionBarCommandOverridesStandard, StringComparer.OrdinalIgnoreCase);
+        _functionBarCommandOverridesFdCompatibleDraft = new Dictionary<string, string?>(_settings.Input.FunctionBarCommandOverridesFdCompatible, StringComparer.OrdinalIgnoreCase);
+        _functionBarCommandOverridesShiftStandardDraft = new Dictionary<string, string?>(_settings.Input.FunctionBarCommandOverridesShiftStandard, StringComparer.OrdinalIgnoreCase);
+        _functionBarCommandOverridesShiftFdCompatibleDraft = new Dictionary<string, string?>(_settings.Input.FunctionBarCommandOverridesShiftFdCompatible, StringComparer.OrdinalIgnoreCase);
+        _functionBarCommandOverridesCtrlStandardDraft = new Dictionary<string, string?>(_settings.Input.FunctionBarCommandOverridesCtrlStandard, StringComparer.OrdinalIgnoreCase);
+        _functionBarCommandOverridesCtrlFdCompatibleDraft = new Dictionary<string, string?>(_settings.Input.FunctionBarCommandOverridesCtrlFdCompatible, StringComparer.OrdinalIgnoreCase);
+        _functionBarCommandOverridesAltStandardDraft = new Dictionary<string, string?>(_settings.Input.FunctionBarCommandOverridesAltStandard, StringComparer.OrdinalIgnoreCase);
+        _functionBarCommandOverridesAltFdCompatibleDraft = new Dictionary<string, string?>(_settings.Input.FunctionBarCommandOverridesAltFdCompatible, StringComparer.OrdinalIgnoreCase);
+
+        _functionBarLabelOverridesStandardDraft = _settings.Input.FunctionBarLabelOverridesStandard.ToDictionary(kv => kv.Key, kv => kv.Value.Clone(), StringComparer.OrdinalIgnoreCase);
+        _functionBarLabelOverridesFdCompatibleDraft = _settings.Input.FunctionBarLabelOverridesFdCompatible.ToDictionary(kv => kv.Key, kv => kv.Value.Clone(), StringComparer.OrdinalIgnoreCase);
+        _functionBarLabelOverridesShiftStandardDraft = _settings.Input.FunctionBarLabelOverridesShiftStandard.ToDictionary(kv => kv.Key, kv => kv.Value.Clone(), StringComparer.OrdinalIgnoreCase);
+        _functionBarLabelOverridesShiftFdCompatibleDraft = _settings.Input.FunctionBarLabelOverridesShiftFdCompatible.ToDictionary(kv => kv.Key, kv => kv.Value.Clone(), StringComparer.OrdinalIgnoreCase);
+        _functionBarLabelOverridesCtrlStandardDraft = _settings.Input.FunctionBarLabelOverridesCtrlStandard.ToDictionary(kv => kv.Key, kv => kv.Value.Clone(), StringComparer.OrdinalIgnoreCase);
+        _functionBarLabelOverridesCtrlFdCompatibleDraft = _settings.Input.FunctionBarLabelOverridesCtrlFdCompatible.ToDictionary(kv => kv.Key, kv => kv.Value.Clone(), StringComparer.OrdinalIgnoreCase);
+        _functionBarLabelOverridesAltStandardDraft = _settings.Input.FunctionBarLabelOverridesAltStandard.ToDictionary(kv => kv.Key, kv => kv.Value.Clone(), StringComparer.OrdinalIgnoreCase);
+        _functionBarLabelOverridesAltFdCompatibleDraft = _settings.Input.FunctionBarLabelOverridesAltFdCompatible.ToDictionary(kv => kv.Key, kv => kv.Value.Clone(), StringComparer.OrdinalIgnoreCase);
+    }
+
+    private (TextBox sevenZip, TextBox diff, TextBox editor, ComboBox videoPlaybackVolume, TextBox videoStillPreviewFfmpegPath, CheckBox videoEnterPlaysExternal, Label sevenZipStatus, Label diffStatus, Label editorStatus, Label videoStillPreviewFfmpegStatus, CheckBox videoStillPreviewEnabled, ComboBox videoSkipSeconds)
         BuildExternalTab(TabPage tab)
     {
-        int labelWidth = 120;
+        int labelWidth = 124;
         int baseX = labelWidth + 12;
         int rowH = 64;
+        int textBoxWidth = 280;
+        int browseButtonWidth = 56;
+        int browseButtonX = baseX + textBoxWidth + 8;
 
         // --- Left: Archive / Diff / Editor ---
-        var groupArchive = new GroupBox { Text = "外部アプリケーション", Location = new Point(8, 6), Size = new Size(376, 360) };
+        var groupArchive = new GroupBox { Text = "外部アプリケーション", Location = new Point(8, 6), Size = new Size(500, 396) };
         tab.Controls.Add(groupArchive);
 
         int top = 28;
         AddLabel(groupArchive, "7-Zip パス:", top, labelWidth);
-        var sevenZip = AddTextBox(groupArchive, baseX, top, 160, _settings.SevenZip.ExePath ?? "");
-        AddBrowseButton(groupArchive, baseX + 168, top - 1, 60, sevenZip);
-        var sevenZipStatus = AddStatusLabel(groupArchive, baseX, top + 26, 240);
+        var sevenZip = AddTextBox(groupArchive, baseX, top, textBoxWidth, _settings.SevenZip.ExePath ?? "");
+        AddBrowseButton(groupArchive, browseButtonX, top - 1, browseButtonWidth, sevenZip);
+        var sevenZipStatus = AddStatusLabel(groupArchive, baseX, top + 26, 360);
         top += rowH;
 
         AddLabel(groupArchive, "外部 Diff:", top, labelWidth);
-        var diff = AddTextBox(groupArchive, baseX, top, 160, _settings.ExternalTools.ExternalDiffPath ?? "");
-        AddBrowseButton(groupArchive, baseX + 168, top - 1, 60, diff);
-        var diffStatus = AddStatusLabel(groupArchive, baseX, top + 26, 240);
+        var diff = AddTextBox(groupArchive, baseX, top, textBoxWidth, _settings.ExternalTools.ExternalDiffPath ?? "");
+        AddBrowseButton(groupArchive, browseButtonX, top - 1, browseButtonWidth, diff);
+        var diffStatus = AddStatusLabel(groupArchive, baseX, top + 26, 360);
         top += rowH;
 
         AddLabel(groupArchive, "外部エディタ:", top, labelWidth);
-        var editor = AddTextBox(groupArchive, baseX, top, 160, _settings.ExternalTools.ExternalEditorPath ?? "");
-        AddBrowseButton(groupArchive, baseX + 168, top - 1, 60, editor);
-        var editorStatus = AddStatusLabel(groupArchive, baseX, top + 26, 240);
+        var editor = AddTextBox(groupArchive, baseX, top, textBoxWidth, _settings.ExternalTools.ExternalEditorPath ?? "");
+        AddBrowseButton(groupArchive, browseButtonX, top - 1, browseButtonWidth, editor);
+        var editorStatus = AddStatusLabel(groupArchive, baseX, top + 26, 360);
         top += rowH + 8;
 
-        AddHintLabel(groupArchive, 16, top, 340, "E キーで選択ファイルをこのエディタで開きます。\n未設定時は notepad.exe を使用します。");
+        AddWrappedHintLabel(groupArchive, 16, top, 460, "E キーで選択ファイルをこのエディタで開きます。\n未設定時は notepad.exe を使用します。");
 
         // --- Right: External Tools / Video ---
-        var groupTools = new GroupBox { Text = "外部ツール管理", Location = new Point(392, 6), Size = new Size(376, 176) };
+        var groupTools = new GroupBox { Text = "外部ツール管理", Location = new Point(516, 6), Size = new Size(500, 188) };
         tab.Controls.Add(groupTools);
 
         top = 28;
@@ -495,35 +710,51 @@ public class SettingsForm : Form
         groupTools.Controls.Add(btnManageTools);
         top += 48;
 
-        AddHintLabel(groupTools, 16, top, 340, "コマンドパレット (Ctrl+Shift+P) や Alt+スロットで起動する外部ツールを管理します。");
+        AddWrappedHintLabel(groupTools, 16, top, 460, "コマンドパレット (Ctrl+Shift+P) や Alt+英数字の外部ツール namespace で起動するツールを管理します。Alt+F1〜F12 の Function layer とは別です。");
 
-        var groupVideoTools = new GroupBox { Text = "動画ツール", Location = new Point(392, 188), Size = new Size(376, 218) };
+        var groupVideoTools = new GroupBox { Text = "動画静止画プレビュー / 外部ツール", Location = new Point(516, 200), Size = new Size(500, 276) };
         tab.Controls.Add(groupVideoTools);
         top = 28;
+
+        var videoStillPreviewEnabled = AddCheckBox(groupVideoTools, "静止画プレビューを有効にする", 16, top, _settings.Preview.VideoStillPreviewEnabled);
+        top += 28;
+        AddLabel(groupVideoTools, "初期位置(秒):", top, labelWidth);
+        var videoSkipSeconds = AddEditableComboBox(groupVideoTools, baseX, top, 100, new[] { "0", "5", "10", "30", "60" }, _settings.Preview.VideoSkipSeconds.ToString());
+        top += 34;
+
         AddLabel(groupVideoTools, "動画ツールフォルダ:", top, labelWidth);
-        var videoStillPreviewFfmpegPath = AddTextBox(groupVideoTools, baseX, top, 160, _settings.Preview.VideoToolDirectory ?? "");
-        AddBrowseFolderButton(groupVideoTools, baseX + 168, top - 1, 60, videoStillPreviewFfmpegPath);
-        var videoStillPreviewFfmpegStatus = AddStatusLabel(groupVideoTools, 16, top + 22, 340);
-        top += 46;
+        var videoStillPreviewFfmpegPath = AddTextBox(groupVideoTools, baseX, top, textBoxWidth, _settings.Preview.VideoToolDirectory ?? "");
+        AddBrowseFolderButton(groupVideoTools, browseButtonX, top - 1, browseButtonWidth, videoStillPreviewFfmpegPath);
+
+        var videoStillPreviewFfmpegStatus = new Label
+        {
+            Location = new Point(16, top + 32),
+            Size = new Size(460, 40),
+            ForeColor = SystemColors.GrayText,
+            TextAlign = ContentAlignment.TopLeft
+        };
+        groupVideoTools.Controls.Add(videoStillPreviewFfmpegStatus);
+
+        top += 70;
         AddLabel(groupVideoTools, "ffplay音量(%):", top, labelWidth);
         var videoPlaybackVolume = AddEditableComboBox(groupVideoTools, baseX, top, 100, new[] { "0", "30", "50", "70", "100" }, _settings.Preview.VideoPlaybackVolumePercent.ToString());
         top += 30;
         var videoEnterPlaysExternal = AddCheckBox(groupVideoTools, "動画 Enter で外部再生する (Ctrl+Enterでプレビュー)", 16, top, _settings.Preview.VideoEnterPlaysExternal);
         top += 26;
-        AddHintLabel(groupVideoTools, 16, top, 340, "※ 静止画: ffmpeg / 再生: ffplay / 長さ: ffprobe");
+        AddHintLabel(groupVideoTools, 16, top, 460, "※ 静止画: ffmpeg / 再生: ffplay / 長さ: ffprobe", 54);
 
         sevenZip.TextChanged += (_, _) => RefreshExternalStatus();
         diff.TextChanged += (_, _) => RefreshExternalStatus();
         editor.TextChanged += (_, _) => RefreshExternalStatus();
         videoStillPreviewFfmpegPath.TextChanged += (_, _) => RefreshExternalStatus();
 
-        return (sevenZip, diff, editor, videoPlaybackVolume, videoStillPreviewFfmpegPath, videoEnterPlaysExternal, sevenZipStatus, diffStatus, editorStatus, videoStillPreviewFfmpegStatus);
+        return (sevenZip, diff, editor, videoPlaybackVolume, videoStillPreviewFfmpegPath, videoEnterPlaysExternal, sevenZipStatus, diffStatus, editorStatus, videoStillPreviewFfmpegStatus, videoStillPreviewEnabled, videoSkipSeconds);
     }
 
     private (CheckBox enableLog, CheckBox enableDetail) BuildLogTab(TabPage tab)
     {
-        // --- Left: Log settings ---
-        var groupLog = new GroupBox { Text = "ログ設定", Location = new Point(8, 6), Size = new Size(376, 360) };
+        // --- Right: Log settings ---
+        var groupLog = new GroupBox { Text = "ログ設定", Location = new Point(506, 6), Size = new Size(490, 160) };
         tab.Controls.Add(groupLog);
 
         int top = 28;
@@ -533,7 +764,8 @@ public class SettingsForm : Form
         var enableDetail = AddCheckBox(groupLog, "詳細ログを有効化（調査用）", 16, top, _settings.Logging.IsDetailedEnabled);
         top += rowH + 8;
 
-        AddHintLabel(groupLog, 16, top, 340, "通常はOFF推奨です。問題調査時のみONにしてください。ログはサイズローテーションされ、古いログは自動削除されます。");
+        var hint = AddWrappedHintLabel(groupLog, 16, top, 460, "通常はOFF推奨です。問題調査時のみONにしてください。\nログはサイズローテーションされ、古いログは自動削除されます。");
+        groupLog.Height = hint.Bottom + 16;
 
         return (enableLog, enableDetail);
     }
@@ -619,6 +851,20 @@ public class SettingsForm : Form
             Size = new Size(width, height),
             ForeColor = SystemColors.GrayText
         });
+    }
+
+    private Label AddWrappedHintLabel(Control parent, int x, int y, int width, string text)
+    {
+        var label = new Label
+        {
+            Text = text,
+            Location = new Point(x, y),
+            MaximumSize = new Size(width, 0),
+            AutoSize = true,
+            ForeColor = SystemColors.GrayText
+        };
+        parent.Controls.Add(label);
+        return label;
     }
 
     private void AddLabel(Control parent, string text, int top, int width)
@@ -781,12 +1027,629 @@ public class SettingsForm : Form
         return checkBox;
     }
 
+    private sealed record MouseGestureItem(string GestureId, string DisplayName);
+
+    private static readonly MouseGestureItem[] MouseGestureItems =
+    {
+        new("L", "左"),
+        new("R", "右"),
+        new("U", "上"),
+        new("D", "下"),
+        new("LR", "左右"),
+        new("LU", "左上"),
+        new("LD", "左下"),
+        new("RL", "右左"),
+        new("RU", "右上"),
+        new("RD", "右下"),
+        new("UL", "上左"),
+        new("UR", "上右"),
+        new("UD", "上下"),
+        new("DL", "下左"),
+        new("DR", "下右"),
+        new("DU", "下上")
+    };
+
+    private void OpenMouseGestureSettingsDialog()
+    {
+        var workingMap = new Dictionary<string, string>(_mouseGestureCommandMapDraft, StringComparer.OrdinalIgnoreCase);
+        var assignableCommands = GetOrderedMouseGestureAssignableCommands();
+        var comboBindings = new List<(string GestureId, ComboBox Combo)>();
+
+        using var dialog = new Form
+        {
+            Text = "マウスジェスチャー割り当て",
+            StartPosition = FormStartPosition.CenterParent,
+            FormBorderStyle = FormBorderStyle.FixedDialog,
+            MaximizeBox = false,
+            MinimizeBox = false,
+            ClientSize = new Size(560, 500)
+        };
+
+        var panel = new Panel
+        {
+            Dock = DockStyle.Top,
+            Height = 420,
+            AutoScroll = true
+        };
+        dialog.Controls.Add(panel);
+
+        int top = 16;
+        foreach (MouseGestureItem item in MouseGestureItems)
+        {
+            string gestureId = item.GestureId;
+            var label = new Label
+            {
+                Text = item.DisplayName,
+                Location = new Point(20, top + 4),
+                AutoSize = true
+            };
+            panel.Controls.Add(label);
+
+            var combo = new ComboBox
+            {
+                Location = new Point(120, top),
+                Size = new Size(400, 24),
+                DropDownStyle = ComboBoxStyle.DropDownList,
+                Tag = item.GestureId
+            };
+            combo.Items.Add(new CommandOption(InputSettings.MouseGestureUnassignedCommandId, "無効"));
+            foreach (CommandDefinition definition in assignableCommands)
+            {
+                combo.Items.Add(new CommandOption(definition.Id, definition.DisplayName));
+            }
+            string selectedCommandId = ResolveGestureCommandIdForSettings(gestureId, workingMap);
+            SelectCommandOption(combo, selectedCommandId);
+            int selectedIndexBeforeDropDown = combo.SelectedIndex;
+            combo.DropDown += (_, _) =>
+            {
+                selectedIndexBeforeDropDown = combo.SelectedIndex;
+            };
+            combo.KeyDown += (_, e) =>
+            {
+                if (e.KeyCode == Keys.Escape && combo.DroppedDown)
+                {
+                    if (selectedIndexBeforeDropDown >= 0 &&
+                        selectedIndexBeforeDropDown < combo.Items.Count)
+                    {
+                        combo.SelectedIndex = selectedIndexBeforeDropDown;
+                    }
+
+                    combo.DroppedDown = false;
+                    e.Handled = true;
+                    e.SuppressKeyPress = true;
+                }
+            };
+            combo.MouseWheel += (_, e) =>
+            {
+                if (!combo.DroppedDown && e is HandledMouseEventArgs handled)
+                {
+                    handled.Handled = true;
+                }
+            };
+            panel.Controls.Add(combo);
+            comboBindings.Add((gestureId, combo));
+
+            top += 34;
+        }
+
+        var resetButton = new Button
+        {
+            Text = "既定に戻す",
+            Location = new Point(12, 454),
+            Size = new Size(120, 32)
+        };
+        resetButton.Click += (_, _) =>
+        {
+            foreach (MouseGestureItem item in MouseGestureItems)
+            {
+                string defaultCommandId = InputSettings.DefaultMouseGestureCommandMap.TryGetValue(item.GestureId, out string? commandId)
+                    ? commandId
+                    : InputSettings.MouseGestureUnassignedCommandId;
+                workingMap[item.GestureId] = defaultCommandId;
+            }
+
+            foreach ((string gestureId, ComboBox combo) in comboBindings)
+            {
+                string selectedCommandId = ResolveGestureCommandIdForSettings(gestureId, workingMap);
+                SelectCommandOption(combo, selectedCommandId);
+            }
+        };
+        dialog.Controls.Add(resetButton);
+
+        var okButton = new Button
+        {
+            Text = "OK",
+            DialogResult = DialogResult.OK,
+            Location = new Point(376, 454),
+            Size = new Size(80, 32)
+        };
+        dialog.Controls.Add(okButton);
+
+        var cancelButton = new Button
+        {
+            Text = "キャンセル",
+            DialogResult = DialogResult.Cancel,
+            Location = new Point(466, 454),
+            Size = new Size(80, 32)
+        };
+        dialog.Controls.Add(cancelButton);
+
+        dialog.AcceptButton = okButton;
+        dialog.CancelButton = cancelButton;
+
+        if (dialog.ShowDialog(this) == DialogResult.OK)
+        {
+            foreach ((string gestureId, ComboBox combo) in comboBindings)
+            {
+                if (combo.SelectedItem is CommandOption option)
+                {
+                    workingMap[gestureId] = option.Id;
+                }
+            }
+
+            _mouseGestureCommandMapDraft = new Dictionary<string, string>(workingMap, StringComparer.OrdinalIgnoreCase);
+        }
+    }
+
+    private void OpenBrowserKeyBindingSettingsDialog()
+    {
+        string profileValue = ToFunctionKeyProfileValue(_functionKeyProfileCombo.Text);
+        IReadOnlyDictionary<string, IReadOnlyList<string>> defaults = InputSettings.GetDefaultBrowserKeyCommandMap(profileValue);
+        var commands = GetOrderedBrowserKeyBindingCommands();
+        var workingOverrides = InputSettings.NormalizeBrowserKeyCommandOverrides(_browserKeyCommandOverridesDraft);
+        var gestureOptions = CreateBrowserKeyGestureOptions(defaults, workingOverrides);
+        var comboBindings = new List<(CommandDefinition Command, ComboBox Combo)>();
+
+        using var dialog = new Form
+        {
+            Text = "キーバインド割り当て",
+            StartPosition = FormStartPosition.CenterParent,
+            FormBorderStyle = FormBorderStyle.FixedDialog,
+            MaximizeBox = false,
+            MinimizeBox = false,
+            ClientSize = new Size(740, 560)
+        };
+
+        var panel = new Panel
+        {
+            Dock = DockStyle.Top,
+            Height = 470,
+            AutoScroll = true
+        };
+        dialog.Controls.Add(panel);
+
+        int top = 16;
+        foreach (CommandDefinition command in commands)
+        {
+            var label = new Label
+            {
+                Text = command.DisplayName,
+                Location = new Point(20, top + 4),
+                Size = new Size(280, 24)
+            };
+            panel.Controls.Add(label);
+
+            var combo = new ComboBox
+            {
+                Location = new Point(320, top),
+                Size = new Size(390, 24),
+                DropDownStyle = ComboBoxStyle.DropDownList
+            };
+            foreach (string gesture in gestureOptions)
+            {
+                combo.Items.Add(new KeyGestureOption(gesture));
+            }
+
+            string selectedGesture = ResolveCommandGestureForSettings(command.Id, defaults, workingOverrides);
+            SelectKeyGestureOption(combo, selectedGesture);
+            panel.Controls.Add(combo);
+            comboBindings.Add((command, combo));
+            top += 34;
+        }
+
+        var resetAllButton = new Button
+        {
+            Text = "すべて既定に戻す",
+            Location = new Point(12, 514),
+            Size = new Size(150, 32)
+        };
+        resetAllButton.Click += (_, _) =>
+        {
+            workingOverrides.Clear();
+            foreach ((CommandDefinition command, ComboBox combo) in comboBindings)
+            {
+                string selectedGesture = ResolveCommandGestureForSettings(command.Id, defaults, workingOverrides);
+                SelectKeyGestureOption(combo, selectedGesture);
+            }
+        };
+        dialog.Controls.Add(resetAllButton);
+
+        var okButton = new Button
+        {
+            Text = "OK",
+            DialogResult = DialogResult.OK,
+            Location = new Point(556, 514),
+            Size = new Size(80, 32)
+        };
+        dialog.Controls.Add(okButton);
+
+        var cancelButton = new Button
+        {
+            Text = "キャンセル",
+            DialogResult = DialogResult.Cancel,
+            Location = new Point(646, 514),
+            Size = new Size(80, 32)
+        };
+        dialog.Controls.Add(cancelButton);
+
+        dialog.AcceptButton = okButton;
+        dialog.CancelButton = cancelButton;
+
+        if (dialog.ShowDialog(this) != DialogResult.OK)
+        {
+            return;
+        }
+
+        var nextOverrides = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
+        var keyToCommand = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        var conflicts = new List<string>();
+
+        foreach ((CommandDefinition command, ComboBox combo) in comboBindings)
+        {
+            if (combo.SelectedItem is not KeyGestureOption selected)
+            {
+                continue;
+            }
+
+            string selectedGesture = InputSettings.NormalizeKeyGestureText(selected.Gesture);
+            if (string.IsNullOrWhiteSpace(selectedGesture))
+            {
+                continue;
+            }
+
+            string defaultGesture = ResolvePrimaryGesture(defaults.TryGetValue(command.Id, out IReadOnlyList<string>? values) ? values : Array.Empty<string>());
+            if (!string.Equals(selectedGesture, InputSettings.MouseGestureUnassignedCommandId, StringComparison.OrdinalIgnoreCase))
+            {
+                if (keyToCommand.TryGetValue(selectedGesture, out string? conflictCommandId))
+                {
+                    string conflictName = _commandRegistry.Find(conflictCommandId)?.DisplayName ?? conflictCommandId;
+                    conflicts.Add($"{selectedGesture}: {conflictName} / {command.DisplayName}");
+                }
+                else
+                {
+                    keyToCommand[selectedGesture] = command.Id;
+                }
+            }
+
+            List<string> existingGestures = workingOverrides.TryGetValue(command.Id, out List<string>? existingRaw)
+                ? InputSettings.NormalizeBrowserKeyGestures(existingRaw)
+                : new List<string>();
+
+            if (string.Equals(selectedGesture, defaultGesture, StringComparison.OrdinalIgnoreCase) && existingGestures.Count == 0)
+            {
+                continue;
+            }
+
+            if (string.Equals(selectedGesture, InputSettings.MouseGestureUnassignedCommandId, StringComparison.OrdinalIgnoreCase))
+            {
+                nextOverrides[command.Id] = new List<string>();
+                continue;
+            }
+
+            var merged = new List<string> { selectedGesture };
+            foreach (string gesture in existingGestures)
+            {
+                if (!merged.Contains(gesture, StringComparer.OrdinalIgnoreCase) &&
+                    !string.Equals(gesture, InputSettings.MouseGestureUnassignedCommandId, StringComparison.OrdinalIgnoreCase))
+                {
+                    merged.Add(gesture);
+                }
+            }
+
+            nextOverrides[command.Id] = merged;
+        }
+
+        if (conflicts.Count > 0)
+        {
+            MessageBox.Show(
+                this,
+                "キー割り当てが競合しています。修正してください。\r\n\r\n" + string.Join("\r\n", conflicts),
+                "キーバインド競合",
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Warning);
+            return;
+        }
+
+        _browserKeyCommandOverridesDraft = nextOverrides;
+    }
+
+    private IReadOnlyList<CommandDefinition> GetOrderedBrowserKeyBindingCommands()
+    {
+        string profileValue = ToFunctionKeyProfileValue(_functionKeyProfileCombo.Text);
+        IReadOnlyDictionary<string, IReadOnlyList<string>> defaults = InputSettings.GetDefaultBrowserKeyCommandMap(profileValue);
+        var overrides = InputSettings.NormalizeBrowserKeyCommandOverrides(_settings.Input?.BrowserKeyCommandOverrides);
+        var commands = _commandRegistry
+            .GetAll()
+            .Where(static c =>
+                (c.Scope == CommandScope.Browser || c.Scope == CommandScope.Global) &&
+                c.IsCustomizable &&
+                !c.IsDangerous)
+            .Where(c => defaults.ContainsKey(c.Id) || overrides.ContainsKey(c.Id))
+            .ToArray();
+
+        var preferredOrder = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase)
+        {
+            [CommandIds.BrowserNavigateParent] = 10,
+            [CommandIds.BrowserNavigateBack] = 11,
+            [CommandIds.BrowserNavigateForward] = 12,
+            [CommandIds.BrowserReload] = 20,
+            [CommandIds.BrowserOpenExplorer] = 30,
+            [CommandIds.BrowserOpenShell] = 31,
+            [CommandIds.BrowserOpenExternalEditor] = 32,
+            [CommandIds.BrowserCopyFullPath] = 40,
+            [CommandIds.ClipboardPaste] = 41,
+            [CommandIds.BrowserTabNew] = 50,
+            [CommandIds.BrowserTabClose] = 51,
+            [CommandIds.BrowserTabRestoreClosed] = 52,
+            [CommandIds.BrowserTabCategoryPrevious] = 53,
+            [CommandIds.BrowserTabCategoryNext] = 54,
+            [CommandIds.BrowserQuickAccess] = 60,
+            [CommandIds.BrowserTree] = 61,
+            [CommandIds.BrowserFilter] = 62,
+            [CommandIds.BrowserSort] = 63,
+            [CommandIds.BrowserFilter] = 64,
+            [CommandIds.BrowserLogdisk] = 65,
+            [CommandIds.ArchiveUnpack] = 66,
+            [CommandIds.BrowserMarkAllFiles] = 67,
+            [CommandIds.BrowserMarkAllItems] = 68,
+            [CommandIds.BrowserOpenMarkSlot] = 69,
+            [CommandIds.AppOpenCommandLauncher] = 70,
+            [CommandIds.AppOpenCommandList] = 71,
+            [CommandIds.BrowserShowHelp] = 72,
+            [CommandIds.AppOpenSettings] = 80
+        };
+
+        return commands
+            .OrderBy(c => preferredOrder.TryGetValue(c.Id, out int order) ? order : 999)
+            .ThenBy(c => c.DisplayName, StringComparer.Ordinal)
+            .ToArray();
+    }
+
+    private static IReadOnlyList<string> CreateBrowserKeyGestureOptions(
+        IReadOnlyDictionary<string, IReadOnlyList<string>> defaults,
+        IReadOnlyDictionary<string, List<string>> overrides)
+    {
+        var gestures = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            InputSettings.MouseGestureUnassignedCommandId
+        };
+
+        foreach (IReadOnlyList<string> values in defaults.Values)
+        {
+            foreach (string value in values)
+            {
+                string normalized = InputSettings.NormalizeKeyGestureText(value);
+                if (!string.IsNullOrWhiteSpace(normalized))
+                {
+                    gestures.Add(normalized);
+                }
+            }
+        }
+
+        foreach (List<string> values in overrides.Values)
+        {
+            foreach (string value in values)
+            {
+                string normalized = InputSettings.NormalizeKeyGestureText(value);
+                if (!string.IsNullOrWhiteSpace(normalized))
+                {
+                    gestures.Add(normalized);
+                }
+            }
+        }
+
+        string[] extras =
+        {
+            "Ctrl+R", "Ctrl+F", "Ctrl+T", "Ctrl+W",
+            "Alt+Left", "Alt+Right", "Alt+F2",
+            "Ctrl+Shift+C", "Ctrl+V", "Back",
+            "Shift+F6", "Alt+F5", "Ctrl+Shift+Left", "Ctrl+Shift+Right",
+            "Ctrl+Shift+P", "Ctrl+Shift+L", "Ctrl+H", "Ctrl+M", "E", "S", "F", "T", "H", "Q", "L", "U"
+        };
+
+        foreach (string extra in extras)
+        {
+            gestures.Add(InputSettings.NormalizeKeyGestureText(extra));
+        }
+
+        return gestures
+            .Where(static x => !string.IsNullOrWhiteSpace(x))
+            .OrderBy(static x => x, StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+    }
+
+    private static string ResolveCommandGestureForSettings(
+        string commandId,
+        IReadOnlyDictionary<string, IReadOnlyList<string>> defaults,
+        IReadOnlyDictionary<string, List<string>> overrides)
+    {
+        if (overrides.TryGetValue(commandId, out List<string>? configured))
+        {
+            List<string> normalizedConfigured = InputSettings.NormalizeBrowserKeyGestures(configured);
+            if (normalizedConfigured.Count == 0)
+            {
+                return InputSettings.MouseGestureUnassignedCommandId;
+            }
+
+            return ResolvePrimaryGesture(normalizedConfigured);
+        }
+
+        if (defaults.TryGetValue(commandId, out IReadOnlyList<string>? defaultGestures))
+        {
+            return ResolvePrimaryGesture(defaultGestures);
+        }
+
+        return InputSettings.MouseGestureUnassignedCommandId;
+    }
+
+    private static string ResolvePrimaryGesture(IEnumerable<string> gestures)
+    {
+        foreach (string gesture in gestures)
+        {
+            string normalized = InputSettings.NormalizeKeyGestureText(gesture);
+            if (!string.IsNullOrWhiteSpace(normalized))
+            {
+                return normalized;
+            }
+        }
+
+        return InputSettings.MouseGestureUnassignedCommandId;
+    }
+
+    private static void SelectKeyGestureOption(ComboBox combo, string gesture)
+    {
+        for (int i = 0; i < combo.Items.Count; i++)
+        {
+            if (combo.Items[i] is KeyGestureOption option &&
+                string.Equals(option.Gesture, gesture, StringComparison.OrdinalIgnoreCase))
+            {
+                combo.SelectedIndex = i;
+                return;
+            }
+        }
+
+        combo.SelectedIndex = 0;
+    }
+
+    private static void SelectCommandOption(ComboBox combo, string commandId)
+    {
+        for (int i = 0; i < combo.Items.Count; i++)
+        {
+            if (combo.Items[i] is CommandOption option && string.Equals(option.Id, commandId, StringComparison.OrdinalIgnoreCase))
+            {
+                combo.SelectedIndex = i;
+                return;
+            }
+        }
+
+        combo.SelectedIndex = 0;
+    }
+
+    private string ResolveGestureCommandIdForSettings(string gestureId, IReadOnlyDictionary<string, string> map)
+    {
+        if (map.TryGetValue(gestureId, out string? configured) && !string.IsNullOrWhiteSpace(configured))
+        {
+            return configured;
+        }
+
+        if (InputSettings.DefaultMouseGestureCommandMap.TryGetValue(gestureId, out string? defaultCommandId))
+        {
+            return defaultCommandId;
+        }
+
+        return InputSettings.MouseGestureUnassignedCommandId;
+    }
+
+    private IReadOnlyList<CommandDefinition> GetOrderedMouseGestureAssignableCommands()
+    {
+        var commands = _commandRegistry.GetMouseGestureAssignableCommands();
+        var preferredOrder = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase)
+        {
+            [CommandIds.BrowserNavigateParent] = 10,
+            [CommandIds.BrowserNavigateBack] = 11,
+            [CommandIds.BrowserNavigateForward] = 12,
+            [CommandIds.BrowserReload] = 20,
+            [CommandIds.BrowserOpenExplorer] = 30,
+            [CommandIds.BrowserOpenShell] = 31,
+            [CommandIds.BrowserCopyFullPath] = 40,
+            [CommandIds.BrowserTabNew] = 50,
+            [CommandIds.BrowserTabNext] = 51,
+            [CommandIds.BrowserTabPrevious] = 52,
+            [CommandIds.BrowserTabClose] = 53,
+            [CommandIds.BrowserTabRestoreClosed] = 54,
+            [CommandIds.BrowserTabCategoryNext] = 55,
+            [CommandIds.BrowserTabCategoryPrevious] = 56,
+            [CommandIds.BrowserQuickAccess] = 60,
+            [CommandIds.BrowserTree] = 61,
+            [CommandIds.BrowserFilter] = 62,
+            [CommandIds.BrowserSort] = 63,
+            [CommandIds.BrowserFilter] = 64,
+            [CommandIds.BrowserLogdisk] = 65,
+            [CommandIds.ArchiveUnpack] = 66,
+            [CommandIds.BrowserMarkAllFiles] = 67,
+            [CommandIds.BrowserMarkAllItems] = 68,
+            [CommandIds.BrowserOpenMarkSlot] = 69,
+            [CommandIds.BrowserOpenExternalEditor] = 70,
+            [CommandIds.ClipboardPaste] = 71,
+            [CommandIds.AppOpenSettings] = 80,
+            [CommandIds.AppOpenCommandLauncher] = 81
+        };
+
+        return commands
+            .OrderBy(c => preferredOrder.TryGetValue(c.Id, out int order) ? order : 999)
+            .ThenBy(c => c.DisplayName, StringComparer.Ordinal)
+            .ToArray();
+    }
+
+    private sealed class CommandOption
+    {
+        public string Id { get; }
+        public string DisplayName { get; }
+
+        public CommandOption(string id, string displayName)
+        {
+            Id = id;
+            DisplayName = displayName;
+        }
+
+        public override string ToString() => DisplayName;
+    }
+
+    private sealed class KeyGestureOption
+    {
+        public string Gesture { get; }
+
+        public KeyGestureOption(string gesture)
+        {
+            Gesture = gesture;
+        }
+
+        public override string ToString()
+        {
+            return string.Equals(Gesture, InputSettings.MouseGestureUnassignedCommandId, StringComparison.OrdinalIgnoreCase)
+                ? "無効"
+                : Gesture;
+        }
+    }
+
     private void SaveCurrentSettings()
     {
-        _settings.Profile = GetSelectedFeatureProfileSettingValue(_featureProfileCombo);
+        SyncInputAssignmentDraftFromEmbeddedView();
+
+        _settings.Profile = ToFeatureProfileSettingValue(_enableWorkspaceSnapshotCheckBox.Checked);
         _settings.Input.FunctionKeyProfile = ToFunctionKeyProfileValue(_functionKeyProfileCombo.Text);
         _settings.Input.CommandLauncherShortcut = _commandLauncherShortcutCombo.Text;
         _settings.Input.EnableMouseGestures = _enableMouseGesturesCheckBox.Checked;
+        _settings.Input.MouseGestureCommandMap = InputSettings.NormalizeMouseGestureCommandMap(_mouseGestureCommandMapDraft);
+        _settings.Input.BrowserKeyCommandOverrides = InputSettings.NormalizeBrowserKeyCommandOverrides(_browserKeyCommandOverridesDraft);
+        _settings.Input.FunctionBarCommandOverridesStandard = new Dictionary<string, string?>(_functionBarCommandOverridesStandardDraft, StringComparer.OrdinalIgnoreCase);
+        _settings.Input.FunctionBarCommandOverridesFdCompatible = new Dictionary<string, string?>(_functionBarCommandOverridesFdCompatibleDraft, StringComparer.OrdinalIgnoreCase);
+        _settings.Input.FunctionBarCommandOverridesShiftStandard = new Dictionary<string, string?>(_functionBarCommandOverridesShiftStandardDraft, StringComparer.OrdinalIgnoreCase);
+        _settings.Input.FunctionBarCommandOverridesShiftFdCompatible = new Dictionary<string, string?>(_functionBarCommandOverridesShiftFdCompatibleDraft, StringComparer.OrdinalIgnoreCase);
+        _settings.Input.FunctionBarCommandOverridesCtrlStandard = new Dictionary<string, string?>(_functionBarCommandOverridesCtrlStandardDraft, StringComparer.OrdinalIgnoreCase);
+        _settings.Input.FunctionBarCommandOverridesCtrlFdCompatible = new Dictionary<string, string?>(_functionBarCommandOverridesCtrlFdCompatibleDraft, StringComparer.OrdinalIgnoreCase);
+        _settings.Input.FunctionBarCommandOverridesAltStandard = new Dictionary<string, string?>(_functionBarCommandOverridesAltStandardDraft, StringComparer.OrdinalIgnoreCase);
+        _settings.Input.FunctionBarCommandOverridesAltFdCompatible = new Dictionary<string, string?>(_functionBarCommandOverridesAltFdCompatibleDraft, StringComparer.OrdinalIgnoreCase);
+        InputSettings.NormalizeAndMigrateFunctionKeyChords(_settings.Input);
+        _settings.Input.FunctionBarLabelOverridesStandard = _functionBarLabelOverridesStandardDraft.ToDictionary(kv => kv.Key, kv => kv.Value.Clone(), StringComparer.OrdinalIgnoreCase);
+        _settings.Input.FunctionBarLabelOverridesFdCompatible = _functionBarLabelOverridesFdCompatibleDraft.ToDictionary(kv => kv.Key, kv => kv.Value.Clone(), StringComparer.OrdinalIgnoreCase);
+        _settings.Input.FunctionBarLabelOverridesShiftStandard = _functionBarLabelOverridesShiftStandardDraft.ToDictionary(kv => kv.Key, kv => kv.Value.Clone(), StringComparer.OrdinalIgnoreCase);
+        _settings.Input.FunctionBarLabelOverridesShiftFdCompatible = _functionBarLabelOverridesShiftFdCompatibleDraft.ToDictionary(kv => kv.Key, kv => kv.Value.Clone(), StringComparer.OrdinalIgnoreCase);
+        _settings.Input.FunctionBarLabelOverridesCtrlStandard = _functionBarLabelOverridesCtrlStandardDraft.ToDictionary(kv => kv.Key, kv => kv.Value.Clone(), StringComparer.OrdinalIgnoreCase);
+        _settings.Input.FunctionBarLabelOverridesCtrlFdCompatible = _functionBarLabelOverridesCtrlFdCompatibleDraft.ToDictionary(kv => kv.Key, kv => kv.Value.Clone(), StringComparer.OrdinalIgnoreCase);
+        _settings.Input.FunctionBarLabelOverridesAltStandard = _functionBarLabelOverridesAltStandardDraft.ToDictionary(kv => kv.Key, kv => kv.Value.Clone(), StringComparer.OrdinalIgnoreCase);
+        _settings.Input.FunctionBarLabelOverridesAltFdCompatible = _functionBarLabelOverridesAltFdCompatibleDraft.ToDictionary(kv => kv.Key, kv => kv.Value.Clone(), StringComparer.OrdinalIgnoreCase);
+        _settings.Input.ShowFunctionBarTooltips = _showFunctionBarTooltipsCheckBox?.Checked ?? _settings.Input.ShowFunctionBarTooltips;
         _settings.SevenZip.ExePath = NullIfEmpty(_sevenZipPathBox.Text);
         _settings.ExternalTools.ExternalDiffPath = NullIfEmpty(_diffPathBox.Text);
         _settings.ExternalTools.ExternalEditorPath = NullIfEmpty(_editorPathBox.Text);
@@ -862,6 +1725,9 @@ public class SettingsForm : Form
 
         _settings.FileOperations.ReloadAfterFileOperation = _reloadAfterFileOperationCheckBox.Checked;
         _settings.FileOperations.SelectCreatedItemAfterCreate = _selectCreatedItemCheckBox.Checked;
+        _settings.FileOperations.ClipboardPasteTextAsFileEnabled = _clipboardPasteTextAsFileCheckBox.Checked;
+        _settings.FileOperations.EnableDragArchiveHandoff = _enableDragArchiveHandoffCheckBox.Checked;
+        _settings.FileOperations.IncludeDragZipManifest = _includeDragZipManifestCheckBox.Checked;
 
         _settings.Session.RestoreLastPath = _restoreLastPathCheckBox.Checked;
         _settings.Session.RestoreTabsOnStartup = _restoreTabsOnStartupCheckBox.Checked;
@@ -873,6 +1739,14 @@ public class SettingsForm : Form
         _settings.Logging.IsDetailedEnabled = _enableDetailedLogCheckBox.Checked;
 
         SettingsManager.Save(_settings);
+    }
+
+    private void UpdateDragArchiveManifestCheckboxEnabledState()
+    {
+        if (_includeDragZipManifestCheckBox != null)
+        {
+            _includeDragZipManifestCheckBox.Enabled = _enableDragArchiveHandoffCheckBox?.Checked ?? false;
+        }
     }
 
     private void PersistEditedFileListColorsAsPresetIfNeeded()
@@ -968,7 +1842,7 @@ public class SettingsForm : Form
     private void OpenFirstLaunchSetupDialog()
     {
         var setupSettings = _settings.Clone();
-        setupSettings.Profile = GetSelectedFeatureProfileSettingValue(_featureProfileCombo);
+        setupSettings.Profile = ToFeatureProfileSettingValue(_enableWorkspaceSnapshotCheckBox.Checked);
         setupSettings.Input.FunctionKeyProfile = ToFunctionKeyProfileValue(_functionKeyProfileCombo.Text);
         setupSettings.Preview.VideoEnterPlaysExternal = _videoEnterPlaysExternalCheckBox.Checked;
         setupSettings.SevenZip.ExePath = NullIfEmpty(_sevenZipPathBox.Text);
@@ -981,9 +1855,14 @@ public class SettingsForm : Form
             return;
         }
 
-        SetFeatureProfileComboValue(dialog.SelectedProfile);
+        _enableWorkspaceSnapshotCheckBox.Checked = dialog.EnableWorkspaceSnapshotFeatures;
         _functionKeyProfileCombo.Text = dialog.UseFdCompatibleFunctionKeys ? "FD/WinFD互換" : "MidFD標準";
         _videoEnterPlaysExternalCheckBox.Checked = dialog.VideoEnterPlaysExternal;
+        _enableMouseGesturesCheckBox.Checked = dialog.EnableMouseGestures;
+        _showFunctionBarTooltipsCheckBox!.Checked = dialog.ShowFunctionBarTooltips;
+        _enableDragArchiveHandoffCheckBox.Checked = dialog.EnableDragArchiveHandoff;
+        _includeDragZipManifestCheckBox.Checked = dialog.IncludeDragZipManifest;
+        _restoreLastPathCheckBox.Checked = dialog.RestoreLastPath;
         _sevenZipPathBox.Text = dialog.SevenZipPath ?? string.Empty;
         _videoStillPreviewFfmpegPathBox.Text = dialog.VideoToolDirectory ?? string.Empty;
         _editorPathBox.Text = dialog.ExternalEditorPath ?? string.Empty;
@@ -1027,7 +1906,7 @@ public class SettingsForm : Form
         string text;
         Color color;
 
-        text = $"状態: {ffmpegSummary} / {ffplaySummary} / {ffprobeSummary}";
+        text = $"状態: {ffmpegSummary} {ffplaySummary} {ffprobeSummary}";
         if (resolution.FfmpegFound && resolution.FfplayFound && resolution.FfprobeFound)
         {
             color = Color.DarkGreen;
@@ -1086,43 +1965,16 @@ public class SettingsForm : Form
         return string.Join(Environment.NewLine, lines);
     }
 
-    private ComboBox CreateFeatureProfileCombo(Control parent, int x, int top, int width, string currentSettingValue)
+    private static bool IsAdvancedWorkspaceFeaturesEnabled(string? settingValue)
     {
-        var combo = new ComboBox
-        {
-            Location = new Point(x, top),
-            Size = new Size(width, 24),
-            DropDownStyle = ComboBoxStyle.DropDownList
-        };
+        return FeatureProfileService.TryResolveProfile(settingValue, out FeatureProfile parsed) && parsed == FeatureProfile.Full;
+    }
 
-        combo.Items.AddRange(FeatureProfileOptions.Select(option => option.DisplayName).Cast<object>().ToArray());
-
-        string initialSetting = FeatureProfileService.TryResolveProfile(currentSettingValue, out FeatureProfile parsed)
-            ? FeatureProfileService.ToSettingValue(parsed)
+    private static string ToFeatureProfileSettingValue(bool enabled)
+    {
+        return enabled
+            ? FeatureProfile.Full.ToString()
             : FeatureProfile.PracticalStable.ToString();
-        int selectedIndex = Array.FindIndex(FeatureProfileOptions, option => string.Equals(option.SettingValue, initialSetting, StringComparison.OrdinalIgnoreCase));
-        combo.SelectedIndex = selectedIndex >= 0 ? selectedIndex : 0;
-
-        parent.Controls.Add(combo);
-        return combo;
-    }
-
-    private static string GetSelectedFeatureProfileSettingValue(ComboBox combo)
-    {
-        int selectedIndex = combo.SelectedIndex;
-        if (selectedIndex < 0 || selectedIndex >= FeatureProfileOptions.Length)
-        {
-            return FeatureProfile.PracticalStable.ToString();
-        }
-
-        return FeatureProfileOptions[selectedIndex].SettingValue;
-    }
-
-    private void SetFeatureProfileComboValue(FeatureProfile profile)
-    {
-        string settingValue = FeatureProfileService.ToSettingValue(profile);
-        int selectedIndex = Array.FindIndex(FeatureProfileOptions, option => string.Equals(option.SettingValue, settingValue, StringComparison.OrdinalIgnoreCase));
-        _featureProfileCombo.SelectedIndex = selectedIndex >= 0 ? selectedIndex : 0;
     }
 
     private sealed class ColorTabResult
@@ -1156,9 +2008,8 @@ public class SettingsForm : Form
 
     private ColorTabResult BuildColorTab(TabPage tab)
     {
-        tab.AutoScroll = false;
-        var groupCustom = new GroupBox { Text = "一覧配色カスタマイズ", Location = new Point(8, 6), Size = new Size(405, 330) };
-        var groupPreview = new GroupBox { Text = "プレビュー", Location = new Point(420, 6), Size = new Size(352, 330) };
+        var groupCustom = new GroupBox { Text = "一覧配色カスタマイズ", Location = new Point(8, 6), Size = new Size(500, 330) };
+        var groupPreview = new GroupBox { Text = "プレビュー", Location = new Point(520, 6), Size = new Size(500, 330) };
         tab.Controls.Add(groupCustom);
         tab.Controls.Add(groupPreview);
 
@@ -1324,7 +2175,7 @@ public class SettingsForm : Form
         {
             Text = "UI基調色（メニュー/ヘッダ/ステータス/Viewer）",
             Location = new Point(8, 342),
-            Size = new Size(734, 150)
+            Size = new Size(1002, 150)
         };
         tab.Controls.Add(groupUiColors);
 
@@ -1335,7 +2186,7 @@ public class SettingsForm : Form
         {
             Text = "通常は表示色に合わせます。個別に変えたい場合だけ手動指定してください。",
             Location = new Point(ux, uy + 2),
-            Size = new Size(704, 20),
+            Size = new Size(970, 20),
             ForeColor = Color.DimGray
         };
         groupUiColors.Controls.Add(syncModeNote);
@@ -1382,7 +2233,7 @@ public class SettingsForm : Form
         {
             Text = "※ ファイル一覧の背景/文字色は上の「一覧配色カスタマイズ」で変更します。",
             Location = new Point(ux, uy),
-            Size = new Size(704, 32),
+            Size = new Size(970, 32),
             ForeColor = Color.DimGray
         };
         groupUiColors.Controls.Add(uiColorsNoteLabel);
@@ -1405,15 +2256,15 @@ public class SettingsForm : Form
 
         var fileListColorPreviewPanel = new ListView
         {
-            Location = new Point(8, 20),
-            Size = new Size(322, 298),
+            Location = new Point(10, 20),
+            Size = new Size(480, 298),
             View = View.Details,
             FullRowSelect = true,
             HeaderStyle = ColumnHeaderStyle.None,
             OwnerDraw = true,
             MultiSelect = false
         };
-        fileListColorPreviewPanel.Columns.Add("Name", 296);
+        fileListColorPreviewPanel.Columns.Add("Name", 476);
 
         var previewItems = new[]
         {

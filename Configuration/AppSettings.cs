@@ -381,6 +381,9 @@ public class FileOperationsSettings
     public ManagedTrashStoreMode ManagedTrashStoreMode { get; set; } = ManagedTrashStoreMode.Json;
     public bool ReloadAfterFileOperation { get; set; } = true;
     public bool SelectCreatedItemAfterCreate { get; set; } = true;
+    public bool ClipboardPasteTextAsFileEnabled { get; set; } = false;
+    public bool EnableDragArchiveHandoff { get; set; } = false;
+    public bool IncludeDragZipManifest { get; set; } = false;
 
     public FileOperationsSettings Clone() => (FileOperationsSettings)MemberwiseClone();
 }

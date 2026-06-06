@@ -16,6 +16,7 @@ using System.Runtime.InteropServices;
 using System.Media;
 using MidFD.Models;
 using MidFD.Helpers;
+using MidFD.Commands;
 using MidFD.Services.TrashManifestStore;
 using MidFD.Services.Workspace;
 namespace MidFD;
@@ -58,7 +59,7 @@ public partial class MainForm : Form
     private const int SW_SHOWMINIMIZED = 2;
     private const int SW_SHOWMAXIMIZED = 3;
     private const int SW_RESTORE = 9;
-    private const int MinimumNormalWindowWidth = 200;
+    private const int MinimumNormalWindowWidth = 980;
     private const int MinimumNormalWindowHeight = 480;
     private const int MinimumUsableClientAreaHeight = 120;
     private Rectangle? _lastKnownGoodNormalBounds;
@@ -126,10 +127,15 @@ public partial class MainForm : Form
     };
     private readonly NavigationService _navigationService;
     private readonly BrowserInputRouter _browserInputRouter = new();
+    private readonly BrowserMarkInteractionController _browserMarkInteractionController = new();
     private readonly ViewerInputRouter _viewerInputRouter = new();
     private readonly BrowserNavigationCoordinator _browserNavigationCoordinator = new();
     private readonly ViewerPreviewCoordinator _viewerPreviewCoordinator = new();
     private readonly CommandStateCoordinator _commandStateCoordinator = new();
+    private CommandStateCoordinator.CommandUiSnapshot _cachedCommandUiSnapshot;
+    private bool _isFunctionBarShiftLayerActive;
+    private bool _isFunctionBarCtrlLayerActive;
+    private bool _isFunctionBarAltLayerActive;
     private readonly BrowserLoadCoordinator _browserLoadCoordinator = new();
     private readonly FileOperationEntryCoordinator _fileOperationEntryCoordinator = new();
     private readonly FileOperationDialogCoordinator _fileOperationDialogCoordinator = new();
@@ -164,6 +170,8 @@ public partial class MainForm : Form
     private string _currentViewerDetectedEncodingLabel = string.Empty;
     private enum UIMode { Browser, Viewer }
     private UIMode _uiMode = UIMode.Browser;
+    private int _hoveredFuncKeyIndex = -1;
+    private int _pressedFuncKeyIndex = -1;
     private enum ViewerEncoding { Auto, UTF8, SJIS }
     private ViewerEncoding _viewerEncodingOverride = ViewerEncoding.Auto;
     private SortKind _currentSort = SortKind.Name;
@@ -193,18 +201,57 @@ public partial class MainForm : Form
     private System.Windows.Forms.Timer? _headerClockTimer;
     private Font? _headerPaintFont; // titleHeaderPanel_Paint で使用するフォント保持用
     // Phase 3-fix2b: Drag-out (MidFD → 外部) 用の状態管理
+    private const string InternalDragArchiveFormat = "MidFD.InternalDragArchiveHandoff";
+    private const string InternalDragArchiveMarkerValue = "1";
     private Point _dragStartPoint = Point.Empty;
     private int _dragCandidateIndex = -1;
+    private bool _dragArchiveHandoffRequested = false;
     private bool _isClipboardBusy = false;
     private bool _isFileOperationUndoRedoBusy = false;
     private readonly NotificationService _notificationService;
     private DateTime _statusNoticeHoldUntilUtc = DateTime.MinValue;
-    private readonly record struct ExternalToolAltHintRow(string SlotLabel, string Title, string ExecutableName);
+    private readonly record struct ExternalToolAltHintRow(
+        string SlotLabel,
+        string Title,
+        string ExecutableName,
+        string StatusText,
+        bool IsLaunchable,
+        ExternalToolCommandDefinition Tool);
+    private readonly record struct CommandHintOverlayMetrics(
+        int Padding,
+        int TitleHeight,
+        int TitleGap,
+        int ExplanationHeight,
+        int ContextLineHeight,
+        int ContextLineSpacing,
+        int ContextGap,
+        int HeaderHeight,
+        int RowHeight,
+        int FooterHeight,
+        int MinimumVisibleRows)
+    {
+        public int RowsTopOffset =>
+            Padding +
+            TitleHeight +
+            TitleGap +
+            ExplanationHeight +
+            ContextGap +
+            (ContextLineHeight * 2) +
+            ContextLineSpacing +
+            HeaderHeight +
+            4;
+    }
     private static readonly HashSet<char> ReservedExternalToolAltSlots = new() { 'F', 'V', 'G', 'T', 'H' };
     private QuickAccessStore _quickAccessStore;
     private readonly MarkSlotStore _markSlotStore;
     private bool _isAltHintHeld;
+    private bool _isExternalToolAltPopupAltOwned;
+    private bool _isOpeningMenuStripExplicitly;
     private IReadOnlyList<ExternalToolAltHintRow> _commandHintRows = Array.Empty<ExternalToolAltHintRow>();
+    private int _commandHintSelectedIndex = -1;
+    private int _commandHintScrollIndex = 0;
+    private string _commandHintContextLine1 = string.Empty;
+    private string _commandHintContextLine2 = string.Empty;
     private readonly System.Windows.Forms.Timer _commandHintOverlayTimer = new();
     private readonly System.Windows.Forms.Timer _directoryRefreshDebounceTimer = new();
     private int _functionBarPreferredHeight = 24;
@@ -258,7 +305,12 @@ public partial class MainForm : Form
     private string _pendingExternalDirectoryRefreshReason = "外部変更";
     private readonly HashSet<string> _pendingExternalDirectoryRefreshReasons = new(StringComparer.OrdinalIgnoreCase);
     private int _pendingExternalDirectoryRefreshEventCount;
+    private string? _pendingExternalDirectoryRefreshExceptionType;
+    private string? _pendingExternalDirectoryRefreshExceptionMessage;
+    private bool _pendingExternalDirectoryRefreshDelayScheduled;
+    private bool _pendingExternalDirectoryRefreshDelayCompleted;
     private bool _isApplyingExternalDirectoryRefresh;
+    private readonly PreviewDiagnosticDelayService _previewDiagnosticDelayService = new();
     private bool _currentDirectoryRefreshRetryPending;
     private string? _browserTabCategoryContextCategoryId;
     private BrowserTabStripCategoryItemKind _browserTabCategoryContextKind = BrowserTabStripCategoryItemKind.Category;
@@ -269,6 +321,9 @@ public partial class MainForm : Form
     private WorkspaceSnapshotStorage? _workspaceSnapshotStorage;
     private bool _restoredBrowserTabsFromWorkspaceStore;
     private readonly MouseGestureRecognizer _mouseGestureRecognizer = new();
+    private readonly List<Point> _mouseGestureTrailPoints = new();
+    private bool _isMouseGestureTrailVisible;
+    private const int MouseGestureTrailMinDistance = 4;
     private bool _suppressNextBrowserContextMenu;
     private DateTime _suppressBrowserContextMenuUntilUtc = DateTime.MinValue;
     private readonly List<ClosedBrowserTabSnapshot> _closedBrowserTabs = new();
@@ -276,12 +331,22 @@ public partial class MainForm : Form
     // browser header interaction polish fields
     private bool _headerInteractionInitialized;
     private ToolTip? _headerToolTip;
+    private readonly ToolTip _browserFileNameToolTip = new();
+    private int _browserFileNameToolTipIndex = -1;
+    private string? _browserFileNameToolTipText;
+    private readonly ToolTip _fKeyToolTip = new();
+    private int _fKeyToolTipIndex = -1;
     private ContextMenuStrip? _headerPathContextMenu;
     private ContextMenuStrip? _headerItemContextMenu;
+    private readonly CommandRegistry _commandRegistry = new();
+    private readonly CommandDispatcher _commandDispatcher;
     public MainForm(string? startupProfileOverride = null)
     {
         _startupProfileOverride = startupProfileOverride;
+        _commandDispatcher = new CommandDispatcher(_commandRegistry, TryExecuteRegisteredCommand);
         InitializeCoreWindowChrome();
+        InitializeBrowserFileNameToolTip();
+        InitializeFunctionBarToolTip();
         _notificationService = new NotificationService(this.statusLabel, this.messageTimer);
         _navigationService = new NavigationService();
         LoadSettingsAndApplyProfile();
@@ -326,11 +391,27 @@ public partial class MainForm : Form
             // アイコン設定失敗時は既定のまま続行
         }
     }
+    private void InitializeBrowserFileNameToolTip()
+    {
+        _browserFileNameToolTip.InitialDelay = 500;
+        _browserFileNameToolTip.ReshowDelay = 200;
+        _browserFileNameToolTip.AutoPopDelay = 5000;
+        _browserFileNameToolTip.ShowAlways = false;
+    }
+    private void InitializeFunctionBarToolTip()
+    {
+        _fKeyToolTip.InitialDelay = 500;
+        _fKeyToolTip.ReshowDelay = 200;
+        _fKeyToolTip.AutoPopDelay = 6000;
+        _fKeyToolTip.ShowAlways = false;
+    }
     [MemberNotNull(nameof(_settings))]
     private void LoadSettingsAndApplyProfile()
     {
         _settings = SettingsManager.Load(out SettingsManager.SettingsLoadMetadata settingsLoadMetadata);
         _settings.Input ??= new InputSettings();
+        _settings.Input.MouseGestureCommandMap = InputSettings.NormalizeMouseGestureCommandMap(_settings.Input.MouseGestureCommandMap);
+        InputSettings.NormalizeAndMigrateFunctionKeyChords(_settings.Input);
         ApplyFeatureProfile(settingsLoadMetadata.IsMouseGesturesExplicit);
     }
     private void InitializePersistenceStores()
@@ -456,6 +537,59 @@ public partial class MainForm : Form
             _sortAscending = _settings.Session.LastSortAscending;
         }
     }
+    private void UpdateFunctionBarCtrlLayerState(bool isCtrlPressed)
+    {
+        if (_isFunctionBarCtrlLayerActive != isCtrlPressed)
+        {
+            _isFunctionBarCtrlLayerActive = isCtrlPressed;
+            UpdateFunctionBar();
+            if (functionBarPanel.Visible)
+            {
+                functionBarPanel.Invalidate();
+            }
+        }
+    }
+    private void UpdateFunctionBarAltLayerState(bool isAltPressed)
+    {
+        if (_isFunctionBarAltLayerActive != isAltPressed)
+        {
+            _isFunctionBarAltLayerActive = isAltPressed;
+            UpdateFunctionBar();
+            if (functionBarPanel.Visible)
+            {
+                functionBarPanel.Invalidate();
+            }
+        }
+    }
+    private void UpdateFunctionBarShiftLayerState(bool isShiftPressed)
+    {
+        if (_isFunctionBarShiftLayerActive != isShiftPressed)
+        {
+            _isFunctionBarShiftLayerActive = isShiftPressed;
+            UpdateFunctionBar();
+            if (functionBarPanel.Visible)
+            {
+                functionBarPanel.Invalidate();
+            }
+        }
+    }
+    private (bool isShift, bool isCtrl, bool isAlt) GetActiveFunctionBarLayer()
+    {
+        if (_isFunctionBarCtrlLayerActive)
+        {
+            return (false, true, false);
+        }
+        if (_isFunctionBarAltLayerActive)
+        {
+            return (false, false, true);
+        }
+        if (_isFunctionBarShiftLayerActive)
+        {
+            return (true, false, false);
+        }
+        return (false, false, false);
+    }
+
     private void InitializeRuntimeTimersAndOverlay()
     {
         KeyUp += MainForm_KeyUp;
@@ -464,6 +598,9 @@ public partial class MainForm : Form
             LogAltHintContext("Deactivate");
             _isAltHintHeld = false;
             HideCommandHintOverlay();
+            UpdateFunctionBarShiftLayerState(false);
+            UpdateFunctionBarCtrlLayerState(false);
+            UpdateFunctionBarAltLayerState(false);
         };
         _commandHintOverlayTimer.Interval = 50;
         _commandHintOverlayTimer.Tick += (_, _) => RefreshCommandHintOverlayState();
@@ -551,7 +688,6 @@ public partial class MainForm : Form
         this.browserPanel.MouseDoubleClick += BrowserPanel_MouseDoubleClick;
         // Phase 3-fix1d: ホイールスクロールの追加とフォーカス補助
         this.browserPanel.MouseWheel += BrowserPanel_MouseWheel;
-        this.browserPanel.MouseEnter += (s, e) => { if (_uiMode == UIMode.Browser) this.browserPanel.Focus(); };
         // Phase 3-fix2a: 外部 → MidFD Drag-in (Copy限定)
         this.browserPanel.AllowDrop = true;
         this.browserPanel.DragEnter += BrowserPanel_DragEnter;
@@ -560,13 +696,19 @@ public partial class MainForm : Form
         this.browserPanel.MouseDown += BrowserPanel_MouseDown;
         this.browserPanel.MouseMove += BrowserPanel_MouseMove;
         this.browserPanel.MouseUp += BrowserPanel_MouseUp;
+        this.browserPanel.MouseLeave += BrowserPanel_MouseLeave;
         // Phase 3-layout-fix1: BrowserPanel のリサイズ再描画
         this.browserPanel.Resize += BrowserPanel_Resize;
     }
     private void WireHeaderAndFunctionBarEvents()
     {
+        EnableDoubleBuffering(this.functionBarPanel);
         // Phase 5-funcbar-click-fix1: FunctionBar のクリック復旧 (描画セグメント判定)
         this.functionBarPanel.MouseClick += FunctionBarPanel_MouseClick;
+        this.functionBarPanel.MouseMove += FunctionBarPanel_MouseMove;
+        this.functionBarPanel.MouseDown += FunctionBarPanel_MouseDown;
+        this.functionBarPanel.MouseUp += FunctionBarPanel_MouseUp;
+        this.functionBarPanel.MouseLeave += FunctionBarPanel_MouseLeave;
         // Phase 2g-fix2: ウィンドウリサイズ時にも Row 2 の Zone 幅を再計算する
         this.headerPanel.Resize += (s, e) => LayoutHeaderZones();
         // Phase 2g-fix3a: Row 1 時計更新 Timer を開始
@@ -889,6 +1031,10 @@ private void SavePersistedMarksToSettings()
             if (_settings.Window.State == FormWindowState.Maximized)
             {
                 this.WindowState = FormWindowState.Maximized;
+            }
+            else if (this.WindowState == FormWindowState.Normal && this.Width < MinimumNormalWindowWidth)
+            {
+                this.Width = MinimumNormalWindowWidth;
             }
             LogService.Info($"[WindowVisibility] RestoreWindowSettings Requested={FormatBoundsForLog(requestedBounds)} Applied={FormatBoundsForLog(restoredBounds)} State={_settings.Window.State}");
             // Only trust as baseline if it's clearly above the floor
@@ -2978,6 +3124,7 @@ private void InitializeBrowserTabControl()
     }
     private void SwitchBrowserTab(int newIndex)
     {
+        HideBrowserFileNameToolTip();
         EnsureBrowserModeBeforeWorkspaceNavigation();
         if (_isSwitchingBrowserTab || newIndex < 0 || newIndex >= _browserTabs.Count)
         {
@@ -3417,12 +3564,34 @@ private void InitializeBrowserTabControl()
     }
     private Rectangle GetCommandHintOverlayBounds()
     {
-        int width = Math.Min(720, Math.Max(520, browserPanel.ClientSize.Width - 96));
-        int availableHeight = Math.Max(152, browserPanel.ClientSize.Height - 32);
-        int desiredHeight = 112 + (_commandHintRows.Count * 22);
-        int height = Math.Min(344, Math.Max(152, Math.Min(availableHeight, desiredHeight)));
+        CommandHintOverlayMetrics metrics = GetCommandHintOverlayMetrics();
+        int width = Math.Min(860, Math.Max(620, browserPanel.ClientSize.Width - 72));
+        int availableHeight = Math.Max(0, browserPanel.ClientSize.Height - 32);
+        int desiredRows = Math.Max(metrics.MinimumVisibleRows, Math.Min(8, Math.Max(1, _commandHintRows.Count)));
+        int desiredHeight = metrics.RowsTopOffset + (desiredRows * metrics.RowHeight) + metrics.Padding;
+        if (_commandHintRows.Count > desiredRows)
+        {
+            desiredHeight += metrics.FooterHeight;
+        }
+        int minimumHeight = metrics.RowsTopOffset + (metrics.MinimumVisibleRows * metrics.RowHeight) + metrics.Padding;
+        int height = Math.Min(440, Math.Max(minimumHeight, Math.Min(availableHeight, desiredHeight)));
         int left = Math.Max(12, browserPanel.ClientSize.Width - width - 12);
         return new Rectangle(left, 12, width, height);
+    }
+    private static CommandHintOverlayMetrics GetCommandHintOverlayMetrics()
+    {
+        return new CommandHintOverlayMetrics(
+            Padding: 14,
+            TitleHeight: 20,
+            TitleGap: 4,
+            ExplanationHeight: 24,
+            ContextLineHeight: 18,
+            ContextLineSpacing: 2,
+            ContextGap: 6,
+            HeaderHeight: 18,
+            RowHeight: 22,
+            FooterHeight: 20,
+            MinimumVisibleRows: 2);
     }
     private void DrawCommandHintOverlay(Graphics g)
     {
@@ -3436,81 +3605,132 @@ private void InitializeBrowserTabControl()
             return;
         }
         Size panelSize = browserPanel.ClientSize;
+        CommandHintOverlayMetrics metrics = GetCommandHintOverlayMetrics();
         if (_lastLoggedCommandHintRowCount != _commandHintRows.Count ||
             _lastLoggedCommandHintBounds != overlayRect ||
             _lastLoggedCommandHintPanelSize != panelSize)
         {
             string firstRow = _commandHintRows.Count > 0
-                ? $"{_commandHintRows[0].SlotLabel}:{_commandHintRows[0].Title}"
+                ? $"{_commandHintRows[0].SlotLabel}:{_commandHintRows[0].Title}:{_commandHintRows[0].StatusText}"
                 : "<none>";
             LogAltHint($"DrawCommandHintOverlay Bounds={overlayRect} Panel={panelSize} RowCount={_commandHintRows.Count} First={firstRow}");
             _lastLoggedCommandHintRowCount = _commandHintRows.Count;
             _lastLoggedCommandHintBounds = overlayRect;
             _lastLoggedCommandHintPanelSize = panelSize;
         }
-        using SolidBrush backgroundBrush = new(Color.FromArgb(232, 0, 0, 0));
+        using SolidBrush backgroundBrush = new(Color.FromArgb(238, 0, 0, 0));
         using Pen borderPen = new(MidFDColors.BorderLine);
         using Pen separatorPen = new(Color.FromArgb(0, 120, 120));
-        using SolidBrush titleBrush = new(Color.Yellow);
-        using SolidBrush textBrush = new(MidFDColors.ListNormalFore);
-        using SolidBrush exeBrush = new(Color.White);
         using Font titleFont = new("Consolas", 11F, FontStyle.Bold, GraphicsUnit.Point);
         using Font bodyFont = new("Consolas", 9F, FontStyle.Regular, GraphicsUnit.Point);
         g.FillRectangle(backgroundBrush, overlayRect);
         g.DrawRectangle(borderPen, overlayRect);
-        int padding = 14;
+        int padding = metrics.Padding;
         int contentWidth = overlayRect.Width - (padding * 2);
-        int slotWidth = 126;
-        int exeWidth = Math.Max(190, Math.Min(250, (contentWidth * 33) / 100));
-        int titleWidth = Math.Max(170, contentWidth - slotWidth - exeWidth);
-        Rectangle titleRect = new(overlayRect.Left + padding, overlayRect.Top + padding - 2, contentWidth, 22);
+        int slotWidth = 120;
+        int titleWidth = Math.Max(180, (contentWidth * 30) / 100);
+        int exeWidth = Math.Max(180, (contentWidth * 28) / 100);
+        int statusWidth = Math.Max(108, contentWidth - slotWidth - titleWidth - exeWidth);
+        Rectangle titleRect = new(overlayRect.Left + padding, overlayRect.Top + padding - 2, contentWidth, metrics.TitleHeight);
         TextRenderer.DrawText(
             g,
-            "External Tool Alt Slot",
+            "External Tool Alt Slot Launcher",
             titleFont,
             titleRect,
             Color.Yellow,
             Color.Transparent,
             TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
-        Rectangle explanationRect = new(overlayRect.Left + padding, titleRect.Bottom + 4, contentWidth, 36);
+        Rectangle explanationRect = new(overlayRect.Left + padding, titleRect.Bottom + metrics.TitleGap, contentWidth, metrics.ExplanationHeight);
         TextRenderer.DrawText(
             g,
-            "Alt+slot で external_tools.json の割当済み外部ツールを直接起動します。",
+            "Alt+英数字は外部ツールの namespace。Alt+F1〜F12 は Function layer と別です。",
             bodyFont,
             explanationRect,
             MidFDColors.ListNormalFore,
             Color.Transparent,
             TextFormatFlags.Left | TextFormatFlags.WordBreak | TextFormatFlags.EndEllipsis);
-        int headerTop = explanationRect.Bottom + 6;
+        Rectangle contextRect = new(overlayRect.Left + padding, explanationRect.Bottom + 2, contentWidth, metrics.ContextLineHeight);
+        TextRenderer.DrawText(
+            g,
+            string.IsNullOrWhiteSpace(_commandHintContextLine1) ? "Target: (unknown)" : _commandHintContextLine1,
+            bodyFont,
+            contextRect,
+            MidFDColors.ListNormalFore,
+            Color.Transparent,
+            TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
+        Rectangle contextLine2Rect = new(overlayRect.Left + padding, contextRect.Bottom + metrics.ContextLineSpacing, contentWidth, metrics.ContextLineHeight);
+        TextRenderer.DrawText(
+            g,
+            string.IsNullOrWhiteSpace(_commandHintContextLine2)
+                ? "Selected: (unknown)"
+                : _commandHintContextLine2,
+            bodyFont,
+            contextLine2Rect,
+            MidFDColors.ListNormalFore,
+            Color.Transparent,
+            TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
+        int headerTop = contextLine2Rect.Bottom + metrics.ContextGap;
         g.DrawLine(separatorPen, overlayRect.Left + padding, headerTop - 4, overlayRect.Right - padding, headerTop - 4);
-        Rectangle slotHeaderRect = new(overlayRect.Left + padding, headerTop, slotWidth, 18);
-        Rectangle titleHeaderRect = new(slotHeaderRect.Right, headerTop, titleWidth, 18);
-        Rectangle exeHeaderRect = new(titleHeaderRect.Right, headerTop, exeWidth, 18);
+        Rectangle slotHeaderRect = new(overlayRect.Left + padding, headerTop, slotWidth, metrics.HeaderHeight);
+        Rectangle titleHeaderRect = new(slotHeaderRect.Right, headerTop, titleWidth, metrics.HeaderHeight);
+        Rectangle exeHeaderRect = new(titleHeaderRect.Right, headerTop, exeWidth, metrics.HeaderHeight);
+        Rectangle statusHeaderRect = new(exeHeaderRect.Right, headerTop, statusWidth, metrics.HeaderHeight);
         TextRenderer.DrawText(g, "Slot", bodyFont, slotHeaderRect, Color.Yellow, Color.Transparent, TextFormatFlags.Left | TextFormatFlags.VerticalCenter);
         TextRenderer.DrawText(g, "Title", bodyFont, titleHeaderRect, Color.Yellow, Color.Transparent, TextFormatFlags.Left | TextFormatFlags.VerticalCenter);
         TextRenderer.DrawText(g, "Exe", bodyFont, exeHeaderRect, Color.Yellow, Color.Transparent, TextFormatFlags.Left | TextFormatFlags.VerticalCenter);
+        TextRenderer.DrawText(g, "Status", bodyFont, statusHeaderRect, Color.Yellow, Color.Transparent, TextFormatFlags.Left | TextFormatFlags.VerticalCenter);
         int rowTop = slotHeaderRect.Bottom + 4;
-        int rowHeight = 22;
-        int availableRows = Math.Max(1, (overlayRect.Bottom - padding - rowTop) / rowHeight);
-        int visibleRows = Math.Min(availableRows, _commandHintRows.Count);
-        for (int i = 0; i < visibleRows; i++)
+        int rowHeight = metrics.RowHeight;
+        int visibleRows = Math.Max(1, (overlayRect.Bottom - padding - rowTop) / rowHeight);
+        int maxScroll = Math.Max(0, _commandHintRows.Count - visibleRows);
+        _commandHintScrollIndex = Math.Clamp(_commandHintScrollIndex, 0, maxScroll);
+        if (_commandHintSelectedIndex >= 0 && _commandHintSelectedIndex < _commandHintRows.Count)
+        {
+            if (_commandHintSelectedIndex < _commandHintScrollIndex)
+            {
+                _commandHintScrollIndex = _commandHintSelectedIndex;
+            }
+            else if (_commandHintSelectedIndex >= _commandHintScrollIndex + visibleRows)
+            {
+                _commandHintScrollIndex = _commandHintSelectedIndex - visibleRows + 1;
+            }
+            _commandHintScrollIndex = Math.Clamp(_commandHintScrollIndex, 0, maxScroll);
+        }
+        int startIndex = Math.Clamp(_commandHintScrollIndex, 0, Math.Max(0, _commandHintRows.Count - 1));
+        int endIndex = Math.Min(_commandHintRows.Count, startIndex + visibleRows);
+        for (int i = startIndex; i < endIndex; i++)
         {
             ExternalToolAltHintRow row = _commandHintRows[i];
-            int top = rowTop + (i * rowHeight);
+            int rowIndex = i - startIndex;
+            int top = rowTop + (rowIndex * rowHeight);
             Rectangle slotRect = new(overlayRect.Left + padding, top, slotWidth, rowHeight);
             Rectangle titleRectRow = new(slotRect.Right, top, titleWidth, rowHeight);
             Rectangle exeRectRow = new(titleRectRow.Right, top, exeWidth, rowHeight);
+            Rectangle statusRectRow = new(exeRectRow.Right, top, statusWidth, rowHeight);
+            bool isSelected = i == _commandHintSelectedIndex;
+            if (isSelected)
+            {
+                using SolidBrush selectionBrush = new(Color.FromArgb(120, MidFDColors.ListSelectedBack));
+                g.FillRectangle(selectionBrush, new Rectangle(overlayRect.Left + padding - 2, top, contentWidth, rowHeight));
+            }
+            Color statusColor = row.IsLaunchable ? Color.LightGreen : Color.LightGray;
             TextRenderer.DrawText(g, row.SlotLabel, bodyFont, slotRect, MidFDColors.ListNormalFore, Color.Transparent, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
             TextRenderer.DrawText(g, row.Title, bodyFont, titleRectRow, MidFDColors.ListNormalFore, Color.Transparent, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
             TextRenderer.DrawText(g, row.ExecutableName, bodyFont, exeRectRow, Color.White, Color.Transparent, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
+            TextRenderer.DrawText(g, row.StatusText, bodyFont, statusRectRow, statusColor, Color.Transparent, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
+            if (isSelected)
+            {
+                using Pen selectionBorderPen = new(Color.FromArgb(180, Color.Cyan));
+                g.DrawRectangle(selectionBorderPen, new Rectangle(overlayRect.Left + padding - 2, top, contentWidth, rowHeight));
+            }
         }
         if (_commandHintRows.Count > visibleRows)
         {
-            int remain = _commandHintRows.Count - visibleRows;
+            int remain = _commandHintRows.Count - endIndex;
             Rectangle moreRect = new(overlayRect.Left + padding, rowTop + (visibleRows * rowHeight), contentWidth, rowHeight);
             TextRenderer.DrawText(
                 g,
-                $"ほか {remain} 件",
+                $"ほか {remain} 件 / ↑↓ で選択 / Enter で起動 / Esc で閉じる",
                 bodyFont,
                 moreRect,
                 Color.Yellow,
@@ -3536,60 +3756,73 @@ private void InitializeBrowserTabControl()
         _browserOnlyMenuItems.Clear();
         _busyAwareMenuItems.Clear();
         _menuItemRules.Clear();
-        var fileMenu = new ToolStripMenuItem("ファイル(&F)");
-        fileMenu.DropDownItems.Add(CreateMenuItem("内容確認/実行(eXecute)(&O)", (s, e) => ExecuteCurrentFile(), browserOnly: true, requiresIdle: true, requiresSelection: true, requiresFile: true, shortcutHint: GetFunctionAwareShortcutHint(FunctionKeyAction.Execute, "X")));
-        fileMenu.DropDownItems.Add(CreateMenuItem("属性変更(&A)", (s, e) => ExecuteAttribute(), browserOnly: true, requiresIdle: true, requiresSelection: true, shortcutHint: GetFunctionAwareShortcutHint(FunctionKeyAction.None, "", "Shift+F1")));
-        fileMenu.DropDownItems.Add(CreateMenuItem("コピー(&C)", (s, e) => _ = ExecuteCopy(), browserOnly: true, requiresIdle: true, requiresSelection: true, shortcutHint: GetFunctionAwareShortcutHint(FunctionKeyAction.Copy, "C")));
-        fileMenu.DropDownItems.Add(CreateMenuItem("移動(&M)", (s, e) => _ = ExecuteMove(), browserOnly: true, requiresIdle: true, requiresSelection: true, shortcutHint: GetFunctionAwareShortcutHint(FunctionKeyAction.None, "M", "Shift+F3")));
-        fileMenu.DropDownItems.Add(CreateMenuItem("名前変更(&R)", (s, e) => ExecuteRename(), browserOnly: true, requiresIdle: true, requiresSelection: true, shortcutHint: GetFunctionAwareShortcutHint(FunctionKeyAction.Rename, "R")));
-        fileMenu.DropDownItems.Add(CreateMenuItem("削除(&D)", (s, e) => _ = ExecuteDelete(), browserOnly: true, requiresIdle: true, requiresSelection: true, shortcutHint: "D / Delete"));
-        fileMenu.DropDownItems.Add(CreateMenuItem("MidFD管理ゴミ箱を空にする(&T)", (s, e) => EmptyMidFdManagedTrash(), browserOnly: true, requiresIdle: true));
-        fileMenu.DropDownItems.Add(new ToolStripSeparator());
-        fileMenu.DropDownItems.Add(CreateMenuItem("新規フォルダ(&K)", (s, e) => ExecuteCreateDirectory(), browserOnly: true, requiresIdle: true, shortcutHint: GetFunctionAwareShortcutHint(FunctionKeyAction.None, "K", "Shift+F5")));
-        fileMenu.DropDownItems.Add(CreateMenuItem("新規ファイル(&N)", (s, e) => ExecuteCreateFile(), browserOnly: true, requiresIdle: true, shortcutHint: "N"));
-        fileMenu.DropDownItems.Add(new ToolStripSeparator());
-        fileMenu.DropDownItems.Add(CreateMenuItem("終了(&X)", (s, e) => Close()));
-        var viewMenu = new ToolStripMenuItem("表示(&V)");
-        viewMenu.DropDownItems.Add(CreateMenuItem("ソート(&S)", (s, e) => ExecuteSort(), browserOnly: true, requiresIdle: true, shortcutHint: GetFunctionAwareShortcutHint(FunctionKeyAction.Sort, "S")));
-        viewMenu.DropDownItems.Add(CreateMenuItem("フィルタ(&F)", (s, e) => ExecuteFilter(), browserOnly: true, requiresIdle: true, shortcutHint: GetFunctionAwareShortcutHint(FunctionKeyAction.Filter, "F / Ctrl+F")));
-        var fileDisplayModeSubMenu = new ToolStripMenuItem("一覧表示");
-        _fileDisplayModeNameOnlyMenuItem = CreateMenuItem("ファイル名のみ", (s, e) => SetBrowserFileDetailDisplayMode(BrowserFileDisplayMode.NameOnly), browserOnly: true, requiresIdle: true, shortcutHint: "Ctrl+1");
-        _fileDisplayModeNameSizeMenuItem = CreateMenuItem("サイズ", (s, e) => SetBrowserFileDetailDisplayMode(BrowserFileDisplayMode.NameSize), browserOnly: true, requiresIdle: true, shortcutHint: "Ctrl+2");
-        _fileDisplayModeNameSizeDateMenuItem = CreateMenuItem("サイズ・更新日時", (s, e) => SetBrowserFileDetailDisplayMode(BrowserFileDisplayMode.NameSizeDate), browserOnly: true, requiresIdle: true, shortcutHint: "Ctrl+3");
-        fileDisplayModeSubMenu.DropDownItems.Add(_fileDisplayModeNameOnlyMenuItem);
-        fileDisplayModeSubMenu.DropDownItems.Add(_fileDisplayModeNameSizeMenuItem);
-        fileDisplayModeSubMenu.DropDownItems.Add(_fileDisplayModeNameSizeDateMenuItem);
-        viewMenu.DropDownItems.Add(fileDisplayModeSubMenu);
-        viewMenu.DropDownOpening += (_, _) => UpdateFileDisplayModeMenuChecks();
-        fileDisplayModeSubMenu.DropDownOpening += (_, _) => UpdateFileDisplayModeMenuChecks();
-        _reloadCurrentDirectoryMenuItem = CreateMenuItem("現在ディレクトリを再読込(&R)", (s, e) => ExecuteCurrentDirectoryReloadCommand(), browserOnly: true, shortcutHint: GetFunctionAwareShortcutHint(FunctionKeyAction.Reload, "Ctrl+R", "Shift+F7"));
-        viewMenu.DropDownItems.Add(_reloadCurrentDirectoryMenuItem);
-        viewMenu.DropDownItems.Add(CreateMenuItem("現在タブのフィルタロック...(&L)", (s, e) => OpenActiveTabFilterLockDialog(), browserOnly: true, requiresIdle: true, shortcutHint: "Ctrl+Shift+L"));
-        _clearTabFilterLockMenuItem = CreateMenuItem("現在タブのフィルタロックを解除(&U)", (s, e) => ClearActiveTabFilterLock(), browserOnly: true, requiresIdle: true);
-        viewMenu.DropDownItems.Add(_clearTabFilterLockMenuItem);
-        viewMenu.DropDownItems.Add(CreateMenuItem("内蔵Viewer / 画像Viewer(&P)", (s, e) => ExecutePreviewLaunch(), browserOnly: true, requiresIdle: true, requiresSelection: true, requiresFile: true, shortcutHint: GetFunctionAwareShortcutHint(FunctionKeyAction.None, "V / Enter", "Shift+F9")));
-        viewMenu.DropDownItems.Add(CreateMenuItem("Logdisk(&L)", (s, e) => ExecuteLogdisk(), browserOnly: true, requiresIdle: true, shortcutHint: GetFunctionAwareShortcutHint(FunctionKeyAction.Logdisk, "L")));
-        viewMenu.DropDownItems.Add(new ToolStripSeparator());
-        viewMenu.DropDownItems.Add(CreateMenuItem("配色設定...(&A)", (s, e) => OpenFileListColorSettings(), browserOnly: false, requiresIdle: false));
-        var moveMenu = new ToolStripMenuItem("移動(&G)");
-        moveMenu.DropDownItems.Add(CreateMenuItem("親へ(&U)", (s, e) => ExecuteBackspace(), browserOnly: true, requiresIdle: true, shortcutHint: "Backspace"));
-        moveMenu.DropDownItems.Add(CreateMenuItem("ルートへ(&R)", (s, e) => ExecuteDriveRoot(), browserOnly: true, requiresIdle: true, shortcutHint: "\\"));
-        moveMenu.DropDownItems.Add(CreateMenuItem("エクスプローラーで開く(&X)", (s, e) => ExecuteOpenCurrentPathInExplorer(), browserOnly: true, requiresIdle: true, shortcutHint: "Alt+F2"));
-        moveMenu.DropDownItems.Add(CreateMenuItem("Top(&T)", (s, e) => ExecuteFunctionKey(11), browserOnly: true, requiresIdle: true, shortcutHint: GetFunctionAwareShortcutHint(FunctionKeyAction.Top, "")));
-        moveMenu.DropDownItems.Add(CreateMenuItem("Bottom(&B)", (s, e) => ExecuteFunctionKey(12), browserOnly: true, requiresIdle: true, shortcutHint: GetFunctionAwareShortcutHint(FunctionKeyAction.Bottom, "")));
-        moveMenu.DropDownItems.Add(CreateMenuItem("Tree(&E)", (s, e) => ExecuteTreeDialog(), browserOnly: true, requiresIdle: true, shortcutHint: GetFunctionAwareShortcutHint(FunctionKeyAction.Tree, "T")));
-        moveMenu.DropDownItems.Add(CreateMenuItem("QuickAccess(&Q)", (s, e) => ExecuteQuickAccess(), browserOnly: true, requiresIdle: true, shortcutHint: "Q"));
-        moveMenu.DropDownItems.Add(CreateMenuItem("戻る(&A)", (s, e) => ExecuteHistoryBack(), browserOnly: true, requiresIdle: true, shortcutHint: "Alt+Left"));
-        moveMenu.DropDownItems.Add(CreateMenuItem("進む(&D)", (s, e) => ExecuteHistoryForward(), browserOnly: true, requiresIdle: true, shortcutHint: "Alt+Right"));
-        moveMenu.DropDownItems.Add(new ToolStripSeparator());
-        moveMenu.DropDownItems.Add(CreateMenuItem("新しいタブを作る(&N)", (s, e) => CreateNewBrowserTab(), browserOnly: true, requiresIdle: true, shortcutHint: "Ctrl+T"));
-        _toggleBrowserTabLockMenuItem = CreateMenuItem("現在のタブを固定(&K)", (s, e) => ToggleActiveBrowserTabLock(), browserOnly: true, requiresIdle: true, shortcutHint: "Ctrl+L");
-        moveMenu.DropDownItems.Add(_toggleBrowserTabLockMenuItem);
-        _toggleBrowserTabReadOnlyMenuItem = CreateMenuItem("現在のタブを ReadOnly にする(&Y)", (s, e) => ToggleActiveBrowserTabReadOnly(), browserOnly: true, requiresIdle: true);
-        moveMenu.DropDownItems.Add(_toggleBrowserTabReadOnlyMenuItem);
-        moveMenu.DropDownItems.Add(CreateMenuItem("次のタブへ(&X)", (s, e) => SelectAdjacentBrowserTab(+1), browserOnly: true, requiresIdle: true, shortcutHint: "Ctrl+Right / Ctrl+Tab"));
-        moveMenu.DropDownItems.Add(CreateMenuItem("前のタブへ(&P)", (s, e) => SelectAdjacentBrowserTab(-1), browserOnly: true, requiresIdle: true, shortcutHint: "Ctrl+Left / Ctrl+Shift+Tab"));
-        moveMenu.DropDownItems.Add(CreateMenuItem("現在のタブを閉じる(&W)", (s, e) => CloseCurrentBrowserTab(), browserOnly: true, requiresIdle: true, shortcutHint: "Ctrl+W"));
+        var menuBuildContext = new MainMenuConstructionCoordinator.BuildContext
+        {
+            CreateMenuItem = (text, onClick, browserOnly, requiresIdle, requiresSelection, requiresFile, requiresEditorTarget, requiresExactlyTwoSelection, requiresTwoFiles, shortcutHint) =>
+                CreateMenuItem(text, onClick, browserOnly, requiresIdle, requiresSelection, requiresFile, requiresEditorTarget, requiresExactlyTwoSelection, requiresTwoFiles, shortcutHint),
+            GetFunctionAwareShortcutHint = (action, defaultShortcut, fdCompatibleShortcut) => GetFunctionAwareShortcutHint(action, defaultShortcut, fdCompatibleShortcut),
+            IsWorkspaceSnapshotEnabled = () => _featureGate.IsEnabled(FeatureId.WorkspaceSnapshot),
+            ExecuteCurrentFile = () => ExecuteCurrentFile(),
+            ExecuteAttribute = () => ExecuteAttribute(),
+            ExecuteCopy = () => _ = ExecuteCopy(),
+            ExecuteMove = () => _ = ExecuteMove(),
+            ExecuteRename = () => ExecuteRename(),
+            ExecuteDelete = () => _ = ExecuteDelete(),
+            EmptyMidFdManagedTrash = () => EmptyMidFdManagedTrash(),
+            ExecuteCreateDirectory = () => ExecuteCreateDirectory(),
+            ExecuteCreateFile = () => ExecuteCreateFile(),
+            CloseMainForm = () => Close(),
+            ExecuteSort = () => ExecuteSort(),
+            ExecuteFilter = () => ExecuteFilter(),
+            SetFileDisplayModeNameOnly = () => SetBrowserFileDetailDisplayMode(BrowserFileDisplayMode.NameOnly),
+            SetFileDisplayModeNameSize = () => SetBrowserFileDetailDisplayMode(BrowserFileDisplayMode.NameSize),
+            SetFileDisplayModeNameSizeDate = () => SetBrowserFileDetailDisplayMode(BrowserFileDisplayMode.NameSizeDate),
+            UpdateFileDisplayModeMenuChecks = () => UpdateFileDisplayModeMenuChecks(),
+            ReloadCurrentDirectory = () => ExecuteCommandFromUi(CommandIds.BrowserReload, CommandScope.Browser, "Menu.View.Reload"),
+            OpenActiveTabFilterLockDialog = () => OpenActiveTabFilterLockDialog(),
+            ClearActiveTabFilterLock = () => ClearActiveTabFilterLock(),
+            ExecutePreviewLaunch = () => ExecutePreviewLaunch(),
+            ExecuteLogdisk = () => ExecuteLogdisk(),
+            OpenFileListColorSettings = () => OpenFileListColorSettings(),
+            NavigateParent = () => ExecuteCommandFromUi(CommandIds.BrowserNavigateParent, CommandScope.Browser, "Menu.Move.Parent"),
+            ExecuteDriveRoot = () => ExecuteDriveRoot(),
+            OpenExplorer = () => ExecuteCommandFromUi(CommandIds.BrowserOpenExplorer, CommandScope.Browser, "Menu.Move.OpenExplorer"),
+            ExecuteTop = () => ExecuteFunctionKey(11),
+            ExecuteBottom = () => ExecuteFunctionKey(12),
+            ExecuteTreeDialog = () => ExecuteTreeDialog(),
+            ExecuteQuickAccess = () => ExecuteQuickAccess(),
+            NavigateBack = () => ExecuteCommandFromUi(CommandIds.BrowserNavigateBack, CommandScope.Browser, "Menu.Move.HistoryBack"),
+            NavigateForward = () => ExecuteCommandFromUi(CommandIds.BrowserNavigateForward, CommandScope.Browser, "Menu.Move.HistoryForward"),
+            CreateNewBrowserTab = () => CreateNewBrowserTab(),
+            ToggleActiveBrowserTabLock = () => ToggleActiveBrowserTabLock(),
+            ToggleActiveBrowserTabReadOnly = () => ToggleActiveBrowserTabReadOnly(),
+            SelectNextBrowserTab = () => SelectAdjacentBrowserTab(+1),
+            SelectPreviousBrowserTab = () => SelectAdjacentBrowserTab(-1),
+            CloseCurrentBrowserTab = () => CloseCurrentBrowserTab(),
+            ExecutePack = () => _ = ExecutePack(),
+            ExecuteUnpack = () => _ = ExecuteUnpack(),
+            ExecuteOpenWithEditor = () => ExecuteOpenWithEditor(),
+            ExecuteOpenWithDiff = () => ExecuteOpenWithDiff(),
+            OpenPowerShell = () => ExecuteCommandFromUi(CommandIds.BrowserOpenShell, CommandScope.Browser, "Menu.Tools.OpenShell"),
+            CopyFullPath = () => ExecuteCommandFromUi(CommandIds.BrowserCopyFullPath, CommandScope.Browser, "Menu.Tools.CopyFullPath"),
+            OpenMarkSlotDialog = () => OpenMarkSlotDialog(),
+            OpenWorkspaceSnapshotDialog = () => OpenWorkspaceSnapshotDialog(),
+            ShowSystemInformation = () => OpenSystemInformationFromUi("Menu.Tools.SystemInformation"),
+            OpenSettings = () => ExecuteCommandFromUi(CommandIds.AppOpenSettings, CommandScope.Global, "Menu.Tools.Settings"),
+            ShowMenuKeyHint = () => ShowMenuKeyHint(),
+            ShowCommandList = () => ShowCommandList(),
+            ShowVersionInfo = () => ShowVersionInfo()
+        };
+        MainMenuConstructionCoordinator.BuildResult menuBuildResult = new MainMenuConstructionCoordinator().Build(menuBuildContext);
+        _fileDisplayModeNameOnlyMenuItem = menuBuildResult.FileDisplayModeNameOnlyMenuItem;
+        _fileDisplayModeNameSizeMenuItem = menuBuildResult.FileDisplayModeNameSizeMenuItem;
+        _fileDisplayModeNameSizeDateMenuItem = menuBuildResult.FileDisplayModeNameSizeDateMenuItem;
+        _reloadCurrentDirectoryMenuItem = menuBuildResult.ReloadCurrentDirectoryMenuItem;
+        _clearTabFilterLockMenuItem = menuBuildResult.ClearTabFilterLockMenuItem;
+        _toggleBrowserTabLockMenuItem = menuBuildResult.ToggleBrowserTabLockMenuItem;
+        _toggleBrowserTabReadOnlyMenuItem = menuBuildResult.ToggleBrowserTabReadOnlyMenuItem;
+        ToolStripMenuItem viewMenu = menuBuildResult.ViewMenu;
+        ToolStripMenuItem moveMenu = menuBuildResult.MoveMenu;
         moveMenu.DropDownOpening += (s, e) =>
         {
             if (_toggleBrowserTabLockMenuItem != null)
@@ -3605,31 +3838,13 @@ private void InitializeBrowserTabControl()
                     : "現在のタブを ReadOnly にする(&Y)";
             }
         };
-        var toolsMenu = new ToolStripMenuItem("ツール(&T)");
-        toolsMenu.DropDownItems.Add(CreateMenuItem("圧縮(&P)", (s, e) => _ = ExecutePack(), browserOnly: true, requiresIdle: true, requiresSelection: true, shortcutHint: GetFunctionAwareShortcutHint(FunctionKeyAction.None, "P", "Shift+F10")));
-        toolsMenu.DropDownItems.Add(CreateMenuItem("解凍(&U)", (s, e) => _ = ExecuteUnpack(), browserOnly: true, requiresIdle: true, requiresSelection: true, shortcutHint: GetFunctionAwareShortcutHint(FunctionKeyAction.Unpack, "U")));
-        toolsMenu.DropDownItems.Add(CreateMenuItem("外部エディタで開く(&E)", (s, e) => ExecuteOpenWithEditor(), browserOnly: true, requiresIdle: true, requiresSelection: true, requiresFile: true, shortcutHint: GetFunctionAwareShortcutHint(FunctionKeyAction.Edit, "E", "Shift+F8 / Shift+Enter")));
-        toolsMenu.DropDownItems.Add(CreateMenuItem("外部 Diff (2件比較専用)(&D)", (s, e) => ExecuteOpenWithDiff(), browserOnly: true, requiresIdle: true, requiresSelection: true, requiresExactlyTwoSelection: true, requiresTwoFiles: true));
-        toolsMenu.DropDownItems.Add(CreateMenuItem("PowerShellをここで開く(&P)", (s, e) => { if (!GuardClipboardBusy()) OpenTerminalInCurrentDirectory(ShellKind.PowerShell); }, browserOnly: true, requiresIdle: true, shortcutHint: GetFunctionAwareShortcutHint(FunctionKeyAction.None, "H", "Shift+F6")));
-        toolsMenu.DropDownItems.Add(CreateMenuItem("フルパスをコピー(&Y)", (s, e) => CopySelectedOrMarkedFullPathsToClipboard(), browserOnly: true, requiresIdle: true, requiresSelection: true, shortcutHint: GetFunctionAwareShortcutHint(FunctionKeyAction.None, "", "Shift+Ctrl+C")));
-        toolsMenu.DropDownItems.Add(new ToolStripSeparator());
-        toolsMenu.DropDownItems.Add(CreateMenuItem("マーク一覧 / スロット(&M)", (s, e) => OpenMarkSlotDialog(), browserOnly: true, requiresIdle: true, shortcutHint: "Ctrl+M"));
-        if (_featureGate.IsEnabled(FeatureId.WorkspaceSnapshot))
-        {
-            toolsMenu.DropDownItems.Add(CreateMenuItem("Workspace スナップショット...(&W)", (s, e) => OpenWorkspaceSnapshotDialog(), browserOnly: true, requiresIdle: true));
-        }
-        toolsMenu.DropDownItems.Add(new ToolStripSeparator());
-        toolsMenu.DropDownItems.Add(CreateMenuItem("設定(&O)", (s, e) => OpenSettingsForm(), shortcutHint: GetFunctionAwareShortcutHint(FunctionKeyAction.None, "O", "Alt+F5")));
-        var helpMenu = new ToolStripMenuItem("ヘルプ(&H)");
-        helpMenu.DropDownItems.Add(CreateMenuItem("主なキー操作ヒント(&K)", (s, e) => ShowMenuKeyHint()));
-        helpMenu.DropDownItems.Add(CreateMenuItem("バージョン情報(&A)", (s, e) => ShowVersionInfo()));
         mainMenuStrip.Items.AddRange(new ToolStripItem[]
         {
-            fileMenu,
-            viewMenu,
-            moveMenu,
-            toolsMenu,
-            helpMenu
+            menuBuildResult.FileMenu,
+            menuBuildResult.ViewMenu,
+            menuBuildResult.MoveMenu,
+            menuBuildResult.ToolsMenu,
+            menuBuildResult.HelpMenu
         });
         foreach (ToolStripMenuItem rootMenu in mainMenuStrip.Items.OfType<ToolStripMenuItem>())
         {
@@ -3659,15 +3874,32 @@ private void InitializeBrowserTabControl()
     }
     private void HandleMenuStripMenuActivate(object? sender, EventArgs e)
     {
+        LogAltHint($"MenuActivate AltOwned={_isExternalToolAltPopupAltOwned} OverlayVisible={IsCommandHintOverlayVisible()} ActiveControl={DescribeControl(ActiveControl)}");
         LogAltHintContext("MenuActivate");
+        if (_isExternalToolAltPopupAltOwned && !_isOpeningMenuStripExplicitly)
+        {
+            LogAltHint("MenuActivate ignored because external tool alt popup owns Alt state");
+            BeginInvoke(new Action(() =>
+            {
+                if (!IsDisposed && IsHandleCreated && _uiMode == UIMode.Browser && browserPanel.Visible)
+                {
+                    browserPanel.Focus();
+                    RefreshCommandHintOverlayState();
+                }
+            }));
+            return;
+        }
         _isAltHintHeld = false;
+        _isExternalToolAltPopupAltOwned = false;
         HideCommandHintOverlay("MenuActivate");
         UpdateMenuStripState();
         RefreshMenuStripRuntimeLayout("MenuActivate", defer: false);
     }
     private void HandleMenuStripMenuDeactivate(object? sender, EventArgs e)
     {
+        LogAltHint($"MenuDeactivate AltOwned={_isExternalToolAltPopupAltOwned} OverlayVisible={IsCommandHintOverlayVisible()} ActiveControl={DescribeControl(ActiveControl)}");
         LogAltHintContext("MenuDeactivate");
+        _isOpeningMenuStripExplicitly = false;
         RefreshCommandHintOverlayState();
     }
     private Font CreateMenuStripFont()
@@ -4025,13 +4257,50 @@ private void InitializeBrowserTabControl()
         ListViewItem? currentItem = isBrowserMode ? GetCurrentBrowserItem() : null;
         string? currentPath = currentItem?.Tag as string;
         int selectionCount = isBrowserMode ? GetLightweightSelectionCount(currentItem) : 0;
-        return _commandStateCoordinator.CreateCommandUiSnapshot(
+
+        CommandStateCoordinator.BrowserSelectionKind selectionKind = CommandStateCoordinator.BrowserSelectionKind.None;
+        if (isBrowserMode && currentItem != null)
+        {
+            if (currentItem.Text == "..")
+            {
+                selectionKind = CommandStateCoordinator.BrowserSelectionKind.ParentDirectory;
+            }
+            else if (IsBrowserFileItem(currentItem))
+            {
+                selectionKind = CommandStateCoordinator.BrowserSelectionKind.File;
+                if (!string.IsNullOrEmpty(currentPath))
+                {
+                    string ext = Path.GetExtension(currentPath);
+                    if (string.Equals(ext, ".zip", StringComparison.OrdinalIgnoreCase) ||
+                        string.Equals(ext, ".7z", StringComparison.OrdinalIgnoreCase) ||
+                        string.Equals(ext, ".rar", StringComparison.OrdinalIgnoreCase) ||
+                        string.Equals(ext, ".tar", StringComparison.OrdinalIgnoreCase) ||
+                        string.Equals(ext, ".gz", StringComparison.OrdinalIgnoreCase) ||
+                        string.Equals(ext, ".tgz", StringComparison.OrdinalIgnoreCase) ||
+                        string.Equals(ext, ".bz2", StringComparison.OrdinalIgnoreCase) ||
+                        string.Equals(ext, ".xz", StringComparison.OrdinalIgnoreCase) ||
+                        string.Equals(ext, ".lzh", StringComparison.OrdinalIgnoreCase) ||
+                        string.Equals(ext, ".lha", StringComparison.OrdinalIgnoreCase))
+                    {
+                        selectionKind = CommandStateCoordinator.BrowserSelectionKind.ArchiveCandidate;
+                    }
+                }
+            }
+            else
+            {
+                selectionKind = CommandStateCoordinator.BrowserSelectionKind.Directory;
+            }
+        }
+
+        _cachedCommandUiSnapshot = _commandStateCoordinator.CreateCommandUiSnapshot(
             isBrowserMode,
             _isClipboardBusy,
             selectionCount,
             HasTwoFileSelectionForCommandState(selectionCount),
             currentItem?.Text,
-            currentPath);
+            currentPath,
+            selectionKind);
+        return _cachedCommandUiSnapshot;
     }
     private int GetLightweightSelectionCount(ListViewItem? currentItem)
     {
@@ -4116,7 +4385,7 @@ private void InitializeBrowserTabControl()
     }
     private bool ShouldShowBrowserFunctionBarForCurrentProfile()
     {
-        return FunctionKeyProfileService.ResolveProfile(CurrentFunctionKeyProfileValue) == FunctionKeyProfile.FDCompatible;
+        return true;
     }
     private bool ShouldShowFunctionBarForCurrentContext()
     {
@@ -4151,7 +4420,7 @@ private void InitializeBrowserTabControl()
             $"{GetFunctionAwareShortcutHint(FunctionKeyAction.Rename, "R")}: 名前変更\nQ: QuickAccess（移動ハブ: 登録先 / 別名 / 最近 / 履歴）\n" +
             "Ctrl+M: マーク一覧 / スロット\nCtrl+T: 新しいタブ\nCtrl+L / タブダブルクリック / タブ右クリック: 現在のタブ固定を切替\n" +
             "Ctrl+Right / Ctrl+Tab: 次のタブ\nCtrl+Left / Ctrl+Shift+Tab: 前のタブ\nCtrl+W: タブを閉じる（固定タブは閉じない）\n" +
-            "Alt: Browser の直起動一覧\nAlt+slot: 割当済み external tool を直起動\n" +
+            "Alt: Browser の直起動一覧\nAlt+英数字: 外部ツール namespace の直起動\nAlt+F1〜F12: Function layer\n" +
             "O: 設定";
     }
     private void ShowMenuKeyHint()
@@ -4188,22 +4457,28 @@ private void InitializeBrowserTabControl()
         UpdateMenuStripState();
         if (mode == UIMode.Browser)
         {
-            const string browserStatus = "Z:Open  X:Check  A:Attr  E:Edit  F:Filter  S:Sort  L:Logd  V:View  H:Shell";
             viewerPanel.Visible = false;
             browserPanel.Visible = true;
             browserPanel.BringToFront(); // Z順を確実にする
             browserPanel.Focus();
             EnsureStatusBarVisible();
-            // ブラウザモードコマンドバー表示 (レガシー statusStrip 側も一応維持)
             if (_notificationService != null)
             {
                 NormalizeStatusLabelLayout();
-                _notificationService.SetPersistent(browserStatus);
+                if (FunctionKeyProfileService.ResolveProfile(CurrentFunctionKeyProfileValue) == FunctionKeyProfile.FDCompatible)
+                {
+                    const string browserStatus = "Z:Open  X:Check  A:Attr  E:Edit  F:Filter  S:Sort  L:Logd  V:View  H:Shell";
+                    _notificationService.SetPersistent(browserStatus);
+                }
+                else
+                {
+                    _notificationService.SetPersistent("Ready.");
+                }
                 NormalizeStatusLabelLayout();
             }
             else
             {
-                statusLabel.Text = browserStatus;
+                statusLabel.Text = "Ready.";
             }
         }
         else
@@ -4264,18 +4539,309 @@ private void InitializeBrowserTabControl()
             _largeFileControl.Visible = (_uiMode == UIMode.Viewer && _currentViewerKind == PreviewKind.LargeText);
         }
     }
+    private readonly record struct FunctionBarSlotViewModel(
+        int Slot, // 1-indexed (1-12)
+        bool IsShiftLayer,
+        string? CommandId,
+        string ShortLabel,
+        string? KeyHint,
+        string? HotKeyChar,
+        string DisplayLabel,
+        bool IsEnabled,
+        string ToolTipText
+    );
+
+    private IReadOnlyList<FunctionBarSlotViewModel> BuildStandardFunctionBarSlotModels(bool isShiftLayer, bool isCtrlLayer = false, bool isAltLayer = false)
+    {
+        var snapshot = BuildCommandUiSnapshot();
+        var models = new List<FunctionBarSlotViewModel>(12);
+        var definitions = FunctionKeyProfileService.GetDefinitions(InputSettings.StandardProfileValue);
+
+        for (int slot = 1; slot <= 12; slot++)
+        {
+            var def = definitions.FirstOrDefault(d => d.KeyNumber == slot);
+            string? customCmdId = FunctionKeyProfileService.ResolveFunctionBarCommandId(
+                FunctionKeyProfile.Standard,
+                slot,
+                _settings.Input.FunctionBarCommandOverridesStandard,
+                _settings.Input.FunctionBarCommandOverridesFdCompatible,
+                _settings.Input.FunctionBarCommandOverridesShiftStandard,
+                _settings.Input.FunctionBarCommandOverridesShiftFdCompatible,
+                isShiftLayer,
+                _settings.Input.FunctionBarCommandOverridesCtrlStandard,
+                _settings.Input.FunctionBarCommandOverridesCtrlFdCompatible,
+                _settings.Input.FunctionBarCommandOverridesAltStandard,
+                _settings.Input.FunctionBarCommandOverridesAltFdCompatible,
+                isCtrlLayer,
+                isAltLayer);
+
+            // If Ctrl or Alt layer, and there is no custom assignment, treat as unassigned (empty)
+            bool isUnassignedModifier = (isCtrlLayer || isAltLayer) && (string.IsNullOrEmpty(customCmdId) || string.Equals(customCmdId, "none", StringComparison.OrdinalIgnoreCase));
+
+            // Determine ShortLabel
+            string shortLabel;
+            if (isUnassignedModifier)
+            {
+                shortLabel = "";
+            }
+            else if (!string.IsNullOrEmpty(customCmdId))
+            {
+                shortLabel = FunctionKeyProfileService.ResolveFunctionBarShortLabel(customCmdId);
+            }
+            else
+            {
+                shortLabel = def?.Label ?? "Cmd";
+            }
+
+            // Apply Custom ShortLabel Override if exists and active CommandId matches
+            if (!isUnassignedModifier && !string.IsNullOrEmpty(customCmdId) && !string.Equals(customCmdId, "none", StringComparison.OrdinalIgnoreCase))
+            {
+                var labelOverrides = isCtrlLayer
+                    ? _settings.Input.FunctionBarLabelOverridesCtrlStandard
+                    : (isAltLayer
+                        ? _settings.Input.FunctionBarLabelOverridesAltStandard
+                        : (isShiftLayer
+                            ? _settings.Input.FunctionBarLabelOverridesShiftStandard
+                            : _settings.Input.FunctionBarLabelOverridesStandard));
+                if (labelOverrides != null && labelOverrides.TryGetValue($"F{slot}", out var labelOverride) && labelOverride != null)
+                {
+                    if (string.Equals(labelOverride.CommandId, customCmdId, StringComparison.OrdinalIgnoreCase) && !string.IsNullOrWhiteSpace(labelOverride.Label))
+                    {
+                        shortLabel = InputSettings.NormalizeFunctionBarLabelText(labelOverride.Label);
+                    }
+                }
+            }
+
+            // Determine KeyHint (browser shortcut表示用。hotkey強調は未修飾の英字ショートカットだけに限定)
+            string? keyHint = null;
+            string? hotKeyChar = null;
+            if (!isUnassignedModifier && !string.IsNullOrEmpty(customCmdId))
+            {
+                keyHint = FunctionKeyProfileService.ResolveFunctionBarKeyHint(
+                    customCmdId,
+                    _settings.Input.BrowserKeyCommandOverrides,
+                    InputSettings.StandardProfileValue);
+                if (string.IsNullOrWhiteSpace(keyHint))
+                {
+                    keyHint = null;
+                }
+                hotKeyChar = FunctionKeyProfileService.ResolveFunctionBarBrowserHotKeyCharacter(
+                    customCmdId,
+                    _settings.Input.BrowserKeyCommandOverrides,
+                    InputSettings.StandardProfileValue);
+                if (string.IsNullOrWhiteSpace(hotKeyChar))
+                {
+                    hotKeyChar = null;
+                }
+            }
+
+            // Determine DisplayLabel
+            string displayLabel;
+            if (isUnassignedModifier)
+            {
+                displayLabel = "";
+            }
+            else
+            {
+                displayLabel = FunctionKeyProfileService.ResolveFunctionBarDisplayLabel(
+                    customCmdId,
+                    shortLabel,
+                    _settings.Input.BrowserKeyCommandOverrides,
+                    InputSettings.StandardProfileValue);
+            }
+
+            // Determine IsEnabled
+            bool isEnabled = true;
+            if (_uiMode == UIMode.Browser)
+            {
+                if (isUnassignedModifier)
+                {
+                    isEnabled = false;
+                }
+                else if (!string.IsNullOrEmpty(customCmdId))
+                {
+                    isEnabled = _commandStateCoordinator.IsCommandEnabled(customCmdId, snapshot);
+                }
+                else
+                {
+                    isEnabled = false;
+                }
+            }
+            else if (isUnassignedModifier)
+            {
+                isEnabled = false;
+            }
+
+            // Determine ToolTipText
+            string toolTipText;
+            string slotPrefix;
+            if (isCtrlLayer)
+            {
+                slotPrefix = $"Ctrl+F{slot}";
+            }
+            else if (isAltLayer)
+            {
+                slotPrefix = $"Alt+F{slot}";
+            }
+            else if (isShiftLayer)
+            {
+                slotPrefix = $"Shift+F{slot}";
+            }
+            else
+            {
+                slotPrefix = $"F{slot}";
+            }
+
+            if (isUnassignedModifier)
+            {
+                toolTipText = $"{slotPrefix}: 未割り当て";
+            }
+            else if (!string.IsNullOrEmpty(customCmdId))
+            {
+                var cmdDef = _commandRegistry.Find(customCmdId);
+                string commandName = cmdDef?.DisplayName ?? "不明なコマンド";
+                string description = cmdDef?.Description ?? $"未登録のコマンドID: {customCmdId}";
+                var toolTipLines = new List<string>
+                {
+                    shortLabel,
+                    $"Command: {customCmdId}",
+                    $"Function: {slotPrefix}"
+                };
+                if (!string.IsNullOrEmpty(keyHint))
+                {
+                    toolTipLines.Add($"通常キー: {keyHint}");
+                }
+                toolTipLines.Add(description);
+                toolTipText = string.Join("\r\n", toolTipLines);
+            }
+            else
+            {
+                toolTipText = $"{shortLabel}\r\nFunction: {slotPrefix}\r\nカスタムコマンドを割り当てることができます。";
+            }
+
+            models.Add(new FunctionBarSlotViewModel(
+                slot,
+                isShiftLayer,
+                customCmdId,
+                shortLabel,
+                keyHint,
+                hotKeyChar,
+                displayLabel,
+                isEnabled,
+                toolTipText
+            ));
+        }
+
+        return models;
+    }
+
+    private Dictionary<string, FunctionBarLabelOverride> GetActiveFunctionBarLabelOverrides(bool isShift, bool isCtrl, bool isAlt, bool isFdCompatible)
+    {
+        if (isCtrl)
+        {
+            return isFdCompatible
+                ? _settings.Input.FunctionBarLabelOverridesCtrlFdCompatible
+                : _settings.Input.FunctionBarLabelOverridesCtrlStandard;
+        }
+
+        if (isAlt)
+        {
+            return isFdCompatible
+                ? _settings.Input.FunctionBarLabelOverridesAltFdCompatible
+                : _settings.Input.FunctionBarLabelOverridesAltStandard;
+        }
+
+        if (isShift)
+        {
+            return isFdCompatible
+                ? _settings.Input.FunctionBarLabelOverridesShiftFdCompatible
+                : _settings.Input.FunctionBarLabelOverridesShiftStandard;
+        }
+
+        return isFdCompatible
+            ? _settings.Input.FunctionBarLabelOverridesFdCompatible
+            : _settings.Input.FunctionBarLabelOverridesStandard;
+    }
+
     private void UpdateFunctionBar()
     {
         ApplyFunctionBarVisibilityForCurrentContext();
         var snapshot = BuildCommandUiSnapshot();
         if (_commandStateCoordinator.UsesBrowserFunctionBar(snapshot))
         {
-            IReadOnlyList<FunctionKeyDefinition> definitions = FunctionKeyProfileService.GetDefinitions(CurrentFunctionKeyProfileValue);
-            for (int i = 1; i <= 12; i++)
+            var (isShift, isCtrl, isAlt) = GetActiveFunctionBarLayer();
+            bool isCompatible = FunctionKeyProfileService.ResolveProfile(CurrentFunctionKeyProfileValue) == FunctionKeyProfile.FDCompatible;
+            if (!isCompatible)
             {
-                FunctionKeyDefinition? definition = definitions.FirstOrDefault(def => def.KeyNumber == i);
-                bool isVisible = definition?.VisibleOnFunctionBar == true && definition.Action != FunctionKeyAction.None;
-                SetFuncKeyText(i, isVisible ? definition!.Label : "", isVisible);
+                var models = BuildStandardFunctionBarSlotModels(isShift, isCtrl, isAlt);
+                for (int i = 1; i <= 12; i++)
+                {
+                    var model = models[i - 1];
+                    // Display label is either KeyHint:ShortLabel or ShortLabel
+                    SetFuncKeyText(i, model.DisplayLabel, true);
+                }
+            }
+            else
+            {
+                IReadOnlyList<FunctionKeyDefinition> definitions = FunctionKeyProfileService.GetDefinitions(CurrentFunctionKeyProfileValue);
+                for (int i = 1; i <= 12; i++)
+                {
+                    FunctionKeyDefinition? definition = definitions.FirstOrDefault(def => def.KeyNumber == i);
+                    string? customCmdId = FunctionKeyProfileService.ResolveFunctionBarCommandId(
+                        FunctionKeyProfile.FDCompatible,
+                        i,
+                        _settings.Input.FunctionBarCommandOverridesStandard,
+                        _settings.Input.FunctionBarCommandOverridesFdCompatible,
+                        _settings.Input.FunctionBarCommandOverridesShiftStandard,
+                        _settings.Input.FunctionBarCommandOverridesShiftFdCompatible,
+                        isShift,
+                        _settings.Input.FunctionBarCommandOverridesCtrlStandard,
+                        _settings.Input.FunctionBarCommandOverridesCtrlFdCompatible,
+                        _settings.Input.FunctionBarCommandOverridesAltStandard,
+                        _settings.Input.FunctionBarCommandOverridesAltFdCompatible,
+                        isCtrl,
+                        isAlt);
+
+                    bool isVisible = (definition?.VisibleOnFunctionBar == true && (definition.Action != FunctionKeyAction.None || !string.IsNullOrEmpty(customCmdId)))
+                        || (!isCompatible && !string.IsNullOrEmpty(customCmdId));
+                    string label = "";
+                    if (isVisible)
+                    {
+                        string? activeCmdId = customCmdId;
+                        if (string.IsNullOrEmpty(activeCmdId) && definition != null)
+                        {
+                            activeCmdId = FunctionKeyProfileService.ResolveCommandIdFromAction(definition.Action);
+                        }
+
+                        if (!string.IsNullOrEmpty(activeCmdId) && !string.Equals(activeCmdId, "none", StringComparison.OrdinalIgnoreCase))
+                        {
+                            string shortLabel = !string.IsNullOrEmpty(customCmdId)
+                                ? FunctionKeyProfileService.ResolveFunctionBarShortLabel(customCmdId)
+                                : (definition?.Label ?? "Cmd");
+
+                            // Apply Custom ShortLabel Override if exists and active CommandId matches
+                            var labelOverrides = GetActiveFunctionBarLabelOverrides(isShift, isCtrl, isAlt, true);
+                            if (labelOverrides != null && labelOverrides.TryGetValue($"F{i}", out var labelOverride) && labelOverride != null)
+                            {
+                                if (string.Equals(labelOverride.CommandId, activeCmdId, StringComparison.OrdinalIgnoreCase) && !string.IsNullOrWhiteSpace(labelOverride.Label))
+                                {
+                                    shortLabel = InputSettings.NormalizeFunctionBarLabelText(labelOverride.Label);
+                                }
+                            }
+
+                            label = FunctionKeyProfileService.ResolveFunctionBarDisplayLabel(
+                                activeCmdId,
+                                shortLabel,
+                                _settings.Input.BrowserKeyCommandOverrides,
+                                InputSettings.FdCompatibleProfileValue);
+                        }
+                        else
+                        {
+                            label = definition?.Label ?? "Cmd";
+                        }
+                    }
+                    SetFuncKeyText(i, label, isVisible);
+                }
             }
         }
         else
@@ -4583,20 +5149,941 @@ private void InitializeBrowserTabControl()
         }
         functionBarPanel.Invalidate(); // Paint イベントを起動して再描画
     }
+    private sealed class FunctionBarColorPalette
+    {
+        public required Color BackColor { get; init; }
+        public required Color BorderColor { get; init; }
+        public required Color EnabledBackColor { get; init; }
+        public required Color EnabledTextColor { get; init; }
+        public required Color DisabledBackColor { get; init; }
+        public required Color DisabledTextColor { get; init; }
+        public required Color DisabledBorderColor { get; init; }
+        public required Color HotKeyBackColor { get; init; }
+        public required Color HotKeyTextColor { get; init; }
+        public required Color HoverBackColor { get; init; }
+        public required Color PressedBackColor { get; init; }
+    }
+
+    private static Color BlendColors(Color colorA, Color colorB, double amount)
+    {
+        amount = Math.Max(0.0, Math.Min(1.0, amount));
+        byte r = (byte)(colorA.R * (1.0 - amount) + colorB.R * amount);
+        byte g = (byte)(colorA.G * (1.0 - amount) + colorB.G * amount);
+        byte b = (byte)(colorA.B * (1.0 - amount) + colorB.B * amount);
+        return Color.FromArgb(r, g, b);
+    }
+
+    private static double GetRelativeLuminance(Color c)
+    {
+        double r = c.R / 255.0;
+        double g = c.G / 255.0;
+        double b = c.B / 255.0;
+
+        r = (r <= 0.03928) ? r / 12.92 : Math.Pow((r + 0.055) / 1.055, 2.4);
+        g = (g <= 0.03928) ? g / 12.92 : Math.Pow((g + 0.055) / 1.055, 2.4);
+        b = (b <= 0.03928) ? b / 12.92 : Math.Pow((b + 0.055) / 1.055, 2.4);
+
+        return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+    }
+
+    private static double GetContrastRatio(Color colorA, Color colorB)
+    {
+        double l1 = GetRelativeLuminance(colorA);
+        double l2 = GetRelativeLuminance(colorB);
+        double bright = Math.Max(l1, l2);
+        double dark = Math.Min(l1, l2);
+        return (bright + 0.05) / (dark + 0.05);
+    }
+
+    private static Color PickReadableTextColor(Color backColor, Color darkCandidate, Color lightCandidate)
+    {
+        double darkContrast = GetContrastRatio(backColor, darkCandidate);
+        double lightContrast = GetContrastRatio(backColor, lightCandidate);
+        return darkContrast >= lightContrast ? darkCandidate : lightCandidate;
+    }
+
+    private FunctionBarColorPalette GetFunctionBarColors(bool isWinFdCompatible)
+    {
+        var resolved = _resolvedColors ?? FileListColorResolver.ResolveColors(_settings);
+        string themeNormalized = FileListColorResolver.NormalizeCoreTheme(_settings.Appearance.ColorTheme, _settings);
+        bool isLightTheme = themeNormalized == "Light";
+
+        // 現在のテーマを象徴する Directory (フォルダ色: ClassicCyan=シアン, Green=緑, Amber=黄/黄金など) を主調色として使用
+        Color accentColor = resolved.Directory;
+
+        if (isWinFdCompatible)
+        {
+            if (isLightTheme)
+            {
+                Color barBack = Color.FromArgb(235, 235, 235);
+                Color enabledBack = BlendColors(Color.White, accentColor, 0.25);
+
+                // フォルダ色が極端に暗い場合は輝度を確保し、明るく美しいボタン背景色を保証
+                if (FileListColorResolver.GetRelativeLuminance(enabledBack) < 0.6)
+                {
+                    enabledBack = Color.FromArgb(200, 240, 240); // デフォルトの美しいライト水色
+                }
+
+                // 無効状態 (Disabled) 配色をテーマ派生で構成 (Light系)
+                Color disabledBack = BlendColors(barBack, enabledBack, 0.08); // 背景寄りの非常に淡いブレンド
+
+                // コントラスト優先で可読テキストを決定
+                Color disabledForeBase = PickReadableTextColor(disabledBack, Color.Black, Color.White);
+                Color disabledFore = BlendColors(disabledForeBase, disabledBack, 0.20); // 弱強調のために少し背景に寄せる
+                if (GetContrastRatio(disabledFore, disabledBack) < 4.5)
+                {
+                    disabledFore = disabledForeBase;
+                }
+
+                Color disabledBorder = BlendColors(barBack, enabledBack, 0.04); // 主張しすぎない極薄境界線
+
+                return new FunctionBarColorPalette
+                {
+                    BackColor = barBack,
+                    BorderColor = Color.FromArgb(200, 200, 200),
+                    EnabledBackColor = enabledBack,
+                    EnabledTextColor = Color.Black,
+                    DisabledBackColor = disabledBack,
+                    DisabledTextColor = disabledFore,
+                    DisabledBorderColor = disabledBorder,
+                    HotKeyBackColor = Color.Yellow,
+                    HotKeyTextColor = Color.Black,
+                    HoverBackColor = BlendColors(enabledBack, Color.White, 0.45),
+                    PressedBackColor = BlendColors(enabledBack, Color.Black, 0.15)
+                };
+            }
+            else
+            {
+                Color barBack = resolved.Background;
+
+                // フォルダ色を有効ボタンの背景色とする
+                Color enabledBack = accentColor;
+
+                // フォルダ色が暗すぎる場合は明るいボタン色にするため輝度を確保
+                if (FileListColorResolver.GetRelativeLuminance(enabledBack) < 0.25)
+                {
+                    enabledBack = BlendColors(enabledBack, Color.White, 0.5);
+                }
+
+                // 無効状態 (Disabled) 配色をテーマ派生で構成 (Dark系: 50%ブレンドで明るく認識しやすい無効背景)
+                Color disabledBack = BlendColors(barBack, enabledBack, 0.5); // ユーザー様調整の50%ブレンドを確実に維持
+
+                // コントラスト最優先で無効背景に対して最も可読性の高い文字色 (黒 or 白) を選出
+                Color disabledForeBase = PickReadableTextColor(disabledBack, Color.Black, Color.White);
+
+                // 無効状態としての「薄い灰色系・弱強調」を出すため、背景色と多めにブレンド
+                Color disabledFore = BlendColors(disabledForeBase, disabledBack, 0.45);
+                if (GetContrastRatio(disabledFore, disabledBack) < 3.0)
+                {
+                    disabledFore = BlendColors(disabledForeBase, disabledBack, 0.25);
+                }
+
+                Color disabledBorder = BlendColors(barBack, enabledBack, 0.03); // 3%ブレンドで超極薄境界線
+
+                return new FunctionBarColorPalette
+                {
+                    BackColor = barBack,
+                    BorderColor = barBack,
+                    EnabledBackColor = enabledBack,
+                    EnabledTextColor = Color.Black, // WinFDの伝統である極めて高い判読性の確保
+                    DisabledBackColor = disabledBack,
+                    DisabledTextColor = disabledFore,
+                    DisabledBorderColor = disabledBorder,
+                    HotKeyBackColor = Color.Yellow,
+                    HotKeyTextColor = Color.Black,
+                    HoverBackColor = BlendColors(enabledBack, Color.White, 0.25),
+                    PressedBackColor = BlendColors(enabledBack, Color.Black, 0.2)
+                };
+            }
+        }
+        else
+        {
+            Color barBack = resolved.Background;
+            Color enabledBack = Color.FromArgb(60, 120, 180);
+            Color disabledBack = BlendColors(barBack, enabledBack, 0.5);
+            Color disabledTextBase = PickReadableTextColor(disabledBack, Color.Black, Color.White);
+            Color disabledText = BlendColors(disabledTextBase, disabledBack, 0.35);
+            if (GetContrastRatio(disabledText, disabledBack) < 3.2)
+            {
+                disabledText = disabledTextBase;
+            }
+
+            return new FunctionBarColorPalette
+            {
+                BackColor = barBack,
+                BorderColor = Color.FromArgb(70, 100, 120),
+                EnabledBackColor = enabledBack,
+                EnabledTextColor = Color.FromArgb(220, 238, 255),
+                DisabledBackColor = disabledBack,
+                DisabledTextColor = disabledText,
+                DisabledBorderColor = Color.FromArgb(45, 58, 68),
+
+                HotKeyBackColor = Color.FromArgb(70, 140, 110),
+                HotKeyTextColor = Color.White,
+
+                HoverBackColor = Color.FromArgb(70, 132, 192),
+                PressedBackColor = Color.FromArgb(46, 92, 140)
+            };
+        }
+    }
+
+    private struct WinFdCompatibleLabelInfo
+    {
+        public string DisplayText;
+        public int HotKeyCharIndex;
+    }
+
+    private WinFdCompatibleLabelInfo ResolveWinFdCompatibleLabelInfo(int keyNumber)
+    {
+        if (_isFunctionBarShiftLayerActive)
+        {
+            return keyNumber switch
+            {
+                1 => new WinFdCompatibleLabelInfo { DisplayText = "attr", HotKeyCharIndex = 0 }, // a
+                2 => new WinFdCompatibleLabelInfo { DisplayText = "", HotKeyCharIndex = -1 },
+                3 => new WinFdCompatibleLabelInfo { DisplayText = "move", HotKeyCharIndex = 0 }, // m
+                4 => new WinFdCompatibleLabelInfo { DisplayText = "", HotKeyCharIndex = -1 },
+                5 => new WinFdCompatibleLabelInfo { DisplayText = "mkdir", HotKeyCharIndex = 0 }, // m
+                6 => new WinFdCompatibleLabelInfo { DisplayText = "psh", HotKeyCharIndex = 0 }, // p
+                7 => new WinFdCompatibleLabelInfo { DisplayText = "rld", HotKeyCharIndex = 0 }, // r
+                8 => new WinFdCompatibleLabelInfo { DisplayText = "edit", HotKeyCharIndex = 0 }, // e
+                9 => new WinFdCompatibleLabelInfo { DisplayText = "prev", HotKeyCharIndex = 0 }, // p
+                10 => new WinFdCompatibleLabelInfo { DisplayText = "pack", HotKeyCharIndex = 0 }, // p
+                11 => new WinFdCompatibleLabelInfo { DisplayText = "", HotKeyCharIndex = -1 },
+                12 => new WinFdCompatibleLabelInfo { DisplayText = "", HotKeyCharIndex = -1 },
+                _ => new WinFdCompatibleLabelInfo { DisplayText = "", HotKeyCharIndex = -1 }
+            };
+        }
+        else
+        {
+            return keyNumber switch
+            {
+                1 => new WinFdCompatibleLabelInfo { DisplayText = "help", HotKeyCharIndex = -1 },
+                2 => new WinFdCompatibleLabelInfo { DisplayText = "exec", HotKeyCharIndex = 1 }, // x
+                3 => new WinFdCompatibleLabelInfo { DisplayText = "copy", HotKeyCharIndex = 0 }, // c
+                4 => new WinFdCompatibleLabelInfo { DisplayText = "delet", HotKeyCharIndex = 0 }, // d
+                5 => new WinFdCompatibleLabelInfo { DisplayText = "renam", HotKeyCharIndex = 0 }, // r
+                6 => new WinFdCompatibleLabelInfo { DisplayText = "sort", HotKeyCharIndex = 0 }, // s
+                7 => new WinFdCompatibleLabelInfo { DisplayText = "find", HotKeyCharIndex = 0 }, // f
+                8 => new WinFdCompatibleLabelInfo { DisplayText = "tree", HotKeyCharIndex = 0 }, // t
+                9 => new WinFdCompatibleLabelInfo { DisplayText = "logds", HotKeyCharIndex = 0 }, // l
+                10 => new WinFdCompatibleLabelInfo { DisplayText = "unpac", HotKeyCharIndex = 0 }, // u
+                11 => new WinFdCompatibleLabelInfo { DisplayText = "top", HotKeyCharIndex = -1 },
+                12 => new WinFdCompatibleLabelInfo { DisplayText = "botto", HotKeyCharIndex = -1 },
+                _ => new WinFdCompatibleLabelInfo { DisplayText = "", HotKeyCharIndex = -1 }
+            };
+        }
+    }
+
+    private static string? ResolveHotKeyCharacter(string? hotKeyHint)
+    {
+        if (string.IsNullOrWhiteSpace(hotKeyHint))
+        {
+            return null;
+        }
+
+        string trimmed = hotKeyHint.Trim();
+        if (trimmed.Length != 1)
+        {
+            return null;
+        }
+
+        char ch = trimmed[0];
+        if (ch >= 'A' && ch <= 'Z')
+        {
+            return char.ToUpperInvariant(ch).ToString();
+        }
+        if (ch >= 'a' && ch <= 'z')
+        {
+            return char.ToUpperInvariant(ch).ToString();
+        }
+
+        return null;
+    }
+
+    private static bool TryBuildHotKeySegments(string labelText, string? hotKeyCharacter, out int hotKeyIndex, out string prefix, out string hotKey, out string suffix)
+    {
+        hotKeyIndex = -1;
+        prefix = string.Empty;
+        hotKey = string.Empty;
+        suffix = string.Empty;
+
+        if (string.IsNullOrWhiteSpace(labelText) || string.IsNullOrWhiteSpace(hotKeyCharacter))
+        {
+            return false;
+        }
+
+        string normalizedHotKey = hotKeyCharacter.Trim();
+        if (normalizedHotKey.Length != 1)
+        {
+            return false;
+        }
+
+        char hotKeyChar = normalizedHotKey[0];
+        for (int i = 0; i < labelText.Length; i++)
+        {
+            char labelChar = labelText[i];
+            if (char.ToUpperInvariant(labelChar) == char.ToUpperInvariant(hotKeyChar))
+            {
+                hotKeyIndex = i;
+                prefix = labelText[..i];
+                hotKey = char.ToUpperInvariant(labelChar).ToString();
+                suffix = labelText[(i + 1)..];
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private string GetFunctionBarLayerBadgeText(bool isShift, bool isCtrl, bool isAlt)
+    {
+        if (isCtrl) return "Ctrl";
+        if (isAlt) return "Alt";
+        if (isShift) return "Shift";
+        return "";
+    }
+
+    private int GetFunctionBarLayerBadgeWidth(bool isShift, bool isCtrl, bool isAlt)
+    {
+        string text = GetFunctionBarLayerBadgeText(isShift, isCtrl, isAlt);
+        if (string.IsNullOrEmpty(text))
+        {
+            return 0;
+        }
+        return 48;
+    }
+
+    private System.Drawing.Drawing2D.GraphicsPath CreateRoundedRectanglePath(Rectangle rect, int radius)
+    {
+        var path = new System.Drawing.Drawing2D.GraphicsPath();
+        int d = radius * 2;
+        path.AddArc(rect.X, rect.Y, d, d, 180, 90);
+        path.AddArc(rect.Right - d, rect.Y, d, d, 270, 90);
+        path.AddArc(rect.Right - d, rect.Bottom - d, d, d, 0, 90);
+        path.AddArc(rect.X, rect.Bottom - d, d, d, 90, 90);
+        path.CloseFigure();
+        return path;
+    }
+
+    private void DrawFunctionBarLayerBadge(Graphics g, Rectangle panelBounds, Rectangle[]? rects, Font font, FunctionBarColorPalette palette, bool isShift, bool isCtrl, bool isAlt)
+    {
+        string text = GetFunctionBarLayerBadgeText(isShift, isCtrl, isAlt);
+        if (string.IsNullOrEmpty(text)) return;
+
+        int badgeW = GetFunctionBarLayerBadgeWidth(isShift, isCtrl, isAlt);
+        const int paddingX = 4;
+        const int paddingY = 3;
+        int badgeH = panelBounds.Height - (paddingY * 2);
+        var badgeRect = new Rectangle(panelBounds.X + paddingX, panelBounds.Y + paddingY, badgeW - (paddingX * 2), badgeH);
+
+        // 1番目のスロットと重ならないようにガード
+        if (rects != null && rects.Length > 0)
+        {
+            int maxX = rects[0].Left - 4;
+            if (badgeRect.Right > maxX)
+            {
+                if (maxX - badgeRect.Left < 20) return; // 描画スペースが極小の場合は描画しない
+                badgeRect.Width = maxX - badgeRect.Left;
+            }
+        }
+
+        Color backColor = Color.FromArgb(24, 38, 57);
+        Color borderColor = Color.FromArgb(0, 192, 222);
+        Color textColor = Color.FromArgb(220, 245, 255);
+
+        using (var path = CreateRoundedRectanglePath(badgeRect, 3))
+        {
+            using (var bgBrush = new SolidBrush(backColor))
+            {
+                g.FillPath(bgBrush, path);
+            }
+            using (var borderPen = new Pen(borderColor, 1.2f))
+            {
+                g.DrawPath(borderPen, path);
+            }
+        }
+
+        using var badgeFont = new Font(font.FontFamily, 8.5F, FontStyle.Bold);
+        TextRenderer.DrawText(
+            g,
+            text,
+            badgeFont,
+            badgeRect,
+            textColor,
+            TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding
+        );
+    }
+
+    private void DrawFunctionBarButtonText(
+        Graphics graphics,
+        Rectangle labelRect,
+        string labelText,
+        string? hotKeyCharacter,
+        Font font,
+        FunctionBarColorPalette palette,
+        bool isEnabled,
+        bool isPressed)
+    {
+        if (string.IsNullOrWhiteSpace(labelText))
+        {
+            return;
+        }
+
+        string normalizedLabel = InputSettings.NormalizeFunctionBarLabelText(labelText);
+        if (isEnabled && TryBuildHotKeySegments(normalizedLabel, hotKeyCharacter, out _, out string prefix, out string hotKey, out string suffix))
+        {
+            Size prefixSize = string.IsNullOrEmpty(prefix)
+                ? Size.Empty
+                : TextRenderer.MeasureText(graphics, prefix, font, Size.Empty, TextFormatFlags.NoPadding);
+            Size hotKeySize = TextRenderer.MeasureText(graphics, hotKey, font, Size.Empty, TextFormatFlags.NoPadding);
+            Size suffixSize = string.IsNullOrEmpty(suffix)
+                ? Size.Empty
+                : TextRenderer.MeasureText(graphics, suffix, font, Size.Empty, TextFormatFlags.NoPadding);
+            int totalWidth = prefixSize.Width + hotKeySize.Width + suffixSize.Width;
+            int startX = labelRect.X + Math.Max(0, (labelRect.Width - totalWidth) / 2);
+            int textY = labelRect.Y + Math.Max(0, (labelRect.Height - TextRenderer.MeasureText(graphics, normalizedLabel, font, Size.Empty, TextFormatFlags.NoPadding).Height) / 2);
+            if (isPressed)
+            {
+                textY += 1;
+            }
+
+            Rectangle prefixRect = new Rectangle(startX, textY, prefixSize.Width, labelRect.Height);
+            Rectangle hotKeyRect = new Rectangle(startX + prefixSize.Width, textY, hotKeySize.Width, labelRect.Height);
+            Rectangle suffixRect = new Rectangle(startX + prefixSize.Width + hotKeySize.Width, textY, suffixSize.Width, labelRect.Height);
+
+            if (hotKeyRect.Width > 0)
+            {
+                Rectangle highlightRect = hotKeyRect;
+                highlightRect.Inflate(1, 0);
+                using var highlightBrush = new SolidBrush(palette.HotKeyBackColor);
+                graphics.FillRectangle(highlightBrush, highlightRect);
+            }
+
+            Color normalText = isEnabled ? palette.EnabledTextColor : palette.DisabledTextColor;
+            TextRenderer.DrawText(graphics, prefix, font, prefixRect, normalText, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding);
+            TextRenderer.DrawText(graphics, hotKey, font, hotKeyRect, palette.HotKeyTextColor, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding);
+            TextRenderer.DrawText(graphics, suffix, font, suffixRect, normalText, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding);
+
+            return;
+        }
+
+        Color textColor = isEnabled ? palette.EnabledTextColor : palette.DisabledTextColor;
+        Size textSize = TextRenderer.MeasureText(graphics, normalizedLabel, font, Size.Empty, TextFormatFlags.NoPadding);
+        Rectangle textRect = new Rectangle(labelRect.X + Math.Max(0, (labelRect.Width - textSize.Width) / 2), labelRect.Y, textSize.Width, labelRect.Height);
+        if (isPressed)
+        {
+            textRect.Offset(0, 1);
+        }
+        TextRenderer.DrawText(graphics, normalizedLabel, font, textRect, textColor,
+            TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding);
+    }
+
+    private void DrawFunctionBarButtonFrame(
+        Graphics graphics,
+        Rectangle cellRect,
+        FunctionBarColorPalette palette,
+        bool isEnabled,
+        bool isHovered,
+        bool isPressed,
+        bool emphasizeBorder)
+    {
+        Color cellBg = isEnabled
+            ? isPressed
+                ? palette.PressedBackColor
+                : isHovered
+                    ? palette.HoverBackColor
+                    : palette.EnabledBackColor
+            : palette.DisabledBackColor;
+
+        using (var bgBrush = new SolidBrush(cellBg))
+        {
+            graphics.FillRectangle(bgBrush, cellRect);
+        }
+
+        Color borderCol = isEnabled ? palette.BorderColor : palette.DisabledBorderColor;
+        if (emphasizeBorder && isEnabled)
+        {
+            borderCol = BlendColors(borderCol, palette.EnabledTextColor, 0.18);
+        }
+
+        using (var borderPen = new Pen(borderCol))
+        {
+            graphics.DrawRectangle(borderPen, cellRect.X, cellRect.Y, cellRect.Width - 1, cellRect.Height - 1);
+        }
+
+        if (isEnabled)
+        {
+            if (isPressed)
+            {
+                Color innerDarkCol = Color.FromArgb(80, BlendColors(palette.EnabledBackColor, Color.Black, 0.3));
+                using var innerDarkPen = new Pen(innerDarkCol);
+                graphics.DrawRectangle(innerDarkPen, cellRect.X + 1, cellRect.Y + 1, cellRect.Width - 3, cellRect.Height - 3);
+            }
+            else if (isHovered)
+            {
+                Color innerLightCol = Color.FromArgb(120, BlendColors(palette.EnabledBackColor, Color.White, 0.5));
+                using var innerLightPen = new Pen(innerLightCol);
+                graphics.DrawRectangle(innerLightPen, cellRect.X + 1, cellRect.Y + 1, cellRect.Width - 3, cellRect.Height - 3);
+            }
+        }
+    }
+
+    private Rectangle[] CalculateFunctionBarLabelRects(Rectangle bounds, Font font, IReadOnlyList<string> labels)
+    {
+        var rects = new Rectangle[labels.Count];
+        if (labels.Count == 0)
+        {
+            return rects;
+        }
+
+        const int labelPaddingX = 6;
+        const int minLabelW = 34;
+        const int innerGap = 12;
+        const int groupGap = 24;
+
+        int[] labelWidths = new int[labels.Count];
+        int totalW = 0;
+        using (var g = CreateGraphics())
+        {
+            for (int i = 0; i < labels.Count; i++)
+            {
+                string labelText = InputSettings.NormalizeFunctionBarLabelText(labels[i]);
+                Size sz = string.IsNullOrWhiteSpace(labelText)
+                    ? Size.Empty
+                    : TextRenderer.MeasureText(g, labelText, font, Size.Empty, TextFormatFlags.NoPadding);
+                int width = Math.Max(minLabelW, sz.Width + (labelPaddingX * 2));
+                labelWidths[i] = width;
+                totalW += width;
+                if (i < labels.Count - 1)
+                {
+                    totalW += (i == 3 || i == 7) ? groupGap : innerGap;
+                }
+            }
+        }
+
+        int startX = bounds.Left + Math.Max(0, (bounds.Width - totalW) / 2);
+        int labelHeight = Math.Max(18, bounds.Height - 2);
+        int labelY = bounds.Bottom - labelHeight;
+
+        int currentX = startX;
+        for (int i = 0; i < labels.Count; i++)
+        {
+            rects[i] = new Rectangle(currentX, labelY, labelWidths[i], labelHeight);
+            currentX += labelWidths[i];
+            if (i < labels.Count - 1)
+            {
+                currentX += (i == 3 || i == 7) ? groupGap : innerGap;
+            }
+        }
+
+        return rects;
+    }
+
+    private Rectangle[] CalculateWinFdFunctionBarLabelRects(Rectangle bounds, Font font)
+    {
+        var labels = new string[12];
+        for (int i = 1; i <= 12; i++)
+        {
+            labels[i - 1] = ResolveWinFdCompatibleLabelInfo(i).DisplayText;
+        }
+
+        return CalculateFunctionBarLabelRects(bounds, font, labels);
+    }
+
+    private static string ExtractFunctionBarDisplayText(string? hiddenText)
+    {
+        if (string.IsNullOrWhiteSpace(hiddenText))
+        {
+            return string.Empty;
+        }
+
+        int separatorIndex = hiddenText.IndexOf(':');
+        string displayText = separatorIndex >= 0
+            ? hiddenText[(separatorIndex + 1)..]
+            : hiddenText;
+        return InputSettings.NormalizeFunctionBarLabelText(displayText);
+    }
+
+    private void DrawWinFdCompatibleFunctionBarItem(
+        Graphics graphics,
+        Rectangle labelRect,
+        int keyNumber,
+        string? customCmdId,
+        string? displayTextOverride,
+        bool isEnabled,
+        bool isHovered,
+        bool isPressed,
+        Font font)
+    {
+        WinFdCompatibleLabelInfo labelInfo;
+        string? hotKeyCharacter = null;
+        if (!string.IsNullOrEmpty(customCmdId))
+        {
+            string shortLabel = ExtractFunctionBarDisplayText(displayTextOverride);
+            if (string.IsNullOrWhiteSpace(shortLabel))
+            {
+                shortLabel = FunctionKeyProfileService.ResolveFunctionBarShortLabel(customCmdId);
+            }
+            labelInfo = new WinFdCompatibleLabelInfo { DisplayText = shortLabel, HotKeyCharIndex = -1 };
+            hotKeyCharacter = ResolveHotKeyCharacter(FunctionKeyProfileService.ResolveFunctionBarPrimaryKeyHint(
+                customCmdId,
+                _settings.Input.BrowserKeyCommandOverrides,
+                InputSettings.StandardProfileValue));
+        }
+        else
+        {
+            var defaultLabelInfo = ResolveWinFdCompatibleLabelInfo(keyNumber);
+            string displayText = ExtractFunctionBarDisplayText(displayTextOverride);
+            if (!string.IsNullOrWhiteSpace(displayText))
+            {
+                labelInfo = new WinFdCompatibleLabelInfo { DisplayText = displayText, HotKeyCharIndex = defaultLabelInfo.HotKeyCharIndex };
+            }
+            else
+            {
+                labelInfo = defaultLabelInfo;
+            }
+        }
+
+        string labelText = labelInfo.DisplayText;
+        if (string.IsNullOrEmpty(labelText)) return;
+        if (string.IsNullOrWhiteSpace(hotKeyCharacter) && labelInfo.HotKeyCharIndex >= 0 && labelInfo.HotKeyCharIndex < labelText.Length)
+        {
+            hotKeyCharacter = labelText[labelInfo.HotKeyCharIndex].ToString();
+        }
+
+        // パレットの取得
+        var palette = GetFunctionBarColors(isWinFdCompatible: true);
+
+        // 1. 背景色の決定
+        Color bgCol;
+        if (isEnabled)
+        {
+            if (isPressed)
+            {
+                bgCol = palette.PressedBackColor;
+            }
+            else if (isHovered)
+            {
+                bgCol = palette.HoverBackColor;
+            }
+            else
+            {
+                bgCol = palette.EnabledBackColor;
+            }
+        }
+        else
+        {
+            bgCol = palette.DisabledBackColor;
+        }
+
+        using (var bgBrush = new SolidBrush(bgCol))
+        {
+            graphics.FillRectangle(bgBrush, labelRect);
+        }
+
+        // 2. セル境界線描画
+        Color borderCol = isEnabled ? palette.BorderColor : palette.DisabledBorderColor;
+        using (var borderPen = new Pen(borderCol))
+        {
+            graphics.DrawLine(borderPen, labelRect.Left, labelRect.Bottom - 1, labelRect.Right - 1, labelRect.Bottom - 1);
+            graphics.DrawLine(borderPen, labelRect.Left, labelRect.Top, labelRect.Left, labelRect.Bottom - 1);
+            graphics.DrawLine(borderPen, labelRect.Right - 1, labelRect.Top, labelRect.Right - 1, labelRect.Bottom - 1);
+        }
+
+        if (isEnabled)
+        {
+            if (isPressed)
+            {
+                Color innerDarkCol = Color.FromArgb(128, BlendColors(palette.EnabledBackColor, Color.Black, 0.45));
+                using var innerDarkPen = new Pen(innerDarkCol);
+                graphics.DrawRectangle(innerDarkPen, labelRect.X + 1, labelRect.Y + 1, labelRect.Width - 2, labelRect.Height - 2);
+            }
+            else if (isHovered)
+            {
+                Color innerLightCol = Color.FromArgb(128, BlendColors(palette.EnabledBackColor, Color.White, 0.65));
+                using var innerLightPen = new Pen(innerLightCol);
+                graphics.DrawRectangle(innerLightPen, labelRect.X + 1, labelRect.Y + 1, labelRect.Width - 2, labelRect.Height - 2);
+            }
+        }
+
+        // 3. テキスト描画領域
+        Size textSize = TextRenderer.MeasureText(graphics, labelText, font, Size.Empty, TextFormatFlags.NoPadding);
+        Rectangle textRect = new Rectangle(labelRect.X + (labelRect.Width - textSize.Width) / 2, labelRect.Y, textSize.Width, labelRect.Height);
+        if (isEnabled && isPressed)
+        {
+            textRect.Offset(0, 1);
+        }
+
+        // 4. バインドキー背景の描画
+        if (isEnabled && !string.IsNullOrWhiteSpace(hotKeyCharacter))
+        {
+            if (TryBuildHotKeySegments(labelText, hotKeyCharacter, out _, out string prefix, out string hotKeyStr, out _))
+            {
+                Size beforeSize = string.IsNullOrEmpty(prefix)
+                    ? Size.Empty
+                    : TextRenderer.MeasureText(graphics, prefix, font, Size.Empty, TextFormatFlags.NoPadding);
+                Size hotKeySize = TextRenderer.MeasureText(graphics, hotKeyStr, font, Size.Empty, TextFormatFlags.NoPadding);
+
+                int textY = textRect.Y + (textRect.Height - textSize.Height) / 2;
+                int hotKeyX = textRect.X + beforeSize.Width;
+
+                using var hotKeyBgBrush = new SolidBrush(palette.HotKeyBackColor);
+                graphics.FillRectangle(hotKeyBgBrush, hotKeyX, textY, hotKeySize.Width, textSize.Height);
+
+                TextRenderer.DrawText(graphics, prefix, font, new Rectangle(textRect.X, textY, beforeSize.Width, textRect.Height), palette.EnabledTextColor, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding);
+                TextRenderer.DrawText(graphics, hotKeyStr, font, new Rectangle(hotKeyX, textY, hotKeySize.Width, textRect.Height), palette.HotKeyTextColor, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding);
+                string suffix = labelText.Substring(prefix.Length + 1);
+                if (!string.IsNullOrEmpty(suffix))
+                {
+                    int suffixX = hotKeyX + hotKeySize.Width;
+                    TextRenderer.DrawText(graphics, suffix, font, new Rectangle(suffixX, textY, textRect.Right - suffixX, textRect.Height), palette.EnabledTextColor, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding);
+                }
+                return;
+            }
+        }
+
+        // 5. テキストの描画
+        Color textColor = isEnabled ? palette.EnabledTextColor : palette.DisabledTextColor;
+        TextRenderer.DrawText(graphics, labelText, font, textRect, textColor,
+            TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding);
+    }
+
+    private int HitTestFunctionKeyIndex(Point loc, Rectangle clientBounds, Font font)
+    {
+        bool isCompatible = FunctionKeyProfileService.ResolveProfile(CurrentFunctionKeyProfileValue) == FunctionKeyProfile.FDCompatible;
+        if (isCompatible)
+        {
+            var rects = CalculateWinFdFunctionBarLabelRects(clientBounds, font);
+            for (int i = 0; i < 12; i++)
+            {
+                if (rects[i].Contains(loc)) return i;
+            }
+            return -1;
+        }
+        else
+        {
+            var layoutModels = BuildStandardFunctionBarSlotModels(false, false, false);
+            var labels = layoutModels.Select(model => model.DisplayLabel).ToArray();
+            var rects = CalculateFunctionBarLabelRects(clientBounds, font, labels);
+            for (int i = 0; i < rects.Length; i++)
+            {
+                if (rects[i].Contains(loc))
+                {
+                    return i;
+                }
+            }
+
+            return -1;
+        }
+    }
+
+    private void InvalidateFunctionBarItem(int index)
+    {
+        if (index < 0 || index >= 12) return;
+
+        using var font = _headerPaintFont != null
+            ? new Font(_headerPaintFont.FontFamily, _headerPaintFont.Size, _headerPaintFont.Style)
+            : new Font("Consolas", 10F);
+
+        bool isCompatible = FunctionKeyProfileService.ResolveProfile(CurrentFunctionKeyProfileValue) == FunctionKeyProfile.FDCompatible;
+        if (isCompatible)
+        {
+            var rects = CalculateWinFdFunctionBarLabelRects(functionBarPanel.ClientRectangle, font);
+            if (index < rects.Length)
+            {
+                var r = rects[index];
+                r.Inflate(1, 1);
+                functionBarPanel.Invalidate(r);
+            }
+        }
+        else
+        {
+            var layoutModels = BuildStandardFunctionBarSlotModels(false, false, false);
+            var labels = layoutModels.Select(model => model.DisplayLabel).ToArray();
+            var rects = CalculateFunctionBarLabelRects(functionBarPanel.ClientRectangle, font, labels);
+            if (index < rects.Length)
+            {
+                var r = rects[index];
+                r.Inflate(1, 1);
+                functionBarPanel.Invalidate(r);
+            }
+        }
+    }
+
+    private void FunctionBarPanel_MouseMove(object? sender, MouseEventArgs e)
+    {
+        if (_uiMode != UIMode.Browser || !ShouldShowBrowserFunctionBarForCurrentProfile()) return;
+        using var font = _headerPaintFont != null
+            ? new Font(_headerPaintFont.FontFamily, _headerPaintFont.Size, _headerPaintFont.Style)
+            : new Font("Consolas", 10F);
+
+        int index = HitTestFunctionKeyIndex(e.Location, functionBarPanel.ClientRectangle, font);
+        if (index != _hoveredFuncKeyIndex)
+        {
+            int oldIndex = _hoveredFuncKeyIndex;
+            _hoveredFuncKeyIndex = index;
+
+            if (oldIndex >= 0) InvalidateFunctionBarItem(oldIndex);
+            if (index >= 0) InvalidateFunctionBarItem(index);
+
+            UpdateFunctionBarToolTip(index, e.Location);
+        }
+    }
+
+    private void FunctionBarPanel_MouseDown(object? sender, MouseEventArgs e)
+    {
+        if (_uiMode != UIMode.Browser || !ShouldShowBrowserFunctionBarForCurrentProfile()) return;
+        if (e.Button != MouseButtons.Left) return;
+
+        using var font = _headerPaintFont != null
+            ? new Font(_headerPaintFont.FontFamily, _headerPaintFont.Size, _headerPaintFont.Style)
+            : new Font("Consolas", 10F);
+
+        int index = HitTestFunctionKeyIndex(e.Location, functionBarPanel.ClientRectangle, font);
+        if (index >= 0)
+        {
+            var snapshot = _cachedCommandUiSnapshot;
+            bool isCompatible = FunctionKeyProfileService.ResolveProfile(CurrentFunctionKeyProfileValue) == FunctionKeyProfile.FDCompatible;
+            bool isEnabled;
+
+            if (!isCompatible)
+            {
+                var (isShift, isCtrl, isAlt) = GetActiveFunctionBarLayer();
+                var models = BuildStandardFunctionBarSlotModels(isShift, isCtrl, isAlt);
+                isEnabled = models[index].IsEnabled;
+            }
+            else
+            {
+                if (_isFunctionBarShiftLayerActive)
+                {
+                    isEnabled = _commandStateCoordinator.IsShiftActionEnabled(index + 1, snapshot);
+                }
+                else if (index + 1 == 4)
+                {
+                    isEnabled = snapshot.SelectionKind == CommandStateCoordinator.BrowserSelectionKind.Directory ||
+                                snapshot.SelectionKind == CommandStateCoordinator.BrowserSelectionKind.File ||
+                                snapshot.SelectionKind == CommandStateCoordinator.BrowserSelectionKind.ArchiveCandidate;
+                }
+                else
+                {
+                    FunctionKeyAction action = FunctionKeyProfileService.ResolveAction(CurrentFunctionKeyProfileValue, index + 1);
+                    isEnabled = _commandStateCoordinator.IsActionEnabled(action, snapshot);
+                }
+            }
+
+            if (isEnabled)
+            {
+                _pressedFuncKeyIndex = index;
+                InvalidateFunctionBarItem(index);
+            }
+        }
+    }
+
+    private void FunctionBarPanel_MouseUp(object? sender, MouseEventArgs e)
+    {
+        if (_pressedFuncKeyIndex >= 0)
+        {
+            int oldPressed = _pressedFuncKeyIndex;
+            _pressedFuncKeyIndex = -1;
+            InvalidateFunctionBarItem(oldPressed);
+        }
+    }
+
+    private void FunctionBarPanel_MouseLeave(object? sender, EventArgs e)
+    {
+        int oldHovered = _hoveredFuncKeyIndex;
+        int oldPressed = _pressedFuncKeyIndex;
+        bool changed = false;
+
+        if (_hoveredFuncKeyIndex >= 0)
+        {
+            _hoveredFuncKeyIndex = -1;
+            changed = true;
+        }
+        if (_pressedFuncKeyIndex >= 0)
+        {
+            _pressedFuncKeyIndex = -1;
+            changed = true;
+        }
+
+        if (changed)
+        {
+            if (oldHovered >= 0) InvalidateFunctionBarItem(oldHovered);
+            if (oldPressed >= 0 && oldPressed != oldHovered) InvalidateFunctionBarItem(oldPressed);
+        }
+
+        HideFunctionBarToolTip();
+    }
+
     private void FunctionBarPanel_MouseClick(object? sender, MouseEventArgs e)
     {
-        // Phase 5-funcbar-click-fix1: Browser 文脈でのみ有効とする
         if (_uiMode != UIMode.Browser || !ShouldShowBrowserFunctionBarForCurrentProfile()) return;
-        int totalW = functionBarPanel.ClientSize.Width;
-        if (totalW <= 0) return;
-        // FunctionBarPanel_Paint と同じ分割ロジック (itemW = totalW / 12) に揃える
-        int itemW = Math.Max(1, totalW / 12);
-        int index = e.X / itemW;
-        // 境界値ガード。幅端数は最終セル(11)に吸収される
-        if (index < 0) index = 0;
-        if (index > 11) index = 11;
+        if (e.Button != MouseButtons.Left) return;
+
+        using var font = _headerPaintFont != null
+            ? new Font(_headerPaintFont.FontFamily, _headerPaintFont.Size, _headerPaintFont.Style)
+            : new Font("Consolas", 10F);
+
+        int index = HitTestFunctionKeyIndex(e.Location, functionBarPanel.ClientRectangle, font);
+        if (index < 0) return;
+
+        var snapshot = _cachedCommandUiSnapshot;
+        bool isCompatible = FunctionKeyProfileService.ResolveProfile(CurrentFunctionKeyProfileValue) == FunctionKeyProfile.FDCompatible;
+        bool isEnabled;
+
+        var (isShift, isCtrl, isAlt) = GetActiveFunctionBarLayer();
+        if (!isCompatible)
+        {
+            var models = BuildStandardFunctionBarSlotModels(isShift, isCtrl, isAlt);
+            isEnabled = models[index].IsEnabled;
+        }
+        else
+        {
+            string? customCmdId = FunctionKeyProfileService.ResolveFunctionBarCommandId(
+                FunctionKeyProfile.FDCompatible,
+                index + 1,
+                _settings.Input.FunctionBarCommandOverridesStandard,
+                _settings.Input.FunctionBarCommandOverridesFdCompatible,
+                _settings.Input.FunctionBarCommandOverridesShiftStandard,
+                _settings.Input.FunctionBarCommandOverridesShiftFdCompatible,
+                isShift,
+                _settings.Input.FunctionBarCommandOverridesCtrlStandard,
+                _settings.Input.FunctionBarCommandOverridesCtrlFdCompatible,
+                _settings.Input.FunctionBarCommandOverridesAltStandard,
+                _settings.Input.FunctionBarCommandOverridesAltFdCompatible,
+                isCtrl,
+                isAlt);
+
+            if (!string.IsNullOrEmpty(customCmdId))
+            {
+                isEnabled = _commandStateCoordinator.IsCommandEnabled(customCmdId, snapshot);
+            }
+            else if (isShift)
+            {
+                isEnabled = _commandStateCoordinator.IsShiftActionEnabled(index + 1, snapshot);
+            }
+            else if (index + 1 == 4)
+            {
+                isEnabled = snapshot.SelectionKind == CommandStateCoordinator.BrowserSelectionKind.Directory ||
+                            snapshot.SelectionKind == CommandStateCoordinator.BrowserSelectionKind.File ||
+                            snapshot.SelectionKind == CommandStateCoordinator.BrowserSelectionKind.ArchiveCandidate;
+            }
+            else
+            {
+                FunctionKeyAction action = FunctionKeyProfileService.ResolveAction(CurrentFunctionKeyProfileValue, index + 1);
+                isEnabled = _commandStateCoordinator.IsActionEnabled(action, snapshot);
+            }
+        }
+
+        if (!isEnabled)
+        {
+            return;
+        }
+
         HandleFuncKeyClick(index);
     }
+
     private void FunctionBarPanel_Paint(object? sender, PaintEventArgs e)
     {
         var panel = sender as Panel;
@@ -4605,42 +6092,136 @@ private void InitializeBrowserTabControl()
         int totalW = panel.ClientSize.Width;
         int totalH = panel.ClientSize.Height;
         if (totalW <= 0 || totalH <= 0) return;
-        int itemW = Math.Max(1, totalW / 12);
         using var font = _headerPaintFont != null
             ? new Font(_headerPaintFont.FontFamily, _headerPaintFont.Size, _headerPaintFont.Style)
             : new Font("Consolas", 10F);
-        using var bgBrush = new SolidBrush(panel.BackColor);
-        e.Graphics.FillRectangle(bgBrush, e.ClipRectangle);
-        for (int i = 0; i < 12; i++)
+
+        var snapshot = _cachedCommandUiSnapshot;
+        bool isCompatible = FunctionKeyProfileService.ResolveProfile(CurrentFunctionKeyProfileValue) == FunctionKeyProfile.FDCompatible;
+        var palette = GetFunctionBarColors(isCompatible);
+
+        // 外枠全体を一度クリア
+        using var clearBrush = new SolidBrush(palette.BackColor);
+        e.Graphics.FillRectangle(clearBrush, e.ClipRectangle);
+
+        var (isShift, isCtrl, isAlt) = GetActiveFunctionBarLayer();
+        Rectangle[]? activeRects = null;
+
+        Rectangle[]? winFdRects = null;
+        if (isCompatible)
         {
-            var lbl = lblFuncKeys[i];
-            if (!lbl.Visible && lbl.Text.Length == 0) continue; // 空は省略
-            string text = lbl.Text;
-            if (string.IsNullOrWhiteSpace(text)) continue;
-            int x = i * itemW;
-            int w = (i == 11) ? (totalW - x) : itemW;
-            // Phase 5-ui-visual-fix1.3: 隣接項目との重なり防止のため左右に 2px の内側余白を設ける
-            const int innerPad = 2;
-            var rect = new Rectangle(x + innerPad, 0, w - (innerPad * 2), totalH);
-            var color = lbl.ForeColor;
-            // Phase 5-ui-visual-fix1.4c: 動的な表示文字判定。「全文字 → 入らなければ承認済み省略形」の2段階
-            string displayText = text;
-            Size fullSize = TextRenderer.MeasureText(e.Graphics, displayText, font, rect.Size, TextFormatFlags.NoPadding);
-            if (fullSize.Width > rect.Width)
+            winFdRects = CalculateWinFdFunctionBarLabelRects(panel.ClientRectangle, font);
+            // WinFD互換表示の上辺全幅罫線 (パレットの無効境界色に連動)
+            using (var sepPen = new Pen(palette.DisabledBorderColor, 1))
             {
-                // 分割してラベル部分を取得 (例: "1:Help" -> "1:", "Help")
-                int colonIndex = text.IndexOf(':');
-                if (colonIndex >= 0)
+                e.Graphics.DrawLine(sepPen, 0, 0, totalW - 1, 0);
+            }
+        }
+
+        if (!isCompatible)
+        {
+            var models = BuildStandardFunctionBarSlotModels(isShift, isCtrl, isAlt);
+            var layoutModels = BuildStandardFunctionBarSlotModels(false, false, false);
+            var labels = layoutModels.Select(model => model.DisplayLabel).ToArray();
+            activeRects = CalculateFunctionBarLabelRects(panel.ClientRectangle, font, labels);
+            for (int i = 0; i < 12; i++)
+            {
+                var model = models[i];
+                Rectangle cellRect = activeRects[i];
+                bool isPressed = (i == _pressedFuncKeyIndex);
+                bool isHovered = (i == _hoveredFuncKeyIndex);
+                bool isEnabled = model.IsEnabled;
+                DrawFunctionBarButtonFrame(e.Graphics, cellRect, palette, isEnabled, isHovered, isPressed, false);
+                const int innerPad = 4;
+                var rect = new Rectangle(cellRect.X + innerPad, cellRect.Y, cellRect.Width - (innerPad * 2), cellRect.Height);
+                string displayText = model.DisplayLabel;
+                if (!string.IsNullOrEmpty(displayText))
                 {
-                    string numPart = text.Substring(0, colonIndex + 1);
-                    string labelPart = text.Substring(colonIndex + 1).Trim();
-                    string shortened = GetShortenedLabel(labelPart);
-                    displayText = numPart + shortened;
+                    Size fullSize = TextRenderer.MeasureText(e.Graphics, displayText, font, rect.Size, TextFormatFlags.NoPadding);
+                    if (fullSize.Width > rect.Width)
+                    {
+                        displayText = GetShortenedLabel(model.ShortLabel);
+                    }
+                    DrawFunctionBarButtonText(e.Graphics, rect, displayText, model.HotKeyChar, font, palette, isEnabled, isPressed);
                 }
             }
-            // Phase 5-ui-visual-fix1.4c: エリプシス (...) による逃げを廃止し、可読性を優先
-            TextRenderer.DrawText(e.Graphics, displayText, font, rect, color,
-                TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding);
+        }
+        else
+        {
+            activeRects = winFdRects ?? CalculateWinFdFunctionBarLabelRects(panel.ClientRectangle, font);
+            for (int i = 0; i < 12; i++)
+            {
+                var lbl = lblFuncKeys[i];
+
+                // i+1番目の CommandId を解決 (優先度付き修飾キーと上書き辞書を使用)
+                string? customCmdId = FunctionKeyProfileService.ResolveFunctionBarCommandId(
+                    FunctionKeyProfile.FDCompatible,
+                    i + 1,
+                    _settings.Input.FunctionBarCommandOverridesStandard,
+                    _settings.Input.FunctionBarCommandOverridesFdCompatible,
+                    _settings.Input.FunctionBarCommandOverridesShiftStandard,
+                    _settings.Input.FunctionBarCommandOverridesShiftFdCompatible,
+                    isShift,
+                    _settings.Input.FunctionBarCommandOverridesCtrlStandard,
+                    _settings.Input.FunctionBarCommandOverridesCtrlFdCompatible,
+                    _settings.Input.FunctionBarCommandOverridesAltStandard,
+                    _settings.Input.FunctionBarCommandOverridesAltFdCompatible,
+                    isCtrl,
+                    isAlt);
+
+                if (string.IsNullOrEmpty(customCmdId))
+                {
+                    if (!lbl.Visible && lbl.Text.Length == 0) continue;
+                }
+
+                string text = lbl.Text;
+                if (string.IsNullOrEmpty(customCmdId) && string.IsNullOrWhiteSpace(text)) continue;
+
+                Rectangle cellRect = activeRects[i];
+
+                // アクションの有効判定 (CommandIDの有効判定優先、優先度付き修飾キーを使用)
+                bool isEnabled = true;
+                if (_uiMode == UIMode.Browser)
+                {
+                    if (!string.IsNullOrEmpty(customCmdId))
+                    {
+                        isEnabled = _commandStateCoordinator.IsCommandEnabled(customCmdId, snapshot);
+                    }
+                    else
+                    {
+                        if (isShift)
+                        {
+                            isEnabled = _commandStateCoordinator.IsShiftActionEnabled(i + 1, snapshot);
+                        }
+                        else if (i + 1 == 4)
+                        {
+                            isEnabled = snapshot.SelectionKind == CommandStateCoordinator.BrowserSelectionKind.Directory ||
+                                        snapshot.SelectionKind == CommandStateCoordinator.BrowserSelectionKind.File ||
+                                        snapshot.SelectionKind == CommandStateCoordinator.BrowserSelectionKind.ArchiveCandidate;
+                        }
+                        else
+                        {
+                            FunctionKeyAction action = FunctionKeyProfileService.ResolveAction(CurrentFunctionKeyProfileValue, i + 1);
+                            isEnabled = _commandStateCoordinator.IsActionEnabled(action, snapshot);
+                        }
+                    }
+                }
+
+                bool isPressed = (i == _pressedFuncKeyIndex);
+                bool isHovered = (i == _hoveredFuncKeyIndex);
+
+                if (winFdRects != null)
+                {
+                    DrawWinFdCompatibleFunctionBarItem(e.Graphics, activeRects[i], i + 1, customCmdId, text, isEnabled, isHovered, isPressed, font);
+                }
+            }
+        }
+
+        // 左端バッジ描画
+        int badgeW = GetFunctionBarLayerBadgeWidth(isShift, isCtrl, isAlt);
+        if (badgeW > 0)
+        {
+            DrawFunctionBarLayerBadge(e.Graphics, panel.ClientRectangle, activeRects, font, palette, isShift, isCtrl, isAlt);
         }
     }
     /// <summary>
@@ -4653,27 +6234,27 @@ private void InitializeBrowserTabControl()
         return fullLabelPart switch
         {
             // Browser
-            "Help" => "Hlp",
-            "Exec" => "Exc",
-            "Copy" => "Cpy",
-            "Edit" => "Edt",
-            "Sort" => "Srt",
-            "Filter" => "Flt",
-            "Tree" => "Tre",
-            "Logd" => "Log",
-            "Unpk" => "Unp",
-            "Encode" => "Enc",
-            "Wrap" => "Wrp",
-            "Ren" => "Ren",
-            "Top" => "Top",
-            "Btm" => "Btm",
+            "help" => "hlp",
+            "exec" => "exc",
+            "copy" => "cpy",
+            "edit" => "edt",
+            "sort" => "srt",
+            "filter" => "flt",
+            "tree" => "tre",
+            "logd" => "log",
+            "unpk" => "unp",
+            "encode" => "enc",
+            "wrap" => "wrp",
+            "ren" => "ren",
+            "top" => "top",
+            "btm" => "btm",
             // Viewer
-            "L:Enc" => "Enc",
-            "W:Wrap" => "Wrp",
-            "^F:Find" => "Find",
-            "F3:Next" => "Next",
-            "S+F3:Prv" => "Prev",
-            "Qt(En/Es)" => "Quit",
+            "l:enc" => "enc",
+            "w:wrap" => "wrp",
+            "^f:find" => "find",
+            "f3:next" => "next",
+            "s+f3:prv" => "prev",
+            "qt(en/es)" => "quit",
             _ => fullLabelPart
         };
     }
@@ -4712,6 +6293,7 @@ private void InitializeBrowserTabControl()
     }
     private bool LoadDirectory(string targetPath, string? focusTargetName = null, bool isHistoryNavigation = false, bool suppressRecent = false)
     {
+        HideBrowserFileNameToolTip();
         try
         {
             var request = CreateDirectoryLoadRequest(targetPath, focusTargetName, isHistoryNavigation, suppressRecent);
@@ -5007,7 +6589,7 @@ private void InitializeBrowserTabControl()
         ReloadCurrentDirectory("現在ディレクトリを再読込しました。");
         return true;
     }
-    private void QueueCurrentDirectoryRefresh(string watchedDirectoryPath, string reason)
+    private void QueueCurrentDirectoryRefresh(string watchedDirectoryPath, string reason, Exception? exception = null)
     {
         if (IsDisposed)
         {
@@ -5017,7 +6599,7 @@ private void InitializeBrowserTabControl()
         {
             try
             {
-                BeginInvoke(new Action(() => QueueCurrentDirectoryRefresh(watchedDirectoryPath, reason)));
+                BeginInvoke(new Action(() => QueueCurrentDirectoryRefresh(watchedDirectoryPath, reason, exception)));
             }
             catch (ObjectDisposedException)
             {
@@ -5038,6 +6620,11 @@ private void InitializeBrowserTabControl()
         _pendingExternalDirectoryRefreshReason = reason;
         _pendingExternalDirectoryRefreshReasons.Add(reason);
         _pendingExternalDirectoryRefreshEventCount++;
+        if (exception != null)
+        {
+            _pendingExternalDirectoryRefreshExceptionType = exception.GetType().Name;
+            _pendingExternalDirectoryRefreshExceptionMessage = exception.Message;
+        }
         _directoryRefreshDebounceTimer.Stop();
         _directoryRefreshDebounceTimer.Start();
     }
@@ -5061,15 +6648,82 @@ private void InitializeBrowserTabControl()
         {
             return;
         }
+        int externalDelayMs = _previewDiagnosticDelayService.ExternalReloadDelayMs;
+        if (!_pendingExternalDirectoryRefreshDelayScheduled
+            && !_pendingExternalDirectoryRefreshDelayCompleted
+            && _previewDiagnosticDelayService.ShouldDelay(currentPath, externalDelayMs))
+        {
+            _pendingExternalDirectoryRefreshDelayScheduled = true;
+            _ = Task.Run(async () =>
+            {
+                try
+                {
+                    using var cts = new CancellationTokenSource();
+                    await _previewDiagnosticDelayService
+                        .DelayAsync("ExternalChangeReload", currentPath, externalDelayMs, cts.Token)
+                        .ConfigureAwait(false);
+                }
+                catch (OperationCanceledException)
+                {
+                }
+                finally
+                {
+                    if (IsDisposed || !IsHandleCreated)
+                    {
+                        _pendingExternalDirectoryRefreshDelayScheduled = false;
+                    }
+                    else
+                    {
+                        try
+                        {
+                            BeginInvoke(new Action(() =>
+                            {
+                                _pendingExternalDirectoryRefreshDelayScheduled = false;
+                                _pendingExternalDirectoryRefreshDelayCompleted = true;
+                                TryProcessPendingCurrentDirectoryRefresh($"{source}:Delayed");
+                            }));
+                        }
+                        catch (ObjectDisposedException)
+                        {
+                            _pendingExternalDirectoryRefreshDelayScheduled = false;
+                        }
+                    }
+                }
+            });
+            return;
+        }
         _isApplyingExternalDirectoryRefresh = true;
+        var sw = Stopwatch.StartNew();
+        string statusBefore = statusLabel?.Text ?? "<null>";
+        string reason = BuildExternalDirectoryRefreshReason();
+        string statusMessage = $"外部変更を反映しました: {reason}";
+        string result = "Skipped";
+        string exceptionType = _pendingExternalDirectoryRefreshExceptionType ?? "-";
+        string exceptionMessage = _pendingExternalDirectoryRefreshExceptionMessage ?? "-";
         try
         {
-            string reason = BuildExternalDirectoryRefreshReason();
             ClearPendingCurrentDirectoryRefresh();
-            ReloadCurrentDirectory($"外部変更を反映しました: {reason}", force: true);
+            bool loaded = ReloadCurrentDirectory(statusMessage, force: true);
+            result = loaded ? "Success" : "Error";
+        }
+        catch (Exception ex)
+        {
+            result = "Error";
+            exceptionType = ex.GetType().Name;
+            exceptionMessage = ex.Message;
+            LogService.Warn(
+                $"[ExternalChangeReload] source={source} path='{currentPath}' reason='{reason}' result=Error " +
+                $"exceptionType='{exceptionType}' message='{exceptionMessage}'");
+            throw;
         }
         finally
         {
+            string statusAfter = statusLabel?.Text ?? "<null>";
+            LogService.Info(
+                $"[StatusUpdate] source='ExternalChangeReload' before='{statusBefore}' after='{statusAfter}'");
+            LogService.Info(
+                $"[ExternalChangeReload] source={source} path='{currentPath}' reason='{reason}' result={result} " +
+                $"exceptionType='{exceptionType}' message='{exceptionMessage}' elapsedMs={sw.ElapsedMilliseconds}");
             _isApplyingExternalDirectoryRefresh = false;
         }
     }
@@ -5080,6 +6734,10 @@ private void InitializeBrowserTabControl()
         _pendingExternalDirectoryRefreshReason = "外部変更";
         _pendingExternalDirectoryRefreshReasons.Clear();
         _pendingExternalDirectoryRefreshEventCount = 0;
+        _pendingExternalDirectoryRefreshExceptionType = null;
+        _pendingExternalDirectoryRefreshExceptionMessage = null;
+        _pendingExternalDirectoryRefreshDelayScheduled = false;
+        _pendingExternalDirectoryRefreshDelayCompleted = false;
         _directoryRefreshDebounceTimer.Stop();
     }
     private string BuildExternalDirectoryRefreshReason()
@@ -5135,7 +6793,7 @@ private void InitializeBrowserTabControl()
             watcher.Created += (_, _) => QueueCurrentDirectoryRefresh(currentPath, "Created");
             watcher.Deleted += (_, _) => QueueCurrentDirectoryRefresh(currentPath, "Deleted");
             watcher.Renamed += (_, _) => QueueCurrentDirectoryRefresh(currentPath, "Renamed");
-            watcher.Error += (_, _) => QueueCurrentDirectoryRefresh(currentPath, "Error");
+            watcher.Error += (_, e) => QueueCurrentDirectoryRefresh(currentPath, "Error", e.GetException());
             watcher.EnableRaisingEvents = true;
             _currentDirectoryWatcher = watcher;
             _currentDirectoryWatcherPath = currentPath;
@@ -5305,9 +6963,98 @@ private void InitializeBrowserTabControl()
     /// Phase 3-input-alias1: ファンクションキー (F2-F12) のルーティングを一元管理する。
     /// UIMode 判定と GuardClipboardBusy を内部で自動処理する。
     /// </summary>
-    private bool ExecuteFunctionKey(int fKey)
+    private bool ExecuteFunctionKey(int fKey, bool forceShiftLayer = false, Keys forcedModifierLayer = Keys.None)
     {
         if (_uiMode != UIMode.Browser) return false;
+
+        bool isCompatible = FunctionKeyProfileService.ResolveProfile(CurrentFunctionKeyProfileValue) == FunctionKeyProfile.FDCompatible;
+        var profile = isCompatible ? FunctionKeyProfile.FDCompatible : FunctionKeyProfile.Standard;
+
+        // F1〜F12のコマンドスロットの解決
+        bool isAltLayer = forcedModifierLayer == Keys.Alt || (forcedModifierLayer == Keys.None && (ModifierKeys & Keys.Alt) != 0);
+        bool isCtrlLayer = forcedModifierLayer == Keys.Control || (forcedModifierLayer == Keys.None && !isAltLayer && (ModifierKeys & Keys.Control) != 0);
+        bool isShiftLayer = forceShiftLayer || forcedModifierLayer == Keys.Shift || (forcedModifierLayer == Keys.None && !isAltLayer && !isCtrlLayer && (_isFunctionBarShiftLayerActive || (ModifierKeys & Keys.Shift) != 0));
+        string? customCmdId = FunctionKeyProfileService.ResolveFunctionBarCommandId(
+            profile,
+            fKey,
+            _settings.Input.FunctionBarCommandOverridesStandard,
+            _settings.Input.FunctionBarCommandOverridesFdCompatible,
+            _settings.Input.FunctionBarCommandOverridesShiftStandard,
+            _settings.Input.FunctionBarCommandOverridesShiftFdCompatible,
+            isShiftLayer,
+            _settings.Input.FunctionBarCommandOverridesCtrlStandard,
+            _settings.Input.FunctionBarCommandOverridesCtrlFdCompatible,
+            _settings.Input.FunctionBarCommandOverridesAltStandard,
+            _settings.Input.FunctionBarCommandOverridesAltFdCompatible,
+            isCtrlLayer,
+            isAltLayer);
+
+        if (!string.IsNullOrEmpty(customCmdId))
+        {
+            if (GuardClipboardBusy()) return true;
+
+            var snapshot = _cachedCommandUiSnapshot;
+
+            // WinFD互換での通常F4 (file.delete) の特別扱いを CommandID レベルでも保護
+            if (isCompatible && fKey == 4 && customCmdId == "file.delete")
+            {
+                if (snapshot.SelectionKind == CommandStateCoordinator.BrowserSelectionKind.Directory ||
+                    snapshot.SelectionKind == CommandStateCoordinator.BrowserSelectionKind.File ||
+                    snapshot.SelectionKind == CommandStateCoordinator.BrowserSelectionKind.ArchiveCandidate)
+                {
+                    _ = ExecuteDelete(permanent: false);
+                }
+                return true;
+            }
+
+            var cmdDef = _commandRegistry.Find(customCmdId);
+            CommandScope scope = cmdDef?.Scope ?? CommandScope.Browser;
+
+            _ = ExecuteCommandFromUi(customCmdId, scope, "FunctionKey");
+            return true;
+        }
+
+        if (!isCompatible && (isCtrlLayer || isAltLayer))
+        {
+            return false;
+        }
+
+        if (isCompatible)
+        {
+            // Shift キーがアクティブ、またはキーボードで Shift が押されている場合
+            if (isShiftLayer)
+            {
+                Keys dummyKey = Keys.Shift | (Keys.F1 + (fKey - 1));
+                return TryHandleFdCompatibleShortcutAliases(dummyKey);
+            }
+            if (isCtrlLayer)
+            {
+                Keys dummyKey = Keys.Control | (Keys.F1 + (fKey - 1));
+                return TryHandleFdCompatibleShortcutAliases(dummyKey);
+            }
+            if (isAltLayer)
+            {
+                Keys dummyKey = Keys.Alt | (Keys.F1 + (fKey - 1));
+                return TryHandleFdCompatibleShortcutAliases(dummyKey);
+            }
+
+            // 通常（Shiftなし）の F4 を Delet (削除) として特別扱いする
+            if (fKey == 4)
+            {
+                if (GuardClipboardBusy()) return true;
+
+                // ガード条件の確認
+                var snapshot = _cachedCommandUiSnapshot;
+                if (snapshot.SelectionKind == CommandStateCoordinator.BrowserSelectionKind.Directory ||
+                    snapshot.SelectionKind == CommandStateCoordinator.BrowserSelectionKind.File ||
+                    snapshot.SelectionKind == CommandStateCoordinator.BrowserSelectionKind.ArchiveCandidate)
+                {
+                    _ = ExecuteDelete(permanent: false);
+                }
+                return true;
+            }
+        }
+
         FunctionKeyAction action = FunctionKeyProfileService.ResolveAction(CurrentFunctionKeyProfileValue, fKey);
         return ExecuteFunctionKeyAction(action);
     }
@@ -5825,22 +7572,10 @@ private void InitializeBrowserTabControl()
             ToggleMark(moveNext: false);
             return true;
         }
-        // Home: ファイルのみ全マーク / 全解除 (トグル)
-        if (keyData == Keys.Home)
-        {
-            ToggleBulkMarks(includeDirectories: false);
-            return true;
-        }
         // Shift+Home: ファイルのみ反転
         if (keyData == (Keys.Shift | Keys.Home))
         {
             InvertBulkMarks(includeDirectories: false);
-            return true;
-        }
-        // End: ファイル + ディレクトリを全マーク / 全解除 (トグル)
-        if (keyData == Keys.End)
-        {
-            ToggleBulkMarks(includeDirectories: true);
             return true;
         }
         // Shift+End: ファイル + ディレクトリを反転
@@ -5985,6 +7720,38 @@ private void InitializeBrowserTabControl()
             $"menu={menuStopwatch.ElapsedMilliseconds}ms intent={intentStopwatch.ElapsedMilliseconds}ms " +
             $"total={totalStopwatch.ElapsedMilliseconds}ms");
     }
+
+    private bool TryHandleBrowserCmdKeyCustomBindings(Keys keyData)
+    {
+        if (_uiMode != UIMode.Browser || IsCurrentDirectoryBusy())
+        {
+            return false;
+        }
+
+        Dictionary<string, string> keyMap = ResolveBrowserKeyCommandMap();
+        string keyGesture = InputSettings.ToKeyGestureText(keyData);
+        if (!keyMap.TryGetValue(keyGesture, out string? commandId))
+        {
+            return false;
+        }
+
+        if (string.Equals(commandId, InputSettings.MouseGestureUnassignedCommandId, StringComparison.OrdinalIgnoreCase))
+        {
+            ShowStatusMessage($"キー割り当て無効: {keyGesture}");
+            return true;
+        }
+
+        return ExecuteCommandFromUi(commandId, CommandScope.Browser, $"Browser.CmdKey.Custom:{keyGesture}");
+    }
+
+    private Dictionary<string, string> ResolveBrowserKeyCommandMap()
+    {
+        return BrowserCommandBindingResolver.ResolveEffectiveKeyCommandMap(
+            CurrentFunctionKeyProfileValue,
+            _settings.Input?.BrowserKeyCommandOverrides,
+            _commandRegistry);
+    }
+
     /// <summary>
     /// Phase 3-input-cmdkey-nav1: ProcessCmdKey における Browser 文脈のナビゲーション操作を helper 化。
     /// </summary>
@@ -6070,6 +7837,42 @@ private void InitializeBrowserTabControl()
     /// </summary>
     private bool TryHandleBrowserCmdKeyAliases(Keys keyData)
     {
+        if (keyData == (Keys.Shift | Keys.F1)) return ExecuteFunctionKey(1, forceShiftLayer: true);
+        if (keyData == (Keys.Shift | Keys.F2)) return ExecuteFunctionKey(2, forceShiftLayer: true);
+        if (keyData == (Keys.Shift | Keys.F3)) return ExecuteFunctionKey(3, forceShiftLayer: true);
+        if (keyData == (Keys.Shift | Keys.F4)) return ExecuteFunctionKey(4, forceShiftLayer: true);
+        if (keyData == (Keys.Shift | Keys.F5)) return ExecuteFunctionKey(5, forceShiftLayer: true);
+        if (keyData == (Keys.Shift | Keys.F6)) return ExecuteFunctionKey(6, forceShiftLayer: true);
+        if (keyData == (Keys.Shift | Keys.F7)) return ExecuteFunctionKey(7, forceShiftLayer: true);
+        if (keyData == (Keys.Shift | Keys.F8)) return ExecuteFunctionKey(8, forceShiftLayer: true);
+        if (keyData == (Keys.Shift | Keys.F9)) return ExecuteFunctionKey(9, forceShiftLayer: true);
+        if (keyData == (Keys.Shift | Keys.F10)) return ExecuteFunctionKey(10, forceShiftLayer: true);
+        if (keyData == (Keys.Shift | Keys.F11)) return ExecuteFunctionKey(11, forceShiftLayer: true);
+        if (keyData == (Keys.Shift | Keys.F12)) return ExecuteFunctionKey(12, forceShiftLayer: true);
+        if (keyData == (Keys.Control | Keys.F1)) return ExecuteFunctionKey(1, forcedModifierLayer: Keys.Control);
+        if (keyData == (Keys.Control | Keys.F2)) return ExecuteFunctionKey(2, forcedModifierLayer: Keys.Control);
+        if (keyData == (Keys.Control | Keys.F3)) return ExecuteFunctionKey(3, forcedModifierLayer: Keys.Control);
+        if (keyData == (Keys.Control | Keys.F4)) return ExecuteFunctionKey(4, forcedModifierLayer: Keys.Control);
+        if (keyData == (Keys.Control | Keys.F5)) return ExecuteFunctionKey(5, forcedModifierLayer: Keys.Control);
+        if (keyData == (Keys.Control | Keys.F6)) return ExecuteFunctionKey(6, forcedModifierLayer: Keys.Control);
+        if (keyData == (Keys.Control | Keys.F7)) return ExecuteFunctionKey(7, forcedModifierLayer: Keys.Control);
+        if (keyData == (Keys.Control | Keys.F8)) return ExecuteFunctionKey(8, forcedModifierLayer: Keys.Control);
+        if (keyData == (Keys.Control | Keys.F9)) return ExecuteFunctionKey(9, forcedModifierLayer: Keys.Control);
+        if (keyData == (Keys.Control | Keys.F10)) return ExecuteFunctionKey(10, forcedModifierLayer: Keys.Control);
+        if (keyData == (Keys.Control | Keys.F11)) return ExecuteFunctionKey(11, forcedModifierLayer: Keys.Control);
+        if (keyData == (Keys.Control | Keys.F12)) return ExecuteFunctionKey(12, forcedModifierLayer: Keys.Control);
+        if (keyData == (Keys.Alt | Keys.F1)) return ExecuteFunctionKey(1, forcedModifierLayer: Keys.Alt);
+        if (keyData == (Keys.Alt | Keys.F2)) return ExecuteFunctionKey(2, forcedModifierLayer: Keys.Alt);
+        if (keyData == (Keys.Alt | Keys.F3)) return ExecuteFunctionKey(3, forcedModifierLayer: Keys.Alt);
+        if (keyData == (Keys.Alt | Keys.F5)) return ExecuteFunctionKey(5, forcedModifierLayer: Keys.Alt);
+        if (keyData == (Keys.Alt | Keys.F6)) return ExecuteFunctionKey(6, forcedModifierLayer: Keys.Alt);
+        if (keyData == (Keys.Alt | Keys.F7)) return ExecuteFunctionKey(7, forcedModifierLayer: Keys.Alt);
+        if (keyData == (Keys.Alt | Keys.F8)) return ExecuteFunctionKey(8, forcedModifierLayer: Keys.Alt);
+        if (keyData == (Keys.Alt | Keys.F9)) return ExecuteFunctionKey(9, forcedModifierLayer: Keys.Alt);
+        if (keyData == (Keys.Alt | Keys.F10)) return ExecuteFunctionKey(10, forcedModifierLayer: Keys.Alt);
+        if (keyData == (Keys.Alt | Keys.F11)) return ExecuteFunctionKey(11, forcedModifierLayer: Keys.Alt);
+        if (keyData == (Keys.Alt | Keys.F12)) return ExecuteFunctionKey(12, forcedModifierLayer: Keys.Alt);
+
         if (TryHandleFdCompatibleShortcutAliases(keyData))
         {
             return true;
@@ -6187,6 +7990,7 @@ private void InitializeBrowserTabControl()
     }
     private void SetBrowserFileDetailDisplayMode(BrowserFileDisplayMode mode)
     {
+        HideBrowserFileNameToolTip();
         BrowserFileDisplayMode currentMode = GetBrowserFileDisplayMode();
         if (currentMode == mode)
         {
@@ -6276,16 +8080,7 @@ private void InitializeBrowserTabControl()
         }
         if (keyData == (Keys.Alt | Keys.F1))
         {
-            if (GuardClipboardBusy()) return true;
-            try
-            {
-                System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(Application.ExecutablePath, $"\"{_navigationService.CurrentPath}\"") { UseShellExecute = true });
-            }
-            catch (Exception ex)
-            {
-                LogService.Error($"NewInstance 起動失敗: {ex.Message}");
-            }
-            return true;
+            return ExecuteCommandFromUi(CommandIds.AppOpenNewInstance, CommandScope.Global, "Browser.CmdKey.AltF1");
         }
         if (keyData == Keys.Z)
         {
@@ -6294,22 +8089,11 @@ private void InitializeBrowserTabControl()
         }
         if (keyData == (Keys.Alt | Keys.F2))
         {
-            if (GuardClipboardBusy()) return true;
-            ExecuteOpenCurrentPathInExplorer();
-            return true;
+            return ExecuteCommandFromUi(CommandIds.BrowserOpenExplorer, CommandScope.Browser, "Browser.CmdKey.AltF2");
         }
         if (keyData == (Keys.Alt | Keys.F3))
         {
-            if (GuardClipboardBusy()) return true;
-            try
-            {
-                System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo("control.exe") { UseShellExecute = true });
-            }
-            catch (Exception ex)
-            {
-                LogService.Error($"ControlPanel 起動失敗: {ex.Message}");
-            }
-            return true;
+            return ExecuteCommandFromUi(CommandIds.AppOpenControlPanel, CommandScope.Global, "Browser.CmdKey.AltF3");
         }
         // Alt+Enter: プロパティ
         if (keyData == (Keys.Alt | Keys.Enter))
@@ -6339,8 +8123,7 @@ private void InitializeBrowserTabControl()
         }
         if (keyData == (Keys.Control | Keys.V))
         {
-            ExecuteClipboardPaste();
-            return true;
+            return ExecuteCommandFromUi(CommandIds.ClipboardPaste, CommandScope.Browser, "Browser.CmdKey.CtrlV");
         }
         return false;
     }
@@ -6348,7 +8131,13 @@ private void InitializeBrowserTabControl()
     {
         try
         {
-            System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo("explorer.exe", $"\"{_navigationService.CurrentPath}\"") { UseShellExecute = true });
+            var startInfo = new System.Diagnostics.ProcessStartInfo
+            {
+                FileName = "explorer.exe",
+                UseShellExecute = false
+            };
+            startInfo.ArgumentList.Add(_navigationService.CurrentPath);
+            System.Diagnostics.Process.Start(startInfo);
         }
         catch (Exception ex)
         {
@@ -6762,6 +8551,7 @@ private void InitializeBrowserTabControl()
         g.Clear(resolved.Background);
         if (fileListView.Items.Count == 0)
         {
+            DrawMouseGestureTrail(g);
             DrawCommandHintOverlay(g);
             return;
         }
@@ -6843,7 +8633,33 @@ private void InitializeBrowserTabControl()
                 DrawCursorUnderline(g, rect, fg);
             }
         }
+        DrawMouseGestureTrail(g);
         DrawCommandHintOverlay(g);
+    }
+    private void DrawMouseGestureTrail(Graphics g)
+    {
+        if (!_isMouseGestureTrailVisible || _mouseGestureTrailPoints.Count < 2)
+        {
+            return;
+        }
+
+        var oldSmoothing = g.SmoothingMode;
+        try
+        {
+            g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+            using var pen = new Pen(Color.FromArgb(220, Color.Cyan), 2f)
+            {
+                StartCap = System.Drawing.Drawing2D.LineCap.Round,
+                EndCap = System.Drawing.Drawing2D.LineCap.Round,
+                LineJoin = System.Drawing.Drawing2D.LineJoin.Round
+            };
+
+            g.DrawLines(pen, _mouseGestureTrailPoints.ToArray());
+        }
+        finally
+        {
+            g.SmoothingMode = oldSmoothing;
+        }
     }
     private void DrawCursorUnderline(Graphics graphics, Rectangle bounds, Color underlineColor)
     {
@@ -6895,7 +8711,7 @@ private void InitializeBrowserTabControl()
     }
     private bool DrawBrowserItemTextWithDetails(Graphics g, ListViewItem item, Rectangle textRect, Font font, Color fg, BrowserFileDisplayMode mode)
     {
-        const int minNameChars = 8;
+        const string nameEllipsis = "...";
 
         bool isDirectory = IsDirectoryListItem(item);
         bool showExtensions = _settings.Appearance?.ShowExtensions ?? true;
@@ -6913,7 +8729,7 @@ private void InitializeBrowserTabControl()
 
         string sizeText = isDirectory
             ? "<DIR>"
-            : BuildBrowserFileSizeText(item);
+            : BuildBrowserFileSizeTextCompact(item);
 
         bool includeDate = mode == BrowserFileDisplayMode.NameSizeDate;
         if (includeDate && string.IsNullOrWhiteSpace(dateText))
@@ -6925,15 +8741,16 @@ private void InitializeBrowserTabControl()
             return false;
         }
 
-        int charWidth = MeasureBrowserTextWidth(g, "0", font);
-        int gapWidth = Math.Max(6, charWidth);
-        string sizeSample = GetBrowserSizeFieldSample();
+        int gapWidth = Math.Max(2, MeasureBrowserTextWidth(g, " ", font));
+        string sizeSample = GetBrowserCompactSizeFieldSample();
         string dateSample = GetBrowserDateFieldSample();
         int dateFieldWidth = includeDate
             ? Math.Max(MeasureBrowserTextWidth(g, dateSample, font), MeasureBrowserTextWidth(g, dateText, font))
             : 0;
-        int sizeFieldWidth = Math.Max(MeasureBrowserTextWidth(g, sizeSample, font), MeasureBrowserTextWidth(g, "<DIR>", font));
-        int minimumNameWidth = charWidth * minNameChars;
+        int sizeFieldWidth = Math.Max(
+            MeasureBrowserTextWidth(g, sizeSample, font),
+            Math.Max(MeasureBrowserTextWidth(g, "<DIR>", font), MeasureBrowserTextWidth(g, sizeText, font)));
+        int minimumNameWidth = MeasureBrowserTextWidth(g, nameEllipsis, font);
         int requiredWidth = includeDate
             ? minimumNameWidth + sizeFieldWidth + dateFieldWidth + (gapWidth * 2)
             : minimumNameWidth + sizeFieldWidth + gapWidth;
@@ -6946,11 +8763,7 @@ private void InitializeBrowserTabControl()
         int reservedDetailWidth = includeDate
             ? sizeFieldWidth + dateFieldWidth + (gapWidth * 2)
             : sizeFieldWidth + gapWidth;
-        int remainingNameWidth = textRect.Width - reservedDetailWidth;
-        int preferredNameChars = includeDate ? 14 : 18;
-        int preferredNameWidth = charWidth * preferredNameChars;
-        int targetNameWidth = Math.Max(minimumNameWidth, preferredNameWidth);
-        int nameFieldWidth = Math.Max(minimumNameWidth, Math.Min(targetNameWidth, remainingNameWidth));
+        int nameFieldWidth = Math.Max(minimumNameWidth, textRect.Width - reservedDetailWidth);
 
         Rectangle nameRect = new Rectangle(textRect.X, textRect.Y, nameFieldWidth, textRect.Height);
         Rectangle sizeRect = new Rectangle(nameRect.Right + gapWidth, textRect.Y, sizeFieldWidth, textRect.Height);
@@ -6979,11 +8792,11 @@ private void InitializeBrowserTabControl()
                 : FitFileNamePreservingExtension(baseName, extension, nameRect.Width, font, g);
         }
 
-        TextRenderer.DrawText(g, nameText, font, nameRect, fg, Color.Transparent, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix | TextFormatFlags.EndEllipsis);
-        TextRenderer.DrawText(g, sizeText, font, sizeRect, fg, Color.Transparent, TextFormatFlags.Right | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix);
+        TextRenderer.DrawText(g, nameText, font, nameRect, fg, Color.Transparent, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPadding);
+        TextRenderer.DrawText(g, sizeText, font, sizeRect, fg, Color.Transparent, TextFormatFlags.Right | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix | TextFormatFlags.NoPadding);
         if (includeDate)
         {
-            TextRenderer.DrawText(g, dateText, font, dateRect, fg, Color.Transparent, TextFormatFlags.Right | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix);
+            TextRenderer.DrawText(g, dateText, font, dateRect, fg, Color.Transparent, TextFormatFlags.Right | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix | TextFormatFlags.NoPadding);
         }
         return true;
     }
@@ -7108,9 +8921,35 @@ private void InitializeBrowserTabControl()
             text,
             font,
             new Size(int.MaxValue, int.MaxValue),
-            TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix).Width;
+            TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix | TextFormatFlags.NoPadding).Width;
     }
-    private string BuildBrowserFileSizeText(ListViewItem item)
+    private static string FormatBrowserCompactSize(long bytes)
+    {
+        if (bytes < 1024)
+        {
+            return $"{bytes}B";
+        }
+
+        string[] units = { "B", "KB", "MB", "GB", "TB", "PB" };
+        double value = bytes / 1024d;
+        int unitIndex = 1;
+        while (unitIndex < units.Length - 1 && value >= 999.95d)
+        {
+            value /= 1024d;
+            unitIndex++;
+        }
+
+        value = Math.Round(value, 1, MidpointRounding.AwayFromZero);
+        if (value >= 1000d && unitIndex < units.Length - 1)
+        {
+            value /= 1024d;
+            unitIndex++;
+            value = Math.Round(value, 1, MidpointRounding.AwayFromZero);
+        }
+
+        return $"{value:0.0}{units[unitIndex]}";
+    }
+    private string BuildBrowserFileSizeTextCompact(ListViewItem item)
     {
         if (item.Tag is not string fullPath || string.IsNullOrWhiteSpace(fullPath))
         {
@@ -7125,7 +8964,7 @@ private void InitializeBrowserTabControl()
             }
 
             long length = new FileInfo(fullPath).Length;
-            return FileSystemItemFactory.FormatDisplaySize(length, _settings.Appearance?.SizeFormat);
+            return FormatBrowserCompactSize(length);
         }
         catch
         {
@@ -7137,16 +8976,7 @@ private void InitializeBrowserTabControl()
         DateTime sampleDate = new DateTime(2099, 12, 31, 23, 59, 59);
         return FileSystemItemFactory.FormatDisplayDate(sampleDate, _settings.Appearance?.DateFormat);
     }
-    private string GetBrowserSizeFieldSample()
-    {
-        string? sizeFormat = _settings.Appearance?.SizeFormat;
-        return sizeFormat switch
-        {
-            "Bytes" => "9,999,999,999,999B",
-            "KB/MB" => "9,999.9GB",
-            _ => "999.99PB"
-        };
-    }
+    private static string GetBrowserCompactSizeFieldSample() => "999.9PB";
     private int GetEffectiveBrowserColumnCount()
     {
         int desiredColumns = Math.Max(1, _columnCount);
@@ -7203,8 +9033,25 @@ private void InitializeBrowserTabControl()
         {
             if (newIndex >= 0 && newIndex < fileListView.Items.Count)
             {
+                bool shiftPressed = (ModifierKeys & Keys.Shift) == Keys.Shift;
+                bool ctrlPressed = (ModifierKeys & Keys.Control) == Keys.Control;
+                int previousCursorIndex = _browserCursorIndex;
+                BrowserMarkClickDecision clickDecision = _browserMarkInteractionController.ResolveLeftClick(
+                    newIndex,
+                    previousCursorIndex,
+                    fileListView.Items.Count,
+                    ctrlPressed,
+                    shiftPressed);
                 _browserCursorIndex = newIndex;
                 SyncBrowserSelection();
+                if (clickDecision.Kind == BrowserMarkClickKind.AddRange)
+                {
+                    AddBrowserMouseMarkRange(clickDecision.AnchorIndex, newIndex);
+                }
+                else if (clickDecision.Kind == BrowserMarkClickKind.ToggleSingle)
+                {
+                    ToggleBrowserMouseMarkByIndex(newIndex);
+                }
             }
         }
         else if (e.Button == MouseButtons.Right)
@@ -7341,7 +9188,10 @@ private void InitializeBrowserTabControl()
         var copyOpItem = new ToolStripMenuItem("コピー(&C)", null, (s, e) => ExecuteClipboardCopy());
         var pasteItem = new ToolStripMenuItem("貼り付け(&P)", null, (s, e) => ExecuteClipboardPaste());
         // Phase 3-clipboard1.3: 事前判定による Enabled 切替
-        pasteItem.Enabled = !_isClipboardBusy && (ShellClipboardService.HasFileDrop() || ShellClipboardService.HasImage());
+        pasteItem.Enabled = !_isClipboardBusy && (
+            ShellClipboardService.HasFileDrop() ||
+            ShellClipboardService.HasImage() ||
+            ((_settings.FileOperations?.ClipboardPasteTextAsFileEnabled ?? false) && ShellClipboardService.HasText()));
         _browserContextMenu.Items.Add(cutItem);
         _browserContextMenu.Items.Add(copyOpItem);
         _browserContextMenu.Items.Add(pasteItem);
@@ -7606,13 +9456,16 @@ private void InitializeBrowserTabControl()
         if (!res.FullPaths.Any()) return;
         try
         {
-            var psi = new System.Diagnostics.ProcessStartInfo();
-            psi.FileName = targetExeOrShortcut;
-            psi.UseShellExecute = true;
+            var psi = new System.Diagnostics.ProcessStartInfo
+            {
+                FileName = targetExeOrShortcut,
+                UseShellExecute = true
+            };
             var sb = new System.Text.StringBuilder();
             foreach (var path in res.FullPaths)
             {
-                sb.Append($"\"{path}\" ");
+                string escaped = (path ?? string.Empty).Replace("\"", "\\\"");
+                sb.Append('"').Append(escaped).Append("\" ");
             }
             psi.Arguments = sb.ToString().TrimEnd();
             System.Diagnostics.Process.Start(psi);
@@ -7635,8 +9488,66 @@ private void InitializeBrowserTabControl()
             ExecuteDefaultOpen(); // ダブルクリック専用（既定アプリ等）へ流す
         }
     }
+    private void ToggleBrowserMouseMarkByIndex(int index)
+    {
+        string? path = TryGetMarkableBrowserPathByIndex(index);
+        if (string.IsNullOrWhiteSpace(path))
+        {
+            return;
+        }
+
+        if (_markedFiles.Contains(path))
+        {
+            UnmarkPath(path);
+        }
+        else
+        {
+            MarkPath(path);
+        }
+
+        RefreshMarkUi();
+        PrimeRecentMultiMarkIntent();
+    }
+    private void AddBrowserMouseMarkRange(int anchorIndex, int clickedIndex)
+    {
+        int start = Math.Max(0, Math.Min(anchorIndex, clickedIndex));
+        int end = Math.Min(fileListView.Items.Count - 1, Math.Max(anchorIndex, clickedIndex));
+        bool changed = false;
+        for (int i = start; i <= end; i++)
+        {
+            string? path = TryGetMarkableBrowserPathByIndex(i);
+            if (string.IsNullOrWhiteSpace(path))
+            {
+                continue;
+            }
+
+            changed |= MarkPath(path);
+        }
+
+        if (changed)
+        {
+            RefreshMarkUi();
+            PrimeRecentMultiMarkIntent();
+        }
+    }
+    private string? TryGetMarkableBrowserPathByIndex(int index)
+    {
+        if (index < 0 || index >= fileListView.Items.Count)
+        {
+            return null;
+        }
+
+        var item = fileListView.Items[index];
+        if (item.Text == "..")
+        {
+            return null;
+        }
+
+        return item.Tag as string;
+    }
     private void BrowserPanel_MouseWheel(object? sender, MouseEventArgs e)
     {
+        HideBrowserFileNameToolTip();
         if (_uiMode != UIMode.Browser || fileListView.Items.Count == 0) return;
         int itemsPerPage = GetBrowserItemsPerPage();
         if (itemsPerPage <= 0) return;
@@ -7662,9 +9573,45 @@ private void InitializeBrowserTabControl()
         }
     }
     // ─── Phase 3-fix2a: 外部 → MidFD Drag-in ───
+    private static bool HasInternalDragArchiveMarker(IDataObject? data)
+    {
+        if (data == null)
+        {
+            return false;
+        }
+
+        if (!data.GetDataPresent(InternalDragArchiveFormat, false))
+        {
+            return false;
+        }
+
+        object? marker = data.GetData(InternalDragArchiveFormat, false);
+        return marker is string markerText
+            ? string.Equals(markerText, InternalDragArchiveMarkerValue, StringComparison.Ordinal)
+            : marker is bool markerFlag && markerFlag;
+    }
+
+    private static int GetFileDropCount(IDataObject? data)
+    {
+        if (data == null || !data.GetDataPresent(DataFormats.FileDrop))
+        {
+            return 0;
+        }
+
+        return data.GetData(DataFormats.FileDrop) is string[] files ? files.Length : 0;
+    }
+
     private void BrowserPanel_DragEnter(object? sender, DragEventArgs e)
     {
         if (_uiMode != UIMode.Browser || IsActiveBrowserTabReadOnly())
+        {
+            e.Effect = DragDropEffects.None;
+            return;
+        }
+        bool hasInternalDragArchiveMarker = HasInternalDragArchiveMarker(e.Data);
+        int fileDropCount = GetFileDropCount(e.Data);
+        LogService.Info($"[DragArchive] DragEnter: internalMarkerPresent={hasInternalDragArchiveMarker}, fileDropCount={fileDropCount}, clipboardBusy={_isClipboardBusy}");
+        if (hasInternalDragArchiveMarker)
         {
             e.Effect = DragDropEffects.None;
             return;
@@ -7698,6 +9645,13 @@ private void InitializeBrowserTabControl()
     {
         if (_uiMode != UIMode.Browser) return;
         if (GuardReadOnlyBrowserTab("ファイル取り込み")) return;
+        bool hasInternalDragArchiveMarker = HasInternalDragArchiveMarker(e.Data);
+        int fileDropCount = GetFileDropCount(e.Data);
+        LogService.Info($"[DragArchive] DragDrop: internalMarkerPresent={hasInternalDragArchiveMarker}, fileDropCount={fileDropCount}, clipboardBusy={_isClipboardBusy}");
+        if (hasInternalDragArchiveMarker)
+        {
+            return;
+        }
         if (_isClipboardBusy)
         {
             ShowStatusMessage("処理中のため画像取り込みできません。");
@@ -7825,6 +9779,10 @@ private void InitializeBrowserTabControl()
             if (_settings.Input?.EnableMouseGestures == true)
             {
                 _mouseGestureRecognizer.Begin(e.Location);
+                _mouseGestureTrailPoints.Clear();
+                _mouseGestureTrailPoints.Add(e.Location);
+                _isMouseGestureTrailVisible = true;
+                browserPanel.Invalidate();
             }
             return;
         }
@@ -7832,6 +9790,9 @@ private void InitializeBrowserTabControl()
         // ドラッグ開始の「候補」座標とインデックスを保持
         _dragStartPoint = e.Location;
         _dragCandidateIndex = CalculateBrowserIndexFromPoint(e.X, e.Y);
+        // MouseDown時点での修飾キー状態（Shift/Ctrl）をキャプチャ
+        var mods = Control.ModifierKeys;
+        _dragArchiveHandoffRequested = (mods & (Keys.Shift | Keys.Control)) != 0;
         if (_dragCandidateIndex >= 0 && _dragCandidateIndex < fileListView.Items.Count && _browserCursorIndex != _dragCandidateIndex)
         {
             InvalidateRecentMultiMarkIntent();
@@ -7874,9 +9835,20 @@ private void InitializeBrowserTabControl()
     private void BrowserPanel_MouseMove(object? sender, MouseEventArgs e)
     {
         if (_uiMode != UIMode.Browser) return;
+        if (e.Button == MouseButtons.None)
+        {
+            UpdateBrowserFileNameToolTip(e.Location);
+        }
+        else
+        {
+            HideBrowserFileNameToolTip();
+        }
         if (e.Button == MouseButtons.Right && _mouseGestureRecognizer.IsTracking)
         {
             _mouseGestureRecognizer.Update(e.Location);
+            AppendMouseGestureTrailPoint(e.Location);
+            browserPanel.Invalidate();
+            ShowMouseGestureInputStatus(_mouseGestureRecognizer.GestureText);
             return;
         }
         if (e.Button != MouseButtons.Left || _dragStartPoint == Point.Empty || _dragCandidateIndex == -1) return;
@@ -7929,33 +9901,138 @@ private void InitializeBrowserTabControl()
                     }
                 }
             }
-            if (dragPaths.Count > 0)
-            {
-                // Phase 3-keybind-cleanup1.3: Clipboard処理中は開始しない
+                if (dragPaths.Count > 0)
+                {
+                    // Phase 3-keybind-cleanup1.3: Clipboard処理中は開始しない
                 if (_isClipboardBusy) return;
-                // ドラッグ開始
-                var data = new DataObject(DataFormats.FileDrop, dragPaths.ToArray());
-                browserPanel.DoDragDrop(data, DragDropEffects.Copy);
+
+                var fileOperations = _settings.FileOperations;
+                bool isShiftOrCtrl = _dragArchiveHandoffRequested || (Control.ModifierKeys & (Keys.Shift | Keys.Control)) != 0;
+                bool isDragArchiveEnabled = fileOperations.EnableDragArchiveHandoff;
+                string logMsg = $"[DragArchive] dragPaths.Count={dragPaths.Count}, _markedFiles.Count={_markedFiles.Count}, enableDragArchiveHandoff={isDragArchiveEnabled}, includeManifest={fileOperations.IncludeDragZipManifest}, mouseDownModifier={_dragArchiveHandoffRequested}, currentModifier={((Control.ModifierKeys & (Keys.Shift | Keys.Control)) != 0)}, archiveDragRequested={isShiftOrCtrl}, candidatePath='{dragCandidatePath}'";
+                LogService.Info(logMsg);
+
+                if (isDragArchiveEnabled && isShiftOrCtrl && dragPaths.Count >= 2)
+                {
+                    string? zipPath = null;
+                    string? archiveBaseDirectory = null;
+                    var originalCursor = browserPanel.Cursor;
+                    try
+                    {
+                        browserPanel.Cursor = Cursors.WaitCursor;
+                        ShowStatusMessage("ドラッグ用ZIPを作成中...");
+                        Application.DoEvents(); // UI描画の更新
+
+                        string tempDir = Path.Combine(Path.GetTempPath(), "MidFD", "DragArchive");
+                        DragArchiveService.DragArchiveInfo archiveInfo = DragArchiveService.GetOrCreateInfoZip(
+                            tempDir,
+                            dragPaths,
+                            fileOperations.IncludeDragZipManifest);
+                        zipPath = archiveInfo.ArchivePath;
+                        archiveBaseDirectory = archiveInfo.BaseDirectory;
+
+                        ShowStatusMessage("ドラッグ用ZIPを作成しました。");
+                        var data = new DataObject();
+                        data.SetData(DataFormats.FileDrop, new string[] { zipPath });
+                        data.SetData(InternalDragArchiveFormat, false, InternalDragArchiveMarkerValue);
+
+                        // 任意: Shell向けにCopy優先を示す Preferred DropEffect (4バイトのバイナリ)
+                        var preferredEffect = (int)DragDropEffects.Copy;
+                        var preferredBytes = BitConverter.GetBytes(preferredEffect);
+                        var preferredStream = new MemoryStream(preferredBytes);
+                        data.SetData("Preferred DropEffect", preferredStream);
+
+                        // ログにドラッグ準備情報を出力 (キー状態も追跡)
+                        bool zipExists = File.Exists(zipPath);
+                        string formatsStr = string.Join(", ", data.GetFormats());
+                        var startMods = Control.ModifierKeys;
+                        LogService.Info($"[DragArchive] Sending drag: baseDirectory='{archiveBaseDirectory}', archivePath='{zipPath}', fileDropCount=1, internalMarkerPresent={HasInternalDragArchiveMarker(data)}, exists={zipExists}, formats=[{formatsStr}], modifierKeys={startMods}, allowedEffects=Copy|Move");
+
+                        // Copy|Move でネゴシエーションを開始
+                        var resultEffect = browserPanel.DoDragDrop(data, DragDropEffects.Copy | DragDropEffects.Move);
+                        LogService.Info($"[DragArchive] Drag completed: resultEffect={resultEffect}");
+                    }
+                    catch (Exception ex)
+                    {
+                        LogService.Error("ドラッグ用ZIP作成失敗", ex);
+                        MessageBox.Show(this, $"ドラッグ用ZIPの作成に失敗しました:\n{ex.Message}", "エラー", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                        ShowStatusMessage("ドラッグ用ZIPの作成に失敗しました。");
+                    }
+                    finally
+                    {
+                        browserPanel.Cursor = originalCursor;
+                    }
+                }
+                else
+                {
+                    // ドラッグ開始
+                    var data = new DataObject(DataFormats.FileDrop, dragPaths.ToArray());
+                    LogService.Info($"[DragArchive] Sending normal FileDrop: fileDropCount={dragPaths.Count}, internalMarkerPresent={HasInternalDragArchiveMarker(data)}");
+                    browserPanel.DoDragDrop(data, DragDropEffects.Copy);
+                }
             }
             // 開始した（または条件に合わず開始できなかった）ので状態をクリア
             _dragStartPoint = Point.Empty;
             _dragCandidateIndex = -1;
+            _dragArchiveHandoffRequested = false;
         }
+    }
+    private void BrowserPanel_MouseLeave(object? sender, EventArgs e)
+    {
+        HideBrowserFileNameToolTip();
     }
     private void BrowserPanel_MouseUp(object? sender, MouseEventArgs e)
     {
         if (e.Button == MouseButtons.Right && _mouseGestureRecognizer.IsTracking)
         {
             string gesture = _mouseGestureRecognizer.End(e.Location);
+            ClearMouseGestureTrail();
             if (!string.IsNullOrEmpty(gesture) && TryExecuteBrowserMouseGesture(gesture))
             {
                 SuppressNextBrowserContextMenu();
                 return;
             }
         }
+        if (e.Button == MouseButtons.Right)
+        {
+            ClearMouseGestureTrail();
+        }
         // ボタンを離した時点で候補をリセット（クリックとして成立したか、ドラッグせずに離した）
         _dragStartPoint = Point.Empty;
         _dragCandidateIndex = -1;
+        _dragArchiveHandoffRequested = false;
+    }
+    private void AppendMouseGestureTrailPoint(Point point)
+    {
+        if (!_isMouseGestureTrailVisible)
+        {
+            return;
+        }
+
+        if (_mouseGestureTrailPoints.Count == 0)
+        {
+            _mouseGestureTrailPoints.Add(point);
+            return;
+        }
+
+        Point last = _mouseGestureTrailPoints[^1];
+        int dx = point.X - last.X;
+        int dy = point.Y - last.Y;
+        if ((dx * dx) + (dy * dy) >= MouseGestureTrailMinDistance * MouseGestureTrailMinDistance)
+        {
+            _mouseGestureTrailPoints.Add(point);
+        }
+    }
+    private void ClearMouseGestureTrail()
+    {
+        if (!_isMouseGestureTrailVisible && _mouseGestureTrailPoints.Count == 0)
+        {
+            return;
+        }
+
+        _isMouseGestureTrailVisible = false;
+        _mouseGestureTrailPoints.Clear();
+        browserPanel.Invalidate();
     }
     private void SuppressNextBrowserContextMenu()
     {
@@ -7978,50 +10055,87 @@ private void InitializeBrowserTabControl()
         {
             return false;
         }
-        switch (gesture)
+
+        if (!TryResolveMouseGestureCommandId(gesture, out string commandId))
         {
-            case "L":
-                ShowStatusMessage("Gesture: 戻る");
-                ExecuteHistoryBack();
-                return true;
-            case "R":
-                ShowStatusMessage("Gesture: 進む");
-                ExecuteHistoryForward();
-                return true;
-            case "U":
-                ShowStatusMessage("Gesture: 親ディレクトリへ移動");
-                ExecuteBackspace();
-                return true;
-            case "UD":
-                ReloadCurrentDirectory("Gesture: 再読込");
-                return true;
-            case "RU":
-                ShowStatusMessage("Gesture: 右タブへ移動");
-                SelectAdjacentBrowserTab(+1);
-                return true;
-            case "LU":
-                ShowStatusMessage("Gesture: 左タブへ移動");
-                SelectAdjacentBrowserTab(-1);
-                return true;
-            case "UR":
-                ShowStatusMessage("Gesture: 右カテゴリへ移動");
-                SelectAdjacentBrowserTabCategory(+1);
-                return true;
-            case "UL":
-                ShowStatusMessage("Gesture: 左カテゴリへ移動");
-                SelectAdjacentBrowserTabCategory(-1);
-                return true;
-            case "DR":
-                ShowStatusMessage("Gesture: 現在タブを閉じる");
-                CloseCurrentBrowserTab();
-                return true;
-            case "LR":
-                RestoreLastClosedBrowserTab();
-                return true;
-            default:
-                ShowStatusMessage($"Gesture: 未割り当て ({gesture})");
-                return true;
+            ShowStatusMessage($"ジェスチャー未割り当て: {gesture}");
+            return true;
         }
+
+        if (string.Equals(commandId, InputSettings.MouseGestureUnassignedCommandId, StringComparison.OrdinalIgnoreCase))
+        {
+            ShowStatusMessage($"ジェスチャー無効: {gesture}");
+            return true;
+        }
+
+        string commandName = ResolveMouseGestureCommandDisplayName(commandId);
+        bool executed = ExecuteCommandFromUi(commandId, CommandScope.Browser, $"MouseGesture:{gesture}");
+        ShowStatusMessage(executed
+            ? $"ジェスチャー実行: {gesture} / {commandName}"
+            : $"ジェスチャー未実行: {gesture} / {commandName}");
+        return executed;
+    }
+    private void ShowMouseGestureInputStatus(string gesture)
+    {
+        if (string.IsNullOrWhiteSpace(gesture) || _uiMode != UIMode.Browser || _settings.Input?.EnableMouseGestures != true)
+        {
+            return;
+        }
+
+        if (!TryResolveMouseGestureCommandId(gesture, out string commandId))
+        {
+            ShowStatusMessage($"ジェスチャー入力中: {gesture} / 割り当て: 未割り当て");
+            return;
+        }
+
+        if (string.Equals(commandId, InputSettings.MouseGestureUnassignedCommandId, StringComparison.OrdinalIgnoreCase))
+        {
+            ShowStatusMessage($"ジェスチャー入力中: {gesture} / 割り当て: 無効");
+            return;
+        }
+
+        ShowStatusMessage($"ジェスチャー入力中: {gesture} / 割り当て: {ResolveMouseGestureCommandDisplayName(commandId)}");
+    }
+    private string ResolveMouseGestureCommandDisplayName(string commandId)
+    {
+        if (_commandRegistry.Find(commandId) is { } definition && !string.IsNullOrWhiteSpace(definition.DisplayName))
+        {
+            return definition.DisplayName;
+        }
+
+        return commandId;
+    }
+    private bool TryResolveMouseGestureCommandId(string gesture, out string commandId)
+    {
+        if (!MouseGestureCommandResolver.TryResolveCommandId(
+                gesture,
+                _settings.Input?.MouseGestureCommandMap,
+                out commandId))
+        {
+            return false;
+        }
+
+        if (string.Equals(commandId, InputSettings.MouseGestureUnassignedCommandId, StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+
+        if (_commandRegistry.Find(commandId) is not { } definition)
+        {
+            return false;
+        }
+
+        if (!definition.IsCustomizable || definition.IsDangerous)
+        {
+            return false;
+        }
+
+        if (definition.Scope != CommandScope.Browser && definition.Scope != CommandScope.Global)
+        {
+            return false;
+        }
+
+        return true;
     }
     private void PushClosedBrowserTabSnapshot(int tabIndex)
     {
@@ -8096,6 +10210,380 @@ private void InitializeBrowserTabControl()
         int currentPage = _browserCursorIndex / itemsPerPage;
         return (currentPage * itemsPerPage) + pageIndex;
     }
+    private void UpdateBrowserFileNameToolTip(Point location)
+    {
+        if (_uiMode != UIMode.Browser || fileListView.Items.Count == 0)
+        {
+            HideBrowserFileNameToolTip();
+            return;
+        }
+
+        int index = CalculateBrowserIndexFromPoint(location.X, location.Y);
+        if (index < 0 || index >= fileListView.Items.Count)
+        {
+            HideBrowserFileNameToolTip();
+            return;
+        }
+
+        if (!TryGetBrowserItemLayoutBounds(index, out Rectangle hoverBounds, out Rectangle nameBounds))
+        {
+            HideBrowserFileNameToolTip();
+            return;
+        }
+
+        if (!hoverBounds.Contains(location))
+        {
+            HideBrowserFileNameToolTip();
+            return;
+        }
+
+        ListViewItem item = fileListView.Items[index];
+        if (!IsBrowserItemNameEllipsized(item, nameBounds))
+        {
+            HideBrowserFileNameToolTip();
+            return;
+        }
+
+        string toolTipText = GetItemFullName(item);
+        if (string.IsNullOrWhiteSpace(toolTipText))
+        {
+            HideBrowserFileNameToolTip();
+            return;
+        }
+
+        if (_browserFileNameToolTipIndex == index && string.Equals(_browserFileNameToolTipText, toolTipText, StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        HideBrowserFileNameToolTip();
+        _browserFileNameToolTip.Show(toolTipText, browserPanel, location.X + 16, location.Y + 20, 5000);
+        _browserFileNameToolTipIndex = index;
+        _browserFileNameToolTipText = toolTipText;
+    }
+    private void HideBrowserFileNameToolTip()
+    {
+        _browserFileNameToolTip.Hide(browserPanel);
+        _browserFileNameToolTipIndex = -1;
+        _browserFileNameToolTipText = null;
+    }
+
+    private void UpdateFunctionBarToolTip(int index, Point location)
+    {
+        if (index < 0 || !_settings.Input.ShowFunctionBarTooltips)
+        {
+            HideFunctionBarToolTip();
+            return;
+        }
+
+        if (_fKeyToolTipIndex == index) return;
+
+        bool isCompatible = FunctionKeyProfileService.ResolveProfile(CurrentFunctionKeyProfileValue) == FunctionKeyProfile.FDCompatible;
+        string toolTipText;
+
+        var (isShift, isCtrl, isAlt) = GetActiveFunctionBarLayer();
+        if (!isCompatible)
+        {
+            var models = BuildStandardFunctionBarSlotModels(isShift, isCtrl, isAlt);
+            toolTipText = models[index].ToolTipText;
+        }
+        else
+        {
+            var profile = FunctionKeyProfile.FDCompatible;
+            string? customCmdId = FunctionKeyProfileService.ResolveFunctionBarCommandId(
+                profile,
+                index + 1,
+                _settings.Input.FunctionBarCommandOverridesStandard,
+                _settings.Input.FunctionBarCommandOverridesFdCompatible,
+                _settings.Input.FunctionBarCommandOverridesShiftStandard,
+                _settings.Input.FunctionBarCommandOverridesShiftFdCompatible,
+                isShift,
+                _settings.Input.FunctionBarCommandOverridesCtrlStandard,
+                _settings.Input.FunctionBarCommandOverridesCtrlFdCompatible,
+                _settings.Input.FunctionBarCommandOverridesAltStandard,
+                _settings.Input.FunctionBarCommandOverridesAltFdCompatible,
+                isCtrl,
+                isAlt);
+
+            if (!string.IsNullOrEmpty(customCmdId))
+            {
+                var def = _commandRegistry.Find(customCmdId);
+                string commandName = def?.DisplayName ?? "不明なコマンド";
+                string description = def?.Description ?? $"未登録のコマンドID: {customCmdId}";
+                string keyHint = FunctionKeyProfileService.ResolveFunctionBarKeyHint(customCmdId, _settings.Input.BrowserKeyCommandOverrides, InputSettings.FdCompatibleProfileValue);
+
+                string shortcutPart = string.IsNullOrEmpty(keyHint) ? "" : $" (通常キー: {keyHint})";
+                string modStr = isShift ? "Shift+" : (isCtrl ? "Ctrl+" : (isAlt ? "Alt+" : ""));
+                toolTipText = $"[{modStr}F{index + 1}] {commandName}{shortcutPart}\r\n{description}";
+            }
+            else
+            {
+                var action = FunctionKeyProfileService.ResolveAction(
+                    InputSettings.FdCompatibleProfileValue,
+                    index + 1);
+
+                string actionLabel = GetActionShortLabel_MainForm(action);
+                string description = GetActionDescription_MainForm(action);
+
+                // Apply Custom ShortLabel Override if exists and active CommandId matches
+                string? activeCmdId = FunctionKeyProfileService.ResolveCommandIdFromAction(action);
+                if (!string.IsNullOrEmpty(activeCmdId) && !string.Equals(activeCmdId, "none", StringComparison.OrdinalIgnoreCase))
+                {
+                    var labelOverrides = GetActiveFunctionBarLabelOverrides(isShift, isCtrl, isAlt, true);
+                    if (labelOverrides != null && labelOverrides.TryGetValue($"F{index + 1}", out var labelOverride) && labelOverride != null)
+                    {
+                        if (string.Equals(labelOverride.CommandId, activeCmdId, StringComparison.OrdinalIgnoreCase) && !string.IsNullOrWhiteSpace(labelOverride.Label))
+                        {
+                            actionLabel = InputSettings.NormalizeFunctionBarLabelText(labelOverride.Label);
+                        }
+                    }
+                }
+
+                string modStr = isShift ? "Shift+" : (isCtrl ? "Ctrl+" : (isAlt ? "Alt+" : ""));
+                toolTipText = $"[{modStr}F{index + 1}] {actionLabel}\r\n{description}";
+            }
+        }
+
+        HideFunctionBarToolTip();
+        _fKeyToolTip.Show(toolTipText, functionBarPanel, location.X + 16, location.Y + 20, 6000);
+        _fKeyToolTipIndex = index;
+    }
+
+    private void HideFunctionBarToolTip()
+    {
+        _fKeyToolTip.Hide(functionBarPanel);
+        _fKeyToolTipIndex = -1;
+    }
+
+    private string GetActionShortLabel_MainForm(FunctionKeyAction action)
+    {
+        return action switch
+        {
+            FunctionKeyAction.Help => "ヘルプ",
+            FunctionKeyAction.Rename => "名前変更",
+            FunctionKeyAction.Execute => "実行",
+            FunctionKeyAction.Copy => "コピー",
+            FunctionKeyAction.Edit => "編集",
+            FunctionKeyAction.Sort => "ソート",
+            FunctionKeyAction.Filter => "フィルタ",
+            FunctionKeyAction.Tree => "ツリー",
+            FunctionKeyAction.Logdisk => "Logdisk",
+            FunctionKeyAction.Unpack => "解凍",
+            FunctionKeyAction.Menu => "メニュー",
+            FunctionKeyAction.Top => "先頭移動",
+            FunctionKeyAction.Bottom => "末尾移動",
+            _ => "なし"
+        };
+    }
+
+    private string GetActionDescription_MainForm(FunctionKeyAction action)
+    {
+        return action switch
+        {
+            FunctionKeyAction.Help => "ヘルプ画面を表示します。",
+            FunctionKeyAction.Rename => "選択項目を名前変更します。",
+            FunctionKeyAction.Execute => "選択項目を実行します。",
+            FunctionKeyAction.Copy => "選択項目をコピーします。",
+            FunctionKeyAction.Edit => "選択項目を編集します。",
+            FunctionKeyAction.Sort => "ソート順の設定を開きます。",
+            FunctionKeyAction.Filter => "フィルタ設定を開きます。",
+            FunctionKeyAction.Tree => "ツリーダイアログを開きます。",
+            FunctionKeyAction.Logdisk => "Logdisk画面を開きます。",
+            FunctionKeyAction.Unpack => "アーカイブを解凍します。",
+            FunctionKeyAction.Menu => "メインメニューを開きます。",
+            FunctionKeyAction.Top => "一覧の先頭に移動します。",
+            FunctionKeyAction.Bottom => "一覧の末尾に移動します。",
+            _ => "アクションなし"
+        };
+    }
+
+    private string GetStandardActionLabel_MainForm(int slot)
+    {
+        return slot switch
+        {
+            1 => "ヘルプ",
+            2 => "名前変更",
+            5 => "再読込",
+            10 => "メニュー",
+            11 => "先頭移動",
+            12 => "末尾移動",
+            _ => "なし"
+        };
+    }
+
+    private string GetStandardActionDescription_MainForm(int slot)
+    {
+        return slot switch
+        {
+            1 => "ヘルプ画面を表示します。",
+            2 => "選択項目を名前変更します。",
+            5 => "現在ディレクトリを再読込します。",
+            10 => "メインメニューを開きます。",
+            11 => "一覧の先頭に移動します。",
+            12 => "一覧の末尾に移動します。",
+            _ => "未割り当て"
+        };
+    }
+
+    private bool TryGetBrowserItemLayoutBounds(int index, out Rectangle hoverBounds, out Rectangle nameBounds)
+    {
+        hoverBounds = Rectangle.Empty;
+        nameBounds = Rectangle.Empty;
+        if (index < 0 || index >= fileListView.Items.Count)
+        {
+            return false;
+        }
+
+        int itemsPerPage = GetBrowserItemsPerPage(out int itemHeight, out int rowsPerColumn);
+        if (itemsPerPage <= 0 || rowsPerColumn <= 0)
+        {
+            return false;
+        }
+
+        int currentPage = _browserCursorIndex / itemsPerPage;
+        int startIndex = currentPage * itemsPerPage;
+        int endIndex = Math.Min(startIndex + itemsPerPage, fileListView.Items.Count);
+        if (index < startIndex || index >= endIndex)
+        {
+            return false;
+        }
+
+        int pageIndex = index - startIndex;
+        int col = pageIndex / rowsPerColumn;
+        int row = pageIndex % rowsPerColumn;
+        int effectiveColumnCount = GetEffectiveBrowserColumnCount();
+        int colWidth = Math.Max(1, browserPanel.Width / effectiveColumnCount);
+        Rectangle rect = new Rectangle(col * colWidth + 5, row * itemHeight + 5, colWidth - 10, itemHeight);
+        hoverBounds = rect;
+
+        int markSlotWidth = 15;
+        int iconSlotWidth = (_settings.Appearance?.ShowItemIcons ?? true) ? 18 : 0;
+        Rectangle textRect = new Rectangle(
+            rect.X + markSlotWidth + iconSlotWidth,
+            rect.Y,
+            rect.Width - markSlotWidth - iconSlotWidth,
+            rect.Height);
+        if (textRect.Width <= 0)
+        {
+            return false;
+        }
+
+        BrowserFileDisplayMode mode = GetBrowserFileDisplayMode();
+        if (mode == BrowserFileDisplayMode.NameOnly)
+        {
+            nameBounds = textRect;
+            return true;
+        }
+
+        using Graphics g = browserPanel.CreateGraphics();
+        if (!TryCalculateBrowserNameRectForDetail(g, fileListView.Items[index], textRect, browserPanel.Font, mode, out Rectangle detailNameRect))
+        {
+            if (mode == BrowserFileDisplayMode.NameSizeDate
+                && TryCalculateBrowserNameRectForDetail(g, fileListView.Items[index], textRect, browserPanel.Font, BrowserFileDisplayMode.NameSize, out detailNameRect))
+            {
+                nameBounds = detailNameRect;
+                return true;
+            }
+
+            nameBounds = textRect;
+            return true;
+        }
+
+        nameBounds = detailNameRect;
+        return true;
+    }
+    private bool TryCalculateBrowserNameRectForDetail(
+        Graphics g,
+        ListViewItem item,
+        Rectangle textRect,
+        Font font,
+        BrowserFileDisplayMode mode,
+        out Rectangle nameRect)
+    {
+        nameRect = Rectangle.Empty;
+        const string nameEllipsis = "...";
+
+        bool includeDate = mode == BrowserFileDisplayMode.NameSizeDate;
+        string dateText = item.SubItems.Count > 3 ? NormalizeBrowserDateText(item.SubItems[3].Text) : string.Empty;
+        if (DateTime.TryParse(item.SubItems.Count > 3 ? item.SubItems[3].Text : string.Empty, out DateTime parsedDate))
+        {
+            dateText = FileSystemItemFactory.FormatDisplayDate(parsedDate, _settings.Appearance?.DateFormat);
+        }
+
+        if (includeDate && string.IsNullOrWhiteSpace(dateText))
+        {
+            return false;
+        }
+
+        string sizeText = IsDirectoryListItem(item) ? "<DIR>" : BuildBrowserFileSizeTextCompact(item);
+        if (string.IsNullOrWhiteSpace(sizeText))
+        {
+            return false;
+        }
+
+        int gapWidth = Math.Max(2, MeasureBrowserTextWidth(g, " ", font));
+        string sizeSample = GetBrowserCompactSizeFieldSample();
+        string dateSample = GetBrowserDateFieldSample();
+        int dateFieldWidth = includeDate
+            ? Math.Max(MeasureBrowserTextWidth(g, dateSample, font), MeasureBrowserTextWidth(g, dateText, font))
+            : 0;
+        int sizeFieldWidth = Math.Max(
+            MeasureBrowserTextWidth(g, sizeSample, font),
+            Math.Max(MeasureBrowserTextWidth(g, "<DIR>", font), MeasureBrowserTextWidth(g, sizeText, font)));
+        int minimumNameWidth = MeasureBrowserTextWidth(g, nameEllipsis, font);
+        int requiredWidth = includeDate
+            ? minimumNameWidth + sizeFieldWidth + dateFieldWidth + (gapWidth * 2)
+            : minimumNameWidth + sizeFieldWidth + gapWidth;
+        if (textRect.Width < requiredWidth)
+        {
+            return false;
+        }
+
+        int reservedDetailWidth = includeDate
+            ? sizeFieldWidth + dateFieldWidth + (gapWidth * 2)
+            : sizeFieldWidth + gapWidth;
+        int nameFieldWidth = Math.Max(minimumNameWidth, textRect.Width - reservedDetailWidth);
+        if (nameFieldWidth < minimumNameWidth)
+        {
+            return false;
+        }
+
+        nameRect = new Rectangle(textRect.X, textRect.Y, nameFieldWidth, textRect.Height);
+        return true;
+    }
+    private bool IsBrowserItemNameEllipsized(ListViewItem item, Rectangle nameBounds)
+    {
+        if (nameBounds.Width <= 0)
+        {
+            return false;
+        }
+
+        using Graphics g = browserPanel.CreateGraphics();
+        if (IsDirectoryListItem(item))
+        {
+            if (item.Text == "..")
+            {
+                return false;
+            }
+
+            bool showDirectoryMarker = _settings.Appearance?.ShowDirectoryMarker ?? true;
+            BrowserFileDisplayMode mode = GetBrowserFileDisplayMode();
+            if (mode == BrowserFileDisplayMode.NameOnly && showDirectoryMarker)
+            {
+                const string marker = " <DIR>";
+                string fullDisplayText = item.Text + marker;
+                string fittedDisplayText = FitDirectoryTextPreservingMarker(item.Text, marker, nameBounds.Width, browserPanel.Font, g);
+                return !string.Equals(fullDisplayText, fittedDisplayText, StringComparison.Ordinal);
+            }
+
+            string fittedDirectoryName = FitTextWithTrailingEllipsis(item.Text, nameBounds.Width, browserPanel.Font, g);
+            return !string.Equals(item.Text, fittedDirectoryName, StringComparison.Ordinal);
+        }
+
+        string fullName = GetItemFullName(item);
+        int textWidth = MeasureBrowserTextWidth(g, fullName, browserPanel.Font);
+        return textWidth > nameBounds.Width;
+    }
     protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
     {
         Keys modifiers = keyData & Keys.Modifiers;
@@ -8119,10 +10607,17 @@ private void InitializeBrowserTabControl()
         {
             return true;
         }
+        if (keyCode == Keys.Escape && TryCloseImageViewersFromMainEsc("MainForm.ProcessCmdKey"))
+        {
+            return true;
+        }
+        if (TryHandleCommandHintOverlayCmdKey(keyData))
+        {
+            return true;
+        }
         if (IsCommandLauncherShortcut(keyData))
         {
-            OpenCommandPalette();
-            return true;
+            return ExecuteCommandFromUi(CommandIds.AppOpenCommandLauncher, CommandScope.Global, "MainForm.ProcessCmdKey.CommandLauncher");
         }
         if (_viewerInputRouter.TryHandleCmdKey(CreateViewerCmdKeyContext(), keyData)) return true;
         if (_browserInputRouter.TryHandleCmdKey(CreateBrowserCmdKeyContext(), keyData)) return true;
@@ -8146,6 +10641,244 @@ private void InitializeBrowserTabControl()
             "None" => false,
             _ => keyData == (Keys.Control | Keys.Shift | Keys.P)
         };
+    }
+    private bool ExecuteCommandFromUi(string commandId, CommandScope scope, string source)
+    {
+        return _commandDispatcher.TryExecute(commandId, new CommandExecutionContext
+        {
+            Scope = scope,
+            Source = source
+        });
+    }
+
+    private void OpenSystemInformationFromUi(string source)
+    {
+        bool executed = ExecuteCommandFromUi(CommandIds.AppOpenSystemInformation, CommandScope.Browser, source);
+        if (executed)
+        {
+            return;
+        }
+
+        LogService.Warn($"[SystemInformation] Command dispatch returned false. Source={source} UiMode={_uiMode}");
+        if (_uiMode == UIMode.Browser)
+        {
+            ShowSystemInformationDialog();
+            return;
+        }
+
+        ShowStatusMessage("情報画面を開けませんでした。Browser画面で再度お試しください。");
+    }
+    private bool TryExecuteRegisteredCommand(string commandId, CommandExecutionContext context)
+    {
+        switch (commandId)
+        {
+            case CommandIds.BrowserNavigateParent:
+                if (_uiMode != UIMode.Browser || IsCurrentDirectoryBusy()) return false;
+                ExecuteBackspace();
+                return true;
+            case CommandIds.BrowserNavigateBack:
+                if (_uiMode != UIMode.Browser || IsCurrentDirectoryBusy()) return false;
+                ExecuteHistoryBack();
+                return true;
+            case CommandIds.BrowserNavigateForward:
+                if (_uiMode != UIMode.Browser || IsCurrentDirectoryBusy()) return false;
+                ExecuteHistoryForward();
+                return true;
+            case CommandIds.BrowserReload:
+                if (_uiMode != UIMode.Browser || IsCurrentDirectoryBusy()) return false;
+                ExecuteCurrentDirectoryReloadCommand();
+                return true;
+            case CommandIds.BrowserMarkAllFiles:
+                if (_uiMode != UIMode.Browser || IsCurrentDirectoryBusy()) return false;
+                ToggleBulkMarks(includeDirectories: false);
+                return true;
+            case CommandIds.BrowserMarkAllItems:
+                if (_uiMode != UIMode.Browser || IsCurrentDirectoryBusy()) return false;
+                ToggleBulkMarks(includeDirectories: true);
+                return true;
+            case CommandIds.BrowserCursorTop:
+                if (_uiMode != UIMode.Browser || IsCurrentDirectoryBusy()) return false;
+                MoveBrowserCursorToTop();
+                return true;
+            case CommandIds.BrowserCursorBottom:
+                if (_uiMode != UIMode.Browser || IsCurrentDirectoryBusy()) return false;
+                MoveBrowserCursorToBottom();
+                return true;
+            case CommandIds.BrowserOpenExplorer:
+                if (_uiMode != UIMode.Browser || IsCurrentDirectoryBusy()) return false;
+                ExecuteOpenCurrentPathInExplorer();
+                return true;
+            case CommandIds.BrowserOpenShell:
+                if (_uiMode != UIMode.Browser || IsCurrentDirectoryBusy()) return false;
+                if (GuardClipboardBusy()) return false;
+                OpenTerminalInCurrentDirectory(ShellKind.PowerShell);
+                return true;
+            case CommandIds.BrowserOpenExternalEditor:
+                if (_uiMode != UIMode.Browser || IsCurrentDirectoryBusy()) return false;
+                ExecuteOpenWithEditor();
+                return true;
+            case CommandIds.BrowserSort:
+                if (_uiMode != UIMode.Browser || IsCurrentDirectoryBusy()) return false;
+                ExecuteSort();
+                return true;
+            case CommandIds.BrowserFilter:
+                if (_uiMode != UIMode.Browser || IsCurrentDirectoryBusy()) return false;
+                ExecuteFilter();
+                return true;
+            case CommandIds.BrowserTree:
+                if (_uiMode != UIMode.Browser || IsCurrentDirectoryBusy()) return false;
+                ExecuteTreeDialog();
+                return true;
+            case CommandIds.BrowserQuickAccess:
+                if (_uiMode != UIMode.Browser || IsCurrentDirectoryBusy()) return false;
+                ExecuteQuickAccess();
+                return true;
+            case CommandIds.BrowserLogdisk:
+                if (_uiMode != UIMode.Browser || IsCurrentDirectoryBusy()) return false;
+                ExecuteLogdisk();
+                return true;
+            case CommandIds.ArchiveUnpack:
+                if (_uiMode != UIMode.Browser || IsCurrentDirectoryBusy()) return false;
+                _ = ExecuteUnpack();
+                return true;
+            case CommandIds.BrowserCopyFullPath:
+                if (_uiMode != UIMode.Browser || IsCurrentDirectoryBusy()) return false;
+                CopySelectedOrMarkedFullPathsToClipboard();
+                return true;
+            case CommandIds.BrowserShowHelp:
+                if (_uiMode != UIMode.Browser || IsCurrentDirectoryBusy()) return false;
+                ShowMenuKeyHint();
+                return true;
+            case CommandIds.BrowserOpenMarkSlot:
+                if (_uiMode != UIMode.Browser || IsCurrentDirectoryBusy()) return false;
+                OpenMarkSlotDialog();
+                return true;
+            case CommandIds.BrowserTabNew:
+                if (_uiMode != UIMode.Browser || IsCurrentDirectoryBusy()) return false;
+                CreateNewBrowserTab();
+                return true;
+            case CommandIds.BrowserTabNext:
+                if (_uiMode != UIMode.Browser || IsCurrentDirectoryBusy()) return false;
+                SelectAdjacentBrowserTab(+1);
+                return true;
+            case CommandIds.BrowserTabPrevious:
+                if (_uiMode != UIMode.Browser || IsCurrentDirectoryBusy()) return false;
+                SelectAdjacentBrowserTab(-1);
+                return true;
+            case CommandIds.BrowserTabCategoryNext:
+                if (_uiMode != UIMode.Browser || IsCurrentDirectoryBusy()) return false;
+                SelectAdjacentBrowserTabCategory(+1);
+                return true;
+            case CommandIds.BrowserTabCategoryPrevious:
+                if (_uiMode != UIMode.Browser || IsCurrentDirectoryBusy()) return false;
+                SelectAdjacentBrowserTabCategory(-1);
+                return true;
+            case CommandIds.BrowserTabClose:
+                if (_uiMode != UIMode.Browser || IsCurrentDirectoryBusy()) return false;
+                CloseCurrentBrowserTab();
+                return true;
+            case CommandIds.BrowserTabRestoreClosed:
+                if (_uiMode != UIMode.Browser || IsCurrentDirectoryBusy()) return false;
+                RestoreLastClosedBrowserTab();
+                return true;
+            case CommandIds.ClipboardPaste:
+                if (_uiMode != UIMode.Browser || IsCurrentDirectoryBusy()) return false;
+                ExecuteClipboardPaste();
+                return true;
+            case "file.copy":
+                if (_uiMode != UIMode.Browser || IsCurrentDirectoryBusy()) return false;
+                _ = ExecuteCopy();
+                return true;
+            case "file.move":
+                if (_uiMode != UIMode.Browser || IsCurrentDirectoryBusy()) return false;
+                _ = ExecuteMove();
+                return true;
+            case "file.rename":
+                if (_uiMode != UIMode.Browser || IsCurrentDirectoryBusy()) return false;
+                ExecuteRename();
+                return true;
+            case "file.delete":
+                if (_uiMode != UIMode.Browser || IsCurrentDirectoryBusy()) return false;
+                _ = ExecuteDelete(permanent: false);
+                return true;
+            case CommandIds.EditUndo:
+                if (_uiMode != UIMode.Browser || IsCurrentDirectoryBusy()) return false;
+                ExecuteFileOperationUndo();
+                return true;
+            case CommandIds.EditRedo:
+                if (_uiMode != UIMode.Browser || IsCurrentDirectoryBusy()) return false;
+                ExecuteFileOperationRedo();
+                return true;
+            case CommandIds.AppOpenSystemInformation:
+                if (_uiMode != UIMode.Browser) return false;
+                ShowSystemInformationDialog();
+                return true;
+            case CommandIds.AppOpenNewInstance:
+                if (_uiMode != UIMode.Browser || IsCurrentDirectoryBusy()) return false;
+                if (GuardClipboardBusy()) return false;
+                try
+                {
+                    var startInfo = new System.Diagnostics.ProcessStartInfo
+                    {
+                        FileName = Application.ExecutablePath,
+                        UseShellExecute = false
+                    };
+                    startInfo.ArgumentList.Add(_navigationService.CurrentPath);
+                    System.Diagnostics.Process.Start(startInfo);
+                }
+                catch (Exception ex)
+                {
+                    LogService.Error($"NewInstance 起動失敗: {ex.Message}");
+                }
+                return true;
+            case CommandIds.AppOpenControlPanel:
+                if (_uiMode != UIMode.Browser || IsCurrentDirectoryBusy()) return false;
+                if (GuardClipboardBusy()) return false;
+                try
+                {
+                    System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo("control.exe") { UseShellExecute = true });
+                }
+                catch (Exception ex)
+                {
+                    LogService.Error($"ControlPanel 起動失敗: {ex.Message}");
+                }
+                return true;
+            case CommandIds.AppOpenSettings:
+                OpenSettingsForm();
+                return true;
+            case CommandIds.AppOpenCommandLauncher:
+                OpenCommandPalette();
+                return true;
+            case CommandIds.AppOpenCommandList:
+                ShowCommandList();
+                return true;
+            default:
+                return false;
+        }
+    }
+    private void ShowCommandList()
+    {
+        using var dialog = new Dialogs.CommandListDialog(_commandRegistry.GetAll());
+        dialog.ShowDialog(this);
+    }
+
+    private void ShowSystemInformationDialog()
+    {
+        try
+        {
+            using var dialog = new Dialogs.SystemInformationDialog(_navigationService.CurrentPath);
+            dialog.ShowDialog(this);
+        }
+        catch (Exception ex)
+        {
+            LogService.Error("[SystemInformation] Failed to open dialog.", ex);
+            MessageBox.Show(
+                this,
+                $"情報画面を開けませんでした。\n{ex.GetType().Name}: {ex.Message}",
+                "情報",
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Error);
+        }
     }
     private void OpenCommandPalette()
     {
@@ -8180,20 +10913,25 @@ private void InitializeBrowserTabControl()
     internal void InvokeReloadCurrentDirectory() => ReloadCurrentDirectory("コマンドパレットから再読込しました。");
     internal void InvokeCopyCurrentDirectory() => CopyCurrentDirectoryFromHeader();
     internal void InvokeCopySelectedItemFullPath() => CopySelectedItemFullPathFromHeader();
+    internal void InvokeOpenExplorer() => ExecuteOpenCurrentPathInExplorer();
+    internal void InvokeOpenShell() => OpenTerminalInCurrentDirectory(ShellKind.PowerShell);
+    internal void InvokeOpenExternalEditor() => ExecuteOpenWithEditor();
     internal void InvokeOpenSettingsForm() => OpenSettingsForm();
     internal void InvokeOpenMarkSlotDialog() => OpenMarkSlotDialog();
     internal void InvokeOpenWorkspaceSnapshotDialog() => OpenWorkspaceSnapshotDialog();
     internal void InvokeLaunchExternalTool(ExternalToolCommandDefinition definition)
     {
-        var context = GetExternalToolExecutionContext();
-        bool usesMarkedPaths =
-            ExternalToolArgumentTemplateService.UsesMarkedPathTemplate(definition.Arguments)
-            || ExternalToolArgumentTemplateService.UsesMarkedPathTemplate(definition.WorkingDirectory);
-        if (usesMarkedPaths && context.MarkedPaths.Count == 0)
+        var context = ExternalToolLaunchCoordinator.BuildExecutionContext(
+            _navigationService.CurrentPath,
+            GetSelectedItemFullPathForHeaderCopy(),
+            GetSelectedItemNameForHeaderCopy(),
+            _markedFiles.Snapshot());
+
+        if (ExternalToolLaunchCoordinator.ShouldConfirmEmptyMarkedPaths(definition, context))
         {
             var result = MessageBox.Show(
                 this,
-                "この外部ツールはマーク済みパス用テンプレートを使用しますが、現在マークは0件です。\n空のマーク一覧で起動しますか？",
+                ExternalToolLaunchCoordinator.BuildEmptyMarkedPathsConfirmationMessage(),
                 "外部ツール起動確認",
                 MessageBoxButtons.YesNo,
                 MessageBoxIcon.Question);
@@ -8212,16 +10950,6 @@ private void InitializeBrowserTabControl()
         {
             ShowStatusMessage($"外部ツールを起動しました: {definition.DisplayName}");
         }
-    }
-    private ExternalToolExecutionContext GetExternalToolExecutionContext()
-    {
-        return new ExternalToolExecutionContext
-        {
-            CurrentDirectory = _navigationService.CurrentPath,
-            SelectedPath = GetSelectedItemFullPathForHeaderCopy(),
-            SelectedName = GetSelectedItemNameForHeaderCopy(),
-            MarkedPaths = _markedFiles.Snapshot()
-        };
     }
     protected override void WndProc(ref Message m)
     {
@@ -8440,12 +11168,13 @@ private void InitializeBrowserTabControl()
         Keys keyCode = (Keys)(nint)m.WParam & Keys.KeyCode;
         if (m.Msg == WM_SYSKEYDOWN)
         {
-            LogAltHint($"WM_SYSKEYDOWN Key={keyCode} AltHeld={_isAltHintHeld} CanShow={CanShowCommandHintOverlay()} ActiveControl={DescribeControl(ActiveControl)}");
+            LogAltHint($"WM_SYSKEYDOWN Key={keyCode} AltHeld={_isAltHintHeld} AltOwned={_isExternalToolAltPopupAltOwned} CanShow={CanShowCommandHintOverlay()} ActiveControl={DescribeControl(ActiveControl)}");
             bool isAltOnlyKey =
                 (keyCode == Keys.Menu || keyCode == Keys.LMenu || keyCode == Keys.RMenu) &&
                 (ModifierKeys & Keys.Control) != Keys.Control;
             if (isAltOnlyKey && CanShowCommandHintOverlay())
             {
+                _isExternalToolAltPopupAltOwned = true;
                 _isAltHintHeld = true;
                 ShowCommandHintOverlay();
                 return;
@@ -8453,7 +11182,7 @@ private void InitializeBrowserTabControl()
         }
         if (m.Msg == WM_SYSKEYUP)
         {
-            LogAltHint($"WM_SYSKEYUP Key={keyCode} AltHeldBefore={_isAltHintHeld} ActiveControl={DescribeControl(ActiveControl)}");
+            LogAltHint($"WM_SYSKEYUP Key={keyCode} AltHeldBefore={_isAltHintHeld} AltOwnedBefore={_isExternalToolAltPopupAltOwned} ActiveControl={DescribeControl(ActiveControl)}");
             bool isAltKey =
                 keyCode == Keys.Menu ||
                 keyCode == Keys.LMenu ||
@@ -8461,6 +11190,7 @@ private void InitializeBrowserTabControl()
             if (isAltKey)
             {
                 _isAltHintHeld = false;
+                _isExternalToolAltPopupAltOwned = false;
                 HideCommandHintOverlay();
                 if (CanShowCommandHintOverlay())
                 {
@@ -8471,7 +11201,7 @@ private void InitializeBrowserTabControl()
         if (m.Msg == WM_SYSCOMMAND)
         {
             int command = (int)((long)m.WParam & 0xFFF0);
-            LogAltHint($"WM_SYSCOMMAND Command=0x{command:X} UiMode={_uiMode} ActiveControl={DescribeControl(ActiveControl)}");
+            LogAltHint($"WM_SYSCOMMAND Command=0x{command:X} lParam=0x{m.LParam:X} AltOwned={_isExternalToolAltPopupAltOwned} UiMode={_uiMode} ActiveControl={DescribeControl(ActiveControl)}");
             bool isSnapshotTarget = (command == SC_MINIMIZE || command == SC_RESTORE || command == SC_MAXIMIZE || command == SC_SIZE || command == SC_MOVE);
             if (isSnapshotTarget)
             {
@@ -8515,7 +11245,11 @@ private void InitializeBrowserTabControl()
             }
             if (command == SC_KEYMENU && _uiMode == UIMode.Browser)
             {
-                return;
+                if (_isExternalToolAltPopupAltOwned)
+                {
+                    LogAltHint($"WM_SYSCOMMAND SC_KEYMENU suppressed for external tool alt popup lParam=0x{m.LParam:X}");
+                    return;
+                }
             }
             base.WndProc(ref m);
             if (isSnapshotTarget)
@@ -8544,7 +11278,12 @@ private void InitializeBrowserTabControl()
     }
     private bool CanShowCommandHintOverlay()
     {
-        return BuildCommandHintState().CanShowOverlay;
+        bool canShow = BuildCommandHintState().CanShowOverlay;
+        if (!canShow && _isExternalToolAltPopupAltOwned && _uiMode == UIMode.Browser && Visible && Enabled && browserPanel.Visible)
+        {
+            return true;
+        }
+        return canShow;
     }
     private bool CanUseCommandLauncherCommands()
     {
@@ -8553,11 +11292,14 @@ private void InitializeBrowserTabControl()
     private void OpenMenuStripFromKeyboard()
     {
         LogAltHintContext("OpenMenuStripFromKeyboard");
+        _isOpeningMenuStripExplicitly = true;
         HideCommandHintOverlay();
         _isAltHintHeld = false;
+        _isExternalToolAltPopupAltOwned = false;
         UpdateMenuStripState();
         if (mainMenuStrip.Items.Count == 0)
         {
+            _isOpeningMenuStripExplicitly = false;
             return;
         }
         mainMenuStrip.Focus();
@@ -8569,6 +11311,18 @@ private void InitializeBrowserTabControl()
     }
     private void MainForm_KeyDown(object? sender, KeyEventArgs e)
     {
+        if (e.Shift)
+        {
+            UpdateFunctionBarShiftLayerState(true);
+        }
+        if (e.Control)
+        {
+            UpdateFunctionBarCtrlLayerState(true);
+        }
+        if (e.Alt || e.KeyCode == Keys.Menu || e.KeyCode == Keys.LMenu || e.KeyCode == Keys.RMenu)
+        {
+            UpdateFunctionBarAltLayerState(true);
+        }
         if (e.KeyCode == Keys.Menu || e.KeyCode == Keys.LMenu || e.KeyCode == Keys.RMenu || (e.Control && e.Alt))
         {
             LogAltHint($"MainForm_KeyDown Key={e.KeyCode} Alt={e.Alt} Ctrl={e.Control} OverlayVisible={IsCommandHintOverlayVisible()}");
@@ -8579,11 +11333,18 @@ private void InitializeBrowserTabControl()
             e.SuppressKeyPress = true;
             return;
         }
+        if (e.KeyCode == Keys.Escape && TryCloseImageViewersFromMainEsc("MainForm.KeyDown"))
+        {
+            e.Handled = true;
+            e.SuppressKeyPress = true;
+            return;
+        }
         bool isAltOnlyKey =
             (e.KeyCode == Keys.Menu || e.KeyCode == Keys.LMenu || e.KeyCode == Keys.RMenu) &&
             !e.Control;
         if (isAltOnlyKey && CanShowCommandHintOverlay())
         {
+            _isExternalToolAltPopupAltOwned = true;
             _isAltHintHeld = true;
             ShowCommandHintOverlay();
             e.Handled = true;
@@ -8619,6 +11380,7 @@ private void InitializeBrowserTabControl()
             IsAuxPreviewActive = _previewPopupVisible && _previewPopup != null && _previewPopup.Visible,
             CanUseCommandLauncherCommands = CanUseCommandLauncherCommands(),
             TryHandleTabs = TryHandleBrowserCmdKeyTabs,
+            TryHandleCustomBindings = TryHandleBrowserCmdKeyCustomBindings,
             OpenMenuStripFromKeyboard = OpenMenuStripFromKeyboard,
             TryHandleNavigation = TryHandleBrowserCmdKeyNavigation,
             TryHandleFileOperationUndoRedo = TryHandleBrowserCmdKeyFileOperationUndoRedo,
@@ -8640,6 +11402,18 @@ private void InitializeBrowserTabControl()
     }
     private void MainForm_KeyUp(object? sender, KeyEventArgs e)
     {
+        if (e.KeyCode == Keys.ShiftKey || e.KeyCode == Keys.LShiftKey || e.KeyCode == Keys.RShiftKey)
+        {
+            UpdateFunctionBarShiftLayerState(false);
+        }
+        if (e.KeyCode == Keys.ControlKey || e.KeyCode == Keys.LControlKey || e.KeyCode == Keys.RControlKey)
+        {
+            UpdateFunctionBarCtrlLayerState(false);
+        }
+        if (e.KeyCode == Keys.Menu || e.KeyCode == Keys.LMenu || e.KeyCode == Keys.RMenu)
+        {
+            UpdateFunctionBarAltLayerState(false);
+        }
         if (e.KeyCode == Keys.Menu || e.KeyCode == Keys.LMenu || e.KeyCode == Keys.RMenu || e.KeyCode == Keys.ControlKey || e.KeyCode == Keys.LControlKey || e.KeyCode == Keys.RControlKey)
         {
             LogAltHint($"MainForm_KeyUp Key={e.KeyCode} AltHeld={_isAltHintHeld} OverlayVisible={IsCommandHintOverlayVisible()}");
@@ -8651,8 +11425,69 @@ private void InitializeBrowserTabControl()
         if (isAltKey)
         {
             _isAltHintHeld = false;
+            _isExternalToolAltPopupAltOwned = false;
             HideCommandHintOverlay("MainForm_KeyUp:AltReleased");
         }
+    }
+    private bool TryHandleCommandHintOverlayCmdKey(Keys keyData)
+    {
+        if (!CanShowCommandHintOverlay() || !IsCommandHintOverlayVisible())
+        {
+            return false;
+        }
+
+        Keys keyCode = keyData & Keys.KeyCode;
+        Keys modifiers = keyData & Keys.Modifiers;
+        LogAltHint($"TryHandleCommandHintOverlayCmdKey KeyData=0x{(int)keyData:X} KeyCode={keyCode} Modifiers={modifiers} Selected={_commandHintSelectedIndex} Scroll={_commandHintScrollIndex}");
+        if (keyCode == Keys.Escape)
+        {
+            _isAltHintHeld = false;
+            HideCommandHintOverlay("TryHandleCommandHintOverlayCmdKey:Escape");
+            return true;
+        }
+        if ((modifiers & Keys.Alt) == Keys.Alt && (keyCode == Keys.Left || keyCode == Keys.Right))
+        {
+            _isAltHintHeld = false;
+            _isExternalToolAltPopupAltOwned = false;
+            HideCommandHintOverlay("AltHistoryNavigation");
+            return false;
+        }
+        if (keyCode == Keys.Up)
+        {
+            MoveCommandHintSelection(-1);
+            return true;
+        }
+        if (keyCode == Keys.Down)
+        {
+            MoveCommandHintSelection(+1);
+            return true;
+        }
+        if (keyCode == Keys.Home)
+        {
+            SetCommandHintSelection(0);
+            return true;
+        }
+        if (keyCode == Keys.End)
+        {
+            SetCommandHintSelection(_commandHintRows.Count - 1);
+            return true;
+        }
+        if (keyCode == Keys.PageUp)
+        {
+            MoveCommandHintSelection(-GetCommandHintVisibleRowCount());
+            return true;
+        }
+        if (keyCode == Keys.PageDown)
+        {
+            MoveCommandHintSelection(+GetCommandHintVisibleRowCount());
+            return true;
+        }
+        if (keyCode is Keys.Enter or Keys.Space)
+        {
+            return LaunchSelectedCommandHint();
+        }
+
+        return false;
     }
     private bool TryHandleCommandHintOverlayKeyDown(KeyEventArgs e)
     {
@@ -8661,13 +11496,68 @@ private void InitializeBrowserTabControl()
             HideCommandHintOverlay("TryHandleCommandHintOverlayKeyDown:CanShowFalse");
             return false;
         }
-        if (IsCommandHintOverlayVisible() && e.KeyCode == Keys.Escape)
+        if (!IsCommandHintOverlayVisible())
+        {
+            return false;
+        }
+        if (e.KeyCode == Keys.Escape)
         {
             _isAltHintHeld = false;
             HideCommandHintOverlay("TryHandleCommandHintOverlayKeyDown:Escape");
             e.Handled = true;
             e.SuppressKeyPress = true;
             return true;
+        }
+        if (e.KeyCode == Keys.Up)
+        {
+            MoveCommandHintSelection(-1);
+            e.Handled = true;
+            e.SuppressKeyPress = true;
+            return true;
+        }
+        if (e.KeyCode == Keys.Down)
+        {
+            MoveCommandHintSelection(+1);
+            e.Handled = true;
+            e.SuppressKeyPress = true;
+            return true;
+        }
+        if (e.KeyCode is Keys.Home)
+        {
+            SetCommandHintSelection(0);
+            e.Handled = true;
+            e.SuppressKeyPress = true;
+            return true;
+        }
+        if (e.KeyCode is Keys.End)
+        {
+            SetCommandHintSelection(_commandHintRows.Count - 1);
+            e.Handled = true;
+            e.SuppressKeyPress = true;
+            return true;
+        }
+        if (e.KeyCode is Keys.PageUp)
+        {
+            MoveCommandHintSelection(-GetCommandHintVisibleRowCount());
+            e.Handled = true;
+            e.SuppressKeyPress = true;
+            return true;
+        }
+        if (e.KeyCode is Keys.PageDown)
+        {
+            MoveCommandHintSelection(+GetCommandHintVisibleRowCount());
+            e.Handled = true;
+            e.SuppressKeyPress = true;
+            return true;
+        }
+        if (e.KeyCode is Keys.Enter or Keys.Space)
+        {
+            if (LaunchSelectedCommandHint())
+            {
+                e.Handled = true;
+                e.SuppressKeyPress = true;
+                return true;
+            }
         }
         return false;
     }
@@ -8680,33 +11570,87 @@ private void InitializeBrowserTabControl()
             return;
         }
         bool shouldShow = _isAltHintHeld && CanShowCommandHintOverlay();
+        LogAltHint($"RefreshCommandHintOverlayState OverlayVisible={IsCommandHintOverlayVisible()} ShouldShow={shouldShow} Selected={_commandHintSelectedIndex} Scroll={_commandHintScrollIndex} AltOwned={_isExternalToolAltPopupAltOwned} ExplicitMenu={_isOpeningMenuStripExplicitly}");
         if (!shouldShow)
         {
             HideCommandHintOverlay("RefreshCommandHintOverlayState:ShouldShowFalse");
             return;
         }
+        if (IsCommandHintOverlayVisible())
+        {
+            ShowCommandHintOverlay(preserveSelection: true);
+            return;
+        }
         ShowCommandHintOverlay();
     }
-    private void ShowCommandHintOverlay()
+    private void ShowCommandHintOverlay(bool preserveSelection = false)
     {
         if (!CanShowCommandHintOverlay())
         {
             return;
         }
-        LogAltHint($"ShowCommandHintOverlay Before OverlayVisible={IsCommandHintOverlayVisible()} ActiveControl={DescribeControl(ActiveControl)}");
+        int beforeSelected = _commandHintSelectedIndex;
+        int beforeScroll = _commandHintScrollIndex;
+        string? selectedToolId = null;
+        if (preserveSelection && beforeSelected >= 0 && beforeSelected < _commandHintRows.Count)
+        {
+            selectedToolId = _commandHintRows[beforeSelected].Tool.Id;
+        }
+        LogAltHint($"ShowCommandHintOverlay Before OverlayVisible={IsCommandHintOverlayVisible()} Preserve={preserveSelection} BeforeSelected={beforeSelected} BeforeScroll={beforeScroll} ActiveControl={DescribeControl(ActiveControl)}");
+        ExternalToolExecutionContext context = ExternalToolLaunchCoordinator.BuildExecutionContext(
+            _navigationService.CurrentPath,
+            GetSelectedItemFullPathForHeaderCopy(),
+            GetSelectedItemNameForHeaderCopy(),
+            _markedFiles.Snapshot());
         IReadOnlyList<ExternalToolAltHintRow> rows = BuildExternalToolAltHintRows();
         _commandHintRows = rows;
+        (_commandHintContextLine1, _commandHintContextLine2) = BuildExternalToolAltContextLines(context);
+        if (_commandHintRows.Count == 0)
+        {
+            _commandHintSelectedIndex = -1;
+            _commandHintScrollIndex = 0;
+        }
+        if (preserveSelection && _commandHintRows.Count > 0)
+        {
+            int preservedIndex = -1;
+            if (!string.IsNullOrWhiteSpace(selectedToolId))
+            {
+                preservedIndex = _commandHintRows
+                    .Select((row, index) => new { row, index })
+                    .FirstOrDefault(item => string.Equals(item.row.Tool.Id, selectedToolId, StringComparison.OrdinalIgnoreCase))?.index ?? -1;
+            }
+            if (preservedIndex >= 0)
+            {
+                _commandHintSelectedIndex = preservedIndex;
+            }
+            else
+            {
+                _commandHintSelectedIndex = Math.Clamp(_commandHintSelectedIndex, 0, _commandHintRows.Count - 1);
+            }
+            _commandHintScrollIndex = Math.Clamp(_commandHintScrollIndex, 0, Math.Max(0, _commandHintRows.Count - 1));
+            EnsureCommandHintSelectionVisible();
+        }
+        else
+        {
+            _commandHintSelectedIndex = GetInitialCommandHintSelectionIndex();
+            _commandHintScrollIndex = 0;
+        }
         browserPanel.Invalidate();
         string firstRow = _commandHintRows.Count > 0
-            ? $"{_commandHintRows[0].SlotLabel}:{_commandHintRows[0].Title}"
+            ? $"{_commandHintRows[0].SlotLabel}:{_commandHintRows[0].Title}:{_commandHintRows[0].StatusText}"
             : "<none>";
-        LogAltHint($"ShowCommandHintOverlay After OverlayVisible={IsCommandHintOverlayVisible()} Bounds={GetCommandHintOverlayBounds()} RowCount={_commandHintRows.Count} First={firstRow} BrowserContext={CanShowCommandHintOverlay()}");
+        LogAltHint($"ShowCommandHintOverlay After OverlayVisible={IsCommandHintOverlayVisible()} Preserve={preserveSelection} AfterSelected={_commandHintSelectedIndex} AfterScroll={_commandHintScrollIndex} Bounds={GetCommandHintOverlayBounds()} RowCount={_commandHintRows.Count} First={firstRow} BrowserContext={CanShowCommandHintOverlay()}");
     }
     private void HideCommandHintOverlay(string reason = "Unknown")
     {
         if (!IsCommandHintOverlayVisible())
         {
             _commandHintRows = Array.Empty<ExternalToolAltHintRow>();
+            _commandHintSelectedIndex = -1;
+            _commandHintScrollIndex = 0;
+            _commandHintContextLine1 = string.Empty;
+            _commandHintContextLine2 = string.Empty;
+            _isExternalToolAltPopupAltOwned = false;
             _lastLoggedCommandHintRowCount = -1;
             _lastLoggedCommandHintBounds = Rectangle.Empty;
             _lastLoggedCommandHintPanelSize = Size.Empty;
@@ -8715,6 +11659,11 @@ private void InitializeBrowserTabControl()
         Rectangle overlayBounds = GetCommandHintOverlayBounds();
         LogAltHint($"HideCommandHintOverlay Reason={reason} Bounds={overlayBounds}");
         _commandHintRows = Array.Empty<ExternalToolAltHintRow>();
+        _commandHintSelectedIndex = -1;
+        _commandHintScrollIndex = 0;
+        _commandHintContextLine1 = string.Empty;
+        _commandHintContextLine2 = string.Empty;
+        _isExternalToolAltPopupAltOwned = false;
         _lastLoggedCommandHintRowCount = -1;
         _lastLoggedCommandHintBounds = Rectangle.Empty;
         _lastLoggedCommandHintPanelSize = Size.Empty;
@@ -8734,6 +11683,187 @@ private void InitializeBrowserTabControl()
         HideCommandHintOverlay("TryHandleBrowserCmdKeyExternalToolAltSlot");
         InvokeLaunchExternalTool(tool!);
         return true;
+    }
+    private bool LaunchSelectedCommandHint()
+    {
+        if (_commandHintRows.Count == 0)
+        {
+            return false;
+        }
+        if (_commandHintSelectedIndex < 0 || _commandHintSelectedIndex >= _commandHintRows.Count)
+        {
+            return false;
+        }
+
+        ExternalToolAltHintRow selected = _commandHintRows[_commandHintSelectedIndex];
+        if (!selected.IsLaunchable)
+        {
+            ShowStatusMessage($"起動不可: {selected.StatusText}");
+            return true;
+        }
+
+        HideCommandHintOverlay("LaunchSelectedCommandHint");
+        InvokeLaunchExternalTool(selected.Tool);
+        return true;
+    }
+    private void MoveCommandHintSelection(int delta)
+    {
+        if (_commandHintRows.Count == 0)
+        {
+            return;
+        }
+
+        int before = _commandHintSelectedIndex;
+        int next = _commandHintSelectedIndex < 0
+            ? 0
+            : Math.Clamp(_commandHintSelectedIndex + delta, 0, _commandHintRows.Count - 1);
+        LogAltHint($"MoveCommandHintSelection Delta={delta} Before={before} Next={next} Scroll={_commandHintScrollIndex}");
+        SetCommandHintSelection(next);
+    }
+    private void SetCommandHintSelection(int index)
+    {
+        if (_commandHintRows.Count == 0)
+        {
+            _commandHintSelectedIndex = -1;
+            _commandHintScrollIndex = 0;
+            browserPanel.Invalidate();
+            return;
+        }
+
+        int beforeSelected = _commandHintSelectedIndex;
+        int beforeScroll = _commandHintScrollIndex;
+        _commandHintSelectedIndex = Math.Clamp(index, 0, _commandHintRows.Count - 1);
+        EnsureCommandHintSelectionVisible();
+        LogAltHint($"SetCommandHintSelection Requested={index} BeforeSelected={beforeSelected} AfterSelected={_commandHintSelectedIndex} BeforeScroll={beforeScroll} AfterScroll={_commandHintScrollIndex}");
+        browserPanel.Invalidate();
+    }
+    private void EnsureCommandHintSelectionVisible()
+    {
+        if (_commandHintRows.Count == 0 || _commandHintSelectedIndex < 0)
+        {
+            return;
+        }
+
+        int visibleRows = GetCommandHintVisibleRowCount();
+        if (visibleRows <= 0)
+        {
+            return;
+        }
+
+        int beforeScroll = _commandHintScrollIndex;
+        int maxScroll = Math.Max(0, _commandHintRows.Count - visibleRows);
+        if (_commandHintSelectedIndex < _commandHintScrollIndex)
+        {
+            _commandHintScrollIndex = _commandHintSelectedIndex;
+        }
+        else if (_commandHintSelectedIndex >= _commandHintScrollIndex + visibleRows)
+        {
+            _commandHintScrollIndex = _commandHintSelectedIndex - visibleRows + 1;
+        }
+
+        _commandHintScrollIndex = Math.Clamp(_commandHintScrollIndex, 0, maxScroll);
+        LogAltHint($"EnsureCommandHintSelectionVisible Selected={_commandHintSelectedIndex} VisibleRows={visibleRows} BeforeScroll={beforeScroll} AfterScroll={_commandHintScrollIndex}");
+    }
+    private int GetInitialCommandHintSelectionIndex()
+    {
+        if (_commandHintRows.Count == 0)
+        {
+            return -1;
+        }
+
+        int launchableIndex = _commandHintRows
+            .Select((row, index) => new { row, index })
+            .FirstOrDefault(item => item.row.IsLaunchable)?.index ?? -1;
+        return launchableIndex >= 0 ? launchableIndex : 0;
+    }
+    private int GetCommandHintVisibleRowCount()
+    {
+        Rectangle overlayRect = GetCommandHintOverlayBounds();
+        CommandHintOverlayMetrics metrics = GetCommandHintOverlayMetrics();
+        int rowTop =
+            overlayRect.Top +
+            metrics.Padding -
+            2 +
+            metrics.TitleHeight +
+            metrics.TitleGap +
+            metrics.ExplanationHeight +
+            2 +
+            metrics.ContextLineHeight +
+            metrics.ContextLineSpacing +
+            metrics.ContextLineHeight +
+            metrics.ContextGap +
+            metrics.HeaderHeight +
+            4;
+        return Math.Max(1, (overlayRect.Bottom - metrics.Padding - rowTop) / metrics.RowHeight);
+    }
+    private static (string Line1, string Line2) BuildExternalToolAltContextLines(ExternalToolExecutionContext context)
+    {
+        string currentDir = string.IsNullOrWhiteSpace(context.CurrentDirectory) ? "(currentDir 未設定)" : context.CurrentDirectory;
+        string selected = string.IsNullOrWhiteSpace(context.SelectedPath)
+            ? "(selectedPath なし)"
+            : (string.IsNullOrWhiteSpace(context.SelectedName) ? context.SelectedPath : $"{context.SelectedName} — {context.SelectedPath}");
+        string marked = context.MarkedPaths.Count == 0 ? "Marked: 0" : $"Marked: {context.MarkedPaths.Count}";
+        return (
+            $"Target: {currentDir}",
+            $"Selected: {selected} / {marked} / Alt+英数字 = External tool namespace / Alt+F1〜F12 = Function layer"
+        );
+    }
+    private static string BuildExternalToolAltStatus(
+        ExternalToolCommandDefinition tool,
+        IReadOnlyDictionary<string, int> slotCounts,
+        out string slotLabel,
+        out bool isLaunchable)
+    {
+        slotLabel = "Alt+?";
+        isLaunchable = false;
+
+        if (!tool.Enabled)
+        {
+            return "無効";
+        }
+        if (string.IsNullOrWhiteSpace(tool.Id))
+        {
+            return "ID未設定";
+        }
+        if (!TryNormalizeExternalToolAltSlot(tool.AltSlot, out string normalizedSlot))
+        {
+            return "スロット未設定";
+        }
+
+        slotLabel = $"Alt+{normalizedSlot}";
+        if (ReservedExternalToolAltSlots.Contains(normalizedSlot[0]))
+        {
+            return "予約スロット";
+        }
+        if (slotCounts.TryGetValue(normalizedSlot, out int slotCount) && slotCount > 1)
+        {
+            return "重複";
+        }
+        if (string.IsNullOrWhiteSpace(tool.ExecutablePath))
+        {
+            return "実行ファイル未設定";
+        }
+
+        try
+        {
+            if (!Path.IsPathRooted(tool.ExecutablePath))
+            {
+                return "絶対パスではない";
+            }
+
+            string normalizedExePath = Path.GetFullPath(tool.ExecutablePath);
+            if (!File.Exists(normalizedExePath))
+            {
+                return "実行ファイルなし";
+            }
+
+            isLaunchable = true;
+            return "起動可";
+        }
+        catch
+        {
+            return "実行ファイル不正";
+        }
     }
     private bool TryResolveExternalToolByAltSlot(
         Keys keyData,
@@ -8826,55 +11956,59 @@ private void InitializeBrowserTabControl()
         {
             return Array.Empty<ExternalToolAltHintRow>();
         }
-        var rows = new List<ExternalToolAltHintRow>();
-        var used = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var slotCounts = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
         foreach (ExternalToolCommandDefinition tool in store.Tools)
         {
-            if (!tool.Enabled || string.IsNullOrWhiteSpace(tool.Id) || string.IsNullOrWhiteSpace(tool.ExecutablePath))
+            if (TryNormalizeExternalToolAltSlot(tool.AltSlot, out string slot))
             {
-                continue;
+                slotCounts[slot] = slotCounts.TryGetValue(slot, out int count) ? count + 1 : 1;
             }
-            if (!TryNormalizeExternalToolAltSlot(tool.AltSlot, out string slot))
-            {
-                continue;
-            }
-            if (ReservedExternalToolAltSlots.Contains(slot[0]) || !used.Add(slot))
-            {
-                continue;
-            }
-            string displayName = string.IsNullOrWhiteSpace(tool.DisplayName) ? tool.Id : tool.DisplayName;
-            rows.Add(new ExternalToolAltHintRow(
-                $"Alt+{slot}",
-                displayName,
-                Path.GetFileName(tool.ExecutablePath)));
         }
-        return rows.OrderBy(static x => x.SlotLabel, StringComparer.OrdinalIgnoreCase).ToArray();
+        var rows = new List<ExternalToolAltHintRow>();
+        foreach (ExternalToolCommandDefinition tool in store.Tools)
+        {
+            string displayName = string.IsNullOrWhiteSpace(tool.DisplayName)
+                ? (string.IsNullOrWhiteSpace(tool.Id) ? "(ID未設定)" : tool.Id)
+                : tool.DisplayName;
+            string executableName = string.IsNullOrWhiteSpace(tool.ExecutablePath)
+                ? "(未設定)"
+                : Path.GetFileName(tool.ExecutablePath);
+            string status = BuildExternalToolAltStatus(tool, slotCounts, out string slotLabel, out bool isLaunchable);
+            rows.Add(new ExternalToolAltHintRow(
+                slotLabel,
+                displayName,
+                executableName,
+                status,
+                isLaunchable,
+                tool));
+        }
+        return rows
+            .OrderByDescending(static x => x.IsLaunchable)
+            .ThenBy(static x => x.SlotLabel, StringComparer.OrdinalIgnoreCase)
+            .ThenBy(static x => x.Title, StringComparer.OrdinalIgnoreCase)
+            .ToArray();
     }
     private bool TryHandleBrowserCmdKeyFileOperationUndoRedo(Keys keyData)
     {
         if (keyData == (Keys.Control | Keys.Z))
         {
             if (GuardClipboardBusy()) return true;
-            ExecuteFileOperationUndo();
-            return true;
+            return ExecuteCommandFromUi(CommandIds.EditUndo, CommandScope.Browser, "Browser.CmdKey.CtrlZ");
         }
         if (keyData == (Keys.Control | Keys.Y))
         {
             if (GuardClipboardBusy()) return true;
-            ExecuteFileOperationRedo();
-            return true;
+            return ExecuteCommandFromUi(CommandIds.EditRedo, CommandScope.Browser, "Browser.CmdKey.CtrlY");
         }
         if (keyData == (Keys.Alt | Keys.Z))
         {
             if (GuardClipboardBusy()) return true;
-            ExecuteFileOperationUndo();
-            return true;
+            return ExecuteCommandFromUi(CommandIds.EditUndo, CommandScope.Browser, "Browser.CmdKey.AltZ");
         }
         if (keyData == (Keys.Alt | Keys.Y))
         {
             if (GuardClipboardBusy()) return true;
-            ExecuteFileOperationRedo();
-            return true;
+            return ExecuteCommandFromUi(CommandIds.EditRedo, CommandScope.Browser, "Browser.CmdKey.AltY");
         }
         return false;
     }
@@ -9567,7 +12701,7 @@ private void InitializeBrowserTabControl()
     }
     private void OpenMarkSlotSetOperationDialog(int preferredSlotNumber)
     {
-        if (GuardFeatureDisabled(FeatureId.MarkSlotSetOperations, "PracticalStable では MarkSlot 集合演算は無効です。"))
+        if (GuardFeatureDisabled(FeatureId.MarkSlotSetOperations, "標準機能（推奨）では MarkSlot 集合演算は無効です。"))
         {
             return;
         }
@@ -9581,9 +12715,9 @@ private void InitializeBrowserTabControl()
     }
     private string ExportMarkSlot(int slotNumber)
     {
-        if (GuardFeatureDisabled(FeatureId.MarkSlotBackupTransfer, "PracticalStable では MarkSlot エクスポートは無効です。"))
+        if (GuardFeatureDisabled(FeatureId.MarkSlotBackupTransfer, "標準機能（推奨）では MarkSlot エクスポートは無効です。"))
         {
-            return "PracticalStable では MarkSlot エクスポートは無効です。";
+            return "標準機能（推奨）では MarkSlot エクスポートは無効です。";
         }
         MarkSlotEntry slot = GetOrCreateMarkSlot(slotNumber);
         if (slot.Paths.Count == 0)
@@ -9618,9 +12752,9 @@ private void InitializeBrowserTabControl()
     }
     private string ImportMarkSlot(int slotNumber)
     {
-        if (GuardFeatureDisabled(FeatureId.MarkSlotBackupTransfer, "PracticalStable では MarkSlot インポートは無効です。"))
+        if (GuardFeatureDisabled(FeatureId.MarkSlotBackupTransfer, "標準機能（推奨）では MarkSlot インポートは無効です。"))
         {
-            return "PracticalStable では MarkSlot インポートは無効です。";
+            return "標準機能（推奨）では MarkSlot インポートは無効です。";
         }
         using var dialog = new OpenFileDialog
         {
@@ -9678,9 +12812,9 @@ private void InitializeBrowserTabControl()
     }
     private string ExportAllMarkSlots()
     {
-        if (GuardFeatureDisabled(FeatureId.MarkSlotBackupTransfer, "PracticalStable では MarkSlot 一括エクスポートは無効です。"))
+        if (GuardFeatureDisabled(FeatureId.MarkSlotBackupTransfer, "標準機能（推奨）では MarkSlot 一括エクスポートは無効です。"))
         {
-            return "PracticalStable では MarkSlot 一括エクスポートは無効です。";
+            return "標準機能（推奨）では MarkSlot 一括エクスポートは無効です。";
         }
         using var dialog = new SaveFileDialog
         {
@@ -9708,9 +12842,9 @@ private void InitializeBrowserTabControl()
     }
     private string ImportAllMarkSlots()
     {
-        if (GuardFeatureDisabled(FeatureId.MarkSlotBackupTransfer, "PracticalStable では MarkSlot 一括インポートは無効です。"))
+        if (GuardFeatureDisabled(FeatureId.MarkSlotBackupTransfer, "標準機能（推奨）では MarkSlot 一括インポートは無効です。"))
         {
-            return "PracticalStable では MarkSlot 一括インポートは無効です。";
+            return "標準機能（推奨）では MarkSlot 一括インポートは無効です。";
         }
         using var dialog = new OpenFileDialog
         {
@@ -10400,6 +13534,31 @@ private void InitializeBrowserTabControl()
             viewer.Close();
         }
     }
+    private bool TryCloseImageViewersFromMainEsc(string source)
+    {
+        if (_uiMode != UIMode.Browser)
+        {
+            return false;
+        }
+
+        _imageViewers.RemoveAll(v => v.IsDisposed);
+        var viewers = _imageViewers.Where(v => !v.IsDisposed && v.Visible).ToArray();
+        if (viewers.Length == 0)
+        {
+            return false;
+        }
+
+        foreach (var viewer in viewers)
+        {
+            viewer.Close();
+        }
+
+        LogService.Info($"[ImageViewerEscClose] Closed {viewers.Length} image viewer(s). source={source}");
+        ShowStatusMessage(viewers.Length == 1
+            ? "画像ビューアを閉じました。"
+            : $"{viewers.Length} 個の画像ビューアを閉じました。");
+        return true;
+    }
     /// <summary>
     /// マウスダブルクリック等から呼ばれる、「その項目を既定の方法で開く」処理。
     /// Enterキー(ExecuteEnter)が内蔵Viewer/Previewを優先するのに対し、こちらは Explorer 同様に
@@ -10427,7 +13586,7 @@ private void InitializeBrowserTabControl()
         }
         else if (File.Exists(fullPath))
         {
-            string? error = ExternalToolService.ExecuteShell(_navigationService.CurrentPath, $"\"{fullPath}\"");
+            string? error = ExternalToolService.OpenWithShellAssociation(fullPath);
             if (error != null) ShowStatusMessage(error);
         }
     }
@@ -10507,6 +13666,7 @@ private void InitializeBrowserTabControl()
         }
         LogService.Info($"[WindowVisibility] NewImageViewer Path={path} Bounds={FormatBoundsForLog(viewer.Bounds)}");
     }
+
     private void SaveImageViewerBounds(ImageViewerForm viewer, string? reason = null, bool logBounds = false)
     {
         if (!_settings.Preview.RememberImageViewerBounds || viewer.IsDisposed)
@@ -10541,7 +13701,13 @@ private void InitializeBrowserTabControl()
             if (Directory.Exists(fullPath))
             {
                 // ディレクトリは Explorer で開く (Z の軽量追加)
-                System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo("explorer.exe", $"\"{fullPath}\"") { UseShellExecute = true });
+                var startInfo = new System.Diagnostics.ProcessStartInfo
+                {
+                    FileName = "explorer.exe",
+                    UseShellExecute = false
+                };
+                startInfo.ArgumentList.Add(fullPath);
+                System.Diagnostics.Process.Start(startInfo);
             }
             else if (File.Exists(fullPath))
             {
@@ -11447,6 +14613,47 @@ private void InitializeBrowserTabControl()
             errorMessage = "Undo/Redo 履歴が空です。";
             return false;
         }
+        if (batch.Operation == FileOperationUndoRedoOperation.CreateFromPaste)
+        {
+            if (!undo)
+            {
+                errorMessage = "この貼り付けUndoはやり直しに対応していません。";
+                return false;
+            }
+
+            foreach (FileOperationUndoRedoItem item in batch.Items)
+            {
+                if (!File.Exists(item.BeforePath))
+                {
+                    errorMessage = $"対象が見つからないため続行できません: {item.BeforePath}";
+                    return false;
+                }
+
+                var info = new FileInfo(item.BeforePath);
+                if (info.Length != item.CreatedFileLength || info.LastWriteTimeUtc.Ticks != item.CreatedFileLastWriteTimeUtcTicks)
+                {
+                    errorMessage = $"作成後に変更されたため続行できません: {item.BeforePath}";
+                    return false;
+                }
+            }
+
+            try
+            {
+                foreach (FileOperationUndoRedoItem item in batch.Items)
+                {
+                    FileOperationService.Delete(item.BeforePath);
+                }
+            }
+            catch (Exception ex)
+            {
+                _fileOperationUndoRedoService.Reset();
+                errorMessage = $"{ex.Message} (履歴は安全側で破棄しました)";
+                return false;
+            }
+
+            focusTargetName = null;
+            return true;
+        }
         if (IsTrashDeleteUndoRedoOperation(batch.Operation))
         {
             return TryApplyTrashDeleteUndoRedoBatch(
@@ -11721,6 +14928,7 @@ private void InitializeBrowserTabControl()
             FileOperationUndoRedoOperation.Rename => "リネーム",
             FileOperationUndoRedoOperation.Move => "移動",
             FileOperationUndoRedoOperation.DeleteToMidFdTrash => "削除",
+            FileOperationUndoRedoOperation.CreateFromPaste => "貼り付け作成",
             _ => "ファイル操作"
         };
     }
@@ -13059,6 +16267,11 @@ private void InitializeBrowserTabControl()
             ShowStatusMessage("クリップボードの確認に失敗しました");
             return;
         }
+        if (!ShellClipboardService.TryHasText(out bool hasText, out string? textClipboardError))
+        {
+            ShowStatusMessage("クリップボードの確認に失敗しました");
+            return;
+        }
         var pasteEntryPlan = _fileOperationEntryCoordinator.CreateClipboardPasteEntryPlan(
             _uiMode == UIMode.Browser,
             _isClipboardBusy,
@@ -13066,6 +16279,7 @@ private void InitializeBrowserTabControl()
             _fileOpCts?.IsCancellationRequested ?? false,
             hasFileDrop,
             hasImage,
+            hasText,
             _navigationService.CurrentPath);
         if (!pasteEntryPlan.CanProceed)
         {
@@ -13092,6 +16306,11 @@ private void InitializeBrowserTabControl()
         else if (!hasFileDrop && hasImage)
         {
             ExecuteClipboardImagePaste();
+            return;
+        }
+        else if (!hasFileDrop && !hasImage && hasText)
+        {
+            ExecuteClipboardTextPaste();
             return;
         }
         try
@@ -13129,10 +16348,12 @@ private void InitializeBrowserTabControl()
                 int renamedCount = 0;
                 bool wasCancelled = false;
                 bool canRecordMoveUndoBatch = isCut;
+                bool canRecordCreatedFilesUndoBatch = !isCut;
                 bool applyRenameCopyToAllSameDirectory = false;
                 CopyCollisionDecision? applyToAllDecision = null;
                 DirectoryMergeDecision? directoryApplyToAllDecision = null;
                 var successfulMoveUndoItems = new List<(string SourcePath, string DestinationPath)>();
+                var successfulCreatedFilePaths = new List<string>();
                 foreach (var sourcePath in validPaths)
                 {
                     if (token.IsCancellationRequested)
@@ -13198,6 +16419,10 @@ private void InitializeBrowserTabControl()
                         }
                     }
                     bool sourceIsDir = Directory.Exists(sourcePath);
+                    if (!isCut && sourceIsDir)
+                    {
+                        canRecordCreatedFilesUndoBatch = false;
+                    }
                     bool destExists = File.Exists(destPath) || Directory.Exists(destPath);
                     bool overwriteMove = false;
                     if (destExists)
@@ -13214,6 +16439,7 @@ private void InitializeBrowserTabControl()
                         if (sourceIsDir)
                         {
                             canRecordMoveUndoBatch = false;
+                            canRecordCreatedFilesUndoBatch = false;
                             if (!TryResolvePasteDirectoryMerge(sourcePath, destPath, isCut, ref directoryApplyToAllDecision, out bool pasteShouldSkip, out bool pasteShouldCancel))
                             {
                                 if (pasteShouldCancel)
@@ -13293,6 +16519,7 @@ private void InitializeBrowserTabControl()
                         {
                             skipCount++;
                             canRecordMoveUndoBatch = false;
+                            canRecordCreatedFilesUndoBatch = false;
                             continue;
                         }
                         ShowFileOperationProgressIfCurrent(
@@ -13309,6 +16536,7 @@ private void InitializeBrowserTabControl()
                         if (overwriteMove)
                         {
                             canRecordMoveUndoBatch = false;
+                            canRecordCreatedFilesUndoBatch = false;
                         }
                         if (collisionResolution.UsedRenameCopy)
                         {
@@ -13329,6 +16557,10 @@ private void InitializeBrowserTabControl()
                         else
                         {
                             FileOperationService.Copy(sourcePath, destPath);
+                            if (canRecordCreatedFilesUndoBatch && File.Exists(destPath))
+                            {
+                                successfulCreatedFilePaths.Add(destPath);
+                            }
                         }
                         firstSuccessName ??= fileName;
                         successCount++;
@@ -13339,6 +16571,7 @@ private void InitializeBrowserTabControl()
                         LogService.Error($"{opErrName}失敗: {fileName}", ex);
                         failCount++;
                         canRecordMoveUndoBatch = false;
+                        canRecordCreatedFilesUndoBatch = false;
                     }
                 }
                 IReadOnlyList<FileOperationUndoRedoItem> moveUndoItems =
@@ -13350,7 +16583,16 @@ private void InitializeBrowserTabControl()
                     successfulMoveUndoItems.Count == validPaths.Count
                         ? FileOperationUndoRedoService.CreateMoveBatch(successfulMoveUndoItems)
                         : Array.Empty<FileOperationUndoRedoItem>();
-                return (successCount, skipCount, failCount, wasCancelled, firstSuccessName, renamedCount, firstRenamedName, moveUndoItems);
+                IReadOnlyList<FileOperationUndoRedoItem> createdFilesUndoItems =
+                    canRecordCreatedFilesUndoBatch &&
+                    !wasCancelled &&
+                    failCount == 0 &&
+                    skipCount == 0 &&
+                    successCount == validPaths.Count &&
+                    successfulCreatedFilePaths.Count == validPaths.Count
+                        ? FileOperationUndoRedoService.CreateCreatedFilesBatch(successfulCreatedFilePaths)
+                        : Array.Empty<FileOperationUndoRedoItem>();
+                return (successCount, skipCount, failCount, wasCancelled, firstSuccessName, renamedCount, firstRenamedName, moveUndoItems, createdFilesUndoItems);
             }, token);
             if (isCut && !result.wasCancelled && result.successCount > 0 && result.failCount == 0 && result.skipCount == 0 && beforeSnapshot != null)
             {
@@ -13393,6 +16635,11 @@ private void InitializeBrowserTabControl()
                 _fileOperationUndoRedoService.RecordBatch(FileOperationUndoRedoOperation.Move, result.moveUndoItems);
                 resultMsg = BuildMoveUndoReadyMessage(result.successCount, validPaths.Count);
             }
+            else if (result.createdFilesUndoItems.Count > 0)
+            {
+                _fileOperationUndoRedoService.RecordBatch(FileOperationUndoRedoOperation.CreateFromPaste, result.createdFilesUndoItems);
+                resultMsg = BuildCreatedFilesUndoReadyMessage(result.successCount, validPaths.Count);
+            }
             HandlePostOperation(new FileOperationResult("Paste", pasteExitStatus, result.successCount, validPaths.Count, result.firstSuccessName,
                 customMessage: resultMsg, skipCount: result.skipCount, failCount: result.failCount));
         }
@@ -13405,6 +16652,10 @@ private void InitializeBrowserTabControl()
             LogService.Error("貼り付け処理中に致命的なエラーが発生しました", ex);
             HandlePostOperation(new FileOperationResult("Paste", FileOpExitStatus.Error, 0, 0));
         }
+    }
+    private static string BuildCreatedFilesUndoReadyMessage(int successCount, int totalCount)
+    {
+        return BuildFileOperationUndoReadyMessage("作成", successCount, totalCount);
     }
     private bool ConfirmBulkCutPasteMove(int itemCount, string firstSourcePath, string destinationDirectory)
     {
@@ -13650,9 +16901,16 @@ private void InitializeBrowserTabControl()
             {
                 string savedPath = ClipboardImagePasteService.SavePngToDirectory(image, _navigationService.CurrentPath);
                 string fileName = Path.GetFileName(savedPath);
+                var createdUndoItems = FileOperationUndoRedoService.CreateCreatedFilesBatch(new[] { savedPath });
+                if (createdUndoItems.Count > 0)
+                {
+                    _fileOperationUndoRedoService.RecordBatch(FileOperationUndoRedoOperation.CreateFromPaste, createdUndoItems);
+                }
                 LoadDirectory(_navigationService.CurrentPath, GetCreatedItemFocusTarget(fileName));
                 LogBrowserImageImportInfo($"Source=ClipboardImage Saved={savedPath}");
-                ShowStatusMessage($"画像を PNG として貼り付けました: {fileName}");
+                ShowStatusMessage(createdUndoItems.Count > 0
+                    ? "画像を PNG として貼り付けました。Ctrl+Z で元に戻せます。"
+                    : $"画像を PNG として貼り付けました: {fileName}");
             }
         }
         catch (Exception ex)
@@ -13664,6 +16922,94 @@ private void InitializeBrowserTabControl()
         {
             _isClipboardBusy = false;
         }
+    }
+    private void ExecuteClipboardTextPaste()
+    {
+        if (GuardReadOnlyBrowserTab())
+        {
+            return;
+        }
+        if (_uiMode != UIMode.Browser)
+        {
+            ShowStatusMessage("この画面では貼り付けできません");
+            return;
+        }
+        if (!(_settings.FileOperations?.ClipboardPasteTextAsFileEnabled ?? false))
+        {
+            ShowStatusMessage("テキスト貼り付けファイル化は設定でOFFです。");
+            return;
+        }
+        if (_isClipboardBusy)
+        {
+            ShowStatusMessage(FileOperationPresentationHelper.GetBusyBlockedMessage(
+                "貼り付け",
+                canCancel: _fileOpCts != null,
+                isCancelRequested: _fileOpCts?.IsCancellationRequested ?? false));
+            return;
+        }
+        if (string.IsNullOrEmpty(_navigationService.CurrentPath))
+        {
+            return;
+        }
+
+        _isClipboardBusy = true;
+        try
+        {
+            if (!ShellClipboardService.TryGetText(out string? text, out string? textError))
+            {
+                ShowStatusMessage("クリップボードにテキストがありません");
+                return;
+            }
+
+            if (string.IsNullOrWhiteSpace(text))
+            {
+                ShowStatusMessage("空のテキストは貼り付けできません");
+                return;
+            }
+
+            string targetPath = CreateClipboardTextPasteFilePath(_navigationService.CurrentPath);
+            File.WriteAllText(targetPath, text, new UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
+            string fileName = Path.GetFileName(targetPath);
+            var createdUndoItems = FileOperationUndoRedoService.CreateCreatedFilesBatch(new[] { targetPath });
+            if (createdUndoItems.Count > 0)
+            {
+                _fileOperationUndoRedoService.RecordBatch(FileOperationUndoRedoOperation.CreateFromPaste, createdUndoItems);
+            }
+            LoadDirectory(_navigationService.CurrentPath, GetCreatedItemFocusTarget(fileName));
+            ShowStatusMessage(createdUndoItems.Count > 0
+                ? "テキストを貼り付けてファイル作成しました。Ctrl+Z で元に戻せます。"
+                : $"テキストを貼り付けてファイル作成しました: {fileName}");
+        }
+        catch (Exception ex)
+        {
+            LogService.Error("クリップボードテキストの貼り付けに失敗しました", ex);
+            ShowStatusMessage($"テキスト貼り付け失敗: {ex.Message}");
+        }
+        finally
+        {
+            _isClipboardBusy = false;
+        }
+    }
+    private static string CreateClipboardTextPasteFilePath(string directory)
+    {
+        string stamp = DateTime.Now.ToString("yyyyMMdd_HHmmss");
+        string baseName = $"clipboard_text_{stamp}";
+        string path = Path.Combine(directory, $"{baseName}.txt");
+        if (!PathExists(path))
+        {
+            return path;
+        }
+
+        for (int i = 1; i <= 999; i++)
+        {
+            string numbered = Path.Combine(directory, $"{baseName}_{i:000}.txt");
+            if (!PathExists(numbered))
+            {
+                return numbered;
+            }
+        }
+
+        return Path.Combine(directory, $"{baseName}_{Guid.NewGuid():N}.txt");
     }
     private bool TryResolvePasteDirectoryMerge(
         string sourcePath,
@@ -14145,9 +17491,11 @@ private void InitializeBrowserTabControl()
         string? currentPath = null)
     {
         string statusText = statusLabel?.Text ?? "<null>";
+        long largeTextElapsedMs = _largeTextEntryStopwatch.IsRunning ? _largeTextEntryStopwatch.ElapsedMilliseconds : -1;
         LogService.Info(
             $"[LargeTextEntryTiming] {stage} elapsedMs={sw.ElapsedMilliseconds} " +
-            $"totalElapsedMs={_largeTextEntryStopwatch.ElapsedMilliseconds} " +
+            $"totalElapsedMs={sw.ElapsedMilliseconds} " +
+            $"largeTextElapsedMs={largeTextElapsedMs} " +
             $"reqId={reqId} uiMode={_uiMode} kind={kind} " +
             $"requestPath='{path}' " +
             $"currentPath='{currentPath ?? "<not-read>"}' " +
@@ -14155,7 +17503,7 @@ private void InitializeBrowserTabControl()
             $"hasBom={state?.HasBom.ToString() ?? "<null>"} " +
             $"offsets={state?.LineOffsets.Count ?? -1} " +
             $"isIndexing={state?.IsIndexing.ToString() ?? "<null>"} " +
-            $"status='{statusText}'");
+            $"statusSnapshot='{statusText}'");
     }
     private void LogViewerLayoutBounds(string reason)
     {
@@ -14597,7 +17945,7 @@ private void InitializeBrowserTabControl()
     }
     private void OpenPathWithShellAssociation(string fullPath)
     {
-        string? error = ExternalToolService.ExecuteShell(_navigationService.CurrentPath, $"\"{fullPath}\"");
+        string? error = ExternalToolService.OpenWithShellAssociation(fullPath);
         if (error != null)
         {
             ShowStatusMessage(error);
@@ -14741,7 +18089,7 @@ private void InitializeBrowserTabControl()
                 ShowStatusMessage,
                 selectionSummary,
                 outsideWarning,
-                null,
+                GetSharedDirectoryMoveHistory(),
                 out string destDir,
                 out bool copyNeedsCreateDirectory))
         {
@@ -14916,6 +18264,10 @@ private void InitializeBrowserTabControl()
             skipCount = result.currentSkipCount;
             failCount = result.currentFailCount;
             exitStatus = FileOperationPresentationHelper.NormalizeExitStatus(result.status, successCount, selection.Count, skipCount, failCount);
+            if (exitStatus == FileOpExitStatus.Success && successCount > 0)
+            {
+                AddDirectoryMoveHistory(destDir);
+            }
         }
         catch (OperationCanceledException)
         {
@@ -16197,7 +19549,7 @@ private void InitializeBrowserTabControl()
                 viewerMessageLabel.Visible = false;
                 viewerPictureBox.Visible = false;
                 viewerTextBox.Visible = false;
-                
+
                 _largeFileControl.SetVisibleLines(requestedFirstLine, lines!, truncatedFlags, preserveCharacterSelection);
                 _largeFileControl.Visible = true;
                 _largeFileControl.Focus();
@@ -16376,6 +19728,11 @@ private void InitializeBrowserTabControl()
             ClearPreview();
         }
         RequestPreviewRefresh();
+
+        if (functionBarPanel.Visible)
+        {
+            functionBarPanel.Invalidate();
+        }
     }
     /// <summary>
     /// 表示クリア専用メソッド。
@@ -16471,6 +19828,10 @@ private void InitializeBrowserTabControl()
     private async Task UpdatePreviewAsync(int reqId, string requestPath, CancellationToken token)
     {
         var entrySw = Stopwatch.StartNew();
+        string result = "Completed";
+        string stage = "Start";
+        PreviewKind resolvedKind = PreviewKind.None;
+        Exception? failedException = null;
         LogLargeTextEntryTiming(
             "UpdatePreviewAsync start",
             entrySw,
@@ -16497,8 +19858,15 @@ private void InitializeBrowserTabControl()
                 reqId,
                 PreviewKind.None,
                 currentPath: currentPath);
+            await _previewDiagnosticDelayService.DelayAsync(
+                "Preview",
+                requestPath,
+                _previewDiagnosticDelayService.PreviewDelayMs,
+                token);
             if (!IsLatestPreviewRequest(reqId, requestPath, token))
             {
+                result = "Superseded";
+                stage = "Debounce";
                 LogService.Info(
                     $"[PreviewRequest] skippedReason=Superseded reqId={reqId} " +
                     $"requestPath='{requestPath}' currentPath='{currentPath}' activeReqId={_activePreviewRequestId}");
@@ -16508,6 +19876,8 @@ private void InitializeBrowserTabControl()
             string fullPath = requestPath;
             if (Directory.Exists(fullPath))
             {
+                result = "SkippedDirectory";
+                stage = "DirectoryGuard";
                 ClearPreview("プレビュー対象外", reqId);
                 return;
             }
@@ -16517,7 +19887,14 @@ private void InitializeBrowserTabControl()
                 ClearPreview("", reqId);
                 _currentPreviewTarget = fullPath;
             }
+            await _previewDiagnosticDelayService.DelayAsync(
+                "PreviewKind",
+                fullPath,
+                _previewDiagnosticDelayService.PreviewKindDelayMs,
+                token);
             var kind = GetEffectivePreviewKind(fullPath);
+            resolvedKind = kind;
+            stage = "KindResolved";
             LogLargeTextEntryTiming(
                 "after GetPreviewKind",
                 entrySw,
@@ -16527,6 +19904,8 @@ private void InitializeBrowserTabControl()
                 currentPath: GetCurrentPreviewSelectionPath());
             if (!IsLatestPreviewRequest(reqId, fullPath, token))
             {
+                result = "Superseded";
+                stage = "AfterKind";
                 LogService.Info(
                     $"[PreviewRequest] skippedReason=SupersededAfterKind reqId={reqId} " +
                     $"requestPath='{fullPath}' activeReqId={_activePreviewRequestId}");
@@ -16534,6 +19913,8 @@ private void InitializeBrowserTabControl()
             }
             if (kind == PreviewKind.None)
             {
+                result = "SkippedUnsupported";
+                stage = "KindNone";
                 string ext = Path.GetExtension(fullPath);
                 ClearPreview($"プレビュー対象外\n{ext}", reqId);
                 return;
@@ -16544,6 +19925,11 @@ private void InitializeBrowserTabControl()
 #endif
             if (kind == PreviewKind.Image)
             {
+                await _previewDiagnosticDelayService.DelayAsync(
+                    "PreviewOpen:Image",
+                    fullPath,
+                    _previewDiagnosticDelayService.PreviewOpenDelayMs,
+                    token);
                 _currentViewerKind = PreviewKind.Image;
                 ApplyViewerChromeState();
                 if (_previewPopup.Visible)
@@ -16564,6 +19950,12 @@ private void InitializeBrowserTabControl()
             }
             else if (kind == PreviewKind.Video)
             {
+                stage = "VideoHint";
+                await _previewDiagnosticDelayService.DelayAsync(
+                    "PreviewOpen:Video",
+                    fullPath,
+                    _previewDiagnosticDelayService.PreviewOpenDelayMs,
+                    token);
                 if (_uiMode == UIMode.Viewer)
                 {
                     _ = TryExitViewerToBrowser();
@@ -16584,6 +19976,12 @@ private void InitializeBrowserTabControl()
             }
             else if (kind == PreviewKind.Text)
             {
+                stage = "Text";
+                await _previewDiagnosticDelayService.DelayAsync(
+                    "PreviewOpen:Text",
+                    fullPath,
+                    _previewDiagnosticDelayService.PreviewOpenDelayMs,
+                    token);
                 // テキスト系: MainForm 内の viewerTextBox に表示
                 // 重い読み込み処理と文字列エンコードをバックグラウンドスレッドへ分離
                 var preview = await Task.Run<(string Text, string EncodingLabel)>(() =>
@@ -16674,8 +20072,11 @@ private void InitializeBrowserTabControl()
             }
             else if (kind == PreviewKind.LargeText)
             {
+                stage = "LargeText";
                 if (_uiMode != UIMode.Viewer)
                 {
+                    result = "SkippedUnsupported";
+                    stage = "LargeTextBrowserSelection";
                     LogLargeTextEntryTiming("LargeText browser selection skipped", entrySw, fullPath, reqId, kind);
                     return;
                 }
@@ -16699,6 +20100,11 @@ private void InitializeBrowserTabControl()
                 await Task.Yield();
                 try
                 {
+                    await _previewDiagnosticDelayService.DelayAsync(
+                        "PreviewOpen:LargeText",
+                        fullPath,
+                        _previewDiagnosticDelayService.PreviewOpenDelayMs,
+                        token);
                     LogLargeTextEntryTiming("before DetectLargeTextEncoding", entrySw, fullPath, reqId, kind, state);
                     var detected = await Task.Run(() => PreviewService.DetectLargeTextEncoding(fullPath), token);
                     state.DetectedEncoding = detected.Encoding;
@@ -16710,6 +20116,8 @@ private void InitializeBrowserTabControl()
                     LogLargeTextEntryTiming("after DetectLargeTextEncoding", entrySw, fullPath, reqId, kind, state);
                     if (!IsLatestPreviewRequest(reqId, fullPath, token) || _uiMode != UIMode.Viewer)
                     {
+                        result = "Superseded";
+                        stage = "LargeTextAfterDetect";
                         LogService.Info(
                             $"[PreviewRequest] skippedReason=SupersededAfterDetect reqId={reqId} " +
                             $"requestPath='{fullPath}' activeReqId={_activePreviewRequestId}");
@@ -16717,6 +20125,8 @@ private void InitializeBrowserTabControl()
                     }
                     if (state.IsBinaryLike)
                     {
+                        result = "SkippedBinary";
+                        stage = "LargeTextBinaryLikeGuard";
                         ClearPreview("LargeText対象外: binary-like file", reqId);
                         ApplyViewerStatusLine("LargeText binary-like guard");
                         ShowStatusMessage("LargeText対象外: binary-like file を検出しました。");
@@ -16724,6 +20134,8 @@ private void InitializeBrowserTabControl()
                     }
                     if (state.IsEncodingUnsupportedForLargeText)
                     {
+                        result = "SkippedUnsupported";
+                        stage = "LargeTextUnsupportedEncodingGuard";
                         ClearPreview($"LargeText未対応: {state.DetectedEncodingLabel}", reqId);
                         ApplyViewerStatusLine("LargeText unsupported encoding guard");
                         ShowStatusMessage($"LargeText未対応: {state.DetectedEncodingLabel}");
@@ -16774,6 +20186,12 @@ private void InitializeBrowserTabControl()
             }
             else if (kind == PreviewKind.Binary)
             {
+                stage = "Binary";
+                await _previewDiagnosticDelayService.DelayAsync(
+                    "PreviewOpen:Binary",
+                    fullPath,
+                    _previewDiagnosticDelayService.PreviewOpenDelayMs,
+                    token);
                 // バイナリダンプ: 先頭数KBを読み込んでHexDumpを表示
                 // 重い読み込みと文字列結合処理をバックグラウンドスレッドへ分離
                 string dumpText = await Task.Run(() =>
@@ -16847,11 +20265,16 @@ private void InitializeBrowserTabControl()
         }
         catch (OperationCanceledException)
         {
+            result = "Canceled";
+            stage = "Canceled";
             // Task.Delay や Task.Run 内でのキャンセル。意図した動作なので何もせず終了。
             LogService.Info($"[PreviewRequest] skippedReason=Canceled reqId={reqId} requestPath='{requestPath}'");
         }
         catch (Exception ex)
         {
+            result = "Failed";
+            stage = "Exception";
+            failedException = ex;
 #if DEBUG
             Debug.WriteLine($"[ReqId: {reqId}] Preview Error ({ex.GetType().Name}): {ex.Message}");
 #endif
@@ -16862,6 +20285,20 @@ private void InitializeBrowserTabControl()
         }
         finally
         {
+            string? currentPath = GetCurrentPreviewSelectionPath();
+            if (failedException != null)
+            {
+                LogService.Warn(
+                    $"[PreviewRequest] failed reqId={reqId} stage='{stage}' result={result} kind={resolvedKind} " +
+                    $"elapsedMs={entrySw.ElapsedMilliseconds} requestPath='{requestPath}' currentPath='{currentPath}' " +
+                    $"exceptionType='{failedException.GetType().Name}' message='{failedException.Message}'");
+            }
+            else
+            {
+                LogService.Info(
+                    $"[PreviewRequest] completed reqId={reqId} result={result} stage='{stage}' kind={resolvedKind} " +
+                    $"elapsedMs={entrySw.ElapsedMilliseconds} requestPath='{requestPath}' currentPath='{currentPath}'");
+            }
             if (_activePreviewRequestId == reqId)
             {
                 _previewRequestInFlight = false;
@@ -16962,7 +20399,7 @@ private void InitializeBrowserTabControl()
         {
             if (allowShellFallback)
             {
-                string? shellError = ExternalToolService.ExecuteShell(_navigationService.CurrentPath, $"\"{fullPath}\"");
+                string? shellError = ExternalToolService.OpenWithShellAssociation(fullPath);
                 if (shellError != null) ShowStatusMessage(shellError);
             }
             else
@@ -17430,6 +20867,10 @@ private void InitializeBrowserTabControl()
             PreviewKind shallowKind = GetBrowserSelectionPreviewKind(currentItem, requestPath);
             if (!IsBrowserAutoPreviewEligible(shallowKind))
             {
+                string skipResult = shallowKind == PreviewKind.Binary ? "SkippedBinary" : "SkippedUnsupported";
+                LogService.Info(
+                    $"[PreviewRequest] completed reqId=-1 result={skipResult} kind={shallowKind} " +
+                    $"requestPath='{requestPath}' currentPath='{GetCurrentPreviewSelectionPath()}' force={force}");
                 _previewCts?.Cancel();
                 _lastPreviewRequestedPath = null;
                 _previewRequestInFlight = false;
@@ -17456,7 +20897,7 @@ private void InitializeBrowserTabControl()
         _ = UpdatePreviewAsync(reqId, requestPath, _previewCts.Token);
     }
     /// <summary>O キー: 設定画面を開く。OK 保存後は _settings を再読込して次のコマンドに反映する。</summary>
-    private void OpenSettingsForm(SettingsForm.InitialTab initialTab = SettingsForm.InitialTab.DisplayAndViewer)
+    private void OpenSettingsForm(SettingsForm.InitialTab initialTab = SettingsForm.InitialTab.Display)
     {
         try
         {
@@ -17469,6 +20910,8 @@ private void InitializeBrowserTabControl()
                 var reloaded = MidFD.Configuration.SettingsManager.Load(out SettingsManager.SettingsLoadMetadata settingsLoadMetadata);
                 _settings.Profile = reloaded.Profile;
                 _settings.Input = reloaded.Input ?? new InputSettings();
+                _settings.Input.MouseGestureCommandMap = InputSettings.NormalizeMouseGestureCommandMap(_settings.Input.MouseGestureCommandMap);
+                InputSettings.NormalizeAndMigrateFunctionKeyChords(_settings.Input);
                 _settings.SevenZip = reloaded.SevenZip;
                 _settings.ExternalTools = reloaded.ExternalTools;
                 _settings.Appearance = reloaded.Appearance;
@@ -17496,6 +20939,7 @@ private void InitializeBrowserTabControl()
                 }
                 LoadDirectory(_navigationService.CurrentPath);
                 RebuildMenuStripAfterSettingsApply();
+                UpdateFunctionBar();
                 ShowStatusMessage("設定を適用しました。");
             };
             var result = form.ShowDialog(this);
@@ -17506,6 +20950,8 @@ private void InitializeBrowserTabControl()
                 var reloaded = MidFD.Configuration.SettingsManager.Load(out SettingsManager.SettingsLoadMetadata settingsLoadMetadata);
                 _settings.Profile = reloaded.Profile;
                 _settings.Input = reloaded.Input ?? new InputSettings();
+                _settings.Input.MouseGestureCommandMap = InputSettings.NormalizeMouseGestureCommandMap(_settings.Input.MouseGestureCommandMap);
+                InputSettings.NormalizeAndMigrateFunctionKeyChords(_settings.Input);
                 _settings.SevenZip = reloaded.SevenZip;
                 _settings.ExternalTools = reloaded.ExternalTools;
                 _settings.Appearance = reloaded.Appearance;
@@ -17533,6 +20979,7 @@ private void InitializeBrowserTabControl()
                 }
                 LoadDirectory(_navigationService.CurrentPath);
                 RebuildMenuStripAfterSettingsApply();
+                UpdateFunctionBar();
                 ShowStatusMessage("設定を保存しました。");
             }
         }
@@ -17562,7 +21009,7 @@ private void InitializeBrowserTabControl()
     }
     private void OpenWorkspaceSnapshotDialog()
     {
-        if (GuardFeatureDisabled(FeatureId.WorkspaceSnapshot, "PracticalStable では Workspace Snapshot は無効です。"))
+        if (GuardFeatureDisabled(FeatureId.WorkspaceSnapshot, "標準機能（推奨）では Workspace Snapshot は無効です。"))
         {
             return;
         }
@@ -17728,7 +21175,7 @@ private void InitializeBrowserTabControl()
     }
     private bool ExportWorkspaceSnapshot(IWin32Window owner, WorkspaceSnapshotEntry entry)
     {
-        if (GuardFeatureDisabled(FeatureId.WorkspaceSnapshot, "PracticalStable では Workspace Snapshot エクスポートは無効です。"))
+        if (GuardFeatureDisabled(FeatureId.WorkspaceSnapshot, "標準機能（推奨）では Workspace Snapshot エクスポートは無効です。"))
         {
             return false;
         }
@@ -17770,7 +21217,7 @@ private void InitializeBrowserTabControl()
     }
     private bool ImportWorkspaceSnapshot(IWin32Window owner)
     {
-        if (GuardFeatureDisabled(FeatureId.WorkspaceSnapshot, "PracticalStable では Workspace Snapshot インポートは無効です。"))
+        if (GuardFeatureDisabled(FeatureId.WorkspaceSnapshot, "標準機能（推奨）では Workspace Snapshot インポートは無効です。"))
         {
             return false;
         }
@@ -17811,7 +21258,7 @@ private void InitializeBrowserTabControl()
     }
     private bool ExportAllWorkspaceSnapshots(IWin32Window owner)
     {
-        if (GuardFeatureDisabled(FeatureId.WorkspaceSnapshot, "PracticalStable では Workspace Snapshot 一括エクスポートは無効です。"))
+        if (GuardFeatureDisabled(FeatureId.WorkspaceSnapshot, "標準機能（推奨）では Workspace Snapshot 一括エクスポートは無効です。"))
         {
             return false;
         }
@@ -17858,7 +21305,7 @@ private void InitializeBrowserTabControl()
     }
     private bool ImportAllWorkspaceSnapshots(IWin32Window owner)
     {
-        if (GuardFeatureDisabled(FeatureId.WorkspaceSnapshot, "PracticalStable では Workspace Snapshot 一括インポートは無効です。"))
+        if (GuardFeatureDisabled(FeatureId.WorkspaceSnapshot, "標準機能（推奨）では Workspace Snapshot 一括インポートは無効です。"))
         {
             return false;
         }
@@ -18179,10 +21626,11 @@ private void InitializeBrowserTabControl()
         headerZone2.Width = widths.Zone2;
         headerZone3.Width = widths.Zone3;
         headerZone4.Width = widths.Zone4;
-        if (this.MinimumSize.Width != widths.MinimumFormWidth)
+        int minimumFormWidth = Math.Max(MinimumNormalWindowWidth, widths.MinimumFormWidth);
+        if (this.MinimumSize.Width != minimumFormWidth)
         {
-            LogService.Info($"[WindowFloorHitIntercept] MinimumSize width audit: {this.MinimumSize.Width} -> {widths.MinimumFormWidth}");
-            this.MinimumSize = new Size(widths.MinimumFormWidth, this.MinimumSize.Height);
+            LogService.Info($"[WindowFloorHitIntercept] MinimumSize width audit: {this.MinimumSize.Width} -> {minimumFormWidth}");
+            this.MinimumSize = new Size(minimumFormWidth, this.MinimumSize.Height);
         }
     }
     /// <summary>
@@ -18406,6 +21854,11 @@ private void InitializeBrowserTabControl()
                 ApplyMarkColor(item, fullPath);
             }
         }
+        bool isCompatible = FunctionKeyProfileService.ResolveProfile(CurrentFunctionKeyProfileValue) == FunctionKeyProfile.FDCompatible;
+        var functionColors = GetFunctionBarColors(isCompatible);
+        functionBarPanel.BackColor = functionColors.BackColor;
+        functionBarPanel.Invalidate();
+
         fileListView.Invalidate();
         browserPanel.Invalidate();
     }

@@ -278,6 +278,17 @@ public class InputSettings
     public static void NormalizeAndMigrateFunctionKeyChords(InputSettings settings)
     {
         ArgumentNullException.ThrowIfNull(settings);
+        if (settings.BrowserKeyCommandOverrides != null)
+        {
+            if (settings.BrowserKeyCommandOverrides.TryGetValue("file.copy", out var copyGestures) && copyGestures != null)
+            {
+                copyGestures.RemoveAll(g => string.Equals(NormalizeKeyGestureText(g), "Ctrl+C", StringComparison.OrdinalIgnoreCase));
+            }
+            if (settings.BrowserKeyCommandOverrides.TryGetValue("file.move", out var moveGestures) && moveGestures != null)
+            {
+                moveGestures.RemoveAll(g => string.Equals(NormalizeKeyGestureText(g), "Ctrl+X", StringComparison.OrdinalIgnoreCase));
+            }
+        }
         settings.BrowserKeyCommandOverrides = NormalizeBrowserKeyCommandOverrides(settings.BrowserKeyCommandOverrides);
         settings.FunctionBarCommandOverridesStandard ??= new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
         settings.FunctionBarCommandOverridesFdCompatible ??= new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
@@ -471,7 +482,7 @@ public class InputSettings
             [CommandIds.BrowserNavigateForward] = new[] { "Alt+Right" },
             [CommandIds.BrowserReload] = new[] { "Ctrl+R", "Shift+R" },
             [CommandIds.BrowserMarkAllFiles] = new[] { "Home" },
-            [CommandIds.BrowserMarkAllItems] = new[] { "End" },
+            [CommandIds.BrowserMarkAllItems] = new[] { "End", "Ctrl+A" },
             [CommandIds.BrowserOpenExplorer] = new[] { "A" },
             [CommandIds.BrowserOpenShell] = new[] { "H" },
             [CommandIds.BrowserOpenExternalEditor] = new[] { "E" },
@@ -492,8 +503,8 @@ public class InputSettings
             [CommandIds.BrowserTabCategoryPrevious] = new[] { "Ctrl+Shift+Left" },
             [CommandIds.ArchiveUnpack] = new[] { "U" },
             [CommandIds.AppOpenSettings] = new[] { "O" },
-            ["file.copy"] = new[] { "C", "Ctrl+C" },
-            ["file.move"] = new[] { "M", "Ctrl+X" },
+            ["file.copy"] = new[] { "C" },
+            ["file.move"] = new[] { "M" },
             ["file.rename"] = new[] { "R" },
             ["file.delete"] = new[] { "D", "Delete" },
             [CommandIds.EditUndo] = new[] { "Ctrl+Z", "Alt+Z" },

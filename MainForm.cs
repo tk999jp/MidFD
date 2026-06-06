@@ -7584,12 +7584,7 @@ private void InitializeBrowserTabControl()
             InvertBulkMarks(includeDirectories: true);
             return true;
         }
-        // Ctrl+A: ファイル + ディレクトリを全マーク
-        if (keyData == (Keys.Control | Keys.A))
-        {
-            MarkBulk(includeDirectories: true);
-            return true;
-        }
+
         return false;
     }
     private void ToggleBulkMarks(bool includeDirectories)

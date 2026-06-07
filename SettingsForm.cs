@@ -31,6 +31,7 @@ public class SettingsForm : Form
     private readonly CheckBox _showHiddenFilesCheckBox;
     private readonly CheckBox _showItemIconsCheckBox;
     private readonly CheckBox _useUnderlineCursorCheckBox;
+    private readonly CheckBox _showBrowserToolbarCheckBox;
     private readonly ComboBox _fileDisplayModeCombo;
     private readonly ComboBox _dateFormatCombo;
     private readonly ComboBox _sizeFormatCombo;
@@ -59,8 +60,6 @@ public class SettingsForm : Form
     private readonly CheckBox _restoreWindowBoundsCheckBox;
     private readonly CheckBox _restoreColumnCountCheckBox;
     private readonly CheckBox _restoreSortCheckBox;
-    private readonly ComboBox _functionKeyProfileCombo;
-    private readonly ComboBox _commandLauncherShortcutCombo;
     private readonly CheckBox _enableMouseGesturesCheckBox;
     private readonly CheckBox _enableWorkspaceSnapshotCheckBox;
     private readonly InputAssignmentDialog _embeddedInputAssignmentView;
@@ -227,7 +226,7 @@ public class SettingsForm : Form
         tabDisplay.AutoScroll = false;
         tabColor.AutoScroll = false;
 
-        (_filerFontCombo, _filerFontSizeBox, _showBrowserTabCategoryRowCheckBox, _showExtensionsCheckBox, _showDirectoryMarkerCheckBox, _showHiddenFilesCheckBox, _showItemIconsCheckBox, _useUnderlineCursorCheckBox, _fileDisplayModeCombo, _dateFormatCombo, _sizeFormatCombo,
+        (_filerFontCombo, _filerFontSizeBox, _showBrowserTabCategoryRowCheckBox, _showExtensionsCheckBox, _showDirectoryMarkerCheckBox, _showHiddenFilesCheckBox, _showItemIconsCheckBox, _useUnderlineCursorCheckBox, _showBrowserToolbarCheckBox, _fileDisplayModeCombo, _dateFormatCombo, _sizeFormatCombo,
          _viewerFontCombo, _viewerFontSizeBox, _viewerWordWrapCheckBox, _reuseImageViewerCheckBox, _closeImageViewerOnNonImageCheckBox, _rememberImageViewerBoundsCheckBox)
             = BuildDisplayAndPreviewTab(tabDisplay, fonts, dateFormats, sizeFormats);
 
@@ -252,7 +251,7 @@ public class SettingsForm : Form
         _customViewerForePreview = colorTabResult.CustomViewerForePreview;
 
         (_confirmDeleteCheckBox, _confirmPermanentDeleteCheckBox, _useMidFdManagedTrashCheckBox, _reloadAfterFileOperationCheckBox, _selectCreatedItemCheckBox, _clipboardPasteTextAsFileCheckBox,
-         _functionKeyProfileCombo, _commandLauncherShortcutCombo, _enableMouseGesturesCheckBox, _enableWorkspaceSnapshotCheckBox, _restoreLastPathCheckBox)
+         _enableMouseGesturesCheckBox, _enableWorkspaceSnapshotCheckBox, _restoreLastPathCheckBox)
             = BuildOperationAndInputTab(tabOperation);
 
         _embeddedInputAssignmentView = BuildInputAssignmentTab(tabInputAssignment);
@@ -318,7 +317,7 @@ public class SettingsForm : Form
         };
     }
 
-    private (ComboBox filerFont, NumericUpDown filerSize, CheckBox showBrowserTabCategoryRow, CheckBox showExtensions, CheckBox showDirectoryMarker, CheckBox showHiddenFiles, CheckBox showItemIcons, CheckBox useUnderlineCursor, ComboBox fileDisplayMode, ComboBox dateFormat, ComboBox sizeFormat,
+    private (ComboBox filerFont, NumericUpDown filerSize, CheckBox showBrowserTabCategoryRow, CheckBox showExtensions, CheckBox showDirectoryMarker, CheckBox showHiddenFiles, CheckBox showItemIcons, CheckBox useUnderlineCursor, CheckBox showBrowserToolbar, ComboBox fileDisplayMode, ComboBox dateFormat, ComboBox sizeFormat,
              ComboBox viewerFont, NumericUpDown viewerSize, CheckBox viewerWordWrap, CheckBox reuseImageViewer, CheckBox closeOnNonImage, CheckBox rememberBounds)
         BuildDisplayAndPreviewTab(TabPage tab, string[] fonts, string[] dateFormats, string[] sizeFormats)
     {
@@ -331,7 +330,7 @@ public class SettingsForm : Form
         int topY = 22;
 
         // --- Left: List Display ---
-        var groupList = new GroupBox { Text = "一覧表示", Location = new Point(8, 6), Size = new Size(500, 390) };
+        var groupList = new GroupBox { Text = "一覧表示", Location = new Point(8, 6), Size = new Size(500, 414) };
         tab.Controls.Add(groupList);
 
         int top = topY;
@@ -343,7 +342,8 @@ public class SettingsForm : Form
 
         // チェックボックス群（1列配置）
         int checkY = top;
-        var showBrowserTabCategoryRow = AddCheckBox(groupList, "上段のカテゴリタブを表示する", 16, checkY, _settings.Appearance.ShowBrowserTabCategoryRow);
+        var showBrowserTabCategoryRow = AddCheckBox(groupList, "上段 of category tab to display", 16, checkY, _settings.Appearance.ShowBrowserTabCategoryRow);
+        showBrowserTabCategoryRow.Text = "上段のカテゴリタブを表示する";
         checkY += 24;
         var showHiddenFiles = AddCheckBox(groupList, "隠しファイルを表示する", 16, checkY, _settings.Appearance.ShowHiddenFiles);
         checkY += 24;
@@ -354,7 +354,9 @@ public class SettingsForm : Form
         var showDirectoryMarker = AddCheckBox(groupList, "ディレクトリに <DIR> を表示", 16, checkY, _settings.Appearance.ShowDirectoryMarker);
         checkY += 24;
         var useUnderlineCursor = AddCheckBox(groupList, "カーソル行をアンダーライン表示", 16, checkY, _settings.Appearance.UseUnderlineCursor);
-        top = checkY + 30;
+        checkY += 24;
+        var showBrowserToolbar = AddCheckBox(groupList, "ナビゲーションボタンを表示する", 16, checkY, _settings.Appearance.ShowBrowserToolbar);
+        top = checkY + 28;
 
         AddLabel(groupList, "一覧表示:", top, lblW);
         var fileDisplayMode = AddFileDisplayModeCombo(groupList, inpX, top, 248, _settings.Appearance.ResolveFileDisplayMode());
@@ -435,12 +437,12 @@ public class SettingsForm : Form
         var rememberBounds = AddCheckBox(groupViewer, "ビューアの位置/サイズを記憶する", checkX, top, _settings.Preview.RememberImageViewerBounds);
         groupViewer.Height = rememberBounds.Bottom + 16;
 
-        return (filerFont, filerSize, showBrowserTabCategoryRow, showExtensions, showDirectoryMarker, showHiddenFiles, showItemIcons, useUnderlineCursor, fileDisplayMode, dateFormat, sizeFormat,
+        return (filerFont, filerSize, showBrowserTabCategoryRow, showExtensions, showDirectoryMarker, showHiddenFiles, showItemIcons, useUnderlineCursor, showBrowserToolbar, fileDisplayMode, dateFormat, sizeFormat,
                 viewerFont, viewerSize, viewerWordWrap, reuseImageViewer, closeOnNonImage, rememberBounds);
     }
 
     private (CheckBox confirmDelete, CheckBox confirmPermanentDelete, CheckBox useMidFdManagedTrash, CheckBox reloadAfterFileOperation, CheckBox selectCreatedItem, CheckBox clipboardPasteTextAsFile,
-             ComboBox functionKeyProfile, ComboBox commandLauncherShortcut, CheckBox enableMouseGestures, CheckBox enableWorkspaceSnapshot, CheckBox restoreLastPath)
+             CheckBox enableMouseGestures, CheckBox enableWorkspaceSnapshot, CheckBox restoreLastPath)
         BuildOperationAndInputTab(TabPage tab)
     {
         int rowH = 28;
@@ -504,21 +506,6 @@ public class SettingsForm : Form
         int rightW = 490;
         int rightTop = 6;
 
-        var groupProfile = new GroupBox { Text = "操作プロファイル", Location = new Point(rightX, rightTop), Size = new Size(rightW, 80) };
-        tab.Controls.Add(groupProfile);
-        AddLabel(groupProfile, "既定操作感:", 24, 100);
-        var functionKeyProfile = AddComboBox(groupProfile, 116, 24, 240, new[] { "MidFD標準", "FD/WinFD互換" }, ToFunctionKeyProfileDisplayValue(_settings.Input.FunctionKeyProfile));
-        var profHint = AddWrappedHintLabel(groupProfile, 16, 56, 460, "全体の既定の操作感を選びます。（個別変更は「入力割り当て」タブ）");
-        groupProfile.Height = profHint.Bottom + 12;
-        rightTop = groupProfile.Bottom + 6;
-
-        var groupInputCustom = new GroupBox { Text = "入力カスタマイズ", Location = new Point(rightX, rightTop), Size = new Size(rightW, 80) };
-        tab.Controls.Add(groupInputCustom);
-        var inHint1 = AddWrappedHintLabel(groupInputCustom, 16, 24, 460, "キーやマウスジェスチャーは「入力割り当て」タブで編集します。\n（機能別タブは内部のCommandId正本ビューです）");
-        var inHint2 = AddWrappedHintLabel(groupInputCustom, 16, inHint1.Bottom + 4, 460, "文字キーFとFunctionキーF1〜F12は別導線です。");
-        groupInputCustom.Height = inHint2.Bottom + 12;
-        rightTop = groupInputCustom.Bottom + 6;
-
         var groupAdvanced = new GroupBox { Text = "高度な使い方 / 詳細オプション", Location = new Point(rightX, rightTop), Size = new Size(rightW, 260) };
         tab.Controls.Add(groupAdvanced);
         int advancedTop = 24;
@@ -538,15 +525,7 @@ public class SettingsForm : Form
         var workspaceHint = AddWrappedHintLabel(groupAdvanced, 32, advancedTop + 24, 444, "作業状態の復元と拡張管理導線を有効にします。\n復元内容は「起動・ログ」で調整します。");
         advancedTop = workspaceHint.Bottom + 8;
 
-        var groupAssist = new GroupBox { Text = "補助導線", Location = new Point(rightX, groupAdvanced.Bottom + 6), Size = new Size(rightW, 100) };
-        tab.Controls.Add(groupAssist);
-        AddLabel(groupAssist, "ランチャー起動:", 24, 100);
-        var commandLauncherShortcut = AddComboBox(groupAssist, 116, 24, 240, new[] { "Ctrl+Shift+P", "Ctrl+Space", "None" }, _settings.Input.CommandLauncherShortcut);
-        var assistHint = AddWrappedHintLabel(groupAssist, 16, 56, 460, "コマンドランチャーを起動するショートカットキーを選択します。");
-        var assistHint2 = AddWrappedHintLabel(groupAssist, 16, assistHint.Bottom + 4, 460, "Alt+英数字ランチャーや外部ツール定義は「外部連携」と「入力割り当て」から利用します。");
-        groupAssist.Height = assistHint2.Bottom + 12;
-
-        return (confirmDelete, confirmPermanentDelete, useMidFdManagedTrash, reloadAfterFileOperation, selectCreatedItem, clipboardPasteTextAsFile, functionKeyProfile, commandLauncherShortcut, enableMouseGestures, enableWorkspaceSnapshot, restoreLastPath);
+        return (confirmDelete, confirmPermanentDelete, useMidFdManagedTrash, reloadAfterFileOperation, selectCreatedItem, clipboardPasteTextAsFile, enableMouseGestures, enableWorkspaceSnapshot, restoreLastPath);
     }
 
     private (CheckBox restoreTabsOnStartup, CheckBox restoreWindowBounds, CheckBox restoreColumnCount, CheckBox restoreSort)
@@ -1193,7 +1172,7 @@ public class SettingsForm : Form
 
     private void OpenBrowserKeyBindingSettingsDialog()
     {
-        string profileValue = ToFunctionKeyProfileValue(_functionKeyProfileCombo.Text);
+        string profileValue = _embeddedInputAssignmentView.SelectedProfileValue;
         IReadOnlyDictionary<string, IReadOnlyList<string>> defaults = InputSettings.GetDefaultBrowserKeyCommandMap(profileValue);
         var commands = GetOrderedBrowserKeyBindingCommands();
         var workingOverrides = InputSettings.NormalizeBrowserKeyCommandOverrides(_browserKeyCommandOverridesDraft);
@@ -1365,7 +1344,7 @@ public class SettingsForm : Form
 
     private IReadOnlyList<CommandDefinition> GetOrderedBrowserKeyBindingCommands()
     {
-        string profileValue = ToFunctionKeyProfileValue(_functionKeyProfileCombo.Text);
+        string profileValue = _embeddedInputAssignmentView.SelectedProfileValue;
         IReadOnlyDictionary<string, IReadOnlyList<string>> defaults = InputSettings.GetDefaultBrowserKeyCommandMap(profileValue);
         var overrides = InputSettings.NormalizeBrowserKeyCommandOverrides(_settings.Input?.BrowserKeyCommandOverrides);
         var commands = _commandRegistry
@@ -1627,8 +1606,7 @@ public class SettingsForm : Form
         SyncInputAssignmentDraftFromEmbeddedView();
 
         _settings.Profile = ToFeatureProfileSettingValue(_enableWorkspaceSnapshotCheckBox.Checked);
-        _settings.Input.FunctionKeyProfile = ToFunctionKeyProfileValue(_functionKeyProfileCombo.Text);
-        _settings.Input.CommandLauncherShortcut = _commandLauncherShortcutCombo.Text;
+        _settings.Input.FunctionKeyProfile = _embeddedInputAssignmentView.SelectedProfileValue;
         _settings.Input.EnableMouseGestures = _enableMouseGesturesCheckBox.Checked;
         _settings.Input.MouseGestureCommandMap = InputSettings.NormalizeMouseGestureCommandMap(_mouseGestureCommandMapDraft);
         _settings.Input.BrowserKeyCommandOverrides = InputSettings.NormalizeBrowserKeyCommandOverrides(_browserKeyCommandOverridesDraft);
@@ -1684,6 +1662,7 @@ public class SettingsForm : Form
         _settings.Appearance.CustomViewerBackColor = UiThemeResolver.ToHexString(GetPreviewColor(_customViewerBackPreview, _settings.Appearance.CustomViewerBackColor));
         _settings.Appearance.CustomViewerForeColor = UiThemeResolver.ToHexString(GetPreviewColor(_customViewerForePreview, _settings.Appearance.CustomViewerForeColor));
         _settings.Appearance.ShowBrowserTabCategoryRow = _showBrowserTabCategoryRowCheckBox.Checked;
+        _settings.Appearance.ShowBrowserToolbar = _showBrowserToolbarCheckBox.Checked;
         _settings.Appearance.ShowExtensions = _showExtensionsCheckBox.Checked;
         _settings.Appearance.ShowDirectoryMarker = _showDirectoryMarkerCheckBox.Checked;
         _settings.Appearance.ShowHiddenFiles = _showHiddenFilesCheckBox.Checked;
@@ -1843,7 +1822,7 @@ public class SettingsForm : Form
     {
         var setupSettings = _settings.Clone();
         setupSettings.Profile = ToFeatureProfileSettingValue(_enableWorkspaceSnapshotCheckBox.Checked);
-        setupSettings.Input.FunctionKeyProfile = ToFunctionKeyProfileValue(_functionKeyProfileCombo.Text);
+        setupSettings.Input.FunctionKeyProfile = _embeddedInputAssignmentView.SelectedProfileValue;
         setupSettings.Preview.VideoEnterPlaysExternal = _videoEnterPlaysExternalCheckBox.Checked;
         setupSettings.SevenZip.ExePath = NullIfEmpty(_sevenZipPathBox.Text);
         setupSettings.Preview.VideoToolDirectory = NullIfEmpty(_videoStillPreviewFfmpegPathBox.Text);
@@ -1856,7 +1835,7 @@ public class SettingsForm : Form
         }
 
         _enableWorkspaceSnapshotCheckBox.Checked = dialog.EnableWorkspaceSnapshotFeatures;
-        _functionKeyProfileCombo.Text = dialog.UseFdCompatibleFunctionKeys ? "FD/WinFD互換" : "MidFD標準";
+        _embeddedInputAssignmentView.SelectedProfileValue = dialog.UseFdCompatibleFunctionKeys ? InputSettings.FdCompatibleProfileValue : InputSettings.StandardProfileValue;
         _videoEnterPlaysExternalCheckBox.Checked = dialog.VideoEnterPlaysExternal;
         _enableMouseGesturesCheckBox.Checked = dialog.EnableMouseGestures;
         _showFunctionBarTooltipsCheckBox!.Checked = dialog.ShowFunctionBarTooltips;
@@ -1881,19 +1860,7 @@ public class SettingsForm : Form
         return string.IsNullOrEmpty(t) ? null : t;
     }
 
-    private static string ToFunctionKeyProfileDisplayValue(string? value)
-    {
-        return string.Equals(value, InputSettings.FdCompatibleProfileValue, StringComparison.OrdinalIgnoreCase)
-            ? "FD/WinFD互換"
-            : "MidFD標準";
-    }
 
-    private static string ToFunctionKeyProfileValue(string? displayValue)
-    {
-        return string.Equals(displayValue, "FD/WinFD互換", StringComparison.Ordinal)
-            ? InputSettings.FdCompatibleProfileValue
-            : InputSettings.StandardProfileValue;
-    }
 
     private static (string Text, Color Color, string ToolTipText) GetVideoToolStatus(string pathText)
     {

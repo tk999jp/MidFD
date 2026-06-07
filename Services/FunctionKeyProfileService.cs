@@ -27,7 +27,7 @@ public static class FunctionKeyProfileService
         new() { KeyNumber = 1, Action = FunctionKeyAction.Help, Label = "help" },
         new() { KeyNumber = 2, Action = FunctionKeyAction.Execute, Label = "check" },
         new() { KeyNumber = 3, Action = FunctionKeyAction.Copy, Label = "copy" },
-        new() { KeyNumber = 4, Action = FunctionKeyAction.Edit, Label = "edit" },
+        new() { KeyNumber = 4, Action = FunctionKeyAction.None, Label = "edit" },
         new() { KeyNumber = 5, Action = FunctionKeyAction.Rename, Label = "ren" },
         new() { KeyNumber = 6, Action = FunctionKeyAction.Sort, Label = "sort" },
         new() { KeyNumber = 7, Action = FunctionKeyAction.Filter, Label = "filter" },
@@ -35,7 +35,7 @@ public static class FunctionKeyProfileService
         new() { KeyNumber = 9, Action = FunctionKeyAction.Logdisk, Label = "logd" },
         new() { KeyNumber = 10, Action = FunctionKeyAction.Unpack, Label = "unpk" },
         new() { KeyNumber = 11, Action = FunctionKeyAction.Top, Label = "top" },
-        new() { KeyNumber = 12, Action = FunctionKeyAction.Bottom, Label = "btm" }
+        new() { KeyNumber = 12, Action = FunctionKeyAction.None, Label = "btm" }
     };
 
     public static FunctionKeyProfile ResolveProfile(string? value)
@@ -72,14 +72,19 @@ public static class FunctionKeyProfileService
     {
         return action switch
         {
+            FunctionKeyAction.Help => CommandIds.BrowserShowHelp,
+            FunctionKeyAction.Execute => CommandIds.BrowserExecute,
             FunctionKeyAction.Rename => "file.rename",
             FunctionKeyAction.Copy => "file.copy",
             FunctionKeyAction.Edit => CommandIds.BrowserOpenExternalEditor,
+            FunctionKeyAction.Reload => CommandIds.BrowserReload,
             FunctionKeyAction.Sort => CommandIds.BrowserSort,
             FunctionKeyAction.Filter => CommandIds.BrowserFilter,
             FunctionKeyAction.Tree => CommandIds.BrowserTree,
             FunctionKeyAction.Logdisk => CommandIds.BrowserLogdisk,
             FunctionKeyAction.Unpack => CommandIds.ArchiveUnpack,
+            FunctionKeyAction.QuickAccess => CommandIds.BrowserQuickAccess,
+            FunctionKeyAction.CommandLauncher => CommandIds.AppOpenCommandLauncher,
             FunctionKeyAction.Top => CommandIds.BrowserCursorTop,
             FunctionKeyAction.Bottom => CommandIds.BrowserCursorBottom,
             _ => null
@@ -102,7 +107,7 @@ public static class FunctionKeyProfileService
         bool isAlt = false)
     {
         string slotKey = $"F{slot}";
-        if (isCtrl && isAlt)
+        if ((isCtrl && isAlt) || (isAlt && isShift) || (isCtrl && isShift))
         {
             return null;
         }
@@ -135,13 +140,38 @@ public static class FunctionKeyProfileService
             {
                 return slot switch
                 {
+                    1 => CommandIds.BrowserChangeAttributes,
+                    2 => CommandIds.AppOpenSystemInformation,
+                    3 => "file.move",
+                    4 => "file.delete",
+                    5 => CommandIds.BrowserCreateDirectory,
                     6 => CommandIds.BrowserOpenShell,
+                    7 => CommandIds.BrowserReload,
+                    8 => CommandIds.BrowserOpenExternalEditor,
+                    9 => CommandIds.BrowserPreview,
+                    10 => CommandIds.ArchivePack,
+                    11 => CommandIds.BrowserQuickAccess,
+                    12 => null,
                     _ => null
                 };
             }
 
-            var action = ResolveAction(InputSettings.FdCompatibleProfileValue, slot);
-            return ResolveCommandIdFromAction(action);
+            return slot switch
+            {
+                1 => CommandIds.BrowserShowHelp,
+                2 => CommandIds.BrowserExecute,
+                3 => "file.copy",
+                4 => "file.delete",
+                5 => "file.rename",
+                6 => CommandIds.BrowserSort,
+                7 => CommandIds.BrowserFilter,
+                8 => CommandIds.BrowserTree,
+                9 => CommandIds.BrowserLogdisk,
+                10 => CommandIds.ArchiveUnpack,
+                11 => CommandIds.BrowserCursorTop,
+                12 => CommandIds.BrowserCursorBottom,
+                _ => null
+            };
         }
         else
         {
@@ -223,18 +253,23 @@ public static class FunctionKeyProfileService
             CommandIds.BrowserNavigateParent => "parent",
             CommandIds.BrowserNavigateBack => "back",
             CommandIds.BrowserNavigateForward => "fwd",
+            CommandIds.BrowserExecute => "exec",
             CommandIds.BrowserReload => "rld",
             CommandIds.BrowserCursorTop => "top",
             CommandIds.BrowserCursorBottom => "btm",
             CommandIds.BrowserOpenExplorer => "expl",
             CommandIds.BrowserOpenShell => "psh",
             CommandIds.BrowserOpenExternalEditor => "edit",
+            CommandIds.BrowserChangeAttributes => "attr",
             CommandIds.BrowserSort => "sort",
             CommandIds.BrowserFilter => "filt",
             CommandIds.BrowserTree => "tree",
             CommandIds.BrowserQuickAccess => "qacc",
             CommandIds.BrowserLogdisk => "logd",
             CommandIds.ArchiveUnpack => "unpk",
+            CommandIds.BrowserCreateDirectory => "mkdir",
+            CommandIds.BrowserPreview => "view",
+            CommandIds.ArchivePack => "pack",
             CommandIds.BrowserCopyFullPath => "path",
             CommandIds.BrowserTabNew => "tabn",
             CommandIds.BrowserTabNext => "tab>",
@@ -247,7 +282,7 @@ public static class FunctionKeyProfileService
             "file.copy" => "copy",
             "file.move" => "move",
             "file.rename" => "ren",
-            "file.delete" => "delet",
+            "file.delete" => "del",
             CommandIds.EditUndo => "undo",
             CommandIds.EditRedo => "redo",
             CommandIds.BrowserShowHelp => "help",
@@ -260,6 +295,91 @@ public static class FunctionKeyProfileService
             CommandIds.AppOpenCommandLauncher => "cmd",
             _ => "cmd"
         };
+
+        return InputSettings.NormalizeFunctionBarLabelText(label);
+    }
+
+    public static string ResolveFunctionBarDisplayLabelFromCommandId(
+        FunctionKeyProfile profile,
+        string? commandId)
+    {
+        if (string.IsNullOrWhiteSpace(commandId) ||
+            string.Equals(commandId, InputSettings.MouseGestureUnassignedCommandId, StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(commandId, "none", StringComparison.OrdinalIgnoreCase))
+        {
+            return string.Empty;
+        }
+
+        string label = profile == FunctionKeyProfile.FDCompatible
+            ? commandId switch
+            {
+                CommandIds.BrowserExecute => "exec",
+                CommandIds.BrowserReload => "rld",
+                CommandIds.BrowserQuickAccess => "qacc",
+                CommandIds.BrowserCreateDirectory => "mkdr",
+                "file.rename" => "ren",
+                _ => ResolveFunctionBarShortLabel(commandId)
+            }
+            : commandId switch
+            {
+                "file.rename" => "rena",
+                CommandIds.BrowserReload => "relo",
+                CommandIds.BrowserQuickAccess => "qiqa",
+                CommandIds.BrowserCreateDirectory => "mkdr",
+                _ => ResolveFunctionBarShortLabel(commandId)
+            };
+
+        return InputSettings.NormalizeFunctionBarLabelText(label);
+    }
+
+    public static string ResolveFdCompatibleFunctionBarShortLabel(int slot, bool isShift, bool isCtrl, bool isAlt)
+    {
+        if (isCtrl || (isAlt && isShift) || (isCtrl && isShift) || (isCtrl && isAlt))
+        {
+            return string.Empty;
+        }
+
+        string label = isAlt
+            ? slot switch
+            {
+                1 => "new",
+                2 => "expl",
+                3 => "ctpl",
+                5 => "set",
+                _ => string.Empty
+            }
+            : isShift
+                ? slot switch
+                {
+                    1 => "attr",
+                    2 => "info",
+                    3 => "move",
+                    4 => "del",
+                    5 => "mkdr",
+                    6 => "psh",
+                    7 => "rld",
+                    8 => "edit",
+                    9 => "view",
+                    10 => "pack",
+                    11 => "qacc",
+                    _ => string.Empty
+                }
+                : slot switch
+                {
+                    1 => "help",
+                    2 => "exec",
+                    3 => "copy",
+                    4 => "del",
+                    5 => "ren",
+                    6 => "sort",
+                    7 => "filt",
+                    8 => "tree",
+                    9 => "logd",
+                    10 => "unpk",
+                    11 => "top",
+                    12 => "btm",
+                    _ => string.Empty
+                };
 
         return InputSettings.NormalizeFunctionBarLabelText(label);
     }
@@ -497,8 +617,57 @@ public static class FunctionKeyProfileService
             .Replace("+", "");
     }
 
-    public static string ResolveFunctionBarDisplayLabel(string? commandId, string shortLabel, System.Collections.Generic.Dictionary<string, System.Collections.Generic.List<string>>? overrides, string? profileValue)
+    public static string ResolveFunctionBarDisplayLabel(
+        FunctionKeyProfile profile,
+        int slot,
+        bool isShift,
+        bool isCtrl,
+        bool isAlt,
+        string? commandId,
+        System.Collections.Generic.Dictionary<string, FunctionBarLabelOverride>? labelOverrides)
     {
-        return InputSettings.NormalizeFunctionBarLabelText(shortLabel);
+        if (string.IsNullOrWhiteSpace(commandId) ||
+            string.Equals(commandId, InputSettings.MouseGestureUnassignedCommandId, StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(commandId, "none", StringComparison.OrdinalIgnoreCase))
+        {
+            return string.Empty;
+        }
+
+        string slotKey = $"F{slot}";
+        if (labelOverrides != null &&
+            labelOverrides.TryGetValue(slotKey, out FunctionBarLabelOverride? labelOverride) &&
+            labelOverride != null &&
+            string.Equals(labelOverride.CommandId, commandId, StringComparison.OrdinalIgnoreCase) &&
+            !string.IsNullOrWhiteSpace(labelOverride.Label))
+        {
+            return InputSettings.NormalizeFunctionBarLabelText(labelOverride.Label);
+        }
+
+        return ResolveFunctionBarDisplayLabelFromCommandId(profile, commandId);
+    }
+
+    public static string ResolveFunctionBarDefaultDisplayLabel(FunctionKeyProfile profile, int slot, bool isShiftLayer, bool isCtrlLayer = false, bool isAltLayer = false)
+    {
+        if (isCtrlLayer || (isAltLayer && isShiftLayer) || (isCtrlLayer && isShiftLayer) || (isCtrlLayer && isAltLayer))
+        {
+            return string.Empty;
+        }
+
+        string? commandId = ResolveFunctionBarCommandId(
+            profile,
+            slot,
+            null,
+            null,
+            null,
+            null,
+            isShiftLayer,
+            null,
+            null,
+            null,
+            null,
+            isCtrlLayer,
+            isAltLayer);
+
+        return ResolveFunctionBarDisplayLabelFromCommandId(profile, commandId);
     }
 }

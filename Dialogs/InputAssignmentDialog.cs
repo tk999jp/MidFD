@@ -43,6 +43,19 @@ public sealed class InputAssignmentDialog : Form
 
     public InputSettings ResultSettings => _settingsDraft.Clone();
 
+    public string SelectedProfileValue
+    {
+        get => ResolveProfileValue();
+        set
+        {
+            int index = string.Equals(value, InputSettings.FdCompatibleProfileValue, StringComparison.OrdinalIgnoreCase) ? 1 : 0;
+            if (_profileCombo.SelectedIndex != index)
+            {
+                _profileCombo.SelectedIndex = index;
+            }
+        }
+    }
+
     public InputAssignmentDialog(InputSettings currentSettings, CommandRegistry registry)
     {
         _settingsDraft = currentSettings.Clone();
@@ -76,7 +89,7 @@ public sealed class InputAssignmentDialog : Form
         };
         _profileCombo.Items.Add(new ProfileOption("MidFD標準", InputSettings.StandardProfileValue));
         _profileCombo.Items.Add(new ProfileOption("FD/WinFD互換", InputSettings.FdCompatibleProfileValue));
-        _profileCombo.SelectedIndex = ResolveProfileValue() == InputSettings.FdCompatibleProfileValue ? 1 : 0;
+        _profileCombo.SelectedIndex = string.Equals(_settingsDraft.FunctionKeyProfile, InputSettings.FdCompatibleProfileValue, StringComparison.OrdinalIgnoreCase) ? 1 : 0;
         _profileCombo.SelectedIndexChanged += (_, _) =>
         {
             _settingsDraft.FunctionKeyProfile = ResolveProfileValue();
@@ -445,10 +458,14 @@ public sealed class InputAssignmentDialog : Form
             id.Equals("file.move", StringComparison.OrdinalIgnoreCase) ||
             id.Equals("file.rename", StringComparison.OrdinalIgnoreCase) ||
             id.Equals("file.delete", StringComparison.OrdinalIgnoreCase) ||
+            id.Equals(CommandIds.BrowserExecute, StringComparison.OrdinalIgnoreCase) ||
+            id.Equals(CommandIds.BrowserChangeAttributes, StringComparison.OrdinalIgnoreCase) ||
+            id.Equals(CommandIds.BrowserCreateDirectory, StringComparison.OrdinalIgnoreCase) ||
             id.Equals(CommandIds.BrowserCopyFullPath, StringComparison.OrdinalIgnoreCase) ||
             id.Equals(CommandIds.ClipboardPaste, StringComparison.OrdinalIgnoreCase) ||
             id.Equals(CommandIds.EditUndo, StringComparison.OrdinalIgnoreCase) ||
-            id.Equals(CommandIds.EditRedo, StringComparison.OrdinalIgnoreCase))
+            id.Equals(CommandIds.EditRedo, StringComparison.OrdinalIgnoreCase) ||
+            id.Equals(CommandIds.ArchivePack, StringComparison.OrdinalIgnoreCase))
         {
             return "ファイル操作";
         }
@@ -493,6 +510,7 @@ public sealed class InputAssignmentDialog : Form
             id.Equals(CommandIds.BrowserOpenExternalEditor, StringComparison.OrdinalIgnoreCase) ||
             id.Equals(CommandIds.BrowserQuickAccess, StringComparison.OrdinalIgnoreCase) ||
             id.Equals(CommandIds.BrowserLogdisk, StringComparison.OrdinalIgnoreCase) ||
+            id.Equals(CommandIds.BrowserPreview, StringComparison.OrdinalIgnoreCase) ||
             id.Equals(CommandIds.ArchiveUnpack, StringComparison.OrdinalIgnoreCase))
         {
             return "外部連携";
@@ -535,49 +553,74 @@ public sealed class InputAssignmentDialog : Form
             return 0;
         }
 
-        if (id.Equals("file.move", StringComparison.OrdinalIgnoreCase))
+        if (id.Equals(CommandIds.BrowserExecute, StringComparison.OrdinalIgnoreCase))
         {
             return 1;
         }
 
-        if (id.Equals("file.rename", StringComparison.OrdinalIgnoreCase))
+        if (id.Equals("file.move", StringComparison.OrdinalIgnoreCase))
         {
             return 2;
         }
 
-        if (id.Equals("file.delete", StringComparison.OrdinalIgnoreCase))
+        if (id.Equals("file.rename", StringComparison.OrdinalIgnoreCase))
         {
             return 3;
         }
 
-        if (id.Equals(CommandIds.ClipboardPaste, StringComparison.OrdinalIgnoreCase))
+        if (id.Equals("file.delete", StringComparison.OrdinalIgnoreCase))
         {
-            return 10;
+            return 4;
         }
 
-        if (id.Equals(CommandIds.BrowserCopyFullPath, StringComparison.OrdinalIgnoreCase))
+        if (id.Equals(CommandIds.BrowserChangeAttributes, StringComparison.OrdinalIgnoreCase))
+        {
+            return 5;
+        }
+
+        if (id.Equals(CommandIds.ClipboardPaste, StringComparison.OrdinalIgnoreCase))
         {
             return 20;
         }
 
-        if (id.Equals(CommandIds.BrowserMarkAllFiles, StringComparison.OrdinalIgnoreCase))
-        {
-            return 21;
-        }
-
-        if (id.Equals(CommandIds.BrowserMarkAllItems, StringComparison.OrdinalIgnoreCase))
-        {
-            return 22;
-        }
-
-        if (id.Equals(CommandIds.EditUndo, StringComparison.OrdinalIgnoreCase))
+        if (id.Equals(CommandIds.BrowserCopyFullPath, StringComparison.OrdinalIgnoreCase))
         {
             return 30;
         }
 
+        if (id.Equals(CommandIds.BrowserMarkAllFiles, StringComparison.OrdinalIgnoreCase))
+        {
+            return 40;
+        }
+
+        if (id.Equals(CommandIds.BrowserMarkAllItems, StringComparison.OrdinalIgnoreCase))
+        {
+            return 41;
+        }
+
+        if (id.Equals(CommandIds.EditUndo, StringComparison.OrdinalIgnoreCase))
+        {
+            return 50;
+        }
+
         if (id.Equals(CommandIds.EditRedo, StringComparison.OrdinalIgnoreCase))
         {
-            return 31;
+            return 51;
+        }
+
+        if (id.Equals(CommandIds.BrowserCreateDirectory, StringComparison.OrdinalIgnoreCase))
+        {
+            return 60;
+        }
+
+        if (id.Equals(CommandIds.BrowserPreview, StringComparison.OrdinalIgnoreCase))
+        {
+            return 61;
+        }
+
+        if (id.Equals(CommandIds.ArchivePack, StringComparison.OrdinalIgnoreCase))
+        {
+            return 62;
         }
 
         return 100;
@@ -726,21 +769,22 @@ public sealed class InputAssignmentDialog : Form
             string? activeCommandId = isReserved
                 ? ReservedFunctionSlotCommandId
                 : ResolveFunctionGridActiveCommandId(commandValue, effectiveCommandId);
-            string displayLabel = isReserved
+            string baseDisplayLabel = isReserved
                 ? "Windows標準: 閉じる"
-                : ResolveFunctionBarDisplayLabel(slotKey, activeCommandId, labelOverrides);
+                : ResolveFunctionBarBaseDisplayLabel(profile, slot, layer);
+            string displayLabel = ResolveFunctionBarDisplayLabel(profile, slot, layer, activeCommandId, labelOverrides);
             string normalKeyText = isReserved ? "(なし)" : ResolveFunctionBarNormalKeyText(activeCommandId);
             string descriptionText = isReserved
                 ? "Windows標準の閉じる操作です。"
                 : ResolveFunctionBarDescriptionText(activeCommandId);
-            bool hasLabelOverride = !isReserved && HasFunctionBarLabelOverride(slotKey, activeCommandId, labelOverrides);
+            bool hasLabelOverride = !isReserved && HasFunctionBarLabelOverride(slotKey, activeCommandId, baseDisplayLabel, labelOverrides);
             int row = _functionGrid.Rows.Add(
                 slotDisplay,
                 displayLabel,
                 isReserved ? ReservedFunctionSlotCommandId : commandValue,
                 normalKeyText,
                 descriptionText);
-            _functionGrid.Rows[row].Tag = (slot, layer, hasOverride || hasLabelOverride, isReserved);
+            _functionGrid.Rows[row].Tag = (slot, layer, hasOverride, isReserved);
             DataGridViewCell labelCell = _functionGrid.Rows[row].Cells["Label"];
             labelCell.ReadOnly = !supportsLabelOverride || isReserved;
             if (!supportsLabelOverride || isReserved)
@@ -748,7 +792,7 @@ public sealed class InputAssignmentDialog : Form
                 labelCell.Style.BackColor = Color.FromArgb(240, 244, 248);
                 labelCell.Style.ForeColor = Color.DimGray;
             }
-            else if (hasOverride || hasLabelOverride)
+            else if (hasLabelOverride)
             {
                 labelCell.Style.ForeColor = SystemColors.HotTrack;
             }
@@ -765,15 +809,9 @@ public sealed class InputAssignmentDialog : Form
             }
             else
             {
-                if (hasOverride || hasLabelOverride)
-                {
-                    _functionGrid.Rows[row].DefaultCellStyle.ForeColor = SystemColors.HotTrack;
-                }
-                else
-                {
-                    _functionGrid.Rows[row].DefaultCellStyle.ForeColor = SystemColors.WindowText;
-                }
+                _functionGrid.Rows[row].DefaultCellStyle.ForeColor = SystemColors.WindowText;
             }
+            _functionGrid.Rows[row].Cells["Command"].Style.ForeColor = hasOverride ? SystemColors.HotTrack : SystemColors.WindowText;
         }
 
         if (selectedSlot.HasValue)
@@ -874,6 +912,7 @@ public sealed class InputAssignmentDialog : Form
         string slotKey = $"F{rowTag.Item1}";
         string? activeCommandId = GetFunctionGridActiveCommandIdForRow(rowIndex);
         FunctionLayer layer = rowTag.Item2;
+        FunctionKeyProfile profile = isFdCompatible ? FunctionKeyProfile.FDCompatible : FunctionKeyProfile.Standard;
         Dictionary<string, FunctionBarLabelOverride> labelOverrides = GetFunctionBarLabelOverrideMap(layer, isFdCompatible);
         string input = _functionGrid.Rows[rowIndex].Cells["Label"].Value?.ToString() ?? string.Empty;
 
@@ -897,7 +936,7 @@ public sealed class InputAssignmentDialog : Form
         }
 
         string normalized = InputSettings.NormalizeFunctionBarLabelText(input);
-        string defaultShortLabel = FunctionKeyProfileService.ResolveFunctionBarShortLabel(activeCommandId);
+        string defaultShortLabel = ResolveFunctionBarBaseDisplayLabel(profile, rowTag.Item1, layer);
         if (string.Equals(normalized, defaultShortLabel, StringComparison.OrdinalIgnoreCase))
         {
             labelOverrides.Remove(slotKey);
@@ -934,11 +973,15 @@ public sealed class InputAssignmentDialog : Form
         DataGridViewCell labelCell = row.Cells["Label"];
         bool supportsLabelOverride = true;
         bool hasCommandOverride = GetOverrideMap(layer, isFdCompatible).ContainsKey(slotKey);
-        bool hasLabelOverride = !isReserved && HasFunctionBarLabelOverride(slotKey, activeCommandId, labelOverrides);
-
-        labelCell.Value = isReserved
+        FunctionKeyProfile profile = string.Equals(ResolveProfileValue(), InputSettings.FdCompatibleProfileValue, StringComparison.OrdinalIgnoreCase)
+            ? FunctionKeyProfile.FDCompatible
+            : FunctionKeyProfile.Standard;
+        string baseDisplayLabel = isReserved
             ? "Windows標準: 閉じる"
-            : ResolveFunctionBarDisplayLabel(slotKey, activeCommandId, labelOverrides);
+            : ResolveFunctionBarBaseDisplayLabel(profile, slot, layer);
+        bool hasLabelOverride = !isReserved && HasFunctionBarLabelOverride(slotKey, activeCommandId, baseDisplayLabel, labelOverrides);
+
+        labelCell.Value = ResolveFunctionBarDisplayLabel(profile, slot, layer, activeCommandId, labelOverrides);
         labelCell.ReadOnly = !supportsLabelOverride || isReserved;
         labelCell.ErrorText = string.Empty;
 
@@ -947,7 +990,7 @@ public sealed class InputAssignmentDialog : Form
             labelCell.Style.BackColor = Color.FromArgb(240, 244, 248);
             labelCell.Style.ForeColor = Color.DimGray;
         }
-        else if (hasCommandOverride || hasLabelOverride)
+        else if (hasLabelOverride)
         {
             labelCell.Style.BackColor = Color.White;
             labelCell.Style.ForeColor = SystemColors.HotTrack;
@@ -958,10 +1001,11 @@ public sealed class InputAssignmentDialog : Form
             labelCell.Style.ForeColor = SystemColors.WindowText;
         }
 
-        row.Tag = (slot, layer, hasCommandOverride || hasLabelOverride, isReserved);
-        row.DefaultCellStyle.ForeColor = hasCommandOverride || hasLabelOverride
+        row.Tag = (slot, layer, hasCommandOverride, isReserved);
+        row.DefaultCellStyle.ForeColor = hasLabelOverride
             ? SystemColors.HotTrack
             : SystemColors.WindowText;
+        row.Cells["Command"].Style.ForeColor = hasCommandOverride ? SystemColors.HotTrack : SystemColors.WindowText;
     }
 
     internal static bool ValidateFunctionBarLabel(string input, out string errorMessage)
@@ -1047,37 +1091,53 @@ public sealed class InputAssignmentDialog : Form
         }
     }
 
-    private string ResolveFunctionBarDisplayLabel(string slotKey, string? commandId, Dictionary<string, FunctionBarLabelOverride> labelOverrides)
+    private string ResolveFunctionBarDisplayLabel(
+        FunctionKeyProfile profile,
+        int slot,
+        FunctionLayer layer,
+        string? commandId,
+        Dictionary<string, FunctionBarLabelOverride> labelOverrides)
     {
-        if (string.IsNullOrWhiteSpace(commandId) || string.Equals(commandId, InputSettings.MouseGestureUnassignedCommandId, StringComparison.OrdinalIgnoreCase))
+        if (string.IsNullOrWhiteSpace(commandId) ||
+            string.Equals(commandId, InputSettings.MouseGestureUnassignedCommandId, StringComparison.OrdinalIgnoreCase))
         {
             return "(未割り当て)";
         }
 
-        if (labelOverrides.TryGetValue(slotKey, out FunctionBarLabelOverride? labelOverride) &&
-            labelOverride != null &&
-            string.Equals(labelOverride.CommandId, commandId, StringComparison.OrdinalIgnoreCase) &&
-            !string.IsNullOrWhiteSpace(labelOverride.Label))
+        if (string.Equals(commandId, ReservedFunctionSlotCommandId, StringComparison.OrdinalIgnoreCase))
         {
-            return InputSettings.NormalizeFunctionBarLabelText(labelOverride.Label);
+            return "Windows標準: 閉じる";
         }
 
-        if (_commandById.ContainsKey(commandId))
-        {
-            return FunctionKeyProfileService.ResolveFunctionBarShortLabel(commandId);
-        }
-
-        return commandId;
+        return FunctionKeyProfileService.ResolveFunctionBarDisplayLabel(
+            profile,
+            slot,
+            layer == FunctionLayer.Shift,
+            layer == FunctionLayer.Ctrl,
+            layer == FunctionLayer.Alt,
+            commandId,
+            labelOverrides);
     }
 
-    private static bool HasFunctionBarLabelOverride(string slotKey, string? commandId, Dictionary<string, FunctionBarLabelOverride> labelOverrides)
+    private string ResolveFunctionBarBaseDisplayLabel(FunctionKeyProfile profile, int slot, FunctionLayer layer)
+    {
+        return FunctionKeyProfileService.ResolveFunctionBarDefaultDisplayLabel(
+            profile,
+            slot,
+            layer == FunctionLayer.Shift,
+            layer == FunctionLayer.Ctrl,
+            layer == FunctionLayer.Alt);
+    }
+
+    private static bool HasFunctionBarLabelOverride(string slotKey, string? commandId, string baseDisplayLabel, Dictionary<string, FunctionBarLabelOverride> labelOverrides)
     {
         return !string.IsNullOrWhiteSpace(commandId) &&
                !string.Equals(commandId, InputSettings.MouseGestureUnassignedCommandId, StringComparison.OrdinalIgnoreCase) &&
                labelOverrides.TryGetValue(slotKey, out FunctionBarLabelOverride? labelOverride) &&
                labelOverride != null &&
                string.Equals(labelOverride.CommandId, commandId, StringComparison.OrdinalIgnoreCase) &&
-               !string.IsNullOrWhiteSpace(labelOverride.Label);
+               !string.IsNullOrWhiteSpace(labelOverride.Label) &&
+               !string.Equals(InputSettings.NormalizeFunctionBarLabelText(labelOverride.Label), InputSettings.NormalizeFunctionBarLabelText(baseDisplayLabel), StringComparison.OrdinalIgnoreCase);
     }
 
     private string ResolveFunctionBarNormalKeyText(string? commandId)
@@ -2463,32 +2523,32 @@ public sealed class InputAssignmentDialog : Form
         }
         _settingsDraft.BrowserKeyCommandOverrides.Remove(commandId);
         ResetFunctionAssignmentForCommand(commandId);
+        ResetFunctionLabelOverridesForCommand(commandId);
         ResetGestureAssignmentForCommand(commandId);
         RefreshAllViews();
     }
 
     private void ResetSelectedFunctionSlot()
     {
-        if (_functionGrid.CurrentRow == null || _functionGrid.CurrentCell == null)
+        if (_functionGrid.CurrentRow == null)
         {
             return;
         }
-        if (_functionGrid.CurrentRow.Tag is ValueTuple<int, FunctionLayer, bool, bool> rowTag && rowTag.Item4)
-        {
-            return;
-        }
-
-        if (_functionGrid.CurrentCell.ColumnIndex != 2)
+        if (_functionGrid.CurrentRow.Tag is not ValueTuple<int, FunctionLayer, bool, bool> rowTag || rowTag.Item4)
         {
             return;
         }
 
-        FunctionLayer layer = GetSelectedFunctionLayer();
+        FunctionLayer layer = rowTag.Item2;
         bool isFdCompatible = string.Equals(ResolveProfileValue(), InputSettings.FdCompatibleProfileValue, StringComparison.OrdinalIgnoreCase);
-        string slotKey = $"F{_functionGrid.CurrentRow.Index + 1}";
-        Dictionary<string, string?> map = GetOverrideMap(layer, isFdCompatible);
-        map.Remove(slotKey);
-        SetOverrideMap(layer, isFdCompatible, map);
+        int slot = rowTag.Item1;
+        string slotKey = $"F{slot}";
+        Dictionary<string, string?> commandMap = GetOverrideMap(layer, isFdCompatible);
+        commandMap.Remove(slotKey);
+        SetOverrideMap(layer, isFdCompatible, commandMap);
+        Dictionary<string, FunctionBarLabelOverride> labelMap = GetFunctionBarLabelOverrideMap(layer, isFdCompatible);
+        labelMap.Remove(slotKey);
+        SetFunctionBarLabelOverrideMap(layer, isFdCompatible, labelMap);
         RefreshAllViews();
     }
 
@@ -2525,6 +2585,14 @@ public sealed class InputAssignmentDialog : Form
             _settingsDraft.FunctionBarCommandOverridesCtrlFdCompatible.Clear();
             _settingsDraft.FunctionBarCommandOverridesAltStandard.Clear();
             _settingsDraft.FunctionBarCommandOverridesAltFdCompatible.Clear();
+            _settingsDraft.FunctionBarLabelOverridesStandard.Clear();
+            _settingsDraft.FunctionBarLabelOverridesFdCompatible.Clear();
+            _settingsDraft.FunctionBarLabelOverridesShiftStandard.Clear();
+            _settingsDraft.FunctionBarLabelOverridesShiftFdCompatible.Clear();
+            _settingsDraft.FunctionBarLabelOverridesCtrlStandard.Clear();
+            _settingsDraft.FunctionBarLabelOverridesCtrlFdCompatible.Clear();
+            _settingsDraft.FunctionBarLabelOverridesAltStandard.Clear();
+            _settingsDraft.FunctionBarLabelOverridesAltFdCompatible.Clear();
             RefreshAllViews();
             return;
         }
@@ -2545,6 +2613,14 @@ public sealed class InputAssignmentDialog : Form
         _settingsDraft.FunctionBarCommandOverridesCtrlFdCompatible.Clear();
         _settingsDraft.FunctionBarCommandOverridesAltStandard.Clear();
         _settingsDraft.FunctionBarCommandOverridesAltFdCompatible.Clear();
+        _settingsDraft.FunctionBarLabelOverridesStandard.Clear();
+        _settingsDraft.FunctionBarLabelOverridesFdCompatible.Clear();
+        _settingsDraft.FunctionBarLabelOverridesShiftStandard.Clear();
+        _settingsDraft.FunctionBarLabelOverridesShiftFdCompatible.Clear();
+        _settingsDraft.FunctionBarLabelOverridesCtrlStandard.Clear();
+        _settingsDraft.FunctionBarLabelOverridesCtrlFdCompatible.Clear();
+        _settingsDraft.FunctionBarLabelOverridesAltStandard.Clear();
+        _settingsDraft.FunctionBarLabelOverridesAltFdCompatible.Clear();
         _settingsDraft.MouseGestureCommandMap = new Dictionary<string, string>(InputSettings.DefaultMouseGestureCommandMap, StringComparer.OrdinalIgnoreCase);
         RefreshAllViews();
     }
@@ -2564,6 +2640,27 @@ public sealed class InputAssignmentDialog : Form
                  })
         {
             foreach (string key in map.Where(x => string.Equals(x.Value, commandId, StringComparison.OrdinalIgnoreCase)).Select(x => x.Key).ToArray())
+            {
+                map.Remove(key);
+            }
+        }
+    }
+
+    private void ResetFunctionLabelOverridesForCommand(string commandId)
+    {
+        foreach (Dictionary<string, FunctionBarLabelOverride> map in new[]
+                 {
+                     _settingsDraft.FunctionBarLabelOverridesStandard,
+                     _settingsDraft.FunctionBarLabelOverridesFdCompatible,
+                     _settingsDraft.FunctionBarLabelOverridesShiftStandard,
+                     _settingsDraft.FunctionBarLabelOverridesShiftFdCompatible,
+                     _settingsDraft.FunctionBarLabelOverridesCtrlStandard,
+                     _settingsDraft.FunctionBarLabelOverridesCtrlFdCompatible,
+                     _settingsDraft.FunctionBarLabelOverridesAltStandard,
+                     _settingsDraft.FunctionBarLabelOverridesAltFdCompatible
+                 })
+        {
+            foreach (string key in map.Where(x => string.Equals(x.Value.CommandId, commandId, StringComparison.OrdinalIgnoreCase)).Select(x => x.Key).ToArray())
             {
                 map.Remove(key);
             }

@@ -239,11 +239,32 @@ internal sealed class CommandStateCoordinator
 
         switch (commandId)
         {
+            case CommandIds.BrowserExecute:
+                return snapshot.SelectionKind == BrowserSelectionKind.File ||
+                       snapshot.SelectionKind == BrowserSelectionKind.ArchiveCandidate;
+
+            case CommandIds.BrowserChangeAttributes:
+                return snapshot.SelectionKind == BrowserSelectionKind.Directory ||
+                       snapshot.SelectionKind == BrowserSelectionKind.File ||
+                       snapshot.SelectionKind == BrowserSelectionKind.ArchiveCandidate;
+
+            case CommandIds.BrowserCreateDirectory:
+                return true;
+
             case "file.rename":
             case "file.copy":
             case "file.move":
             case "file.delete":
             case CommandIds.BrowserCopyFullPath:
+                return snapshot.SelectionKind == BrowserSelectionKind.Directory ||
+                       snapshot.SelectionKind == BrowserSelectionKind.File ||
+                       snapshot.SelectionKind == BrowserSelectionKind.ArchiveCandidate;
+
+            case CommandIds.BrowserPreview:
+                return snapshot.SelectionKind == BrowserSelectionKind.File ||
+                       snapshot.SelectionKind == BrowserSelectionKind.ArchiveCandidate;
+
+            case CommandIds.ArchivePack:
                 return snapshot.SelectionKind == BrowserSelectionKind.Directory ||
                        snapshot.SelectionKind == BrowserSelectionKind.File ||
                        snapshot.SelectionKind == BrowserSelectionKind.ArchiveCandidate;

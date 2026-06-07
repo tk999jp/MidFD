@@ -90,6 +90,7 @@ public static class QuickAccessService
         QuickAccessEntry? existingEntry,
         string displayName,
         string path,
+        string? categoryName,
         bool useAlias,
         string? currentPath,
         out string normalizedPath,
@@ -130,6 +131,7 @@ public static class QuickAccessService
 
         QuickAccessEntryKind targetKind = useAlias ? QuickAccessEntryKind.Alias : QuickAccessEntryKind.Bookmark;
         string targetDisplayName = resolvedDisplayName;
+        string? targetCategoryName = NormalizeCategoryName(categoryName);
 
         if (target == null)
         {
@@ -137,7 +139,8 @@ public static class QuickAccessService
             {
                 Kind = targetKind,
                 Path = normalized,
-                DisplayName = targetDisplayName
+                DisplayName = targetDisplayName,
+                CategoryName = targetCategoryName
             };
 
             if (targetKind == QuickAccessEntryKind.Alias)
@@ -168,7 +171,8 @@ public static class QuickAccessService
                 {
                     Kind = targetKind,
                     Path = normalized,
-                    DisplayName = targetDisplayName
+                    DisplayName = targetDisplayName,
+                    CategoryName = targetCategoryName
                 };
 
                 if (targetKind == QuickAccessEntryKind.Alias)
@@ -184,6 +188,7 @@ public static class QuickAccessService
             {
                 target.Path = normalized;
                 target.DisplayName = targetDisplayName;
+                target.CategoryName = targetCategoryName;
             }
 
             message = targetKind == QuickAccessEntryKind.Alias
@@ -320,6 +325,7 @@ public static class QuickAccessService
             entry,
             displayName,
             path,
+            entry.CategoryName,
             entry.Kind == QuickAccessEntryKind.Alias,
             currentPath,
             out normalizedPath,
@@ -396,6 +402,32 @@ public static class QuickAccessService
             .ToList();
     }
 
+    public static IReadOnlyList<string> GetKnownCategoryNames(QuickAccessStore? store)
+    {
+        if (store == null)
+        {
+            return Array.Empty<string>();
+        }
+
+        var categories = new List<string>();
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (QuickAccessEntry entry in store.Bookmarks.Concat(store.Aliases).Concat(store.Commands))
+        {
+            string? category = NormalizeCategoryName(entry.CategoryName);
+            if (string.IsNullOrWhiteSpace(category))
+            {
+                continue;
+            }
+
+            if (seen.Add(category))
+            {
+                categories.Add(category);
+            }
+        }
+
+        return categories;
+    }
+
     public static string? FindAliasDisplayName(QuickAccessStore? store, string? path)
     {
         string? normalized = NormalizePath(path, null);
@@ -444,10 +476,17 @@ public static class QuickAccessService
         return source
             .Where(entry =>
                 entry.DisplayName.Contains(trimmed, StringComparison.OrdinalIgnoreCase) ||
+                GetEntryCategoryLabel(entry).Contains(trimmed, StringComparison.OrdinalIgnoreCase) ||
                 GetEntryValueLabel(entry).Contains(trimmed, StringComparison.OrdinalIgnoreCase) ||
                 GetEntryKindLabel(entry).Contains(trimmed, StringComparison.OrdinalIgnoreCase) ||
                 GetEntryStatusLabel(entry, (string?)null).Contains(trimmed, StringComparison.OrdinalIgnoreCase))
             .ToList();
+    }
+
+    public static string GetEntryCategoryLabel(QuickAccessEntry entry)
+    {
+        string? category = NormalizeCategoryName(entry.CategoryName);
+        return string.IsNullOrWhiteSpace(category) ? "未分類" : category;
     }
 
     public static string GetEntryKindLabel(QuickAccessEntry entry)
@@ -489,6 +528,7 @@ public static class QuickAccessService
         }
 
         return $"表示名: {entry.DisplayName}\r\n" +
+               $"カテゴリ: {GetEntryCategoryLabel(entry)}\r\n" +
                $"移動先: {GetEntryValueLabel(entry)}\r\n" +
                $"区分: {GetEntryKindLabel(entry)}\r\n" +
                $"状態: {GetEntryStatusLabel(entry, currentPath)}";
@@ -831,6 +871,7 @@ public static class QuickAccessService
             Kind = expectedKind,
             Path = path,
             DisplayName = displayName,
+            CategoryName = NormalizeCategoryName(entry.CategoryName),
             ExecutablePath = expectedKind == QuickAccessEntryKind.ExternalCommand
                 ? path
                 : (entry.ExecutablePath ?? string.Empty),
@@ -889,11 +930,23 @@ public static class QuickAccessService
             Kind = entry.Kind,
             Path = entry.Path,
             DisplayName = entry.DisplayName,
+            CategoryName = entry.CategoryName,
             ExecutablePath = entry.ExecutablePath,
             Arguments = entry.Arguments,
             WorkingDirectoryMode = entry.WorkingDirectoryMode,
             TargetMode = entry.TargetMode
         };
+    }
+
+    public static string? NormalizeCategoryName(string? categoryName)
+    {
+        if (string.IsNullOrWhiteSpace(categoryName))
+        {
+            return null;
+        }
+
+        string trimmed = categoryName.Trim();
+        return string.IsNullOrWhiteSpace(trimmed) ? null : trimmed;
     }
 
     private static string GetParentLabel(string path)

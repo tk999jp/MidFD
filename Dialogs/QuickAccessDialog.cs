@@ -492,10 +492,12 @@ public class QuickAccessDialog : Form
         QuickAccessEntry? seedEntry = GetSelectedEntry();
         string initialPath = _currentPath;
         string initialDisplayName = QuickAccessService.CreateDisplayName(_currentPath);
+        string? initialCategoryName = null;
         if (_tabControl.SelectedIndex != 0 && seedEntry != null && !string.IsNullOrWhiteSpace(seedEntry.Path))
         {
             initialPath = seedEntry.Path;
             initialDisplayName = QuickAccessService.CreateDisplayName(seedEntry.Path);
+            initialCategoryName = seedEntry.CategoryName;
         }
 
         QuickAccessLocationDialogResult? dialogResult = QuickAccessLocationDialog.ShowEditor(
@@ -504,6 +506,8 @@ public class QuickAccessDialog : Form
             _currentPath,
             initialPath,
             initialDisplayName,
+            initialCategoryName,
+            QuickAccessService.GetKnownCategoryNames(_workingStore),
             initialUseForTabTitle: false);
         if (dialogResult == null)
         {
@@ -515,6 +519,7 @@ public class QuickAccessDialog : Form
             null,
             dialogResult.DisplayName,
             dialogResult.Path,
+            dialogResult.CategoryName,
             dialogResult.UseForTabTitle,
             _currentPath,
             out string normalizedPath,
@@ -550,6 +555,8 @@ public class QuickAccessDialog : Form
             _currentPath,
             entry.Path,
             entry.DisplayName,
+            entry.CategoryName,
+            QuickAccessService.GetKnownCategoryNames(_workingStore),
             initialUseForTabTitle: entry.Kind == QuickAccessEntryKind.Alias);
         if (dialogResult == null)
         {
@@ -561,6 +568,7 @@ public class QuickAccessDialog : Form
             entry,
             dialogResult.DisplayName,
             dialogResult.Path,
+            dialogResult.CategoryName,
             dialogResult.UseForTabTitle,
             _currentPath,
             out string normalizedPath,

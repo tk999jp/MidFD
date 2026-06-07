@@ -37,6 +37,7 @@ public sealed class QuickAccessCommandContext
 public class QuickAccessEntry
 {
     public string DisplayName { get; set; } = string.Empty;
+    public string? CategoryName { get; set; }
     public string Path { get; set; } = string.Empty;
     public QuickAccessEntryKind Kind { get; set; }
     public string ExecutablePath { get; set; } = string.Empty;
@@ -49,6 +50,7 @@ public class QuickAccessEntry
         return new QuickAccessEntry
         {
             DisplayName = DisplayName,
+            CategoryName = CategoryName,
             Path = Path,
             Kind = Kind,
             ExecutablePath = ExecutablePath,

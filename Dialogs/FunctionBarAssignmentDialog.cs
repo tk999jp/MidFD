@@ -377,23 +377,30 @@ public sealed class FunctionBarAssignmentDialog : Form
                     null,
                     isShift);
 
-                string defaultActionLabel = isFdCompatible
-                    ? GetActionShortLabel(defaultAction)
-                    : ResolveStandardDefaultActionLabel(slot, defaultCmdId);
+                string defaultActionLabel = !string.IsNullOrEmpty(defaultCmdId)
+                    ? (isFdCompatible
+                        ? FunctionKeyProfileService.ResolveFdCompatibleFunctionBarShortLabel(slot, isShift, false, false)
+                        : FunctionKeyProfileService.ResolveFunctionBarShortLabel(defaultCmdId))
+                    : (isFdCompatible ? "(未割り当て)" : ResolveStandardDefaultActionLabel(slot, defaultCmdId));
 
                 string displayName;
                 string normalKeyText = string.Empty;
                 string functionName = "(未割り当て)";
                 string descriptionText = "このスロットには機能が割り当てられていません。";
-                bool isModified = !string.IsNullOrEmpty(assignedCmdId);
+                string defaultDisplayName = GetDefaultDisplayNameForSlot(slot, isFdCompatible, isShift, defaultCmdId);
+                string baseDisplayName;
 
                 if (string.IsNullOrEmpty(assignedCmdId))
                 {
-                    displayName = defaultActionLabel;
+                    displayName = defaultDisplayName;
                     normalKeyText = FunctionKeyProfileService.ResolveFunctionBarKeyHint(
                         defaultCmdId,
                         _settingsDraft.BrowserKeyCommandOverrides,
                         isFdCompatible ? InputSettings.FdCompatibleProfileValue : InputSettings.StandardProfileValue);
+                    if (string.IsNullOrEmpty(normalKeyText))
+                    {
+                        normalKeyText = "(なし)";
+                    }
                 }
                 else if (string.Equals(assignedCmdId, "none", StringComparison.OrdinalIgnoreCase))
                 {
@@ -409,7 +416,7 @@ public sealed class FunctionBarAssignmentDialog : Form
                     var def = _registry.Find(assignedCmdId);
                     if (def != null)
                     {
-                        displayName = FunctionKeyProfileService.ResolveFunctionBarShortLabel(assignedCmdId);
+                        displayName = defaultDisplayName;
                         functionName = def.DisplayName;
                         descriptionText = def.Description;
                     }
@@ -420,6 +427,8 @@ public sealed class FunctionBarAssignmentDialog : Form
                         descriptionText = $"未登録のコマンドID: {assignedCmdId}";
                     }
                 }
+
+                baseDisplayName = displayName;
 
                 // Custom ShortLabel Override の適用
                 string? activeCmdId = assignedCmdId;
@@ -438,8 +447,16 @@ public sealed class FunctionBarAssignmentDialog : Form
                     {
                         if (string.Equals(labelOverride.CommandId, activeCmdId, StringComparison.OrdinalIgnoreCase) && !string.IsNullOrWhiteSpace(labelOverride.Label))
                         {
-                            displayName = InputSettings.NormalizeFunctionBarLabelText(labelOverride.Label);
-                            isModified = true;
+                            string normalizedLabel = InputSettings.NormalizeFunctionBarLabelText(labelOverride.Label);
+                            string normalizedBaseDisplayName = InputSettings.NormalizeFunctionBarLabelText(baseDisplayName);
+                            if (string.Equals(normalizedLabel, normalizedBaseDisplayName, StringComparison.OrdinalIgnoreCase))
+                            {
+                                RemoveLabelOverride(slot);
+                            }
+                            else
+                            {
+                                displayName = normalizedLabel;
+                            }
                         }
                     }
 
@@ -466,14 +483,10 @@ public sealed class FunctionBarAssignmentDialog : Form
                 row.Cells["NormalKey"].Value = normalKeyText;
                 row.Cells["Description"].Value = descriptionText;
 
-                if (isModified)
-                {
-                    row.DefaultCellStyle.ForeColor = SystemColors.HotTrack;
-                }
-                else
-                {
-                    row.DefaultCellStyle.ForeColor = SystemColors.WindowText;
-                }
+                var labelCell = row.Cells["Label"];
+                labelCell.Style.ForeColor = string.Equals(displayName, baseDisplayName, StringComparison.OrdinalIgnoreCase)
+                    ? SystemColors.WindowText
+                    : SystemColors.HotTrack;
             }
         }
         finally
@@ -554,7 +567,6 @@ public sealed class FunctionBarAssignmentDialog : Form
         bool isFdCompatible = _profileCombo.SelectedIndex == 1;
         bool isShift = IsShiftLayerSelected();
         string slotKey = $"F{slot}";
-
         var labelOverrides = isShift
             ? (isFdCompatible ? _settingsDraft.FunctionBarLabelOverridesShiftFdCompatible : _settingsDraft.FunctionBarLabelOverridesShiftStandard)
             : (isFdCompatible ? _settingsDraft.FunctionBarLabelOverridesFdCompatible : _settingsDraft.FunctionBarLabelOverridesStandard);
@@ -635,7 +647,15 @@ public sealed class FunctionBarAssignmentDialog : Form
                 return;
             }
 
-            SetLabelOverride(slot, activeCmdId, input);
+            string baseDisplayName = ResolveBaseDisplayNameForSlot(slot, assignedCmdId, defaultCmdId);
+            if (string.Equals(InputSettings.NormalizeFunctionBarLabelText(input), InputSettings.NormalizeFunctionBarLabelText(baseDisplayName), StringComparison.OrdinalIgnoreCase))
+            {
+                RemoveLabelOverride(slot);
+            }
+            else
+            {
+                SetLabelOverride(slot, activeCmdId, input);
+            }
             RefreshListView();
         }
         else if (e.ColumnIndex == 2) // 機能名列
@@ -798,20 +818,52 @@ public sealed class FunctionBarAssignmentDialog : Form
         return action switch
         {
             FunctionKeyAction.Help => "help",
-            FunctionKeyAction.Execute => "eXec",
-            FunctionKeyAction.Copy => "Copy",
-            FunctionKeyAction.Edit => "Edit",
-            FunctionKeyAction.Rename => "Renam",
-            FunctionKeyAction.Sort => "Sort",
-            FunctionKeyAction.Filter => "Filter",
-            FunctionKeyAction.Tree => "Tree",
-            FunctionKeyAction.Logdisk => "Logds",
-            FunctionKeyAction.Unpack => "Unpac",
+            FunctionKeyAction.Execute => "exec",
+            FunctionKeyAction.Copy => "copy",
+            FunctionKeyAction.Edit => "edit",
+            FunctionKeyAction.Rename => "ren",
+            FunctionKeyAction.Sort => "sort",
+            FunctionKeyAction.Filter => "find",
+            FunctionKeyAction.Tree => "tree",
+            FunctionKeyAction.Logdisk => "logd",
+            FunctionKeyAction.Unpack => "unpk",
             FunctionKeyAction.Top => "top",
-            FunctionKeyAction.Bottom => "botto",
+            FunctionKeyAction.Bottom => "btm",
             FunctionKeyAction.Menu => "menu",
             _ => "none"
         };
+    }
+
+    private string GetDefaultDisplayNameForSlot(int slot, bool isFdCompatible, bool isShift, string? defaultCmdId)
+    {
+        return FunctionKeyProfileService.ResolveFunctionBarDefaultDisplayLabel(
+            isFdCompatible ? FunctionKeyProfile.FDCompatible : FunctionKeyProfile.Standard,
+            slot,
+            isShift);
+    }
+
+    private string ResolveBaseDisplayNameForSlot(int slot, string? assignedCmdId, string? defaultCmdId)
+    {
+        bool isFdCompatible = _profileCombo.SelectedIndex == 1;
+        bool isShift = IsShiftLayerSelected();
+
+        if (string.IsNullOrEmpty(assignedCmdId))
+        {
+            return GetDefaultDisplayNameForSlot(slot, isFdCompatible, isShift, defaultCmdId);
+        }
+
+        if (string.Equals(assignedCmdId, "none", StringComparison.OrdinalIgnoreCase))
+        {
+            return "(未割り当て)";
+        }
+
+        var def = _registry.Find(assignedCmdId);
+        if (def != null)
+        {
+            return GetDefaultDisplayNameForSlot(slot, isFdCompatible, isShift, defaultCmdId);
+        }
+
+        return "不明";
     }
 
     private string GetActionJapaneseDescription(FunctionKeyAction action)
@@ -928,9 +980,7 @@ public sealed class FunctionBarAssignmentDialog : Form
             isFdCompatible ? InputSettings.FdCompatibleProfileValue : InputSettings.StandardProfileValue,
             slot);
 
-        string defaultActionLabel = isFdCompatible
-            ? GetActionShortLabel(defaultAction)
-            : ResolveStandardDefaultActionLabel(slot, defaultCmdId);
+        string defaultActionLabel = GetDefaultDisplayNameForSlot(slot, isFdCompatible, isShift, defaultCmdId);
 
         string? labelOverrideVal = null;
         if (!string.IsNullOrEmpty(activeCmdId) && !string.Equals(activeCmdId, "none", StringComparison.OrdinalIgnoreCase))
@@ -951,13 +1001,17 @@ public sealed class FunctionBarAssignmentDialog : Form
         string cmdDesc = "何も実行しません。";
         if (string.IsNullOrEmpty(assignedCmdId))
         {
-            cmdDisplayName = isFdCompatible ? defaultActionLabel : ResolveStandardDefaultActionLabel(slot, defaultCmdId);
+            cmdDisplayName = string.IsNullOrEmpty(defaultCmdId)
+                ? (isFdCompatible ? "(未割り当て)" : ResolveStandardDefaultActionLabel(slot, defaultCmdId))
+                : defaultActionLabel;
             var defaultCmdDef = !string.IsNullOrEmpty(defaultCmdId) ? _registry.Find(defaultCmdId) : null;
             if (defaultCmdDef != null)
             {
                 cmdDisplayName = defaultCmdDef.DisplayName;
             }
-            cmdDesc = isFdCompatible ? GetActionJapaneseDescription(defaultAction) : ResolveStandardDefaultActionDescription(slot, defaultCmdId);
+            cmdDesc = defaultCmdDef != null
+                ? defaultCmdDef.Description
+                : (isFdCompatible ? GetActionJapaneseDescription(defaultAction) : ResolveStandardDefaultActionDescription(slot, defaultCmdId));
         }
         else if (string.Equals(assignedCmdId, "none", StringComparison.OrdinalIgnoreCase))
         {
@@ -991,7 +1045,7 @@ public sealed class FunctionBarAssignmentDialog : Form
         }
         else
         {
-            defaultCmdName = isFdCompatible ? GetActionJapaneseDescription(defaultAction) : GetStandardActionJapaneseDescription(slot);
+            defaultCmdName = isFdCompatible ? "(未割り当て)" : GetStandardActionJapaneseDescription(slot);
         }
 
         string normalKeyText = string.Empty;
@@ -1009,7 +1063,7 @@ public sealed class FunctionBarAssignmentDialog : Form
 
         var sb = new System.Text.StringBuilder();
         sb.AppendLine($"【対象キー】 {displaySlotKey} ({(isFdCompatible ? "FD/WinFD互換" : "MidFD標準")} / {(isShift ? "Shiftレイヤー" : "通常レイヤー")})");
-        sb.AppendLine($"【表示名】 {(labelOverrideVal ?? displayNameOrFallback(activeCmdId, defaultActionLabel))}   [既定: {defaultActionLabel}]");
+        sb.AppendLine($"【表示名】 {(labelOverrideVal ?? displayNameOrFallback(activeCmdId, defaultActionLabel, slot, isShift, isFdCompatible))}   [既定: {defaultActionLabel}]");
         sb.AppendLine($"【機能名】 {cmdDisplayName}   [既定: {defaultCmdName}]");
         sb.AppendLine($"【通常キー】 {normalKeyText}");
         if (!string.IsNullOrEmpty(activeCmdId) && !string.Equals(activeCmdId, "none", StringComparison.OrdinalIgnoreCase))
@@ -1024,16 +1078,11 @@ public sealed class FunctionBarAssignmentDialog : Form
         _detailsBox.Text = sb.ToString();
     }
 
-    private string displayNameOrFallback(string? activeCmdId, string fallback)
+    private string displayNameOrFallback(string? activeCmdId, string fallback, int slot, bool isShift, bool isFdCompatible)
     {
         if (string.IsNullOrEmpty(activeCmdId) || string.Equals(activeCmdId, "none", StringComparison.OrdinalIgnoreCase))
         {
             return fallback;
-        }
-        var def = _registry.Find(activeCmdId);
-        if (def != null)
-        {
-            return FunctionKeyProfileService.ResolveFunctionBarShortLabel(activeCmdId);
         }
         return fallback;
     }

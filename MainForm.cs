@@ -242,6 +242,11 @@ public partial class MainForm : Form
             4;
     }
     private static readonly HashSet<char> ReservedExternalToolAltSlots = new() { 'F', 'V', 'G', 'T', 'H' };
+    private ToolStripButton? _btnMenuBack;
+    private ToolStripButton? _btnMenuForward;
+    private ToolStripButton? _btnMenuUp;
+    private ToolStripButton? _btnMenuReload;
+    private ToolStripItem? _menuNavSeparator;
     private QuickAccessStore _quickAccessStore;
     private readonly MarkSlotStore _markSlotStore;
     private bool _isAltHintHeld;
@@ -338,6 +343,8 @@ public partial class MainForm : Form
     private int _fKeyToolTipIndex = -1;
     private ContextMenuStrip? _headerPathContextMenu;
     private ContextMenuStrip? _headerItemContextMenu;
+    private ContextMenuStrip? _browserItemContextMenu;
+    private ContextMenuStrip? _browserBlankContextMenu;
     private readonly CommandRegistry _commandRegistry = new();
     private readonly CommandDispatcher _commandDispatcher;
     public MainForm(string? startupProfileOverride = null)
@@ -397,13 +404,6 @@ public partial class MainForm : Form
         _browserFileNameToolTip.ReshowDelay = 200;
         _browserFileNameToolTip.AutoPopDelay = 5000;
         _browserFileNameToolTip.ShowAlways = false;
-    }
-    private void InitializeFunctionBarToolTip()
-    {
-        _fKeyToolTip.InitialDelay = 500;
-        _fKeyToolTip.ReshowDelay = 200;
-        _fKeyToolTip.AutoPopDelay = 6000;
-        _fKeyToolTip.ShowAlways = false;
     }
     [MemberNotNull(nameof(_settings))]
     private void LoadSettingsAndApplyProfile()
@@ -537,58 +537,6 @@ public partial class MainForm : Form
             _sortAscending = _settings.Session.LastSortAscending;
         }
     }
-    private void UpdateFunctionBarCtrlLayerState(bool isCtrlPressed)
-    {
-        if (_isFunctionBarCtrlLayerActive != isCtrlPressed)
-        {
-            _isFunctionBarCtrlLayerActive = isCtrlPressed;
-            UpdateFunctionBar();
-            if (functionBarPanel.Visible)
-            {
-                functionBarPanel.Invalidate();
-            }
-        }
-    }
-    private void UpdateFunctionBarAltLayerState(bool isAltPressed)
-    {
-        if (_isFunctionBarAltLayerActive != isAltPressed)
-        {
-            _isFunctionBarAltLayerActive = isAltPressed;
-            UpdateFunctionBar();
-            if (functionBarPanel.Visible)
-            {
-                functionBarPanel.Invalidate();
-            }
-        }
-    }
-    private void UpdateFunctionBarShiftLayerState(bool isShiftPressed)
-    {
-        if (_isFunctionBarShiftLayerActive != isShiftPressed)
-        {
-            _isFunctionBarShiftLayerActive = isShiftPressed;
-            UpdateFunctionBar();
-            if (functionBarPanel.Visible)
-            {
-                functionBarPanel.Invalidate();
-            }
-        }
-    }
-    private (bool isShift, bool isCtrl, bool isAlt) GetActiveFunctionBarLayer()
-    {
-        if (_isFunctionBarCtrlLayerActive)
-        {
-            return (false, true, false);
-        }
-        if (_isFunctionBarAltLayerActive)
-        {
-            return (false, false, true);
-        }
-        if (_isFunctionBarShiftLayerActive)
-        {
-            return (true, false, false);
-        }
-        return (false, false, false);
-    }
 
     private void InitializeRuntimeTimersAndOverlay()
     {
@@ -700,46 +648,6 @@ public partial class MainForm : Form
         // Phase 3-layout-fix1: BrowserPanel のリサイズ再描画
         this.browserPanel.Resize += BrowserPanel_Resize;
     }
-    private void WireHeaderAndFunctionBarEvents()
-    {
-        EnableDoubleBuffering(this.functionBarPanel);
-        // Phase 5-funcbar-click-fix1: FunctionBar のクリック復旧 (描画セグメント判定)
-        this.functionBarPanel.MouseClick += FunctionBarPanel_MouseClick;
-        this.functionBarPanel.MouseMove += FunctionBarPanel_MouseMove;
-        this.functionBarPanel.MouseDown += FunctionBarPanel_MouseDown;
-        this.functionBarPanel.MouseUp += FunctionBarPanel_MouseUp;
-        this.functionBarPanel.MouseLeave += FunctionBarPanel_MouseLeave;
-        // Phase 2g-fix2: ウィンドウリサイズ時にも Row 2 の Zone 幅を再計算する
-        this.headerPanel.Resize += (s, e) => LayoutHeaderZones();
-        // Phase 2g-fix3a: Row 1 時計更新 Timer を開始
-        StartHeaderClockTimer();
-        // Phase 2g-fix3b: Row 1 の再描画責務分離と局所ちらつき低減
-        EnableDoubleBuffering(this.titleHeaderPanel);
-        EnableDoubleBuffering(this.contentFramePanel);
-        this.titleHeaderPanel.Resize += (s, e) =>
-        {
-            this.titleHeaderPanel.Invalidate();
-            this.contentFramePanel.Invalidate();
-        };
-        this.contentFramePanel.Resize += (s, e) => this.contentFramePanel.Invalidate();
-        // Phase 2g-fix4b.1: Row 2 の Custom Paint 配線
-        headerZone1.Paint += HeaderZone_Paint;
-        headerZone2.Paint += HeaderZone_Paint;
-        headerZone3.Paint += HeaderZone_Paint;
-        headerZone4.Paint += HeaderZone_Paint;
-        // Zone自体のちらつきを抑える
-        EnableDoubleBuffering(headerZone1);
-        EnableDoubleBuffering(headerZone2);
-        EnableDoubleBuffering(headerZone3);
-        EnableDoubleBuffering(headerZone4);
-        EnableDoubleBuffering(browserPanel);
-        // Phase 3-bottom-funcbar-click1: FunctionBar のラベルクリック配線
-        for (int i = 0; i < lblFuncKeys.Length; i++)
-        {
-            int index = i; // クロージャ用
-            lblFuncKeys[i].Click += (s, e) => HandleFuncKeyClick(index);
-        }
-    }
     private void WireWindowLifecycleEvents()
     {
         // popup の初期位置を MainForm の右側に設定する
@@ -763,6 +671,20 @@ public partial class MainForm : Form
             DisposeCurrentDirectoryWatcher();
             SaveWindowSettings();
             SavePreviewSettings();
+            if (_browserItemContextMenu != null)
+            {
+                _browserItemContextMenu.Close();
+                ClearAndDisposeMenuItems(_browserItemContextMenu);
+                _browserItemContextMenu.Dispose();
+                _browserItemContextMenu = null;
+            }
+            if (_browserBlankContextMenu != null)
+            {
+                _browserBlankContextMenu.Close();
+                ClearAndDisposeMenuItems(_browserBlankContextMenu);
+                _browserBlankContextMenu.Dispose();
+                _browserBlankContextMenu = null;
+            }
         };
         this.Move += (s, e) => PositionPreviewPopup();
         this.Resize += (s, e) =>
@@ -3750,6 +3672,15 @@ private void InitializeBrowserTabControl()
                 TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
         }
     }
+    private void UpdateBrowserToolbarVisibility()
+    {
+        bool show = _settings.Appearance?.ShowBrowserToolbar ?? false;
+        if (_btnMenuBack != null) _btnMenuBack.Visible = show;
+        if (_btnMenuForward != null) _btnMenuForward.Visible = show;
+        if (_btnMenuUp != null) _btnMenuUp.Visible = show;
+        if (_btnMenuReload != null) _btnMenuReload.Visible = show;
+        if (_menuNavSeparator != null) _menuNavSeparator.Visible = show;
+    }
     private void InitializeMenuStrip()
     {
         mainMenuStrip.Items.Clear();
@@ -3838,14 +3769,90 @@ private void InitializeBrowserTabControl()
                     : "現在のタブを ReadOnly にする(&Y)";
             }
         };
+        ToolStripMenuItem favoritesMenu = new ToolStripMenuItem("お気に入り(&A)") { Name = "favoritesMenu" };
+        favoritesMenu.DropDownOpening += (s, e) => BuildFavoritesMenu(favoritesMenu, QuickAccessService.GetRegisteredEntries(_quickAccessStore));
+
+        _btnMenuBack = new ToolStripButton
+        {
+            Text = "←戻る",
+            ToolTipText = "戻る (Alt+Left)",
+            DisplayStyle = ToolStripItemDisplayStyle.Text,
+            Font = new Font("Yu Gothic UI", 9F),
+            Padding = new Padding(2, 3, 2, 3),
+            Margin = new Padding(0, 0, 0, 0)
+        };
+        _btnMenuBack.Click += (s, e) => ExecuteCommandFromUi(CommandIds.BrowserNavigateBack, CommandScope.Browser, "Menu.NavigateBack");
+
+        _btnMenuForward = new ToolStripButton
+        {
+            Text = "→進む",
+            ToolTipText = "進む (Alt+Right)",
+            DisplayStyle = ToolStripItemDisplayStyle.Text,
+            Font = new Font("Yu Gothic UI", 9F),
+            Padding = new Padding(2, 3, 2, 3),
+            Margin = new Padding(0, 0, 0, 0)
+        };
+        _btnMenuForward.Click += (s, e) => ExecuteCommandFromUi(CommandIds.BrowserNavigateForward, CommandScope.Browser, "Menu.NavigateForward");
+
+        _btnMenuUp = new ToolStripButton
+        {
+            Text = "↑上へ",
+            ToolTipText = "親フォルダへ (Backspace / Alt+Up)",
+            DisplayStyle = ToolStripItemDisplayStyle.Text,
+            Font = new Font("Yu Gothic UI", 9F),
+            Padding = new Padding(2, 3, 2, 3),
+            Margin = new Padding(0, 0, 0, 0)
+        };
+        _btnMenuUp.Click += (s, e) => ExecuteCommandFromUi(CommandIds.BrowserNavigateParent, CommandScope.Browser, "Menu.NavigateParent");
+
+        _btnMenuReload = new ToolStripButton
+        {
+            Text = "↻更新",
+            ToolTipText = "再読込 (Ctrl+R / F5)",
+            DisplayStyle = ToolStripItemDisplayStyle.Text,
+            Font = new Font("Yu Gothic UI", 9F),
+            Padding = new Padding(2, 3, 2, 3),
+            Margin = new Padding(0, 0, 0, 0)
+        };
+        _btnMenuReload.Click += (s, e) => ExecuteCommandFromUi(CommandIds.BrowserReload, CommandScope.Browser, "Menu.Reload");
+
+        _menuNavSeparator = new ToolStripLabel("│")
+        {
+            ForeColor = Color.FromArgb(80, 128, 128, 128),
+            Font = new Font("Yu Gothic UI", 9F),
+            Margin = new Padding(4, 0, 4, 0)
+        };
+
         mainMenuStrip.Items.AddRange(new ToolStripItem[]
         {
+            _btnMenuBack,
+            _btnMenuForward,
+            _btnMenuUp,
+            _btnMenuReload,
+            _menuNavSeparator,
             menuBuildResult.FileMenu,
             menuBuildResult.ViewMenu,
             menuBuildResult.MoveMenu,
+            favoritesMenu,
             menuBuildResult.ToolsMenu,
             menuBuildResult.HelpMenu
         });
+
+        mainMenuStrip.Renderer = new MenuIntegratedNavigationRenderer();
+
+        mainMenuStrip.ContextMenuStrip = new ContextMenuStrip();
+        var hideItem = new ToolStripMenuItem("ナビゲーションボタンを非表示にする");
+        hideItem.Click += (s, e) =>
+        {
+            if (_settings.Appearance != null)
+            {
+                _settings.Appearance.ShowBrowserToolbar = false;
+                UpdateBrowserToolbarVisibility();
+                SettingsManager.Save(_settings);
+            }
+        };
+        mainMenuStrip.ContextMenuStrip.Items.Add(hideItem);
+
         foreach (ToolStripMenuItem rootMenu in mainMenuStrip.Items.OfType<ToolStripMenuItem>())
         {
             rootMenu.DropDownOpening += (s, e) =>
@@ -3861,6 +3868,214 @@ private void InitializeBrowserTabControl()
         SynchronizeMenuStripFontAndLayout(CreateMenuStripFont());
         LogMenuStripLayoutMetrics("InitializeMenuStrip");
     }
+    private void BuildFavoritesMenu(ToolStripMenuItem favoritesMenu, IReadOnlyList<QuickAccessEntry> entries)
+    {
+        favoritesMenu.DropDownItems.Clear();
+
+        IReadOnlyList<QuickAccessEntry> favoriteEntries = entries
+            .Where(entry => entry != null && !string.IsNullOrWhiteSpace(entry.Path))
+            .ToList();
+        IReadOnlyList<QuickAccessEntry> categorizedEntries = favoriteEntries
+            .Where(entry => !string.IsNullOrWhiteSpace(QuickAccessService.NormalizeCategoryName(entry.CategoryName)))
+            .ToList();
+
+        if (categorizedEntries.Count == 0)
+        {
+            AddFavoritesMenuEntries(favoritesMenu.DropDownItems, favoriteEntries);
+        }
+        else
+        {
+            foreach (IGrouping<string?, QuickAccessEntry> categoryGroup in categorizedEntries
+                         .GroupBy(entry => QuickAccessService.NormalizeCategoryName(entry.CategoryName), StringComparer.OrdinalIgnoreCase))
+            {
+                string categoryName = categoryGroup.Key ?? string.Empty;
+                if (string.IsNullOrWhiteSpace(categoryName))
+                {
+                    continue;
+                }
+
+                var categoryMenu = new MidFD.Controls.TightCascadeToolStripMenuItem(categoryName) { Tag = "FavoriteCategory" };
+                AddFavoritesMenuEntries(categoryMenu.DropDownItems, categoryGroup.ToList());
+                favoritesMenu.DropDownItems.Add(categoryMenu);
+            }
+
+            IReadOnlyList<QuickAccessEntry> uncategorizedEntries = favoriteEntries
+                .Where(entry => string.IsNullOrWhiteSpace(QuickAccessService.NormalizeCategoryName(entry.CategoryName)))
+                .ToList();
+            if (uncategorizedEntries.Count > 0)
+            {
+                if (favoritesMenu.DropDownItems.Count > 0)
+                {
+                    favoritesMenu.DropDownItems.Add(new ToolStripSeparator());
+                }
+
+                AddFavoritesMenuEntries(favoritesMenu.DropDownItems, uncategorizedEntries);
+            }
+        }
+
+        if (favoritesMenu.DropDownItems.Count > 0)
+        {
+            favoritesMenu.DropDownItems.Add(new ToolStripSeparator());
+        }
+
+        favoritesMenu.DropDownItems.Add(CreateAddCurrentLocationFavoriteMenuItem());
+        favoritesMenu.DropDownItems.Add(CreateOpenQuickAccessMenuItem());
+
+        if (_settings.Appearance != null)
+        {
+            var uiThemeColors = UiThemeResolver.Resolve(_settings.Appearance);
+            ApplyDropDownTheme(favoritesMenu, uiThemeColors.ChromeBackColor, uiThemeColors.ChromeForeColor);
+        }
+    }
+
+    private void AddFavoritesMenuEntries(ToolStripItemCollection targetItems, IReadOnlyList<QuickAccessEntry> entries)
+    {
+        HashSet<string> duplicateDisplayNames = entries
+            .Select(entry => ResolveFavoritesMenuDisplayName(entry))
+            .Where(displayName => !string.IsNullOrWhiteSpace(displayName))
+            .GroupBy(displayName => displayName, StringComparer.OrdinalIgnoreCase)
+            .Where(group => group.Count() > 1)
+            .Select(group => group.Key)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+        foreach (QuickAccessEntry entry in entries)
+        {
+            string path = entry.Path.Trim();
+            string displayName = ResolveFavoritesMenuDisplayName(entry);
+            if (duplicateDisplayNames.Contains(displayName))
+            {
+                displayName = $"{displayName} ({path})";
+            }
+
+            var item = new ToolStripMenuItem(displayName)
+            {
+                ToolTipText = path,
+                Tag = "FavoriteItem"
+            };
+            item.Click += (s, e) => NavigateToPathSafe(path);
+            targetItems.Add(item);
+        }
+    }
+
+    private ToolStripMenuItem CreateAddCurrentLocationFavoriteMenuItem()
+    {
+        var item = new ToolStripMenuItem("現在地をお気に入りに追加") { Tag = "FavoriteActionItem" };
+        item.Click += (s, e) => AddCurrentLocationToFavorites();
+        return item;
+    }
+
+    private ToolStripMenuItem CreateOpenQuickAccessMenuItem()
+    {
+        var item = new ToolStripMenuItem("QuickAccessを開く/編集...") { Tag = "FavoriteActionItem" };
+        item.Click += (s, e) => ExecuteQuickAccess();
+        return item;
+    }
+
+    private string ResolveFavoritesMenuDisplayName(QuickAccessEntry entry)
+    {
+        string displayName = entry.DisplayName?.Trim() ?? string.Empty;
+        if (!string.IsNullOrWhiteSpace(displayName))
+        {
+            return displayName;
+        }
+
+        displayName = QuickAccessService.CreateDisplayName(entry.Path);
+        if (!string.IsNullOrWhiteSpace(displayName))
+        {
+            return displayName;
+        }
+
+        string path = entry.Path?.Trim() ?? string.Empty;
+        return !string.IsNullOrWhiteSpace(path) ? path : string.Empty;
+    }
+
+    private void AddCurrentLocationToFavorites()
+    {
+        AddBrowserPathToFavorites(_navigationService.CurrentPath, _navigationService.CurrentPath);
+    }
+
+    private void AddSelectedBrowserItemToFavorites()
+    {
+        if (_uiMode != UIMode.Browser || IsCurrentDirectoryBusy())
+        {
+            return;
+        }
+
+        ListViewItem? item = GetCurrentBrowserItem();
+        if (item == null || item.Text == "..")
+        {
+            ShowStatusMessage("QuickAccess に登録できる項目がありません。");
+            return;
+        }
+
+        string? itemPath = item.Tag as string;
+        if (string.IsNullOrWhiteSpace(itemPath))
+        {
+            ShowStatusMessage("QuickAccess に登録できる項目がありません。");
+            return;
+        }
+
+        AddBrowserPathToFavorites(itemPath, _navigationService.CurrentPath);
+    }
+
+    private void AddBrowserPathToFavorites(string pathToRegister, string currentPath)
+    {
+        if (_uiMode != UIMode.Browser || IsCurrentDirectoryBusy())
+        {
+            return;
+        }
+
+        string initialDisplayName = QuickAccessService.CreateDisplayName(pathToRegister);
+        QuickAccessLocationDialogResult? dialogResult = QuickAccessLocationDialog.ShowEditor(
+            this,
+            "QuickAccess 登録",
+            currentPath,
+            pathToRegister,
+            initialDisplayName,
+            null,
+            QuickAccessService.GetKnownCategoryNames(_quickAccessStore),
+            initialUseForTabTitle: false);
+        if (dialogResult == null)
+        {
+            return;
+        }
+
+        if (QuickAccessService.TrySaveManagedLocationEntry(
+            _quickAccessStore,
+            null,
+            dialogResult.DisplayName,
+            dialogResult.Path,
+            dialogResult.CategoryName,
+            dialogResult.UseForTabTitle,
+            currentPath,
+            out _,
+            out string message))
+        {
+            QuickAccessService.Save(_quickAccessStore);
+            RefreshAllBrowserTabTitles();
+            ShowStatusMessage(message);
+            return;
+        }
+
+        MessageBox.Show(message, "QuickAccess", MessageBoxButtons.OK, MessageBoxIcon.Information);
+    }
+
+    private void NavigateToPathSafe(string path)
+    {
+        if (_uiMode != UIMode.Browser || IsCurrentDirectoryBusy()) return;
+        string resolved = _navigationService.NormalizeDestinationDirectory(path);
+        try
+        {
+            ExecuteDirectoryNavigationRequest(
+                _browserNavigationCoordinator.CreateDirectoryNavigationRequest(resolved),
+                onDirectoryMissing: p => MessageBox.Show($"指定されたパスが見つかりません: {p}", "エラー", MessageBoxButtons.OK, MessageBoxIcon.Error));
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show(ex.Message, "エラー", MessageBoxButtons.OK, MessageBoxIcon.Error);
+        }
+    }
+
     private void WireMenuStripLifetimeEvents()
     {
         if (mainMenuStrip == null)
@@ -3906,19 +4121,146 @@ private void InitializeBrowserTabControl()
     {
         return SystemFonts.MenuFont ?? mainMenuStrip?.Font ?? this.Font;
     }
+    private sealed class MenuIntegratedNavigationColorTable : ProfessionalColorTable
+    {
+        public override Color MenuItemSelected => Color.FromArgb(40, 128, 128, 128);
+        public override Color MenuItemSelectedGradientBegin => Color.FromArgb(40, 128, 128, 128);
+        public override Color MenuItemSelectedGradientEnd => Color.FromArgb(40, 128, 128, 128);
+        public override Color MenuItemBorder => Color.FromArgb(80, 128, 128, 128);
+        public override Color MenuBorder => Color.FromArgb(80, 128, 128, 128);
+        public override Color ToolStripDropDownBackground => Color.WhiteSmoke;
+    }
+
+    private sealed class MenuIntegratedNavigationRenderer : ToolStripProfessionalRenderer
+    {
+        public MenuIntegratedNavigationRenderer() : base(new MenuIntegratedNavigationColorTable())
+        {
+        }
+
+        protected override void OnRenderButtonBackground(ToolStripItemRenderEventArgs e)
+        {
+            if (e.Item is not ToolStripButton btn)
+            {
+                base.OnRenderButtonBackground(e);
+                return;
+            }
+
+            var g = e.Graphics;
+            var rect = new Rectangle(Point.Empty, btn.Size);
+
+            if (btn.Selected || btn.Pressed)
+            {
+                using (var brush = new SolidBrush(Color.FromArgb(0, 64, 64)))
+                {
+                    g.FillRectangle(brush, rect);
+                }
+                using (var pen = new Pen(Color.FromArgb(0, 255, 255)))
+                {
+                    g.DrawRectangle(pen, rect.X, rect.Y, rect.Width - 1, rect.Height - 1);
+                }
+            }
+        }
+
+        protected override void OnRenderMenuItemBackground(ToolStripItemRenderEventArgs e)
+        {
+            if (e.Item is not ToolStripMenuItem item)
+            {
+                base.OnRenderMenuItemBackground(e);
+                return;
+            }
+
+            var g = e.Graphics;
+            var rect = new Rectangle(Point.Empty, item.Size);
+
+            if (item.IsOnDropDown)
+            {
+                if (item.Selected || item.Pressed)
+                {
+                    using (var brush = new SolidBrush(Color.FromArgb(220, 235, 252)))
+                    {
+                        g.FillRectangle(brush, rect);
+                    }
+                    using (var pen = new Pen(Color.FromArgb(180, 200, 240)))
+                    {
+                        g.DrawRectangle(pen, rect.X, rect.Y, rect.Width - 1, rect.Height - 1);
+                    }
+                }
+            }
+            else
+            {
+                if (item.Selected || item.Pressed)
+                {
+                    using (var brush = new SolidBrush(Color.FromArgb(0, 64, 64)))
+                    {
+                        g.FillRectangle(brush, rect);
+                    }
+                    using (var pen = new Pen(Color.FromArgb(0, 255, 255)))
+                    {
+                        g.DrawRectangle(pen, rect.X, rect.Y, rect.Width - 1, rect.Height - 1);
+                    }
+                }
+            }
+        }
+
+        protected override void OnRenderItemText(ToolStripItemTextRenderEventArgs e)
+        {
+            if (e.Item is ToolStripMenuItem item)
+            {
+                if (item.IsOnDropDown)
+                {
+                    e.TextColor = item.Enabled ? Color.Black : Color.Gray;
+                }
+                else
+                {
+                    e.TextColor = item.Enabled ? Color.FromArgb(0, 255, 255) : Color.Gray;
+                }
+            }
+            else if (e.Item is ToolStripButton btn)
+            {
+                e.TextColor = btn.Enabled ? Color.FromArgb(0, 255, 255) : Color.Gray;
+            }
+            base.OnRenderItemText(e);
+        }
+
+        protected override void OnRenderSeparator(ToolStripSeparatorRenderEventArgs e)
+        {
+            if (e.Vertical)
+            {
+                base.OnRenderSeparator(e);
+                return;
+            }
+
+            var g = e.Graphics;
+            var rect = new Rectangle(Point.Empty, e.Item.Size);
+
+            using (var brush = new SolidBrush(Color.WhiteSmoke))
+            {
+                g.FillRectangle(brush, rect);
+            }
+            int y = rect.Height / 2;
+            using (var pen = new Pen(Color.FromArgb(200, 200, 200)))
+            {
+                g.DrawLine(pen, 6, y, rect.Width - 6, y);
+            }
+        }
+
+        protected override void OnRenderToolStripBorder(ToolStripRenderEventArgs e)
+        {
+            if (e.ToolStrip is MenuStrip)
+            {
+                return;
+            }
+            base.OnRenderToolStripBorder(e);
+        }
+    }
+
     private static (int Height, Padding Padding) CalculateMenuStripMetrics(Font menuFont)
     {
-        Size textSize = TextRenderer.MeasureText("Hg", menuFont, Size.Empty, TextFormatFlags.NoPadding);
-        int verticalPadding = Math.Max(1, (int)Math.Round(menuFont.SizeInPoints / 12f));
-        int horizontalPadding = 4;
-        int height = textSize.Height + (verticalPadding * 2) + 2;
-        return (height, new Padding(horizontalPadding, verticalPadding, 0, verticalPadding));
+        return (28, new Padding(4, 1, 0, 1));
     }
     private static Padding CalculateRootMenuItemPadding(Font menuFont)
     {
-        int horizontal = Math.Max(6, (int)Math.Round(menuFont.SizeInPoints * 0.45f));
-        int vertical = Math.Max(1, (int)Math.Round(menuFont.SizeInPoints / 14f));
-        return new Padding(horizontal, vertical, horizontal, vertical);
+        return new Padding(6, 4, 6, 4);
     }
     private static Padding CalculateDropDownItemPadding(Font menuFont)
     {
@@ -3944,11 +4286,15 @@ private void InitializeBrowserTabControl()
             mainMenuStrip.AutoSize = false;
             mainMenuStrip.Font = menuFont;
             mainMenuStrip.Padding = metrics.Padding;
-            mainMenuStrip.Height = metrics.Height;
-            foreach (ToolStripMenuItem rootItem in mainMenuStrip.Items.OfType<ToolStripMenuItem>())
+            mainMenuStrip.Height = 28;
+            foreach (ToolStripItem item in mainMenuStrip.Items)
             {
-                ApplyRootMenuVisualMetrics(rootItem, menuFont);
-                ApplyToolStripItemFontAndLayout(rootItem, menuFont);
+                item.Font = menuFont;
+                if (item is ToolStripMenuItem rootItem)
+                {
+                    ApplyRootMenuVisualMetrics(rootItem, menuFont);
+                    ApplyToolStripItemFontAndLayout(rootItem, menuFont);
+                }
             }
         }
         finally
@@ -4034,13 +4380,47 @@ private void InitializeBrowserTabControl()
             }));
         LogService.Info($"[MenuStripLayout] {context} Font={menuFont} Height={mainMenuStrip.Height} Padding={padding} Metrics={rootMetrics}");
     }
+    private static void ConfigureGlobalDropDownProperties(ToolStripDropDownItem item, Font? menuFont)
+    {
+        if (item.DropDown is ToolStripDropDownMenu menu)
+        {
+            menu.DropShadowEnabled = false;
+
+            if (item.Name == "favoritesMenu" || item.Tag?.ToString() == "FavoriteCategory")
+            {
+                menu.ShowImageMargin = false;
+                menu.ShowCheckMargin = false;
+                menu.Padding = new Padding(2, 1, 2, 1);
+            }
+            else
+            {
+                menu.ShowImageMargin = false;
+                if (menuFont != null)
+                {
+                    menu.Padding = CalculateDropDownInnerPadding(menuFont);
+                }
+                else
+                {
+                    menu.Padding = new Padding(2, 1, 2, 1);
+                }
+            }
+            menu.Margin = Padding.Empty;
+        }
+    }
+
     private static void ApplyRootMenuVisualMetrics(ToolStripMenuItem item, Font menuFont)
     {
         item.Margin = Padding.Empty;
         item.Padding = CalculateRootMenuItemPadding(menuFont);
         item.TextAlign = ContentAlignment.MiddleCenter;
-        item.DropDown.Padding = CalculateDropDownInnerPadding(menuFont);
-        item.DropDown.Margin = Padding.Empty;
+        ConfigureGlobalDropDownProperties(item, menuFont);
+    }
+    private static bool IsFavoriteMenuItem(ToolStripItem item)
+    {
+        if (item == null) return false;
+        if (item.Name == "favoritesMenu") return true;
+        string? tag = item.Tag?.ToString();
+        return tag == "FavoriteCategory" || tag == "FavoriteItem" || tag == "FavoriteActionItem";
     }
     private static void ApplyToolStripItemFontAndLayout(ToolStripItem item, Font menuFont)
     {
@@ -4053,6 +4433,9 @@ private void InitializeBrowserTabControl()
         try
         {
             dropDownItem.DropDown.Font = menuFont;
+
+            ConfigureGlobalDropDownProperties(dropDownItem, menuFont);
+
             foreach (ToolStripItem childItem in dropDownItem.DropDownItems)
             {
                 ApplyDropDownItemVisualMetrics(childItem, menuFont);
@@ -4075,7 +4458,14 @@ private void InitializeBrowserTabControl()
         item.Margin = Padding.Empty;
         if (item is ToolStripMenuItem menuItem)
         {
-            menuItem.Padding = CalculateDropDownItemPadding(menuFont);
+            if (IsFavoriteMenuItem(menuItem))
+            {
+                menuItem.Padding = new Padding(4, 2, 4, 2);
+            }
+            else
+            {
+                menuItem.Padding = CalculateDropDownItemPadding(menuFont);
+            }
             menuItem.TextAlign = ContentAlignment.MiddleLeft;
         }
     }
@@ -4383,32 +4773,6 @@ private void InitializeBrowserTabControl()
     {
         return FunctionKeyProfileService.ResolveAction(CurrentFunctionKeyProfileValue, fKey) == expectedAction;
     }
-    private bool ShouldShowBrowserFunctionBarForCurrentProfile()
-    {
-        return true;
-    }
-    private bool ShouldShowFunctionBarForCurrentContext()
-    {
-        if (_uiMode == UIMode.Browser)
-        {
-            return ShouldShowBrowserFunctionBarForCurrentProfile();
-        }
-        bool compactViewer = _uiMode == UIMode.Viewer
-            && (_currentViewerKind == PreviewKind.Text || _currentViewerKind == PreviewKind.Binary || _currentViewerKind == PreviewKind.LargeText);
-        return !compactViewer;
-    }
-    private void ApplyFunctionBarVisibilityForCurrentContext()
-    {
-        bool shouldShow = ShouldShowFunctionBarForCurrentContext();
-        functionBarPanel.Visible = shouldShow;
-        if (shouldShow)
-        {
-            functionBarPanel.Height = _functionBarPreferredHeight;
-        }
-        contentFramePanel.PerformLayout();
-        mainAreaPanel.PerformLayout();
-        viewerPanel.PerformLayout();
-    }
     private string BuildMenuKeyHintMessage()
     {
         return
@@ -4548,314 +4912,13 @@ private void InitializeBrowserTabControl()
         string? HotKeyChar,
         string DisplayLabel,
         bool IsEnabled,
-        string ToolTipText
+        string ToolTipText,
+        string LayoutLabel,
+        bool IsSlotVisible
     );
 
-    private IReadOnlyList<FunctionBarSlotViewModel> BuildStandardFunctionBarSlotModels(bool isShiftLayer, bool isCtrlLayer = false, bool isAltLayer = false)
-    {
-        var snapshot = BuildCommandUiSnapshot();
-        var models = new List<FunctionBarSlotViewModel>(12);
-        var definitions = FunctionKeyProfileService.GetDefinitions(InputSettings.StandardProfileValue);
 
-        for (int slot = 1; slot <= 12; slot++)
-        {
-            var def = definitions.FirstOrDefault(d => d.KeyNumber == slot);
-            string? customCmdId = FunctionKeyProfileService.ResolveFunctionBarCommandId(
-                FunctionKeyProfile.Standard,
-                slot,
-                _settings.Input.FunctionBarCommandOverridesStandard,
-                _settings.Input.FunctionBarCommandOverridesFdCompatible,
-                _settings.Input.FunctionBarCommandOverridesShiftStandard,
-                _settings.Input.FunctionBarCommandOverridesShiftFdCompatible,
-                isShiftLayer,
-                _settings.Input.FunctionBarCommandOverridesCtrlStandard,
-                _settings.Input.FunctionBarCommandOverridesCtrlFdCompatible,
-                _settings.Input.FunctionBarCommandOverridesAltStandard,
-                _settings.Input.FunctionBarCommandOverridesAltFdCompatible,
-                isCtrlLayer,
-                isAltLayer);
 
-            // If Ctrl or Alt layer, and there is no custom assignment, treat as unassigned (empty)
-            bool isUnassignedModifier = (isCtrlLayer || isAltLayer) && (string.IsNullOrEmpty(customCmdId) || string.Equals(customCmdId, "none", StringComparison.OrdinalIgnoreCase));
-
-            // Determine ShortLabel
-            string shortLabel;
-            if (isUnassignedModifier)
-            {
-                shortLabel = "";
-            }
-            else if (!string.IsNullOrEmpty(customCmdId))
-            {
-                shortLabel = FunctionKeyProfileService.ResolveFunctionBarShortLabel(customCmdId);
-            }
-            else
-            {
-                shortLabel = def?.Label ?? "Cmd";
-            }
-
-            // Apply Custom ShortLabel Override if exists and active CommandId matches
-            if (!isUnassignedModifier && !string.IsNullOrEmpty(customCmdId) && !string.Equals(customCmdId, "none", StringComparison.OrdinalIgnoreCase))
-            {
-                var labelOverrides = isCtrlLayer
-                    ? _settings.Input.FunctionBarLabelOverridesCtrlStandard
-                    : (isAltLayer
-                        ? _settings.Input.FunctionBarLabelOverridesAltStandard
-                        : (isShiftLayer
-                            ? _settings.Input.FunctionBarLabelOverridesShiftStandard
-                            : _settings.Input.FunctionBarLabelOverridesStandard));
-                if (labelOverrides != null && labelOverrides.TryGetValue($"F{slot}", out var labelOverride) && labelOverride != null)
-                {
-                    if (string.Equals(labelOverride.CommandId, customCmdId, StringComparison.OrdinalIgnoreCase) && !string.IsNullOrWhiteSpace(labelOverride.Label))
-                    {
-                        shortLabel = InputSettings.NormalizeFunctionBarLabelText(labelOverride.Label);
-                    }
-                }
-            }
-
-            // Determine KeyHint (browser shortcut表示用。hotkey強調は未修飾の英字ショートカットだけに限定)
-            string? keyHint = null;
-            string? hotKeyChar = null;
-            if (!isUnassignedModifier && !string.IsNullOrEmpty(customCmdId))
-            {
-                keyHint = FunctionKeyProfileService.ResolveFunctionBarKeyHint(
-                    customCmdId,
-                    _settings.Input.BrowserKeyCommandOverrides,
-                    InputSettings.StandardProfileValue);
-                if (string.IsNullOrWhiteSpace(keyHint))
-                {
-                    keyHint = null;
-                }
-                hotKeyChar = FunctionKeyProfileService.ResolveFunctionBarBrowserHotKeyCharacter(
-                    customCmdId,
-                    _settings.Input.BrowserKeyCommandOverrides,
-                    InputSettings.StandardProfileValue);
-                if (string.IsNullOrWhiteSpace(hotKeyChar))
-                {
-                    hotKeyChar = null;
-                }
-            }
-
-            // Determine DisplayLabel
-            string displayLabel;
-            if (isUnassignedModifier)
-            {
-                displayLabel = "";
-            }
-            else
-            {
-                displayLabel = FunctionKeyProfileService.ResolveFunctionBarDisplayLabel(
-                    customCmdId,
-                    shortLabel,
-                    _settings.Input.BrowserKeyCommandOverrides,
-                    InputSettings.StandardProfileValue);
-            }
-
-            // Determine IsEnabled
-            bool isEnabled = true;
-            if (_uiMode == UIMode.Browser)
-            {
-                if (isUnassignedModifier)
-                {
-                    isEnabled = false;
-                }
-                else if (!string.IsNullOrEmpty(customCmdId))
-                {
-                    isEnabled = _commandStateCoordinator.IsCommandEnabled(customCmdId, snapshot);
-                }
-                else
-                {
-                    isEnabled = false;
-                }
-            }
-            else if (isUnassignedModifier)
-            {
-                isEnabled = false;
-            }
-
-            // Determine ToolTipText
-            string toolTipText;
-            string slotPrefix;
-            if (isCtrlLayer)
-            {
-                slotPrefix = $"Ctrl+F{slot}";
-            }
-            else if (isAltLayer)
-            {
-                slotPrefix = $"Alt+F{slot}";
-            }
-            else if (isShiftLayer)
-            {
-                slotPrefix = $"Shift+F{slot}";
-            }
-            else
-            {
-                slotPrefix = $"F{slot}";
-            }
-
-            if (isUnassignedModifier)
-            {
-                toolTipText = $"{slotPrefix}: 未割り当て";
-            }
-            else if (!string.IsNullOrEmpty(customCmdId))
-            {
-                var cmdDef = _commandRegistry.Find(customCmdId);
-                string commandName = cmdDef?.DisplayName ?? "不明なコマンド";
-                string description = cmdDef?.Description ?? $"未登録のコマンドID: {customCmdId}";
-                var toolTipLines = new List<string>
-                {
-                    shortLabel,
-                    $"Command: {customCmdId}",
-                    $"Function: {slotPrefix}"
-                };
-                if (!string.IsNullOrEmpty(keyHint))
-                {
-                    toolTipLines.Add($"通常キー: {keyHint}");
-                }
-                toolTipLines.Add(description);
-                toolTipText = string.Join("\r\n", toolTipLines);
-            }
-            else
-            {
-                toolTipText = $"{shortLabel}\r\nFunction: {slotPrefix}\r\nカスタムコマンドを割り当てることができます。";
-            }
-
-            models.Add(new FunctionBarSlotViewModel(
-                slot,
-                isShiftLayer,
-                customCmdId,
-                shortLabel,
-                keyHint,
-                hotKeyChar,
-                displayLabel,
-                isEnabled,
-                toolTipText
-            ));
-        }
-
-        return models;
-    }
-
-    private Dictionary<string, FunctionBarLabelOverride> GetActiveFunctionBarLabelOverrides(bool isShift, bool isCtrl, bool isAlt, bool isFdCompatible)
-    {
-        if (isCtrl)
-        {
-            return isFdCompatible
-                ? _settings.Input.FunctionBarLabelOverridesCtrlFdCompatible
-                : _settings.Input.FunctionBarLabelOverridesCtrlStandard;
-        }
-
-        if (isAlt)
-        {
-            return isFdCompatible
-                ? _settings.Input.FunctionBarLabelOverridesAltFdCompatible
-                : _settings.Input.FunctionBarLabelOverridesAltStandard;
-        }
-
-        if (isShift)
-        {
-            return isFdCompatible
-                ? _settings.Input.FunctionBarLabelOverridesShiftFdCompatible
-                : _settings.Input.FunctionBarLabelOverridesShiftStandard;
-        }
-
-        return isFdCompatible
-            ? _settings.Input.FunctionBarLabelOverridesFdCompatible
-            : _settings.Input.FunctionBarLabelOverridesStandard;
-    }
-
-    private void UpdateFunctionBar()
-    {
-        ApplyFunctionBarVisibilityForCurrentContext();
-        var snapshot = BuildCommandUiSnapshot();
-        if (_commandStateCoordinator.UsesBrowserFunctionBar(snapshot))
-        {
-            var (isShift, isCtrl, isAlt) = GetActiveFunctionBarLayer();
-            bool isCompatible = FunctionKeyProfileService.ResolveProfile(CurrentFunctionKeyProfileValue) == FunctionKeyProfile.FDCompatible;
-            if (!isCompatible)
-            {
-                var models = BuildStandardFunctionBarSlotModels(isShift, isCtrl, isAlt);
-                for (int i = 1; i <= 12; i++)
-                {
-                    var model = models[i - 1];
-                    // Display label is either KeyHint:ShortLabel or ShortLabel
-                    SetFuncKeyText(i, model.DisplayLabel, true);
-                }
-            }
-            else
-            {
-                IReadOnlyList<FunctionKeyDefinition> definitions = FunctionKeyProfileService.GetDefinitions(CurrentFunctionKeyProfileValue);
-                for (int i = 1; i <= 12; i++)
-                {
-                    FunctionKeyDefinition? definition = definitions.FirstOrDefault(def => def.KeyNumber == i);
-                    string? customCmdId = FunctionKeyProfileService.ResolveFunctionBarCommandId(
-                        FunctionKeyProfile.FDCompatible,
-                        i,
-                        _settings.Input.FunctionBarCommandOverridesStandard,
-                        _settings.Input.FunctionBarCommandOverridesFdCompatible,
-                        _settings.Input.FunctionBarCommandOverridesShiftStandard,
-                        _settings.Input.FunctionBarCommandOverridesShiftFdCompatible,
-                        isShift,
-                        _settings.Input.FunctionBarCommandOverridesCtrlStandard,
-                        _settings.Input.FunctionBarCommandOverridesCtrlFdCompatible,
-                        _settings.Input.FunctionBarCommandOverridesAltStandard,
-                        _settings.Input.FunctionBarCommandOverridesAltFdCompatible,
-                        isCtrl,
-                        isAlt);
-
-                    bool isVisible = (definition?.VisibleOnFunctionBar == true && (definition.Action != FunctionKeyAction.None || !string.IsNullOrEmpty(customCmdId)))
-                        || (!isCompatible && !string.IsNullOrEmpty(customCmdId));
-                    string label = "";
-                    if (isVisible)
-                    {
-                        string? activeCmdId = customCmdId;
-                        if (string.IsNullOrEmpty(activeCmdId) && definition != null)
-                        {
-                            activeCmdId = FunctionKeyProfileService.ResolveCommandIdFromAction(definition.Action);
-                        }
-
-                        if (!string.IsNullOrEmpty(activeCmdId) && !string.Equals(activeCmdId, "none", StringComparison.OrdinalIgnoreCase))
-                        {
-                            string shortLabel = !string.IsNullOrEmpty(customCmdId)
-                                ? FunctionKeyProfileService.ResolveFunctionBarShortLabel(customCmdId)
-                                : (definition?.Label ?? "Cmd");
-
-                            // Apply Custom ShortLabel Override if exists and active CommandId matches
-                            var labelOverrides = GetActiveFunctionBarLabelOverrides(isShift, isCtrl, isAlt, true);
-                            if (labelOverrides != null && labelOverrides.TryGetValue($"F{i}", out var labelOverride) && labelOverride != null)
-                            {
-                                if (string.Equals(labelOverride.CommandId, activeCmdId, StringComparison.OrdinalIgnoreCase) && !string.IsNullOrWhiteSpace(labelOverride.Label))
-                                {
-                                    shortLabel = InputSettings.NormalizeFunctionBarLabelText(labelOverride.Label);
-                                }
-                            }
-
-                            label = FunctionKeyProfileService.ResolveFunctionBarDisplayLabel(
-                                activeCmdId,
-                                shortLabel,
-                                _settings.Input.BrowserKeyCommandOverrides,
-                                InputSettings.FdCompatibleProfileValue);
-                        }
-                        else
-                        {
-                            label = definition?.Label ?? "Cmd";
-                        }
-                    }
-                    SetFuncKeyText(i, label, isVisible);
-                }
-            }
-        }
-        else
-        {
-            // Viewer モード
-            for (int i = 1; i <= 12; i++) SetFuncKeyText(i, "", false);
-            SetFuncKeyText(1, "L:Enc ", true); // L キーによる文字コード切替
-            SetFuncKeyText(2, "W:Wrap", true); // W キーによる折り返し切替
-            SetFuncKeyText(3, "^F:Find", true); // Ctrl+F による検索入力
-            SetFuncKeyText(4, "F3:Next", true); // F3 による前方検索
-            SetFuncKeyText(5, "S+F3:Prv", true); // Shift+F3 による後方検索
-            SetFuncKeyText(10, "Qt(En/Es)", true); // Enter / Esc による終了
-        }
-    }
     private void ExecuteViewerFind()
     {
         if (_currentViewerKind == PreviewKind.LargeText && _largeFileState != null)
@@ -5117,38 +5180,6 @@ private void InitializeBrowserTabControl()
         _largeFileControl.ClearActiveSearchHit();
         ApplyViewerStatusLine();
     }
-    private void SetFuncKeyText(int num, string text, bool enabled)
-    {
-        if (num < 1 || num > 12) return;
-        var lbl = lblFuncKeys[num - 1];
-        // WinFD風: "数字:ラベル" 形式
-        // 数字部分はシアン/青系、ラベル部分は白/灰系にするのが理想だが、
-        // 最小差分のため単一ラベル内でテキスト構成する。
-        if (string.IsNullOrEmpty(text))
-        {
-            lbl.Text = "";
-        }
-        else
-        {
-            // Phase 5-ui-visual-fix1.4c: 先頭空白と2桁パディングを廃止して領域を確保
-            lbl.Text = $"{num}:{text.Trim()}";
-        }
-}
-    private void LayoutFunctionBar()
-    {
-        // Phase 5-ui-layout-fix2: 個別 Label の Z-Order 問題を回避するため Paint 描画へ切り替え済み
-        // lblFuncKeys は非表示にして、functionBarPanel_Paint での描画に委譲する
-        foreach (var lbl in lblFuncKeys)
-        {
-            lbl.Visible = false;
-        }
-        UpdateFunctionBar();
-        if (!functionBarPanel.Visible)
-        {
-            return;
-        }
-        functionBarPanel.Invalidate(); // Paint イベントを起動して再描画
-    }
     private sealed class FunctionBarColorPalette
     {
         public required Color BackColor { get; init; }
@@ -5335,44 +5366,62 @@ private void InitializeBrowserTabControl()
 
     private WinFdCompatibleLabelInfo ResolveWinFdCompatibleLabelInfo(int keyNumber)
     {
-        if (_isFunctionBarShiftLayerActive)
+        string displayText = FunctionKeyProfileService.ResolveFdCompatibleFunctionBarShortLabel(
+            keyNumber,
+            _isFunctionBarShiftLayerActive,
+            _isFunctionBarCtrlLayerActive,
+            _isFunctionBarAltLayerActive);
+        if (string.IsNullOrWhiteSpace(displayText))
         {
-            return keyNumber switch
-            {
-                1 => new WinFdCompatibleLabelInfo { DisplayText = "attr", HotKeyCharIndex = 0 }, // a
-                2 => new WinFdCompatibleLabelInfo { DisplayText = "", HotKeyCharIndex = -1 },
-                3 => new WinFdCompatibleLabelInfo { DisplayText = "move", HotKeyCharIndex = 0 }, // m
-                4 => new WinFdCompatibleLabelInfo { DisplayText = "", HotKeyCharIndex = -1 },
-                5 => new WinFdCompatibleLabelInfo { DisplayText = "mkdir", HotKeyCharIndex = 0 }, // m
-                6 => new WinFdCompatibleLabelInfo { DisplayText = "psh", HotKeyCharIndex = 0 }, // p
-                7 => new WinFdCompatibleLabelInfo { DisplayText = "rld", HotKeyCharIndex = 0 }, // r
-                8 => new WinFdCompatibleLabelInfo { DisplayText = "edit", HotKeyCharIndex = 0 }, // e
-                9 => new WinFdCompatibleLabelInfo { DisplayText = "prev", HotKeyCharIndex = 0 }, // p
-                10 => new WinFdCompatibleLabelInfo { DisplayText = "pack", HotKeyCharIndex = 0 }, // p
-                11 => new WinFdCompatibleLabelInfo { DisplayText = "", HotKeyCharIndex = -1 },
-                12 => new WinFdCompatibleLabelInfo { DisplayText = "", HotKeyCharIndex = -1 },
-                _ => new WinFdCompatibleLabelInfo { DisplayText = "", HotKeyCharIndex = -1 }
-            };
+            return new WinFdCompatibleLabelInfo { DisplayText = "", HotKeyCharIndex = -1 };
         }
-        else
+
+        int hotKeyCharIndex = (_isFunctionBarCtrlLayerActive || (_isFunctionBarAltLayerActive && _isFunctionBarShiftLayerActive) || (_isFunctionBarCtrlLayerActive && _isFunctionBarShiftLayerActive) || (_isFunctionBarCtrlLayerActive && _isFunctionBarAltLayerActive))
+            ? -1
+            : (_isFunctionBarAltLayerActive
+                ? keyNumber switch
+                {
+                    1 => 0,
+                    2 => 0,
+                    3 => 0,
+                    5 => 0,
+                    _ => -1
+                }
+                : _isFunctionBarShiftLayerActive
+                    ? keyNumber switch
+                    {
+                        1 => 0,
+                        2 => 0,
+                        3 => 0,
+                        4 => 0,
+                        5 => 0,
+                        6 => 0,
+                        7 => 0,
+                        8 => 0,
+                        9 => 0,
+                        10 => 0,
+                        11 => 0,
+                        _ => -1
+                    }
+                    : keyNumber switch
+                    {
+                        2 => 1,
+                        3 => 0,
+                        4 => 0,
+                        5 => 0,
+                        6 => 0,
+                        7 => 0,
+                        8 => 0,
+                        9 => 0,
+                        10 => 0,
+                        _ => -1
+                    });
+
+        return new WinFdCompatibleLabelInfo
         {
-            return keyNumber switch
-            {
-                1 => new WinFdCompatibleLabelInfo { DisplayText = "help", HotKeyCharIndex = -1 },
-                2 => new WinFdCompatibleLabelInfo { DisplayText = "exec", HotKeyCharIndex = 1 }, // x
-                3 => new WinFdCompatibleLabelInfo { DisplayText = "copy", HotKeyCharIndex = 0 }, // c
-                4 => new WinFdCompatibleLabelInfo { DisplayText = "delet", HotKeyCharIndex = 0 }, // d
-                5 => new WinFdCompatibleLabelInfo { DisplayText = "renam", HotKeyCharIndex = 0 }, // r
-                6 => new WinFdCompatibleLabelInfo { DisplayText = "sort", HotKeyCharIndex = 0 }, // s
-                7 => new WinFdCompatibleLabelInfo { DisplayText = "find", HotKeyCharIndex = 0 }, // f
-                8 => new WinFdCompatibleLabelInfo { DisplayText = "tree", HotKeyCharIndex = 0 }, // t
-                9 => new WinFdCompatibleLabelInfo { DisplayText = "logds", HotKeyCharIndex = 0 }, // l
-                10 => new WinFdCompatibleLabelInfo { DisplayText = "unpac", HotKeyCharIndex = 0 }, // u
-                11 => new WinFdCompatibleLabelInfo { DisplayText = "top", HotKeyCharIndex = -1 },
-                12 => new WinFdCompatibleLabelInfo { DisplayText = "botto", HotKeyCharIndex = -1 },
-                _ => new WinFdCompatibleLabelInfo { DisplayText = "", HotKeyCharIndex = -1 }
-            };
-        }
+            DisplayText = displayText,
+            HotKeyCharIndex = hotKeyCharIndex
+        };
     }
 
     private static string? ResolveHotKeyCharacter(string? hotKeyHint)
@@ -5723,7 +5772,7 @@ private void InitializeBrowserTabControl()
             string shortLabel = ExtractFunctionBarDisplayText(displayTextOverride);
             if (string.IsNullOrWhiteSpace(shortLabel))
             {
-                shortLabel = FunctionKeyProfileService.ResolveFunctionBarShortLabel(customCmdId);
+                shortLabel = ResolveWinFdCompatibleLabelInfo(keyNumber).DisplayText;
             }
             labelInfo = new WinFdCompatibleLabelInfo { DisplayText = shortLabel, HotKeyCharIndex = -1 };
             hotKeyCharacter = ResolveHotKeyCharacter(FunctionKeyProfileService.ResolveFunctionBarPrimaryKeyHint(
@@ -5848,34 +5897,20 @@ private void InitializeBrowserTabControl()
         TextRenderer.DrawText(graphics, labelText, font, textRect, textColor,
             TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding);
     }
-
     private int HitTestFunctionKeyIndex(Point loc, Rectangle clientBounds, Font font)
     {
-        bool isCompatible = FunctionKeyProfileService.ResolveProfile(CurrentFunctionKeyProfileValue) == FunctionKeyProfile.FDCompatible;
-        if (isCompatible)
+        var profile = FunctionKeyProfileService.ResolveProfile(CurrentFunctionKeyProfileValue);
+        var layoutModels = BuildFunctionBarSlotModels(profile, false, false, false);
+        var labels = layoutModels.Select(model => model.LayoutLabel).ToArray();
+        var rects = CalculateFunctionBarLabelRects(clientBounds, font, labels);
+        for (int i = 0; i < rects.Length; i++)
         {
-            var rects = CalculateWinFdFunctionBarLabelRects(clientBounds, font);
-            for (int i = 0; i < 12; i++)
+            if (rects[i].Contains(loc))
             {
-                if (rects[i].Contains(loc)) return i;
+                return i;
             }
-            return -1;
         }
-        else
-        {
-            var layoutModels = BuildStandardFunctionBarSlotModels(false, false, false);
-            var labels = layoutModels.Select(model => model.DisplayLabel).ToArray();
-            var rects = CalculateFunctionBarLabelRects(clientBounds, font, labels);
-            for (int i = 0; i < rects.Length; i++)
-            {
-                if (rects[i].Contains(loc))
-                {
-                    return i;
-                }
-            }
-
-            return -1;
-        }
+        return -1;
     }
 
     private void InvalidateFunctionBarItem(int index)
@@ -5886,342 +5921,15 @@ private void InitializeBrowserTabControl()
             ? new Font(_headerPaintFont.FontFamily, _headerPaintFont.Size, _headerPaintFont.Style)
             : new Font("Consolas", 10F);
 
-        bool isCompatible = FunctionKeyProfileService.ResolveProfile(CurrentFunctionKeyProfileValue) == FunctionKeyProfile.FDCompatible;
-        if (isCompatible)
+        var profile = FunctionKeyProfileService.ResolveProfile(CurrentFunctionKeyProfileValue);
+        var layoutModels = BuildFunctionBarSlotModels(profile, false, false, false);
+        var labels = layoutModels.Select(model => model.LayoutLabel).ToArray();
+        var rects = CalculateFunctionBarLabelRects(functionBarPanel.ClientRectangle, font, labels);
+        if (index < rects.Length)
         {
-            var rects = CalculateWinFdFunctionBarLabelRects(functionBarPanel.ClientRectangle, font);
-            if (index < rects.Length)
-            {
-                var r = rects[index];
-                r.Inflate(1, 1);
-                functionBarPanel.Invalidate(r);
-            }
-        }
-        else
-        {
-            var layoutModels = BuildStandardFunctionBarSlotModels(false, false, false);
-            var labels = layoutModels.Select(model => model.DisplayLabel).ToArray();
-            var rects = CalculateFunctionBarLabelRects(functionBarPanel.ClientRectangle, font, labels);
-            if (index < rects.Length)
-            {
-                var r = rects[index];
-                r.Inflate(1, 1);
-                functionBarPanel.Invalidate(r);
-            }
-        }
-    }
-
-    private void FunctionBarPanel_MouseMove(object? sender, MouseEventArgs e)
-    {
-        if (_uiMode != UIMode.Browser || !ShouldShowBrowserFunctionBarForCurrentProfile()) return;
-        using var font = _headerPaintFont != null
-            ? new Font(_headerPaintFont.FontFamily, _headerPaintFont.Size, _headerPaintFont.Style)
-            : new Font("Consolas", 10F);
-
-        int index = HitTestFunctionKeyIndex(e.Location, functionBarPanel.ClientRectangle, font);
-        if (index != _hoveredFuncKeyIndex)
-        {
-            int oldIndex = _hoveredFuncKeyIndex;
-            _hoveredFuncKeyIndex = index;
-
-            if (oldIndex >= 0) InvalidateFunctionBarItem(oldIndex);
-            if (index >= 0) InvalidateFunctionBarItem(index);
-
-            UpdateFunctionBarToolTip(index, e.Location);
-        }
-    }
-
-    private void FunctionBarPanel_MouseDown(object? sender, MouseEventArgs e)
-    {
-        if (_uiMode != UIMode.Browser || !ShouldShowBrowserFunctionBarForCurrentProfile()) return;
-        if (e.Button != MouseButtons.Left) return;
-
-        using var font = _headerPaintFont != null
-            ? new Font(_headerPaintFont.FontFamily, _headerPaintFont.Size, _headerPaintFont.Style)
-            : new Font("Consolas", 10F);
-
-        int index = HitTestFunctionKeyIndex(e.Location, functionBarPanel.ClientRectangle, font);
-        if (index >= 0)
-        {
-            var snapshot = _cachedCommandUiSnapshot;
-            bool isCompatible = FunctionKeyProfileService.ResolveProfile(CurrentFunctionKeyProfileValue) == FunctionKeyProfile.FDCompatible;
-            bool isEnabled;
-
-            if (!isCompatible)
-            {
-                var (isShift, isCtrl, isAlt) = GetActiveFunctionBarLayer();
-                var models = BuildStandardFunctionBarSlotModels(isShift, isCtrl, isAlt);
-                isEnabled = models[index].IsEnabled;
-            }
-            else
-            {
-                if (_isFunctionBarShiftLayerActive)
-                {
-                    isEnabled = _commandStateCoordinator.IsShiftActionEnabled(index + 1, snapshot);
-                }
-                else if (index + 1 == 4)
-                {
-                    isEnabled = snapshot.SelectionKind == CommandStateCoordinator.BrowserSelectionKind.Directory ||
-                                snapshot.SelectionKind == CommandStateCoordinator.BrowserSelectionKind.File ||
-                                snapshot.SelectionKind == CommandStateCoordinator.BrowserSelectionKind.ArchiveCandidate;
-                }
-                else
-                {
-                    FunctionKeyAction action = FunctionKeyProfileService.ResolveAction(CurrentFunctionKeyProfileValue, index + 1);
-                    isEnabled = _commandStateCoordinator.IsActionEnabled(action, snapshot);
-                }
-            }
-
-            if (isEnabled)
-            {
-                _pressedFuncKeyIndex = index;
-                InvalidateFunctionBarItem(index);
-            }
-        }
-    }
-
-    private void FunctionBarPanel_MouseUp(object? sender, MouseEventArgs e)
-    {
-        if (_pressedFuncKeyIndex >= 0)
-        {
-            int oldPressed = _pressedFuncKeyIndex;
-            _pressedFuncKeyIndex = -1;
-            InvalidateFunctionBarItem(oldPressed);
-        }
-    }
-
-    private void FunctionBarPanel_MouseLeave(object? sender, EventArgs e)
-    {
-        int oldHovered = _hoveredFuncKeyIndex;
-        int oldPressed = _pressedFuncKeyIndex;
-        bool changed = false;
-
-        if (_hoveredFuncKeyIndex >= 0)
-        {
-            _hoveredFuncKeyIndex = -1;
-            changed = true;
-        }
-        if (_pressedFuncKeyIndex >= 0)
-        {
-            _pressedFuncKeyIndex = -1;
-            changed = true;
-        }
-
-        if (changed)
-        {
-            if (oldHovered >= 0) InvalidateFunctionBarItem(oldHovered);
-            if (oldPressed >= 0 && oldPressed != oldHovered) InvalidateFunctionBarItem(oldPressed);
-        }
-
-        HideFunctionBarToolTip();
-    }
-
-    private void FunctionBarPanel_MouseClick(object? sender, MouseEventArgs e)
-    {
-        if (_uiMode != UIMode.Browser || !ShouldShowBrowserFunctionBarForCurrentProfile()) return;
-        if (e.Button != MouseButtons.Left) return;
-
-        using var font = _headerPaintFont != null
-            ? new Font(_headerPaintFont.FontFamily, _headerPaintFont.Size, _headerPaintFont.Style)
-            : new Font("Consolas", 10F);
-
-        int index = HitTestFunctionKeyIndex(e.Location, functionBarPanel.ClientRectangle, font);
-        if (index < 0) return;
-
-        var snapshot = _cachedCommandUiSnapshot;
-        bool isCompatible = FunctionKeyProfileService.ResolveProfile(CurrentFunctionKeyProfileValue) == FunctionKeyProfile.FDCompatible;
-        bool isEnabled;
-
-        var (isShift, isCtrl, isAlt) = GetActiveFunctionBarLayer();
-        if (!isCompatible)
-        {
-            var models = BuildStandardFunctionBarSlotModels(isShift, isCtrl, isAlt);
-            isEnabled = models[index].IsEnabled;
-        }
-        else
-        {
-            string? customCmdId = FunctionKeyProfileService.ResolveFunctionBarCommandId(
-                FunctionKeyProfile.FDCompatible,
-                index + 1,
-                _settings.Input.FunctionBarCommandOverridesStandard,
-                _settings.Input.FunctionBarCommandOverridesFdCompatible,
-                _settings.Input.FunctionBarCommandOverridesShiftStandard,
-                _settings.Input.FunctionBarCommandOverridesShiftFdCompatible,
-                isShift,
-                _settings.Input.FunctionBarCommandOverridesCtrlStandard,
-                _settings.Input.FunctionBarCommandOverridesCtrlFdCompatible,
-                _settings.Input.FunctionBarCommandOverridesAltStandard,
-                _settings.Input.FunctionBarCommandOverridesAltFdCompatible,
-                isCtrl,
-                isAlt);
-
-            if (!string.IsNullOrEmpty(customCmdId))
-            {
-                isEnabled = _commandStateCoordinator.IsCommandEnabled(customCmdId, snapshot);
-            }
-            else if (isShift)
-            {
-                isEnabled = _commandStateCoordinator.IsShiftActionEnabled(index + 1, snapshot);
-            }
-            else if (index + 1 == 4)
-            {
-                isEnabled = snapshot.SelectionKind == CommandStateCoordinator.BrowserSelectionKind.Directory ||
-                            snapshot.SelectionKind == CommandStateCoordinator.BrowserSelectionKind.File ||
-                            snapshot.SelectionKind == CommandStateCoordinator.BrowserSelectionKind.ArchiveCandidate;
-            }
-            else
-            {
-                FunctionKeyAction action = FunctionKeyProfileService.ResolveAction(CurrentFunctionKeyProfileValue, index + 1);
-                isEnabled = _commandStateCoordinator.IsActionEnabled(action, snapshot);
-            }
-        }
-
-        if (!isEnabled)
-        {
-            return;
-        }
-
-        HandleFuncKeyClick(index);
-    }
-
-    private void FunctionBarPanel_Paint(object? sender, PaintEventArgs e)
-    {
-        var panel = sender as Panel;
-        if (panel == null) return;
-        if (_uiMode == UIMode.Browser && !ShouldShowBrowserFunctionBarForCurrentProfile()) return;
-        int totalW = panel.ClientSize.Width;
-        int totalH = panel.ClientSize.Height;
-        if (totalW <= 0 || totalH <= 0) return;
-        using var font = _headerPaintFont != null
-            ? new Font(_headerPaintFont.FontFamily, _headerPaintFont.Size, _headerPaintFont.Style)
-            : new Font("Consolas", 10F);
-
-        var snapshot = _cachedCommandUiSnapshot;
-        bool isCompatible = FunctionKeyProfileService.ResolveProfile(CurrentFunctionKeyProfileValue) == FunctionKeyProfile.FDCompatible;
-        var palette = GetFunctionBarColors(isCompatible);
-
-        // 外枠全体を一度クリア
-        using var clearBrush = new SolidBrush(palette.BackColor);
-        e.Graphics.FillRectangle(clearBrush, e.ClipRectangle);
-
-        var (isShift, isCtrl, isAlt) = GetActiveFunctionBarLayer();
-        Rectangle[]? activeRects = null;
-
-        Rectangle[]? winFdRects = null;
-        if (isCompatible)
-        {
-            winFdRects = CalculateWinFdFunctionBarLabelRects(panel.ClientRectangle, font);
-            // WinFD互換表示の上辺全幅罫線 (パレットの無効境界色に連動)
-            using (var sepPen = new Pen(palette.DisabledBorderColor, 1))
-            {
-                e.Graphics.DrawLine(sepPen, 0, 0, totalW - 1, 0);
-            }
-        }
-
-        if (!isCompatible)
-        {
-            var models = BuildStandardFunctionBarSlotModels(isShift, isCtrl, isAlt);
-            var layoutModels = BuildStandardFunctionBarSlotModels(false, false, false);
-            var labels = layoutModels.Select(model => model.DisplayLabel).ToArray();
-            activeRects = CalculateFunctionBarLabelRects(panel.ClientRectangle, font, labels);
-            for (int i = 0; i < 12; i++)
-            {
-                var model = models[i];
-                Rectangle cellRect = activeRects[i];
-                bool isPressed = (i == _pressedFuncKeyIndex);
-                bool isHovered = (i == _hoveredFuncKeyIndex);
-                bool isEnabled = model.IsEnabled;
-                DrawFunctionBarButtonFrame(e.Graphics, cellRect, palette, isEnabled, isHovered, isPressed, false);
-                const int innerPad = 4;
-                var rect = new Rectangle(cellRect.X + innerPad, cellRect.Y, cellRect.Width - (innerPad * 2), cellRect.Height);
-                string displayText = model.DisplayLabel;
-                if (!string.IsNullOrEmpty(displayText))
-                {
-                    Size fullSize = TextRenderer.MeasureText(e.Graphics, displayText, font, rect.Size, TextFormatFlags.NoPadding);
-                    if (fullSize.Width > rect.Width)
-                    {
-                        displayText = GetShortenedLabel(model.ShortLabel);
-                    }
-                    DrawFunctionBarButtonText(e.Graphics, rect, displayText, model.HotKeyChar, font, palette, isEnabled, isPressed);
-                }
-            }
-        }
-        else
-        {
-            activeRects = winFdRects ?? CalculateWinFdFunctionBarLabelRects(panel.ClientRectangle, font);
-            for (int i = 0; i < 12; i++)
-            {
-                var lbl = lblFuncKeys[i];
-
-                // i+1番目の CommandId を解決 (優先度付き修飾キーと上書き辞書を使用)
-                string? customCmdId = FunctionKeyProfileService.ResolveFunctionBarCommandId(
-                    FunctionKeyProfile.FDCompatible,
-                    i + 1,
-                    _settings.Input.FunctionBarCommandOverridesStandard,
-                    _settings.Input.FunctionBarCommandOverridesFdCompatible,
-                    _settings.Input.FunctionBarCommandOverridesShiftStandard,
-                    _settings.Input.FunctionBarCommandOverridesShiftFdCompatible,
-                    isShift,
-                    _settings.Input.FunctionBarCommandOverridesCtrlStandard,
-                    _settings.Input.FunctionBarCommandOverridesCtrlFdCompatible,
-                    _settings.Input.FunctionBarCommandOverridesAltStandard,
-                    _settings.Input.FunctionBarCommandOverridesAltFdCompatible,
-                    isCtrl,
-                    isAlt);
-
-                if (string.IsNullOrEmpty(customCmdId))
-                {
-                    if (!lbl.Visible && lbl.Text.Length == 0) continue;
-                }
-
-                string text = lbl.Text;
-                if (string.IsNullOrEmpty(customCmdId) && string.IsNullOrWhiteSpace(text)) continue;
-
-                Rectangle cellRect = activeRects[i];
-
-                // アクションの有効判定 (CommandIDの有効判定優先、優先度付き修飾キーを使用)
-                bool isEnabled = true;
-                if (_uiMode == UIMode.Browser)
-                {
-                    if (!string.IsNullOrEmpty(customCmdId))
-                    {
-                        isEnabled = _commandStateCoordinator.IsCommandEnabled(customCmdId, snapshot);
-                    }
-                    else
-                    {
-                        if (isShift)
-                        {
-                            isEnabled = _commandStateCoordinator.IsShiftActionEnabled(i + 1, snapshot);
-                        }
-                        else if (i + 1 == 4)
-                        {
-                            isEnabled = snapshot.SelectionKind == CommandStateCoordinator.BrowserSelectionKind.Directory ||
-                                        snapshot.SelectionKind == CommandStateCoordinator.BrowserSelectionKind.File ||
-                                        snapshot.SelectionKind == CommandStateCoordinator.BrowserSelectionKind.ArchiveCandidate;
-                        }
-                        else
-                        {
-                            FunctionKeyAction action = FunctionKeyProfileService.ResolveAction(CurrentFunctionKeyProfileValue, i + 1);
-                            isEnabled = _commandStateCoordinator.IsActionEnabled(action, snapshot);
-                        }
-                    }
-                }
-
-                bool isPressed = (i == _pressedFuncKeyIndex);
-                bool isHovered = (i == _hoveredFuncKeyIndex);
-
-                if (winFdRects != null)
-                {
-                    DrawWinFdCompatibleFunctionBarItem(e.Graphics, activeRects[i], i + 1, customCmdId, text, isEnabled, isHovered, isPressed, font);
-                }
-            }
-        }
-
-        // 左端バッジ描画
-        int badgeW = GetFunctionBarLayerBadgeWidth(isShift, isCtrl, isAlt);
-        if (badgeW > 0)
-        {
-            DrawFunctionBarLayerBadge(e.Graphics, panel.ClientRectangle, activeRects, font, palette, isShift, isCtrl, isAlt);
+            var r = rects[index];
+            r.Inflate(1, 1);
+            functionBarPanel.Invalidate(r);
         }
     }
     /// <summary>
@@ -7129,165 +6837,9 @@ private void InitializeBrowserTabControl()
     /// Phase 3-input-viewer1: Viewer モード専用の KeyDown 処理を helper 化。
     /// 処理を行った（早期 return すべき）場合は true を返す。
     /// </summary>
-    private bool TryHandleViewerKeyDown(KeyEventArgs e)
-    {
-        if (_uiMode != UIMode.Viewer) return false;
-        // Ctrl+C: 表示中行または選択範囲コピー
-        if (e.Control && e.KeyCode == Keys.C)
-        {
-            if (TryCopyLargeFileVisibleText())
-            {
-                e.Handled = true;
-                e.SuppressKeyPress = true;
-                return true;
-            }
-            if (viewerTextBox.Visible && viewerTextBox.SelectionLength > 0)
-            {
-                viewerTextBox.Copy();
-                ShowStatusMessage("選択範囲をコピーしました。");
-                e.Handled = true;
-                e.SuppressKeyPress = true;
-                return true;
-            }
-            // いずれにも該当しない場合はデフォルトのコピー動作を許容（または無視）するために
-            // ここでは return true せず、TextBox 等へイベントを流す可能性を残すことも検討できるが、
-            // 現在の契約に従い、ここで Handled にする。
-            e.Handled = true;
-            e.SuppressKeyPress = true;
-            return true;
-        }
-        // Enter / Esc で Browser 復帰
-        if (e.KeyCode == Keys.Enter || e.KeyCode == Keys.Escape)
-        {
-            if (TryExitViewerToBrowser())
-            {
-                e.Handled = true;
-                e.SuppressKeyPress = true;
-                return true;
-            }
-        }
-        // L: エンコーディング切替
-        if (e.KeyCode == Keys.L)
-        {
-            if (_viewerEncodingOverride == ViewerEncoding.Auto) _viewerEncodingOverride = ViewerEncoding.UTF8;
-            else if (_viewerEncodingOverride == ViewerEncoding.UTF8) _viewerEncodingOverride = ViewerEncoding.SJIS;
-            else _viewerEncodingOverride = ViewerEncoding.Auto;
-            ApplyViewerStatusLine();
-            // プレビューを再描画
-            RequestPreviewRefresh(force: true);
-            e.Handled = true;
-            e.SuppressKeyPress = true;
-            return true;
-        }
-        // W: 折り返し切替
-        if (e.KeyCode == Keys.W)
-        {
-            viewerTextBox.WordWrap = !viewerTextBox.WordWrap;
-            viewerTextBox.ScrollBars = viewerTextBox.WordWrap ? RichTextBoxScrollBars.Vertical : RichTextBoxScrollBars.Both;
-            // 設定の永続化
-            _settings.Preview.ViewerWordWrap = viewerTextBox.WordWrap;
-            SettingsManager.Save(_settings);
-            ApplyViewerStatusLine();
-            e.Handled = true;
-            e.SuppressKeyPress = true;
-            return true;
-        }
-        // ラージファイル用全体ナビゲーション
-        if (_currentViewerKind == PreviewKind.LargeText && _largeFileState != null)
-        {
-            var state = _largeFileState;
-            int oldLine = state.FirstVisibleLine;
-            int newLine = oldLine;
-            if (e.KeyCode == Keys.Home)
-            {
-                newLine = 0;
-            }
-            else if (e.KeyCode == Keys.End)
-            {
-                if (state.IsIndexing)
-                {
-                    state.PendingEndAfterIndex = true;
-                    ShowStatusMessage("インデックス完了後に末尾へ移動します...");
-                    e.Handled = true;
-                    e.SuppressKeyPress = true;
-                    return true;
-                }
-                newLine = _largeFileControl.GetMaxFirstVisibleLine();
-            }
-            else if (e.KeyCode == Keys.PageUp)
-            {
-                newLine = oldLine - _largeFileControl.VisibleLineCount;
-            }
-            else if (e.KeyCode == Keys.PageDown)
-            {
-                newLine = oldLine + _largeFileControl.VisibleLineCount;
-            }
-            if (newLine != oldLine || e.KeyCode == Keys.Home || e.KeyCode == Keys.End)
-            {
-                _ = NavigateLargeFilePreviewAsync(newLine, e.KeyCode.ToString());
-                e.Handled = true;
-                e.SuppressKeyPress = true;
-                return true;
-            }
-        }
-        // ナビゲーションキー等は TextBox 側に通してスクロールを可能にする
-        if (IsNavigationOrModifierKey(e.KeyCode))
-        {
-            return true; // 早期 return (Browser 用 KeyDown 処理へ流さない)
-        }
-        // それ以外はすべて抑止
-        e.Handled = true;
-        e.SuppressKeyPress = true;
-        return true;
-    }
     /// <summary>
     /// Phase 3-input-viewer1: Viewer モード専用の ProcessCmdKey 操作を helper 化。
     /// </summary>
-    private bool TryHandleViewerCmdKey(Keys keyData)
-    {
-        if (_uiMode != UIMode.Viewer) return false;
-        // Ctrl+F / F3 / Shift+F3: Viewer 検索ロジックへのルーティング
-        if (keyData == (Keys.Control | Keys.F))
-        {
-            ExecuteViewerFind();
-            return true;
-        }
-        if (keyData == (Keys.Control | Keys.A))
-        {
-            if (_currentViewerKind == PreviewKind.Text && viewerTextBox.Visible)
-            {
-                viewerTextBox.SelectAll();
-                return true;
-            }
-        }
-        if (keyData == Keys.F3)
-        {
-            ExecuteViewerFindNext(backward: false);
-            return true;
-        }
-        if (keyData == (Keys.Shift | Keys.F3))
-        {
-            ExecuteViewerFindNext(backward: true);
-            return true;
-        }
-        // Ctrl+C: ラージファイル表示中コピー
-        if (keyData == (Keys.Control | Keys.C))
-        {
-            if (TryCopyLargeFileVisibleText())
-            {
-                return true;
-            }
-        }
-        // Enter / Esc: Browser 復帰
-        if (keyData == Keys.Enter || keyData == Keys.Escape)
-        {
-            if (TryExitViewerToBrowser())
-            {
-                return true;
-            }
-        }
-        return false;
-    }
     /// <summary>
     /// Phase 3-input-browser1: Browser モード専用の KeyDown 処理を helper 化。
     /// </summary>
@@ -7389,6 +6941,12 @@ private void InitializeBrowserTabControl()
         if (e.Shift && e.KeyCode != Keys.D && e.KeyCode != Keys.Delete)
         {
             return false;
+        }
+        if (TryHandleBrowserCmdKeyCustomBindings(e.KeyData))
+        {
+            e.Handled = true;
+            e.SuppressKeyPress = true;
+            return true;
         }
         // 単キーコマンド群
         if (e.KeyCode == Keys.R && !e.Shift)
@@ -7564,29 +7122,6 @@ private void InitializeBrowserTabControl()
     /// <summary>
     /// Phase 3-input-cmdkey-mark1: ProcessCmdKey における Browser 文脈の一括マーク操作を helper 化。
     /// </summary>
-    private bool TryHandleBrowserCmdKeyMarking(Keys keyData)
-    {
-        // Tab を横取りし、コントロール間フォーカス移動を防ぐ (ToggleMark)
-        if (keyData == Keys.Tab)
-        {
-            ToggleMark(moveNext: false);
-            return true;
-        }
-        // Shift+Home: ファイルのみ反転
-        if (keyData == (Keys.Shift | Keys.Home))
-        {
-            InvertBulkMarks(includeDirectories: false);
-            return true;
-        }
-        // Shift+End: ファイル + ディレクトリを反転
-        if (keyData == (Keys.Shift | Keys.End))
-        {
-            InvertBulkMarks(includeDirectories: true);
-            return true;
-        }
-
-        return false;
-    }
     private void ToggleBulkMarks(bool includeDirectories)
     {
         var targets = CollectBulkMarkTargetPaths(includeDirectories);
@@ -7716,194 +7251,14 @@ private void InitializeBrowserTabControl()
             $"total={totalStopwatch.ElapsedMilliseconds}ms");
     }
 
-    private bool TryHandleBrowserCmdKeyCustomBindings(Keys keyData)
-    {
-        if (_uiMode != UIMode.Browser || IsCurrentDirectoryBusy())
-        {
-            return false;
-        }
 
-        Dictionary<string, string> keyMap = ResolveBrowserKeyCommandMap();
-        string keyGesture = InputSettings.ToKeyGestureText(keyData);
-        if (!keyMap.TryGetValue(keyGesture, out string? commandId))
-        {
-            return false;
-        }
-
-        if (string.Equals(commandId, InputSettings.MouseGestureUnassignedCommandId, StringComparison.OrdinalIgnoreCase))
-        {
-            ShowStatusMessage($"キー割り当て無効: {keyGesture}");
-            return true;
-        }
-
-        return ExecuteCommandFromUi(commandId, CommandScope.Browser, $"Browser.CmdKey.Custom:{keyGesture}");
-    }
-
-    private Dictionary<string, string> ResolveBrowserKeyCommandMap()
-    {
-        return BrowserCommandBindingResolver.ResolveEffectiveKeyCommandMap(
-            CurrentFunctionKeyProfileValue,
-            _settings.Input?.BrowserKeyCommandOverrides,
-            _commandRegistry);
-    }
 
     /// <summary>
     /// Phase 3-input-cmdkey-nav1: ProcessCmdKey における Browser 文脈のナビゲーション操作を helper 化。
     /// </summary>
-    private bool TryHandleBrowserCmdKeyNavigation(Keys keyData)
-    {
-        // 履歴移動 (Alt 系) - リストの中身の有無にかかわらず動作
-        if (keyData == (Keys.Alt | Keys.Left))
-        {
-            ExecuteHistoryBack();
-            return true;
-        }
-        if (keyData == (Keys.Alt | Keys.Right))
-        {
-            ExecuteHistoryForward();
-            return true;
-        }
-        int total = fileListView.Items.Count;
-        if (total <= 0) return false;
-        int itemsPerPage = GetBrowserItemsPerPage(out _, out int rowsPerColumn);
-        bool moved = false;
-        if (keyData == Keys.Up)
-        {
-            _browserCursorIndex = (_browserCursorIndex - 1 + total) % total;
-            moved = true;
-        }
-        else if (keyData == Keys.Down)
-        {
-            _browserCursorIndex = (_browserCursorIndex + 1) % total;
-            moved = true;
-        }
-        else if (keyData == Keys.Left)
-        {
-            _browserCursorIndex = Math.Max(0, _browserCursorIndex - rowsPerColumn);
-            moved = true;
-        }
-        else if (keyData == Keys.Right)
-        {
-            _browserCursorIndex = Math.Min(total - 1, _browserCursorIndex + rowsPerColumn);
-            moved = true;
-        }
-        else if (keyData == (Keys.Control | Keys.Home) || keyData == Keys.F11)
-        {
-            return ExecuteFunctionKey(11);
-        }
-        else if (keyData == (Keys.Control | Keys.End) || keyData == Keys.F12)
-        {
-            return ExecuteFunctionKey(12);
-        }
-        else if (keyData == (Keys.Control | Keys.Back))
-        {
-            if (GuardClipboardBusy()) return true;
-            _previewPopup.Clear();
-            _currentPreviewTarget = null;
-            ExecuteHistoryBack();
-            return true;
-        }
-        else if (keyData == Keys.PageUp)
-        {
-            if (_browserCursorIndex - itemsPerPage >= 0)
-            {
-                _browserCursorIndex -= itemsPerPage;
-                moved = true;
-            }
-        }
-        else if (keyData == Keys.PageDown)
-        {
-            if (_browserCursorIndex + itemsPerPage < total)
-            {
-                _browserCursorIndex += itemsPerPage;
-                moved = true;
-            }
-        }
-        if (moved)
-        {
-            InvalidateRecentMultiMarkIntent();
-            SyncBrowserSelection();
-            return true;
-        }
-        return false;
-    }
     /// <summary>
     /// Phase 3-input-cmdkey-launch1: ProcessCmdKey における Browser 文脈のエピエイリアス系操作 (Fキー / Filter / 再読込) を helper 化。
     /// </summary>
-    private bool TryHandleBrowserCmdKeyAliases(Keys keyData)
-    {
-        if (keyData == (Keys.Shift | Keys.F1)) return ExecuteFunctionKey(1, forceShiftLayer: true);
-        if (keyData == (Keys.Shift | Keys.F2)) return ExecuteFunctionKey(2, forceShiftLayer: true);
-        if (keyData == (Keys.Shift | Keys.F3)) return ExecuteFunctionKey(3, forceShiftLayer: true);
-        if (keyData == (Keys.Shift | Keys.F4)) return ExecuteFunctionKey(4, forceShiftLayer: true);
-        if (keyData == (Keys.Shift | Keys.F5)) return ExecuteFunctionKey(5, forceShiftLayer: true);
-        if (keyData == (Keys.Shift | Keys.F6)) return ExecuteFunctionKey(6, forceShiftLayer: true);
-        if (keyData == (Keys.Shift | Keys.F7)) return ExecuteFunctionKey(7, forceShiftLayer: true);
-        if (keyData == (Keys.Shift | Keys.F8)) return ExecuteFunctionKey(8, forceShiftLayer: true);
-        if (keyData == (Keys.Shift | Keys.F9)) return ExecuteFunctionKey(9, forceShiftLayer: true);
-        if (keyData == (Keys.Shift | Keys.F10)) return ExecuteFunctionKey(10, forceShiftLayer: true);
-        if (keyData == (Keys.Shift | Keys.F11)) return ExecuteFunctionKey(11, forceShiftLayer: true);
-        if (keyData == (Keys.Shift | Keys.F12)) return ExecuteFunctionKey(12, forceShiftLayer: true);
-        if (keyData == (Keys.Control | Keys.F1)) return ExecuteFunctionKey(1, forcedModifierLayer: Keys.Control);
-        if (keyData == (Keys.Control | Keys.F2)) return ExecuteFunctionKey(2, forcedModifierLayer: Keys.Control);
-        if (keyData == (Keys.Control | Keys.F3)) return ExecuteFunctionKey(3, forcedModifierLayer: Keys.Control);
-        if (keyData == (Keys.Control | Keys.F4)) return ExecuteFunctionKey(4, forcedModifierLayer: Keys.Control);
-        if (keyData == (Keys.Control | Keys.F5)) return ExecuteFunctionKey(5, forcedModifierLayer: Keys.Control);
-        if (keyData == (Keys.Control | Keys.F6)) return ExecuteFunctionKey(6, forcedModifierLayer: Keys.Control);
-        if (keyData == (Keys.Control | Keys.F7)) return ExecuteFunctionKey(7, forcedModifierLayer: Keys.Control);
-        if (keyData == (Keys.Control | Keys.F8)) return ExecuteFunctionKey(8, forcedModifierLayer: Keys.Control);
-        if (keyData == (Keys.Control | Keys.F9)) return ExecuteFunctionKey(9, forcedModifierLayer: Keys.Control);
-        if (keyData == (Keys.Control | Keys.F10)) return ExecuteFunctionKey(10, forcedModifierLayer: Keys.Control);
-        if (keyData == (Keys.Control | Keys.F11)) return ExecuteFunctionKey(11, forcedModifierLayer: Keys.Control);
-        if (keyData == (Keys.Control | Keys.F12)) return ExecuteFunctionKey(12, forcedModifierLayer: Keys.Control);
-        if (keyData == (Keys.Alt | Keys.F1)) return ExecuteFunctionKey(1, forcedModifierLayer: Keys.Alt);
-        if (keyData == (Keys.Alt | Keys.F2)) return ExecuteFunctionKey(2, forcedModifierLayer: Keys.Alt);
-        if (keyData == (Keys.Alt | Keys.F3)) return ExecuteFunctionKey(3, forcedModifierLayer: Keys.Alt);
-        if (keyData == (Keys.Alt | Keys.F5)) return ExecuteFunctionKey(5, forcedModifierLayer: Keys.Alt);
-        if (keyData == (Keys.Alt | Keys.F6)) return ExecuteFunctionKey(6, forcedModifierLayer: Keys.Alt);
-        if (keyData == (Keys.Alt | Keys.F7)) return ExecuteFunctionKey(7, forcedModifierLayer: Keys.Alt);
-        if (keyData == (Keys.Alt | Keys.F8)) return ExecuteFunctionKey(8, forcedModifierLayer: Keys.Alt);
-        if (keyData == (Keys.Alt | Keys.F9)) return ExecuteFunctionKey(9, forcedModifierLayer: Keys.Alt);
-        if (keyData == (Keys.Alt | Keys.F10)) return ExecuteFunctionKey(10, forcedModifierLayer: Keys.Alt);
-        if (keyData == (Keys.Alt | Keys.F11)) return ExecuteFunctionKey(11, forcedModifierLayer: Keys.Alt);
-        if (keyData == (Keys.Alt | Keys.F12)) return ExecuteFunctionKey(12, forcedModifierLayer: Keys.Alt);
-
-        if (TryHandleFdCompatibleShortcutAliases(keyData))
-        {
-            return true;
-        }
-        if (keyData == (Keys.Control | Keys.M))
-        {
-            if (GuardClipboardBusy()) return true;
-            OpenMarkSlotDialog();
-            return true;
-        }
-        if (keyData == (Keys.Control | Keys.R))
-        {
-            return ExecuteCurrentDirectoryReloadCommand();
-        }
-        if (keyData == (Keys.Control | Keys.F))
-        {
-            ExecuteFilter();
-            return true;
-        }
-        if (keyData == Keys.F1) return ExecuteFunctionKey(1);
-        if (keyData == Keys.F2) return ExecuteFunctionKey(2);
-        if (keyData == Keys.F3) return ExecuteFunctionKey(3);
-        if (keyData == Keys.F4) return ExecuteFunctionKey(4);
-        if (keyData == Keys.F5) return ExecuteFunctionKey(5);
-        if (keyData == Keys.F6) return ExecuteFunctionKey(6);
-        if (keyData == Keys.F7) return ExecuteFunctionKey(7);
-        if (keyData == Keys.F8) return ExecuteFunctionKey(8);
-        if (keyData == Keys.F9) return ExecuteFunctionKey(9);
-        if (keyData == Keys.F10) return ExecuteFunctionKey(10);
-        // Shift+R: 再読込
-        if (keyData == (Keys.Shift | Keys.R))
-        {
-            return ExecuteCurrentDirectoryReloadCommand();
-        }
-        return false;
-    }
 
     private bool TryHandleFdCompatibleShortcutAliases(Keys keyData)
     {
@@ -8027,176 +7382,12 @@ private void InitializeBrowserTabControl()
     /// <summary>
     /// Phase 3-input-cmdkey-launch1: ProcessCmdKey における Browser 文脈の起動系操作 (外部アプリ / プロパティ) を helper 化。
     /// </summary>
-    private bool TryHandleBrowserCmdKeyLaunch(Keys keyData)
-    {
-        if (keyData == (Keys.Control | Keys.Enter))
-        {
-            var item = GetCurrentBrowserItem();
-            if (item != null && item.Text != "..")
-            {
-                string? fullPath = item.Tag as string;
-                if (!string.IsNullOrEmpty(fullPath) && File.Exists(fullPath))
-                {
-                    var rawKind = PreviewService.GetPreviewKind(fullPath);
-                    if (rawKind == PreviewKind.Video)
-                    {
-                        if (_settings.Preview?.VideoEnterPlaysExternal == true)
-                        {
-                            ExecuteBrowserOpenRequest(CreateBrowserOpenRequest(fullPath, allowExecuteTarget: true));
-                        }
-                        else
-                        {
-                            var launchResult = VideoPlaybackLaunchService.Launch(
-                                fullPath,
-                                _settings.Preview?.VideoToolDirectory,
-                                _settings.Preview?.VideoPlaybackVolumePercent ?? 100,
-                                0);
-                            if (launchResult.Success)
-                            {
-                                if (launchResult.UsedFfplay)
-                                {
-                                    ShowStatusMessage($"ffplay.exeで外部再生しました。音量:{launchResult.AppliedVolumePercent}%");
-                                }
-                                else
-                                {
-                                    ShowStatusMessage("ffplay.exeが見つからないため、既定アプリで動画を開きました。");
-                                }
-                            }
-                            else
-                            {
-                                MessageBox.Show(this, launchResult.ErrorMessage ?? "外部再生の起動に失敗しました。", "エラー", MessageBoxButtons.OK, MessageBoxIcon.Error);
-                            }
-                        }
-                        return true;
-                    }
-                }
-            }
-            return false;
-        }
-        if (keyData == (Keys.Alt | Keys.F1))
-        {
-            return ExecuteCommandFromUi(CommandIds.AppOpenNewInstance, CommandScope.Global, "Browser.CmdKey.AltF1");
-        }
-        if (keyData == Keys.Z)
-        {
-            ExecuteZLaunch();
-            return true;
-        }
-        if (keyData == (Keys.Alt | Keys.F2))
-        {
-            return ExecuteCommandFromUi(CommandIds.BrowserOpenExplorer, CommandScope.Browser, "Browser.CmdKey.AltF2");
-        }
-        if (keyData == (Keys.Alt | Keys.F3))
-        {
-            return ExecuteCommandFromUi(CommandIds.AppOpenControlPanel, CommandScope.Global, "Browser.CmdKey.AltF3");
-        }
-        // Alt+Enter: プロパティ
-        if (keyData == (Keys.Alt | Keys.Enter))
-        {
-            if (fileListView.Items.Count > 0)
-            {
-                ExecuteProperties(ResolveSelection());
-                return true;
-            }
-        }
-        return false;
-    }
     /// <summary>
     /// Phase 3-input-cmdkey-clipui1: ProcessCmdKey における Browser 文脈のクリップボード操作 (Ctrl+C/X/V) を helper 化。
     /// </summary>
-    private bool TryHandleBrowserCmdKeyClipboard(Keys keyData)
-    {
-        if (keyData == (Keys.Control | Keys.C))
-        {
-            ExecuteClipboardCopy();
-            return true;
-        }
-        if (keyData == (Keys.Control | Keys.X))
-        {
-            ExecuteClipboardCut();
-            return true;
-        }
-        if (keyData == (Keys.Control | Keys.V))
-        {
-            return ExecuteCommandFromUi(CommandIds.ClipboardPaste, CommandScope.Browser, "Browser.CmdKey.CtrlV");
-        }
-        return false;
-    }
-    private void ExecuteOpenCurrentPathInExplorer()
-    {
-        try
-        {
-            var startInfo = new System.Diagnostics.ProcessStartInfo
-            {
-                FileName = "explorer.exe",
-                UseShellExecute = false
-            };
-            startInfo.ArgumentList.Add(_navigationService.CurrentPath);
-            System.Diagnostics.Process.Start(startInfo);
-        }
-        catch (Exception ex)
-        {
-            LogService.Error($"Explorer 起動失敗: {ex.Message}");
-        }
-    }
     /// <summary>
     /// Phase 3-input-cmdkey-clipui1: ProcessCmdKey における Browser 文脈の列数設定 (1-9) を helper 化。
     /// </summary>
-    private bool TryHandleBrowserCmdKeyColumnCount(Keys keyData)
-    {
-        // Ctrl+1/2/3 および Ctrl+NumPad1/2/3 による明示的な表示モード切替
-        if (keyData == (Keys.Control | Keys.D1) || keyData == (Keys.Control | Keys.NumPad1))
-        {
-            SetBrowserFileDetailDisplayMode(BrowserFileDisplayMode.NameOnly);
-            return true;
-        }
-        if (keyData == (Keys.Control | Keys.D2) || keyData == (Keys.Control | Keys.NumPad2))
-        {
-            SetBrowserFileDetailDisplayMode(BrowserFileDisplayMode.NameSize);
-            return true;
-        }
-        if (keyData == (Keys.Control | Keys.D3) || keyData == (Keys.Control | Keys.NumPad3))
-        {
-            SetBrowserFileDetailDisplayMode(BrowserFileDisplayMode.NameSizeDate);
-            return true;
-        }
-
-        // 通常の数字キー / NumPadキーによる列数選択
-        int val = 0;
-        if (keyData >= Keys.D1 && keyData <= Keys.D9) val = (int)(keyData - Keys.D0);
-        else if (keyData >= Keys.NumPad1 && keyData <= Keys.NumPad9) val = (int)(keyData - Keys.NumPad0);
-
-        if (val > 0)
-        {
-            bool isWinFD = FunctionKeyProfileService.ResolveProfile(CurrentFunctionKeyProfileValue) == FunctionKeyProfile.FDCompatible;
-            bool isRepeat = (val == _lastColumnCountKey);
-            _lastColumnCountKey = val;
-
-            if (_columnCount != val)
-            {
-                _columnCount = val;
-                SetBrowserFileDetailDisplayMode(BrowserFileDisplayMode.NameOnly);
-            }
-            else if (isRepeat && isWinFD)
-            {
-                BrowserFileDisplayMode currentMode = GetBrowserFileDisplayMode();
-                BrowserFileDisplayMode nextMode = currentMode switch
-                {
-                    BrowserFileDisplayMode.NameOnly => BrowserFileDisplayMode.NameSize,
-                    BrowserFileDisplayMode.NameSize => BrowserFileDisplayMode.NameSizeDate,
-                    _ => BrowserFileDisplayMode.NameOnly
-                };
-                SetBrowserFileDetailDisplayMode(nextMode);
-            }
-
-            _settings.Session.LastColumnCount = _columnCount;
-            UpdateInfoPanel();
-            browserPanel.Invalidate();
-            CaptureActiveBrowserTabState();
-            return true;
-        }
-        return false;
-    }
     /// <summary>
     /// WinFD風の上部情報欄（Info行・Name行）を更新する。
     /// カーソル位置のアイテム情報とマーク/ファイル数を表示する。
@@ -9016,11 +8207,12 @@ private void InitializeBrowserTabControl()
         CaptureActiveBrowserTabState();
     }
     // ─── Phase 3-fix1c: マウス基本操作（単クリック/ダブルクリック） ───
-    private ContextMenuStrip? _browserContextMenu;
-    private string? _browserContextPath;
-    private string? _browserContextItemName;
     private void BrowserPanel_MouseClick(object? sender, MouseEventArgs e)
     {
+        if (e.Button == MouseButtons.XButton1 || e.Button == MouseButtons.XButton2)
+        {
+            return;
+        }
         if (_uiMode != UIMode.Browser) return;
         ClearPendingEscExitMarkPersistence();
         int newIndex = CalculateBrowserIndexFromPoint(e.X, e.Y);
@@ -9055,158 +8247,16 @@ private void InitializeBrowserTabControl()
             if (newIndex >= 0 && newIndex < fileListView.Items.Count)
             {
                 var item = fileListView.Items[newIndex];
-                if (item.Text == "..") return; // 空白や .. では何もしない
-                string? fullPath = item.Tag as string;
-                if (string.IsNullOrEmpty(fullPath)) return;
-                if (!File.Exists(fullPath) && !Directory.Exists(fullPath)) return;
-                // 右クリック項目が未マークなら、既存マークを解除しクリック項目を対象化
-                if (!_markedFiles.Contains(fullPath))
+                if (_browserCursorIndex != newIndex)
                 {
-                    ClearMarks();
                     _browserCursorIndex = newIndex;
                     SyncBrowserSelection();
                 }
-                _browserContextPath = fullPath;
-                _browserContextItemName = item.Text;
-                ShowBrowserContextMenu(e.Location);
+                ShowBrowserItemContextMenu(e.Location);
+                return;
             }
-        }
-    }
-    private void ShowBrowserContextMenu(Point location)
-    {
-        if (TryConsumeBrowserContextMenuSuppress())
-        {
-            return;
-        }
-        if (_browserContextMenu == null)
-        {
-            _browserContextMenu = new ContextMenuStrip();
-            _browserContextMenu.Opening += BrowserContextMenu_Opening;
-        }
-        else
-        {
-            var oldItems = _browserContextMenu.Items.Cast<ToolStripItem>().ToArray();
-            _browserContextMenu.Items.Clear();
-            foreach (var item in oldItems)
-            {
-                item.Dispose();
-            }
-        }
-        var res = SelectionResolver.Resolve(_markedFiles, fileListView.Items.Count > 0 && _browserCursorIndex >= 0 ? fileListView.Items[_browserCursorIndex] : null);
-        bool canOpenInNewTab = !string.IsNullOrWhiteSpace(_browserContextPath)
-            && !string.Equals(_browserContextItemName, "..", StringComparison.Ordinal)
-            && Directory.Exists(_browserContextPath);
-        // 1. 開く
-        var openItem = new ToolStripMenuItem("開く(&O)", null, (s, e) => ExecuteDefaultOpen());
-        _browserContextMenu.Items.Add(openItem);
-        var openInNewTabItem = new ToolStripMenuItem("新しいタブで開く(&T)", null, (s, e) =>
-        {
-            if (!string.IsNullOrWhiteSpace(_browserContextPath))
-            {
-                CreateNewBrowserTab(_browserContextPath);
-            }
-        })
-        {
-            Enabled = canOpenInNewTab
-        };
-        _browserContextMenu.Items.Add(openInNewTabItem);
-        // 2. 7-Zip > (または直接の圧縮・解凍)
-        bool isReadOnly = IsActiveBrowserTabReadOnly();
-        var sevenZipMenu = Create7ZipMenu(res);
-        if (sevenZipMenu != null)
-        {
-            _browserContextMenu.Items.Add(sevenZipMenu);
-        }
-        else
-        {
-            // 7-Zip サブメニューがない場合は直接配置
-            var packItem = new ToolStripMenuItem("圧縮...", null, async (s, e) => await ExecutePack())
-            {
-                Enabled = !isReadOnly && res.Count > 0
-            };
-            _browserContextMenu.Items.Add(packItem);
-            var unpackItem = new ToolStripMenuItem("解凍...", null, async (s, e) => await ExecuteUnpack())
-            {
-                Enabled = !isReadOnly && res.Count > 0 && res.FullPaths.Any(IsArchiveTarget)
-            };
-            _browserContextMenu.Items.Add(unpackItem);
-            var packEachFolderItem = new ToolStripMenuItem("個別圧縮...", null, async (s, e) =>
-            {
-                await ExecutePack(forcePackEachFolderIndividually: true);
-            })
-            {
-                Enabled = !isReadOnly && CanPackEachFolderIndividually(res)
-            };
-            _browserContextMenu.Items.Add(packEachFolderItem);
-        }
-        // 3. プログラムから開く >
-        var openWithItem = new ToolStripMenuItem("プログラムから開く(&H)...", null, (s, e) => ExecuteOpenWith(res));
-        _browserContextMenu.Items.Add(openWithItem);
-        // 4. パスをコピー
-        var copyPathItem = new ToolStripMenuItem("パスをコピー(&P)", null, (s, e) =>
-        {
-            if (res.FullPaths.Any())
-            {
-                string paths = string.Join(Environment.NewLine, res.FullPaths);
-                Clipboard.SetText(paths);
-                ShowStatusMessage($"{res.FullPaths.Count} 件のパスをクリップボードにコピーしました。");
-            }
-        });
-        _browserContextMenu.Items.Add(copyPathItem);
-        // SVGをコピー
-        bool isSingleSvg = res.FullPaths.Count == 1 &&
-                           (string.Equals(Path.GetExtension(res.FullPaths[0]), ".svg", StringComparison.OrdinalIgnoreCase) ||
-                            string.Equals(Path.GetExtension(res.FullPaths[0]), ".svgz", StringComparison.OrdinalIgnoreCase));
-        if (isSingleSvg && _featureGate.IsEnabled(FeatureId.SvgClipboard))
-        {
-            var copySvgItem = new ToolStripMenuItem("SVGをコピー(&G)", null, (s, e) =>
-            {
-                if (SvgClipboardExportService.CopyToClipboard(res.FullPaths[0]))
-                {
-                    ShowStatusMessage("SVGをクリップボードにコピーしました。");
-                }
-                else
-                {
-                    ShowStatusMessage("SVGのコピーに失敗しました。");
-                }
-            });
-            _browserContextMenu.Items.Add(copySvgItem);
-        }
-        _browserContextMenu.Items.Add(new ToolStripSeparator());
-        // 5. 送る >
-        var sendToMenu = new ToolStripMenuItem("送る(&N)");
-        PopulateSendToMenu(sendToMenu);
-        _browserContextMenu.Items.Add(sendToMenu);
-        _browserContextMenu.Items.Add(new ToolStripSeparator());
-        // 6. 切り取り / コピー / 貼り付け
-        var cutItem = new ToolStripMenuItem("切り取り(&T)", null, (s, e) => ExecuteClipboardCut());
-        var copyOpItem = new ToolStripMenuItem("コピー(&C)", null, (s, e) => ExecuteClipboardCopy());
-        var pasteItem = new ToolStripMenuItem("貼り付け(&P)", null, (s, e) => ExecuteClipboardPaste());
-        // Phase 3-clipboard1.3: 事前判定による Enabled 切替
-        pasteItem.Enabled = !_isClipboardBusy && (
-            ShellClipboardService.HasFileDrop() ||
-            ShellClipboardService.HasImage() ||
-            ((_settings.FileOperations?.ClipboardPasteTextAsFileEnabled ?? false) && ShellClipboardService.HasText()));
-        _browserContextMenu.Items.Add(cutItem);
-        _browserContextMenu.Items.Add(copyOpItem);
-        _browserContextMenu.Items.Add(pasteItem);
-        _browserContextMenu.Items.Add(new ToolStripSeparator());
-        // PowerShell / コマンドプロンプト (直置き)
-        _browserContextMenu.Items.Add(new ToolStripMenuItem("PowerShellをここで開く(&P)", null, (s, e) =>
-            OpenTerminalInCurrentDirectory(ShellKind.PowerShell)));
-        _browserContextMenu.Items.Add(new ToolStripMenuItem("コマンドプロンプトをここで開く(&C)", null, (s, e) =>
-            OpenTerminalInCurrentDirectory(ShellKind.CommandPrompt)));
-        _browserContextMenu.Items.Add(new ToolStripSeparator());
-        // 7. プロパティ
-        var propItem = new ToolStripMenuItem("プロパティ(&R)", null, (s, e) => ExecuteProperties(res));
-        _browserContextMenu.Items.Add(propItem);
-        _browserContextMenu.Show(browserPanel, location);
-    }
-    private void BrowserContextMenu_Opening(object? sender, System.ComponentModel.CancelEventArgs e)
-    {
-        if (TryConsumeBrowserContextMenuSuppress())
-        {
-            e.Cancel = true;
+
+            ShowBrowserBlankContextMenu(e.Location);
         }
     }
     private ToolStripMenuItem? Create7ZipMenu(SelectionResult res)
@@ -9414,61 +8464,6 @@ private void InitializeBrowserTabControl()
         else
         {
             ShowStatusMessage("複数プロパティ一括表示は未対応です。");
-        }
-    }
-    private void PopulateSendToMenu(ToolStripMenuItem sendToMenu)
-    {
-        string sendToPath = Environment.GetFolderPath(Environment.SpecialFolder.SendTo);
-        if (!Directory.Exists(sendToPath)) return;
-        try
-        {
-            var files = Directory.GetFiles(sendToPath);
-            foreach (var file in files)
-            {
-                var attr = File.GetAttributes(file);
-                if (attr.HasFlag(FileAttributes.Hidden)) continue;
-                string name = Path.GetFileNameWithoutExtension(file);
-                if (name.Contains("圧縮") || name.Contains("Pack"))
-                {
-                    // 標準の圧縮機能やサブメニューと混同・重複するのを防ぐため、送るメニューからは除外する
-                    continue;
-                }
-                var item = new ToolStripMenuItem(name, null, (s, e) => ExecuteSendTo(file));
-                sendToMenu.DropDownItems.Add(item);
-            }
-        }
-        catch (Exception ex)
-        {
-            LogService.Error($"SendTo 列挙失敗: {ex.Message}");
-            var errorItem = new ToolStripMenuItem("(列挙失敗)");
-            errorItem.Enabled = false;
-            sendToMenu.DropDownItems.Add(errorItem);
-        }
-    }
-    private void ExecuteSendTo(string targetExeOrShortcut)
-    {
-        var res = SelectionResolver.Resolve(_markedFiles, fileListView.Items.Count > 0 && _browserCursorIndex >= 0 ? fileListView.Items[_browserCursorIndex] : null);
-        if (!res.FullPaths.Any()) return;
-        try
-        {
-            var psi = new System.Diagnostics.ProcessStartInfo
-            {
-                FileName = targetExeOrShortcut,
-                UseShellExecute = true
-            };
-            var sb = new System.Text.StringBuilder();
-            foreach (var path in res.FullPaths)
-            {
-                string escaped = (path ?? string.Empty).Replace("\"", "\\\"");
-                sb.Append('"').Append(escaped).Append("\" ");
-            }
-            psi.Arguments = sb.ToString().TrimEnd();
-            System.Diagnostics.Process.Start(psi);
-        }
-        catch (Exception ex)
-        {
-            LogService.Error($"SendTo 実行失敗: {ex.Message}");
-            ShowStatusMessage($"送る操作に失敗しました: {ex.Message}");
         }
     }
     private void BrowserPanel_MouseDoubleClick(object? sender, MouseEventArgs e)
@@ -9978,6 +8973,16 @@ private void InitializeBrowserTabControl()
     }
     private void BrowserPanel_MouseUp(object? sender, MouseEventArgs e)
     {
+        if (e.Button == MouseButtons.XButton1)
+        {
+            ExecuteCommandFromUi(CommandIds.BrowserNavigateBack, CommandScope.Browser, "Mouse.XButton1");
+            return;
+        }
+        if (e.Button == MouseButtons.XButton2)
+        {
+            ExecuteCommandFromUi(CommandIds.BrowserNavigateForward, CommandScope.Browser, "Mouse.XButton2");
+            return;
+        }
         if (e.Button == MouseButtons.Right && _mouseGestureRecognizer.IsTracking)
         {
             string gesture = _mouseGestureRecognizer.End(e.Location);
@@ -10263,92 +9268,7 @@ private void InitializeBrowserTabControl()
         _browserFileNameToolTipText = null;
     }
 
-    private void UpdateFunctionBarToolTip(int index, Point location)
-    {
-        if (index < 0 || !_settings.Input.ShowFunctionBarTooltips)
-        {
-            HideFunctionBarToolTip();
-            return;
-        }
 
-        if (_fKeyToolTipIndex == index) return;
-
-        bool isCompatible = FunctionKeyProfileService.ResolveProfile(CurrentFunctionKeyProfileValue) == FunctionKeyProfile.FDCompatible;
-        string toolTipText;
-
-        var (isShift, isCtrl, isAlt) = GetActiveFunctionBarLayer();
-        if (!isCompatible)
-        {
-            var models = BuildStandardFunctionBarSlotModels(isShift, isCtrl, isAlt);
-            toolTipText = models[index].ToolTipText;
-        }
-        else
-        {
-            var profile = FunctionKeyProfile.FDCompatible;
-            string? customCmdId = FunctionKeyProfileService.ResolveFunctionBarCommandId(
-                profile,
-                index + 1,
-                _settings.Input.FunctionBarCommandOverridesStandard,
-                _settings.Input.FunctionBarCommandOverridesFdCompatible,
-                _settings.Input.FunctionBarCommandOverridesShiftStandard,
-                _settings.Input.FunctionBarCommandOverridesShiftFdCompatible,
-                isShift,
-                _settings.Input.FunctionBarCommandOverridesCtrlStandard,
-                _settings.Input.FunctionBarCommandOverridesCtrlFdCompatible,
-                _settings.Input.FunctionBarCommandOverridesAltStandard,
-                _settings.Input.FunctionBarCommandOverridesAltFdCompatible,
-                isCtrl,
-                isAlt);
-
-            if (!string.IsNullOrEmpty(customCmdId))
-            {
-                var def = _commandRegistry.Find(customCmdId);
-                string commandName = def?.DisplayName ?? "不明なコマンド";
-                string description = def?.Description ?? $"未登録のコマンドID: {customCmdId}";
-                string keyHint = FunctionKeyProfileService.ResolveFunctionBarKeyHint(customCmdId, _settings.Input.BrowserKeyCommandOverrides, InputSettings.FdCompatibleProfileValue);
-
-                string shortcutPart = string.IsNullOrEmpty(keyHint) ? "" : $" (通常キー: {keyHint})";
-                string modStr = isShift ? "Shift+" : (isCtrl ? "Ctrl+" : (isAlt ? "Alt+" : ""));
-                toolTipText = $"[{modStr}F{index + 1}] {commandName}{shortcutPart}\r\n{description}";
-            }
-            else
-            {
-                var action = FunctionKeyProfileService.ResolveAction(
-                    InputSettings.FdCompatibleProfileValue,
-                    index + 1);
-
-                string actionLabel = GetActionShortLabel_MainForm(action);
-                string description = GetActionDescription_MainForm(action);
-
-                // Apply Custom ShortLabel Override if exists and active CommandId matches
-                string? activeCmdId = FunctionKeyProfileService.ResolveCommandIdFromAction(action);
-                if (!string.IsNullOrEmpty(activeCmdId) && !string.Equals(activeCmdId, "none", StringComparison.OrdinalIgnoreCase))
-                {
-                    var labelOverrides = GetActiveFunctionBarLabelOverrides(isShift, isCtrl, isAlt, true);
-                    if (labelOverrides != null && labelOverrides.TryGetValue($"F{index + 1}", out var labelOverride) && labelOverride != null)
-                    {
-                        if (string.Equals(labelOverride.CommandId, activeCmdId, StringComparison.OrdinalIgnoreCase) && !string.IsNullOrWhiteSpace(labelOverride.Label))
-                        {
-                            actionLabel = InputSettings.NormalizeFunctionBarLabelText(labelOverride.Label);
-                        }
-                    }
-                }
-
-                string modStr = isShift ? "Shift+" : (isCtrl ? "Ctrl+" : (isAlt ? "Alt+" : ""));
-                toolTipText = $"[{modStr}F{index + 1}] {actionLabel}\r\n{description}";
-            }
-        }
-
-        HideFunctionBarToolTip();
-        _fKeyToolTip.Show(toolTipText, functionBarPanel, location.X + 16, location.Y + 20, 6000);
-        _fKeyToolTipIndex = index;
-    }
-
-    private void HideFunctionBarToolTip()
-    {
-        _fKeyToolTip.Hide(functionBarPanel);
-        _fKeyToolTipIndex = -1;
-    }
 
     private string GetActionShortLabel_MainForm(FunctionKeyAction action)
     {
@@ -10579,53 +9499,6 @@ private void InitializeBrowserTabControl()
         int textWidth = MeasureBrowserTextWidth(g, fullName, browserPanel.Font);
         return textWidth > nameBounds.Width;
     }
-    protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
-    {
-        Keys modifiers = keyData & Keys.Modifiers;
-        Keys keyCode = keyData & Keys.KeyCode;
-        bool isPlainNumberKey = (modifiers == Keys.None) &&
-                                ((keyCode >= Keys.D1 && keyCode <= Keys.D9) ||
-                                 (keyCode >= Keys.NumPad1 && keyCode <= Keys.NumPad9));
-        if (!isPlainNumberKey)
-        {
-            _lastColumnCountKey = 0;
-        }
-
-        if (keyCode == Keys.Escape)
-        {
-            LogService.Info(
-                $"[CancelRuntime] MainForm.ProcessCmdKey Escape. busy={_isClipboardBusy}, " +
-                $"hasCts={_fileOpCts != null}, requested={_fileOpCts?.IsCancellationRequested ?? false}, " +
-                $"activeControl={DescribeControl(ActiveControl)}, thread={Environment.CurrentManagedThreadId}");
-        }
-        if (keyCode == Keys.Escape && TryRouteActiveFileOperationCancel("MainForm.ProcessCmdKey"))
-        {
-            return true;
-        }
-        if (keyCode == Keys.Escape && TryCloseImageViewersFromMainEsc("MainForm.ProcessCmdKey"))
-        {
-            return true;
-        }
-        if (TryHandleCommandHintOverlayCmdKey(keyData))
-        {
-            return true;
-        }
-        if (IsCommandLauncherShortcut(keyData))
-        {
-            return ExecuteCommandFromUi(CommandIds.AppOpenCommandLauncher, CommandScope.Global, "MainForm.ProcessCmdKey.CommandLauncher");
-        }
-        if (_viewerInputRouter.TryHandleCmdKey(CreateViewerCmdKeyContext(), keyData)) return true;
-        if (_browserInputRouter.TryHandleCmdKey(CreateBrowserCmdKeyContext(), keyData)) return true;
-        if (keyData == (Keys.Control | Keys.Shift | Keys.L))
-        {
-            if (_uiMode == UIMode.Browser && !IsCurrentDirectoryBusy())
-            {
-                OpenActiveTabFilterLockDialog();
-                return true;
-            }
-        }
-        return base.ProcessCmdKey(ref msg, keyData);
-    }
     private bool IsCommandLauncherShortcut(Keys keyData)
     {
         var shortcut = _settings?.Input?.CommandLauncherShortcut ?? "Ctrl+Shift+P";
@@ -10699,6 +9572,18 @@ private void InitializeBrowserTabControl()
                 if (_uiMode != UIMode.Browser || IsCurrentDirectoryBusy()) return false;
                 MoveBrowserCursorToBottom();
                 return true;
+            case CommandIds.BrowserChangeAttributes:
+                if (_uiMode != UIMode.Browser || IsCurrentDirectoryBusy()) return false;
+                ExecuteAttribute();
+                return true;
+            case CommandIds.BrowserExecute:
+                if (_uiMode != UIMode.Browser || IsCurrentDirectoryBusy()) return false;
+                ExecuteCurrentFile();
+                return true;
+            case CommandIds.BrowserCreateDirectory:
+                if (_uiMode != UIMode.Browser || IsCurrentDirectoryBusy()) return false;
+                ExecuteCreateDirectory();
+                return true;
             case CommandIds.BrowserOpenExplorer:
                 if (_uiMode != UIMode.Browser || IsCurrentDirectoryBusy()) return false;
                 ExecuteOpenCurrentPathInExplorer();
@@ -10711,6 +9596,10 @@ private void InitializeBrowserTabControl()
             case CommandIds.BrowserOpenExternalEditor:
                 if (_uiMode != UIMode.Browser || IsCurrentDirectoryBusy()) return false;
                 ExecuteOpenWithEditor();
+                return true;
+            case CommandIds.BrowserPreview:
+                if (_uiMode != UIMode.Browser || IsCurrentDirectoryBusy()) return false;
+                ExecutePreviewLaunch();
                 return true;
             case CommandIds.BrowserSort:
                 if (_uiMode != UIMode.Browser || IsCurrentDirectoryBusy()) return false;
@@ -10731,6 +9620,10 @@ private void InitializeBrowserTabControl()
             case CommandIds.BrowserLogdisk:
                 if (_uiMode != UIMode.Browser || IsCurrentDirectoryBusy()) return false;
                 ExecuteLogdisk();
+                return true;
+            case CommandIds.ArchivePack:
+                if (_uiMode != UIMode.Browser || IsCurrentDirectoryBusy()) return false;
+                _ = ExecutePack();
                 return true;
             case CommandIds.ArchiveUnpack:
                 if (_uiMode != UIMode.Browser || IsCurrentDirectoryBusy()) return false;
@@ -10909,43 +9802,6 @@ private void InitializeBrowserTabControl()
     internal void InvokeCopyCurrentDirectory() => CopyCurrentDirectoryFromHeader();
     internal void InvokeCopySelectedItemFullPath() => CopySelectedItemFullPathFromHeader();
     internal void InvokeOpenExplorer() => ExecuteOpenCurrentPathInExplorer();
-    internal void InvokeOpenShell() => OpenTerminalInCurrentDirectory(ShellKind.PowerShell);
-    internal void InvokeOpenExternalEditor() => ExecuteOpenWithEditor();
-    internal void InvokeOpenSettingsForm() => OpenSettingsForm();
-    internal void InvokeOpenMarkSlotDialog() => OpenMarkSlotDialog();
-    internal void InvokeOpenWorkspaceSnapshotDialog() => OpenWorkspaceSnapshotDialog();
-    internal void InvokeLaunchExternalTool(ExternalToolCommandDefinition definition)
-    {
-        var context = ExternalToolLaunchCoordinator.BuildExecutionContext(
-            _navigationService.CurrentPath,
-            GetSelectedItemFullPathForHeaderCopy(),
-            GetSelectedItemNameForHeaderCopy(),
-            _markedFiles.Snapshot());
-
-        if (ExternalToolLaunchCoordinator.ShouldConfirmEmptyMarkedPaths(definition, context))
-        {
-            var result = MessageBox.Show(
-                this,
-                ExternalToolLaunchCoordinator.BuildEmptyMarkedPathsConfirmationMessage(),
-                "外部ツール起動確認",
-                MessageBoxButtons.YesNo,
-                MessageBoxIcon.Question);
-            if (result != DialogResult.Yes)
-            {
-                ShowStatusMessage("外部ツールの起動をキャンセルしました。");
-                return;
-            }
-        }
-        string? error = ExternalToolLauncherService.Launch(definition, context);
-        if (error != null)
-        {
-            MessageBox.Show(this, error, "外部ツール起動エラー", MessageBoxButtons.OK, MessageBoxIcon.Error);
-        }
-        else
-        {
-            ShowStatusMessage($"外部ツールを起動しました: {definition.DisplayName}");
-        }
-    }
     protected override void WndProc(ref Message m)
     {
         if (m.Msg == WM_WINDOWPOSCHANGING)
@@ -11284,146 +10140,6 @@ private void InitializeBrowserTabControl()
     {
         return BuildCommandHintState().CanUseCommandLauncherCommands;
     }
-    private void OpenMenuStripFromKeyboard()
-    {
-        LogAltHintContext("OpenMenuStripFromKeyboard");
-        _isOpeningMenuStripExplicitly = true;
-        HideCommandHintOverlay();
-        _isAltHintHeld = false;
-        _isExternalToolAltPopupAltOwned = false;
-        UpdateMenuStripState();
-        if (mainMenuStrip.Items.Count == 0)
-        {
-            _isOpeningMenuStripExplicitly = false;
-            return;
-        }
-        mainMenuStrip.Focus();
-        if (mainMenuStrip.Items[0] is ToolStripMenuItem rootItem)
-        {
-            rootItem.Select();
-            rootItem.ShowDropDown();
-        }
-    }
-    private void MainForm_KeyDown(object? sender, KeyEventArgs e)
-    {
-        if (e.Shift)
-        {
-            UpdateFunctionBarShiftLayerState(true);
-        }
-        if (e.Control)
-        {
-            UpdateFunctionBarCtrlLayerState(true);
-        }
-        if (e.Alt || e.KeyCode == Keys.Menu || e.KeyCode == Keys.LMenu || e.KeyCode == Keys.RMenu)
-        {
-            UpdateFunctionBarAltLayerState(true);
-        }
-        if (e.KeyCode == Keys.Menu || e.KeyCode == Keys.LMenu || e.KeyCode == Keys.RMenu || (e.Control && e.Alt))
-        {
-            LogAltHint($"MainForm_KeyDown Key={e.KeyCode} Alt={e.Alt} Ctrl={e.Control} OverlayVisible={IsCommandHintOverlayVisible()}");
-        }
-        if (e.KeyCode == Keys.Escape && TryRouteActiveFileOperationCancel("MainForm.KeyDown"))
-        {
-            e.Handled = true;
-            e.SuppressKeyPress = true;
-            return;
-        }
-        if (e.KeyCode == Keys.Escape && TryCloseImageViewersFromMainEsc("MainForm.KeyDown"))
-        {
-            e.Handled = true;
-            e.SuppressKeyPress = true;
-            return;
-        }
-        bool isAltOnlyKey =
-            (e.KeyCode == Keys.Menu || e.KeyCode == Keys.LMenu || e.KeyCode == Keys.RMenu) &&
-            !e.Control;
-        if (isAltOnlyKey && CanShowCommandHintOverlay())
-        {
-            _isExternalToolAltPopupAltOwned = true;
-            _isAltHintHeld = true;
-            ShowCommandHintOverlay();
-            e.Handled = true;
-            e.SuppressKeyPress = true;
-            return;
-        }
-        if (TryHandleCommandHintOverlayKeyDown(e)) return;
-        if (_viewerInputRouter.TryHandleKeyDown(CreateViewerKeyDownContext(), e)) return;
-        if (_browserInputRouter.TryHandleKeyDown(CreateBrowserKeyDownContext(), e)) return;
-    }
-    private ViewerInputRouter.CmdKeyContext CreateViewerCmdKeyContext()
-    {
-        return new ViewerInputRouter.CmdKeyContext
-        {
-            IsViewerMode = _uiMode == UIMode.Viewer,
-            TryHandleCore = TryHandleViewerCmdKey
-        };
-    }
-    private ViewerInputRouter.KeyDownContext CreateViewerKeyDownContext()
-    {
-        return new ViewerInputRouter.KeyDownContext
-        {
-            IsViewerMode = _uiMode == UIMode.Viewer,
-            TryHandleCore = TryHandleViewerKeyDown
-        };
-    }
-    private BrowserInputRouter.CmdKeyContext CreateBrowserCmdKeyContext()
-    {
-        return new BrowserInputRouter.CmdKeyContext
-        {
-            IsBrowserMode = _uiMode == UIMode.Browser,
-            IsBrowserFocused = browserPanel.Focused,
-            IsAuxPreviewActive = _previewPopupVisible && _previewPopup != null && _previewPopup.Visible,
-            CanUseCommandLauncherCommands = CanUseCommandLauncherCommands(),
-            TryHandleTabs = TryHandleBrowserCmdKeyTabs,
-            TryHandleCustomBindings = TryHandleBrowserCmdKeyCustomBindings,
-            OpenMenuStripFromKeyboard = OpenMenuStripFromKeyboard,
-            TryHandleNavigation = TryHandleBrowserCmdKeyNavigation,
-            TryHandleFileOperationUndoRedo = TryHandleBrowserCmdKeyFileOperationUndoRedo,
-            TryHandleMarking = TryHandleBrowserCmdKeyMarking,
-            TryHandleClipboard = TryHandleBrowserCmdKeyClipboard,
-            TryHandleColumnCount = TryHandleBrowserCmdKeyColumnCount,
-            TryHandleAliases = TryHandleBrowserCmdKeyAliases,
-            TryHandleLaunch = TryHandleBrowserCmdKeyLaunch,
-            TryHandleCommandLauncher = TryHandleBrowserCmdKeyExternalToolAltSlot
-        };
-    }
-    private BrowserInputRouter.KeyDownContext CreateBrowserKeyDownContext()
-    {
-        return new BrowserInputRouter.KeyDownContext
-        {
-            IsBrowserMode = _uiMode == UIMode.Browser,
-            TryHandleCore = TryHandleBrowserKeyDown
-        };
-    }
-    private void MainForm_KeyUp(object? sender, KeyEventArgs e)
-    {
-        if (e.KeyCode == Keys.ShiftKey || e.KeyCode == Keys.LShiftKey || e.KeyCode == Keys.RShiftKey)
-        {
-            UpdateFunctionBarShiftLayerState(false);
-        }
-        if (e.KeyCode == Keys.ControlKey || e.KeyCode == Keys.LControlKey || e.KeyCode == Keys.RControlKey)
-        {
-            UpdateFunctionBarCtrlLayerState(false);
-        }
-        if (e.KeyCode == Keys.Menu || e.KeyCode == Keys.LMenu || e.KeyCode == Keys.RMenu)
-        {
-            UpdateFunctionBarAltLayerState(false);
-        }
-        if (e.KeyCode == Keys.Menu || e.KeyCode == Keys.LMenu || e.KeyCode == Keys.RMenu || e.KeyCode == Keys.ControlKey || e.KeyCode == Keys.LControlKey || e.KeyCode == Keys.RControlKey)
-        {
-            LogAltHint($"MainForm_KeyUp Key={e.KeyCode} AltHeld={_isAltHintHeld} OverlayVisible={IsCommandHintOverlayVisible()}");
-        }
-        bool isAltKey =
-            e.KeyCode == Keys.Menu ||
-            e.KeyCode == Keys.LMenu ||
-            e.KeyCode == Keys.RMenu;
-        if (isAltKey)
-        {
-            _isAltHintHeld = false;
-            _isExternalToolAltPopupAltOwned = false;
-            HideCommandHintOverlay("MainForm_KeyUp:AltReleased");
-        }
-    }
     private bool TryHandleCommandHintOverlayCmdKey(Keys keyData)
     {
         if (!CanShowCommandHintOverlay() || !IsCommandHintOverlayVisible())
@@ -11663,21 +10379,6 @@ private void InitializeBrowserTabControl()
         _lastLoggedCommandHintBounds = Rectangle.Empty;
         _lastLoggedCommandHintPanelSize = Size.Empty;
         browserPanel.Invalidate();
-    }
-    private bool TryHandleBrowserCmdKeyExternalToolAltSlot(Keys keyData)
-    {
-        if (!TryResolveExternalToolByAltSlot(keyData, out ExternalToolCommandDefinition? tool, out string slotLabel))
-        {
-            return false;
-        }
-        if (GuardClipboardBusy())
-        {
-            return true;
-        }
-        LogAltHint($"TryHandleBrowserCmdKeyExternalToolAltSlot Slot={slotLabel} Tool={tool!.Id}");
-        HideCommandHintOverlay("TryHandleBrowserCmdKeyExternalToolAltSlot");
-        InvokeLaunchExternalTool(tool!);
-        return true;
     }
     private bool LaunchSelectedCommandHint()
     {
@@ -11982,100 +10683,6 @@ private void InitializeBrowserTabControl()
             .ThenBy(static x => x.SlotLabel, StringComparer.OrdinalIgnoreCase)
             .ThenBy(static x => x.Title, StringComparer.OrdinalIgnoreCase)
             .ToArray();
-    }
-    private bool TryHandleBrowserCmdKeyFileOperationUndoRedo(Keys keyData)
-    {
-        if (keyData == (Keys.Control | Keys.Z))
-        {
-            if (GuardClipboardBusy()) return true;
-            return ExecuteCommandFromUi(CommandIds.EditUndo, CommandScope.Browser, "Browser.CmdKey.CtrlZ");
-        }
-        if (keyData == (Keys.Control | Keys.Y))
-        {
-            if (GuardClipboardBusy()) return true;
-            return ExecuteCommandFromUi(CommandIds.EditRedo, CommandScope.Browser, "Browser.CmdKey.CtrlY");
-        }
-        if (keyData == (Keys.Alt | Keys.Z))
-        {
-            if (GuardClipboardBusy()) return true;
-            return ExecuteCommandFromUi(CommandIds.EditUndo, CommandScope.Browser, "Browser.CmdKey.AltZ");
-        }
-        if (keyData == (Keys.Alt | Keys.Y))
-        {
-            if (GuardClipboardBusy()) return true;
-            return ExecuteCommandFromUi(CommandIds.EditRedo, CommandScope.Browser, "Browser.CmdKey.AltY");
-        }
-        return false;
-    }
-    private bool TryHandleBrowserCmdKeyTabs(Keys keyData)
-    {
-        if (_uiMode != UIMode.Browser)
-        {
-            return false;
-        }
-        if (keyData == (Keys.Control | Keys.T))
-        {
-            CreateNewBrowserTab();
-            return true;
-        }
-        if (keyData == (Keys.Control | Keys.L))
-        {
-            ToggleActiveBrowserTabLock();
-            return true;
-        }
-        if (keyData == (Keys.Control | Keys.W))
-        {
-            CloseCurrentBrowserTab();
-            return true;
-        }
-        if (keyData == (Keys.Control | Keys.Shift | Keys.N))
-        {
-            AddGeneratedBrowserTabCategory();
-            return true;
-        }
-        if (keyData == (Keys.Control | Keys.Shift | Keys.Left))
-        {
-            LogService.Info($"[BrowserTabCategory] Shortcut Key=Ctrl+Shift+Left ActiveCategory={_activeBrowserTabCategoryId} Tabs={_browserTabs.Count} ActiveIndex={_activeBrowserTabIndex}");
-            SelectAdjacentBrowserTabCategory(-1);
-            return true;
-        }
-        if (keyData == (Keys.Control | Keys.Shift | Keys.Right))
-        {
-            LogService.Info($"[BrowserTabCategory] Shortcut Key=Ctrl+Shift+Right ActiveCategory={_activeBrowserTabCategoryId} Tabs={_browserTabs.Count} ActiveIndex={_activeBrowserTabIndex}");
-            SelectAdjacentBrowserTabCategory(+1);
-            return true;
-        }
-        if (keyData == (Keys.Control | Keys.Left))
-        {
-            SelectAdjacentBrowserTab(-1);
-            return true;
-        }
-        if (keyData == (Keys.Control | Keys.Right))
-        {
-            SelectAdjacentBrowserTab(+1);
-            return true;
-        }
-        if (keyData == (Keys.Control | Keys.Alt | Keys.Left))
-        {
-            MoveBrowserTabCategory(_activeBrowserTabCategoryId, -1);
-            return true;
-        }
-        if (keyData == (Keys.Control | Keys.Alt | Keys.Right))
-        {
-            MoveBrowserTabCategory(_activeBrowserTabCategoryId, +1);
-            return true;
-        }
-        if (keyData == (Keys.Control | Keys.Tab))
-        {
-            SelectAdjacentBrowserTab(+1);
-            return true;
-        }
-        if (keyData == (Keys.Control | Keys.Shift | Keys.Tab))
-        {
-            SelectAdjacentBrowserTab(-1);
-            return true;
-        }
-        return false;
     }
     private void ToggleMark(bool moveNext)
     {
@@ -20505,8 +19112,20 @@ private void InitializeBrowserTabControl()
     }
     private void OpenTerminalInCurrentDirectory(ShellKind kind)
     {
-        string? error = ExternalToolService.OpenTerminal(_navigationService.CurrentPath, kind);
-        if (error != null) ShowStatusMessage(error);
+        OpenTerminalInWorkingDirectory(_navigationService.CurrentPath, kind);
+    }
+    private static string? GetBrowserItemWorkingDirectory(string itemPath)
+    {
+        if (Directory.Exists(itemPath))
+        {
+            return itemPath;
+        }
+        if (!File.Exists(itemPath))
+        {
+            return null;
+        }
+        string? workingDirectory = Path.GetDirectoryName(itemPath);
+        return string.IsNullOrWhiteSpace(workingDirectory) ? null : workingDirectory;
     }
     private void ExecuteShell()
     {
@@ -21771,12 +20390,16 @@ private void InitializeBrowserTabControl()
         browserPanel.BackColor = _resolvedColors.Background;
         mainMenuStrip.BackColor = uiThemeColors.ChromeBackColor;
         mainMenuStrip.ForeColor = uiThemeColors.ChromeForeColor;
-        foreach (ToolStripMenuItem rootItem in mainMenuStrip.Items.OfType<ToolStripMenuItem>())
+        foreach (ToolStripItem item in mainMenuStrip.Items)
         {
-            rootItem.BackColor = uiThemeColors.ChromeBackColor;
-            rootItem.ForeColor = uiThemeColors.ChromeForeColor;
-            ApplyDropDownTheme(rootItem, uiThemeColors.ChromeBackColor, uiThemeColors.ChromeForeColor);
+            item.BackColor = uiThemeColors.ChromeBackColor;
+            item.ForeColor = uiThemeColors.ChromeForeColor;
+            if (item is ToolStripMenuItem rootItem)
+            {
+                ApplyDropDownTheme(rootItem, uiThemeColors.ChromeBackColor, uiThemeColors.ChromeForeColor);
+            }
         }
+        UpdateBrowserToolbarVisibility();
         viewerPanel.BackColor = uiThemeColors.ViewerBackColor;
         viewerTextBox.BackColor = uiThemeColors.ViewerBackColor;
         viewerTextBox.ForeColor = uiThemeColors.ViewerForeColor;
@@ -21859,15 +20482,19 @@ private void InitializeBrowserTabControl()
     }
     private void ApplyDropDownTheme(ToolStripDropDownItem item, Color backColor, Color foreColor)
     {
-        item.DropDown.BackColor = backColor;
-        item.DropDown.ForeColor = foreColor;
+        Color dropDownBack = Color.WhiteSmoke;
+        Color dropDownFore = Color.Black;
+
+        item.DropDown.BackColor = dropDownBack;
+        item.DropDown.ForeColor = dropDownFore;
+        ConfigureGlobalDropDownProperties(item, null);
         foreach (ToolStripItem child in item.DropDownItems)
         {
-            child.BackColor = backColor;
-            child.ForeColor = foreColor;
+            child.BackColor = dropDownBack;
+            child.ForeColor = dropDownFore;
             if (child is ToolStripDropDownItem childDropDown)
             {
-                ApplyDropDownTheme(childDropDown, backColor, foreColor);
+                ApplyDropDownTheme(childDropDown, dropDownBack, dropDownFore);
             }
         }
     }

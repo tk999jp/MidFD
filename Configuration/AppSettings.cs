@@ -56,6 +56,7 @@ public class AppearanceSettings
     public bool ShowLightweightInfo { get; set; } = true;
     public string DateFormat { get; set; } = "yyyy-MM-dd HH:mm";
     public string SizeFormat { get; set; } = "HumanReadable";
+    public bool ShowBrowserToolbar { get; set; } = false;
 
     public bool UseCustomFileListColors { get; set; } = false;
     public bool EnableSemanticColorAssist { get; set; } = true;

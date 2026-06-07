@@ -6,6 +6,7 @@ namespace MidFD.Dialogs;
 public sealed class QuickAccessLocationDialog : Form
 {
     private readonly TextBox _displayNameTextBox;
+    private readonly ComboBox _categoryComboBox;
     private readonly TextBox _pathTextBox;
     private readonly CheckBox _useForTabTitleCheckBox;
     private readonly Label _summaryLabel;
@@ -13,6 +14,7 @@ public sealed class QuickAccessLocationDialog : Form
     private bool _displayNameTouched;
 
     public string DisplayNameValue => _displayNameTextBox.Text.Trim();
+    public string? CategoryNameValue => QuickAccessService.NormalizeCategoryName(_categoryComboBox.Text);
     public string PathValue => _pathTextBox.Text.Trim();
     public bool UseForTabTitle => _useForTabTitleCheckBox.Checked;
 
@@ -21,6 +23,8 @@ public sealed class QuickAccessLocationDialog : Form
         string currentPath,
         string initialPath,
         string initialDisplayName,
+        string? initialCategoryName,
+        IReadOnlyList<string>? categoryOptions,
         bool initialUseForTabTitle)
     {
         const int horizontalMargin = 16;
@@ -64,10 +68,28 @@ public sealed class QuickAccessLocationDialog : Form
             Text = initialDisplayName
         };
 
-        var pathLabel = new Label
+        var categoryLabel = new Label
         {
             Left = horizontalMargin,
             Top = _displayNameTextBox.Bottom + rowGap,
+            Width = contentWidth,
+            Text = "カテゴリ"
+        };
+        _categoryComboBox = new ComboBox
+        {
+            Left = horizontalMargin,
+            Top = categoryLabel.Bottom + 4,
+            Width = contentWidth,
+            DropDownStyle = ComboBoxStyle.DropDown,
+            AutoCompleteMode = AutoCompleteMode.SuggestAppend,
+            AutoCompleteSource = AutoCompleteSource.ListItems,
+            Text = string.IsNullOrWhiteSpace(initialCategoryName) ? string.Empty : initialCategoryName.Trim()
+        };
+
+        var pathLabel = new Label
+        {
+            Left = horizontalMargin,
+            Top = _categoryComboBox.Bottom + rowGap,
             Width = contentWidth,
             Text = "移動先フォルダ"
         };
@@ -134,6 +156,8 @@ public sealed class QuickAccessLocationDialog : Form
 
         Controls.Add(displayNameLabel);
         Controls.Add(_displayNameTextBox);
+        Controls.Add(categoryLabel);
+        Controls.Add(_categoryComboBox);
         Controls.Add(pathLabel);
         Controls.Add(_pathTextBox);
         Controls.Add(currentPathButton);
@@ -152,6 +176,7 @@ public sealed class QuickAccessLocationDialog : Form
             _displayNameTouched = true;
             UpdateSummaryText();
         };
+        _categoryComboBox.TextChanged += (_, _) => UpdateSummaryText();
         _pathTextBox.TextChanged += (_, _) =>
         {
             ApplySuggestedDisplayName();
@@ -167,12 +192,43 @@ public sealed class QuickAccessLocationDialog : Form
         Shown += (_, _) =>
         {
             _displayNameTouched = false;
+            _categoryComboBox.SelectAll();
             _displayNameTextBox.SelectAll();
         };
 
         UpdateSummaryText();
+        PopulateCategorySuggestions(initialCategoryName, categoryOptions);
         var completionController = Helpers.DirectoryPathCompletionController.Attach(_pathTextBox);
         Disposed += (_, _) => completionController.Dispose();
+    }
+
+    private void PopulateCategorySuggestions(string? initialCategoryName, IReadOnlyList<string>? categoryOptions)
+    {
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        if (categoryOptions != null)
+        {
+            foreach (string category in categoryOptions)
+            {
+                string? normalized = QuickAccessService.NormalizeCategoryName(category);
+                if (string.IsNullOrWhiteSpace(normalized) || !seen.Add(normalized))
+                {
+                    continue;
+                }
+
+                _categoryComboBox.Items.Add(normalized);
+            }
+        }
+
+        string? initialCategory = QuickAccessService.NormalizeCategoryName(initialCategoryName);
+        if (!string.IsNullOrWhiteSpace(initialCategory) && seen.Add(initialCategory))
+        {
+            _categoryComboBox.Items.Add(initialCategory);
+        }
+
+        if (!string.IsNullOrWhiteSpace(initialCategory))
+        {
+            _categoryComboBox.Text = initialCategory;
+        }
     }
 
     private void BrowsePath()
@@ -206,8 +262,9 @@ public sealed class QuickAccessLocationDialog : Form
         string displayNameSummary = _displayNameTextBox.Text.Trim().Length == 0
             ? "(空なら末端ディレクトリ名)"
             : _displayNameTextBox.Text.Trim();
+        string categorySummary = string.IsNullOrWhiteSpace(CategoryNameValue) ? "未分類" : CategoryNameValue;
         string tabTitleText = _useForTabTitleCheckBox.Checked ? "はい" : "いいえ";
-        _summaryLabel.Text = $"表示名: {displayNameSummary} / タブ見出しにも使う: {tabTitleText}\r\n移動先: {pathSummary}";
+        _summaryLabel.Text = $"表示名: {displayNameSummary} / カテゴリ: {categorySummary} / タブ見出しにも使う: {tabTitleText}\r\n移動先: {pathSummary}";
     }
 
     public static QuickAccessLocationDialogResult? ShowEditor(
@@ -216,9 +273,11 @@ public sealed class QuickAccessLocationDialog : Form
         string currentPath,
         string initialPath,
         string initialDisplayName,
+        string? initialCategoryName,
+        IReadOnlyList<string>? categoryOptions,
         bool initialUseForTabTitle)
     {
-        using var dialog = new QuickAccessLocationDialog(title, currentPath, initialPath, initialDisplayName, initialUseForTabTitle);
+        using var dialog = new QuickAccessLocationDialog(title, currentPath, initialPath, initialDisplayName, initialCategoryName, categoryOptions, initialUseForTabTitle);
         if (dialog.ShowDialog(owner) != DialogResult.OK)
         {
             return null;
@@ -226,6 +285,7 @@ public sealed class QuickAccessLocationDialog : Form
 
         return new QuickAccessLocationDialogResult(
             dialog.DisplayNameValue,
+            dialog.CategoryNameValue,
             dialog.PathValue,
             dialog.UseForTabTitle);
     }
@@ -233,5 +293,6 @@ public sealed class QuickAccessLocationDialog : Form
 
 public sealed record QuickAccessLocationDialogResult(
     string DisplayName,
+    string? CategoryName,
     string Path,
     bool UseForTabTitle);

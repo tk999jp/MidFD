@@ -98,6 +98,20 @@ public sealed class FileOperationUndoRedoService
         RemoveMatching(_redoStack, static batch => IsTrashDeleteOperation(batch.Operation));
     }
 
+    public void PruneTrashDeleteItemsByRecycleBinPaths(IEnumerable<string> recycleBinPaths)
+    {
+        var pathSet = new HashSet<string>(
+            recycleBinPaths.Where(path => !string.IsNullOrWhiteSpace(path)),
+            StringComparer.OrdinalIgnoreCase);
+        if (pathSet.Count == 0)
+        {
+            return;
+        }
+
+        PruneTrashDeleteItems(_undoStack, pathSet);
+        PruneTrashDeleteItems(_redoStack, pathSet);
+    }
+
     public static IReadOnlyList<FileOperationUndoRedoItem> CreateRenameBatch(IEnumerable<RenamePreviewItem> items)
     {
         return items
@@ -222,6 +236,41 @@ public sealed class FileOperationUndoRedoService
             .Where(batch => !predicate(batch))
             .Reverse()
             .ToList();
+        stack.Clear();
+        foreach (FileOperationUndoRedoBatch batch in preserved)
+        {
+            stack.Push(batch);
+        }
+    }
+
+    private static void PruneTrashDeleteItems(Stack<FileOperationUndoRedoBatch> stack, HashSet<string> recycleBinPaths)
+    {
+        var preserved = new List<FileOperationUndoRedoBatch>();
+        foreach (FileOperationUndoRedoBatch batch in stack.Reverse())
+        {
+            if (batch.Operation != FileOperationUndoRedoOperation.DeleteToMidFdTrash)
+            {
+                preserved.Add(batch);
+                continue;
+            }
+
+            var filteredItems = batch.Items
+                .Where(item => string.IsNullOrWhiteSpace(item.RecycleBinPath) || !recycleBinPaths.Contains(item.RecycleBinPath))
+                .ToList();
+
+            if (filteredItems.Count == 0)
+            {
+                continue;
+            }
+
+            preserved.Add(new FileOperationUndoRedoBatch
+            {
+                Operation = batch.Operation,
+                Items = filteredItems,
+                IsPartialCancellation = batch.IsPartialCancellation
+            });
+        }
+
         stack.Clear();
         foreach (FileOperationUndoRedoBatch batch in preserved)
         {

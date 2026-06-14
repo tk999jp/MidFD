@@ -15,12 +15,25 @@ public class FileListColorResolver
         "Green",
         "Amber",
         "Light",
-        "WinFD Classic Dark",
-        "WinFD Classic Light",
-        "High Contrast Dark",
-        "High Contrast Light",
-        "Terminal Green",
-        "Amber Contrast"
+        "Slate",
+        "Mono Dark",
+        "Cyber",
+        "Violet",
+        "Sepia"
+    };
+
+    private static readonly (string Alias, string Canonical)[] PresetAliases =
+    {
+        ("High Contrast Dark", "Mono Dark"),
+        ("High Contrast Light", "Light"),
+        ("Contrast Dark", "Mono Dark"),
+        ("Contrast Light", "Light"),
+        ("Terminal Green", "Green"),
+        ("Green Terminal", "Green"),
+        ("Amber Contrast", "Amber"),
+        ("Amber Terminal", "Amber"),
+        ("WinFD Classic Dark", "Slate"),
+        ("WinFD Classic Light", "Light")
     };
 
     public class ResolvedColors
@@ -43,14 +56,38 @@ public class FileListColorResolver
 
     public static bool IsBuiltInPreset(string? presetKey)
     {
-        return Array.Exists(BuiltInPresetKeys, preset => string.Equals(preset, presetKey, StringComparison.Ordinal));
+        if (string.IsNullOrWhiteSpace(presetKey))
+        {
+            return false;
+        }
+
+        string canonical = CanonicalizePresetKey(presetKey);
+        return Array.Exists(BuiltInPresetKeys, preset => string.Equals(preset, canonical, StringComparison.Ordinal));
+    }
+
+    public static string CanonicalizePresetKey(string? presetKey)
+    {
+        if (string.IsNullOrWhiteSpace(presetKey) || TryGetUserPresetName(presetKey, out _))
+        {
+            return presetKey ?? "ClassicCyan";
+        }
+
+        foreach (var (alias, canonical) in PresetAliases)
+        {
+            if (string.Equals(alias, presetKey, StringComparison.OrdinalIgnoreCase))
+            {
+                return canonical;
+            }
+        }
+
+        return presetKey;
     }
 
     public static string NormalizeCoreTheme(string? themeKey, AppSettings? settings = null)
     {
+        themeKey = CanonicalizePresetKey(themeKey);
         if (string.Equals(themeKey, "Light", StringComparison.OrdinalIgnoreCase) ||
-            string.Equals(themeKey, "High Contrast Light", StringComparison.OrdinalIgnoreCase) ||
-            string.Equals(themeKey, "WinFD Classic Light", StringComparison.OrdinalIgnoreCase))
+            string.Equals(themeKey, "Light", StringComparison.OrdinalIgnoreCase))
         {
             return "Light";
         }
@@ -59,7 +96,7 @@ public class FileListColorResolver
             return "Green";
         }
         if (string.Equals(themeKey, "Amber", StringComparison.OrdinalIgnoreCase) ||
-            string.Equals(themeKey, "Amber Contrast", StringComparison.OrdinalIgnoreCase))
+            string.Equals(themeKey, "Sepia", StringComparison.OrdinalIgnoreCase))
         {
             return "Amber";
         }
@@ -159,74 +196,64 @@ public class FileListColorResolver
             }
         }
 
+        presetKey = CanonicalizePresetKey(presetKey);
         var colors = new ResolvedColors();
         switch (presetKey)
         {
-            case "WinFD Classic Dark":
-                colors.Background = Color.Black;
-                colors.NormalFile = Color.White;
-                colors.Directory = Color.Cyan;
-                colors.ReadOnly = Color.Lime;
-                colors.Hidden = Color.Gray;
-                colors.System = Color.Red;
-                colors.Marked = Color.White;
-                colors.SelectedBackground = Color.FromArgb(0, 0, 128);
-                colors.SelectedForeground = Color.White;
+            case "Slate":
+                colors.Background = Color.FromArgb(20, 26, 34);
+                colors.NormalFile = Color.FromArgb(214, 222, 228);
+                colors.Directory = Color.FromArgb(122, 178, 214);
+                colors.ReadOnly = Color.FromArgb(132, 208, 164);
+                colors.Hidden = Color.FromArgb(124, 142, 176);
+                colors.System = Color.FromArgb(214, 152, 182);
+                colors.Marked = Color.FromArgb(245, 245, 248);
+                colors.SelectedBackground = Color.FromArgb(48, 72, 96);
+                colors.SelectedForeground = Color.FromArgb(248, 250, 252);
                 break;
-            case "WinFD Classic Light":
-                colors.Background = Color.White;
-                colors.NormalFile = Color.Black;
-                colors.Directory = Color.Blue;
-                colors.ReadOnly = Color.FromArgb(0, 128, 0);
-                colors.Hidden = Color.Gray;
-                colors.System = Color.FromArgb(128, 0, 128);
-                colors.Marked = Color.Black;
-                colors.SelectedBackground = Color.FromArgb(180, 200, 240);
-                colors.SelectedForeground = Color.Black;
+            case "Mono Dark":
+                colors.Background = Color.FromArgb(18, 18, 18);
+                colors.NormalFile = Color.FromArgb(214, 214, 214);
+                colors.Directory = Color.FromArgb(176, 176, 176);
+                colors.ReadOnly = Color.FromArgb(144, 188, 144);
+                colors.Hidden = Color.FromArgb(126, 126, 126);
+                colors.System = Color.FromArgb(188, 152, 152);
+                colors.Marked = Color.FromArgb(244, 244, 244);
+                colors.SelectedBackground = Color.FromArgb(62, 62, 62);
+                colors.SelectedForeground = Color.FromArgb(248, 248, 248);
                 break;
-            case "High Contrast Dark":
-                colors.Background = Color.Black;
-                colors.NormalFile = Color.White;
-                colors.Directory = Color.Yellow;
-                colors.ReadOnly = Color.Lime;
-                colors.Hidden = Color.Cyan;
-                colors.System = Color.Magenta;
-                colors.Marked = Color.White;
-                colors.SelectedBackground = Color.FromArgb(0, 58, 112); // #003A70
-                colors.SelectedForeground = Color.White;
+            case "Cyber":
+                colors.Background = Color.FromArgb(16, 22, 36);
+                colors.NormalFile = Color.FromArgb(214, 246, 255);
+                colors.Directory = Color.FromArgb(72, 240, 255);
+                colors.ReadOnly = Color.FromArgb(132, 255, 198);
+                colors.Hidden = Color.FromArgb(126, 136, 224);
+                colors.System = Color.FromArgb(255, 112, 214);
+                colors.Marked = Color.FromArgb(255, 244, 168);
+                colors.SelectedBackground = Color.FromArgb(78, 30, 110);
+                colors.SelectedForeground = Color.FromArgb(244, 248, 255);
                 break;
-            case "High Contrast Light":
-                colors.Background = Color.White;
-                colors.NormalFile = Color.Black;
-                colors.Directory = Color.FromArgb(0, 0, 204); // #0000CC
-                colors.ReadOnly = Color.FromArgb(0, 96, 0); // #006000
-                colors.Hidden = Color.FromArgb(128, 0, 128); // #800080
-                colors.System = Color.FromArgb(176, 0, 0); // #B00000
-                colors.Marked = Color.Black;
-                colors.SelectedBackground = Color.FromArgb(204, 232, 255); // #CCE8FF
-                colors.SelectedForeground = Color.Black;
+            case "Violet":
+                colors.Background = Color.FromArgb(24, 16, 36);
+                colors.NormalFile = Color.FromArgb(228, 220, 244);
+                colors.Directory = Color.FromArgb(184, 144, 255);
+                colors.ReadOnly = Color.FromArgb(144, 214, 188);
+                colors.Hidden = Color.FromArgb(124, 132, 196);
+                colors.System = Color.FromArgb(232, 126, 194);
+                colors.Marked = Color.FromArgb(250, 246, 255);
+                colors.SelectedBackground = Color.FromArgb(68, 42, 104);
+                colors.SelectedForeground = Color.FromArgb(248, 244, 255);
                 break;
-            case "Terminal Green":
-                colors.Background = Color.Black;
-                colors.NormalFile = Color.FromArgb(0, 220, 0);
-                colors.Directory = Color.FromArgb(0, 255, 0);
-                colors.ReadOnly = Color.FromArgb(0, 180, 0);
-                colors.Hidden = Color.FromArgb(0, 100, 0);
-                colors.System = Color.FromArgb(0, 150, 0);
-                colors.Marked = Color.White;
-                colors.SelectedBackground = Color.FromArgb(0, 60, 0);
-                colors.SelectedForeground = Color.White;
-                break;
-            case "Amber Contrast":
-                colors.Background = Color.Black;
-                colors.NormalFile = Color.FromArgb(255, 190, 0);
-                colors.Directory = Color.FromArgb(255, 215, 0);
-                colors.ReadOnly = Color.FromArgb(218, 165, 32);
-                colors.Hidden = Color.FromArgb(139, 101, 8);
-                colors.System = Color.FromArgb(205, 133, 63);
-                colors.Marked = Color.White;
-                colors.SelectedBackground = Color.FromArgb(70, 40, 0);
-                colors.SelectedForeground = Color.White;
+            case "Sepia":
+                colors.Background = Color.FromArgb(38, 30, 22);
+                colors.NormalFile = Color.FromArgb(230, 214, 190);
+                colors.Directory = Color.FromArgb(196, 168, 124);
+                colors.ReadOnly = Color.FromArgb(150, 188, 136);
+                colors.Hidden = Color.FromArgb(122, 146, 170);
+                colors.System = Color.FromArgb(184, 134, 122);
+                colors.Marked = Color.FromArgb(246, 236, 220);
+                colors.SelectedBackground = Color.FromArgb(84, 60, 34);
+                colors.SelectedForeground = Color.FromArgb(255, 246, 232);
                 break;
             default:
                 return ResolveDefaultColors(presetKey);
@@ -236,14 +263,14 @@ public class FileListColorResolver
 
     public static string GetPresetDescription(string? presetKey)
     {
+        presetKey = CanonicalizePresetKey(presetKey);
         return presetKey switch
         {
-            "WinFD Classic Dark" => "黒背景にシアン/黄/緑/青/マゼンタを強く出す、WinFD寄りの高彩度配色です。",
-            "WinFD Classic Light" => "白背景でも属性色を強く残す、WinFD寄りの明色配色です。",
-            "High Contrast Dark" => "黒背景で識別性を優先し、選択行も読めるよう調整した配色です。",
-            "High Contrast Light" => "白背景で黒文字中心、属性色は濃く、選択行も読めるよう調整した配色です。",
-            "Terminal Green" => "黒背景に緑系を主役にした、端末風の配色です。",
-            "Amber Contrast" => "黒背景にアンバー系を主体にした、高コントラスト配色です。",
+            "Slate" => "青みを抑えた濃色ベースで、落ち着いた視認性を狙った配色です。",
+            "Mono Dark" => "無彩色寄りの濃色ベースで、派手さを抑えて見通しを重視した配色です。",
+            "Cyber" => "近未来感のある暗色ベースで、シアンとマゼンタをアクセントにした配色です。",
+            "Violet" => "紫系を主調にした暗色配色です。青・緑・琥珀と別系統で見分けやすくしています。",
+            "Sepia" => "茶・紙面寄りの落ち着いた配色です。暗色ベースでも温かみを保ちます。",
             "Green" => "緑系主体の既存テーマです。",
             "Amber" => "アンバー系主体の既存テーマです。",
             "Light" => "白背景の既存テーマです。",
@@ -473,9 +500,7 @@ public class FileListColorResolver
 
     public static bool IsHighContrastPreset(string? presetKey)
     {
-        if (string.IsNullOrWhiteSpace(presetKey)) return false;
-        return presetKey.Equals("High Contrast Dark", StringComparison.OrdinalIgnoreCase)
-            || presetKey.Equals("High Contrast Light", StringComparison.OrdinalIgnoreCase);
+        return false;
     }
 
     public static Color ResolveSelectedForegroundForPreset(

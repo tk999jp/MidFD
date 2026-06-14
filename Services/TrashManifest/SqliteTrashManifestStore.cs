@@ -325,6 +325,49 @@ internal sealed class SqliteTrashManifestStore : ITrashManifestStore
         }
     }
 
+    public int RemoveRecordsByTrashPaths(TrashManifest manifest, IEnumerable<string> trashPaths)
+    {
+        var paths = trashPaths
+            .Where(path => !string.IsNullOrWhiteSpace(path))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+        if (paths.Count == 0)
+        {
+            return 0;
+        }
+
+        int removed = 0;
+        var pathSet = new HashSet<string>(paths, StringComparer.OrdinalIgnoreCase);
+        manifest.Records.RemoveAll(record => pathSet.Contains(record.TrashPath));
+
+        try
+        {
+            using var connection = new SqliteConnection(_connectionString);
+            connection.Open();
+            using var transaction = connection.BeginTransaction();
+            using var command = connection.CreateCommand();
+            command.Transaction = transaction;
+            command.CommandText = "DELETE FROM trash_records WHERE trash_path = @tp";
+            var tpParam = command.Parameters.Add("@tp", SqliteType.Text);
+            command.Prepare();
+
+            foreach (string path in paths)
+            {
+                tpParam.Value = path;
+                removed += command.ExecuteNonQuery();
+            }
+
+            transaction.Commit();
+        }
+        catch (Exception ex)
+        {
+            LogService.Error($"[MidFdTrash] SQLite RemoveRecordsByTrashPaths failed. count={paths.Count}", ex);
+            throw;
+        }
+
+        return removed;
+    }
+
     public bool TryGetRecordByOriginalPath(TrashManifest manifest, string originalPath, out TrashManifestRecord? record)
     {
         record = manifest.Records.LastOrDefault(r => string.Equals(r.OriginalPath, originalPath, StringComparison.OrdinalIgnoreCase));

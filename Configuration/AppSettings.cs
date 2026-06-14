@@ -56,6 +56,7 @@ public class AppearanceSettings
     public bool ShowLightweightInfo { get; set; } = true;
     public string DateFormat { get; set; } = "yyyy-MM-dd HH:mm";
     public string SizeFormat { get; set; } = "HumanReadable";
+    public bool ShowFunctionBar { get; set; } = true;
     public bool ShowBrowserToolbar { get; set; } = false;
 
     public bool UseCustomFileListColors { get; set; } = false;
@@ -63,12 +64,13 @@ public class AppearanceSettings
     public CustomFileListColorSettings CustomFileListColors { get; set; } = new();
     public List<CustomFileListColorPreset> CustomFileListColorPresets { get; set; } = new();
 
-    // UIクローム/Viewer手動指定色
     public bool CustomUiThemeColorsEnabled { get; set; } = false;
     public string? CustomFilerBackColor { get; set; }
     public string? CustomFilerForeColor { get; set; }
     public string? CustomViewerBackColor { get; set; }
     public string? CustomViewerForeColor { get; set; }
+    public string? CustomFunctionBarBackColor { get; set; }
+    public string? CustomFunctionBarForeColor { get; set; }
 
 
     public AppearanceSettings Clone()
@@ -379,6 +381,8 @@ public class FileOperationsSettings
     public bool ConfirmPermanentDelete { get; set; } = true;
     public bool UseRecycleBinByDefault { get; set; } = true;
     public bool UseMidFdManagedTrash { get; set; } = false;
+    public bool ManagedTrashAutoHandoffEnabled { get; set; } = true;
+    public int ManagedTrashUndoRetentionDays { get; set; } = 7;
     public ManagedTrashStoreMode ManagedTrashStoreMode { get; set; } = ManagedTrashStoreMode.Json;
     public bool ReloadAfterFileOperation { get; set; } = true;
     public bool SelectCreatedItemAfterCreate { get; set; } = true;

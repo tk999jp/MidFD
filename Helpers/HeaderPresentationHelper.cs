@@ -42,6 +42,7 @@ namespace MidFD.Helpers
         public class InputState
         {
             public string CurrentPath { get; set; } = string.Empty;
+            public string CurrentPathKind { get; set; } = string.Empty;
             public int CursorIndex { get; set; }
             public int ItemCount { get; set; }
             public int ItemsPerPage { get; set; }
@@ -49,8 +50,16 @@ namespace MidFD.Helpers
             public int ColumnCount { get; set; }
             public IReadOnlyCollection<string> MarkedFiles { get; set; } = Array.Empty<string>();
             public string? CachedMarkSummary { get; set; }
+            public int CachedMarkCount { get; set; }
+            public string CachedMarkSizeText { get; set; } = string.Empty;
+            public string CachedMarkSummaryCompact { get; set; } = string.Empty;
             public string? CurrentItemText { get; set; }
             public string? CurrentItemPath { get; set; }
+            public string? CurrentItemExtensionText { get; set; }
+            public string? CurrentItemSizeText { get; set; }
+            public string? CurrentItemDateText { get; set; }
+            public string? CurrentItemAttrText { get; set; }
+            public bool CurrentItemIsDirectory { get; set; }
             public SortKind SortKind { get; set; }
             public bool SortAscending { get; set; }
             public string FilterPattern { get; set; } = string.Empty;
@@ -134,14 +143,44 @@ namespace MidFD.Helpers
 
             if (state.MarkedFiles.Count > 0)
             {
-                // 2行表示用を先に生成（キャッシュの有無に関わらず必要）
                 result.MarkCountLine = $"Mark:{state.MarkedFiles.Count,3}";
+                result.MarkCount = state.CachedMarkCount > 0 ? state.CachedMarkCount : state.MarkedFiles.Count;
 
-                if (state.CachedMarkSummary != null)
+                bool deferred = NetworkPathResolutionPolicy.IsAuxiliaryResolutionDeferred(state.CurrentPath) ||
+                    state.MarkedFiles.Any(NetworkPathResolutionPolicy.IsUncPath);
+                if (deferred)
                 {
-                    result.MarkSummary = state.CachedMarkSummary;
-                    // キャッシュからサイズ部分を抽出するのは不安定なため、再計算するか、ここでは簡易表示にする
-                    // 今回は MarkedFiles があるので再計算ロジックを走らせることを優先
+                    if (!string.IsNullOrWhiteSpace(state.CachedMarkSummaryCompact))
+                    {
+                        result.MarkSummaryCompact = state.CachedMarkSummaryCompact;
+                    }
+                    else if (!string.IsNullOrWhiteSpace(state.CachedMarkSizeText))
+                    {
+                        result.MarkSummaryCompact = $"Mark: {result.MarkCount} MarkSize: {state.CachedMarkSizeText}";
+                    }
+
+                    if (!string.IsNullOrWhiteSpace(state.CachedMarkSummary))
+                    {
+                        result.MarkSummary = state.CachedMarkSummary;
+                    }
+                    else if (!string.IsNullOrWhiteSpace(result.MarkSummaryCompact))
+                    {
+                        result.MarkSummary = result.MarkSummaryCompact;
+                    }
+
+                    result.MarkSizeText = !string.IsNullOrWhiteSpace(state.CachedMarkSizeText)
+                        ? state.CachedMarkSizeText
+                        : "?";
+                    result.MarkSizeLine = $"Size:{result.MarkSizeText}";
+                    NetworkPathResolutionPolicy.LogDecision(
+                        "NetworkPathResolutionDeferral.AuxiliaryUseCached",
+                        "HeaderInfo.MarkSummary",
+                        nameof(BuildTotalInfo),
+                        state.CurrentPath,
+                        usedCached: true,
+                        resolvedSync: false,
+                        reason: "cached-mark-summary");
+                    return;
                 }
 
                 long totalSize = 0;
@@ -177,7 +216,6 @@ namespace MidFD.Helpers
 
                 // Corrective: Path行右端用のコンパクトなマーク表示
                 string sizeText = FileOperationService.FormatSize(totalSize);
-                result.MarkCount = state.MarkedFiles.Count;
                 result.MarkSizeText = sizeText;
                 result.MarkSummaryCompact = $"Mark: {result.MarkCount} MarkSize: {sizeText}";
             }
@@ -193,6 +231,62 @@ namespace MidFD.Helpers
                 result.FileName = state.CurrentItemText ?? "";
                 return;
             }
+
+            bool hasCachedMetadata =
+                !string.IsNullOrWhiteSpace(state.CurrentItemDateText) ||
+                !string.IsNullOrWhiteSpace(state.CurrentItemAttrText) ||
+                !string.IsNullOrWhiteSpace(state.CurrentItemSizeText) ||
+                !string.IsNullOrWhiteSpace(state.CurrentItemExtensionText);
+
+            if (hasCachedMetadata)
+            {
+                NetworkPathResolutionPolicy.LogDecision(
+                    "NetworkPathResolutionDeferral.AuxiliaryUseCached",
+                    "HeaderInfo.ItemInfo",
+                    nameof(BuildItemInfo),
+                    state.CurrentItemPath,
+                    usedCached: true,
+                    resolvedSync: false,
+                    reason: "list-item-subitems");
+
+                result.ItemAttr = string.IsNullOrWhiteSpace(state.CurrentItemAttrText)
+                    ? "----"
+                    : state.CurrentItemAttrText!;
+                result.FileDate = state.CurrentItemDateText ?? string.Empty;
+                result.FileStats = state.CurrentItemIsDirectory
+                    ? (state.ShowDirectoryMarker ? "<DIR>" : "")
+                    : (state.CurrentItemSizeText ?? string.Empty);
+                result.FileName = state.CurrentItemIsDirectory
+                    ? (state.CurrentItemText ?? string.Empty)
+                    : BuildCachedFileName(state);
+                return;
+            }
+
+            if (NetworkPathResolutionPolicy.IsAuxiliaryResolutionDeferred(state.CurrentItemPath))
+            {
+                NetworkPathResolutionPolicy.LogDecision(
+                    "NetworkPathResolutionDeferral.Skip",
+                    "HeaderInfo.ItemInfo",
+                    nameof(BuildItemInfo),
+                    state.CurrentItemPath,
+                    usedCached: false,
+                    resolvedSync: false,
+                    reason: "unc-path");
+                result.ItemAttr = "----";
+                result.FileDate = "";
+                result.FileStats = state.CurrentItemIsDirectory ? (state.ShowDirectoryMarker ? "<DIR>" : "") : "";
+                result.FileName = state.CurrentItemText ?? "";
+                return;
+            }
+
+            NetworkPathResolutionPolicy.LogDecision(
+                "NetworkPathResolutionDeferral.AllowCritical",
+                "HeaderInfo.ItemInfo",
+                nameof(BuildItemInfo),
+                state.CurrentItemPath,
+                usedCached: false,
+                resolvedSync: true,
+                reason: "fallback-probe");
 
             try
             {
@@ -227,18 +321,52 @@ namespace MidFD.Helpers
             string driveUsedText = "Used:---";
             string driveFreeText = "Free:---";
 
+            string root = NetworkPathResolutionPolicy.GetPathRoot(state.CurrentPath);
+            if (NetworkPathResolutionPolicy.IsAuxiliaryResolutionDeferred(state.CurrentPath))
+            {
+                NetworkPathResolutionPolicy.LogDecision(
+                    "NetworkPathResolutionDeferral.Skip",
+                    "HeaderInfo.Drive",
+                    nameof(BuildDriveInfo),
+                    state.CurrentPath,
+                    usedCached: false,
+                    resolvedSync: false,
+                    reason: "unc-path");
+                result.DriveUsed = driveUsedText;
+                result.DriveFree = driveFreeText;
+                return;
+            }
+
+            if (NetworkPathResolutionPolicy.TryGetDriveType(root, out DriveType driveType) && driveType == DriveType.Network)
+            {
+                NetworkPathResolutionPolicy.LogDecision(
+                    "NetworkPathResolutionDeferral.Skip",
+                    "HeaderInfo.Drive",
+                    nameof(BuildDriveInfo),
+                    state.CurrentPath,
+                    usedCached: false,
+                    resolvedSync: false,
+                    reason: "remote-drive");
+                result.DriveUsed = driveUsedText;
+                result.DriveFree = driveFreeText;
+                return;
+            }
+
             try
             {
-                string root = Path.GetPathRoot(state.CurrentPath) ?? "C:\\";
-                var drive = new DriveInfo(root);
-                if (drive.IsReady)
+                if (NetworkPathResolutionPolicy.TryGetDriveType(root, out driveType) &&
+                    (driveType == DriveType.Fixed || driveType == DriveType.Removable || driveType == DriveType.CDRom))
                 {
-                    long total = drive.TotalSize;
-                    long free = drive.AvailableFreeSpace;
-                    long used = total - free;
+                    var drive = new DriveInfo(root);
+                    if (drive.IsReady)
+                    {
+                        long total = drive.TotalSize;
+                        long free = drive.AvailableFreeSpace;
+                        long used = total - free;
 
-                    driveUsedText = $"Used:{FileOperationService.FormatSize(used)}";
-                    driveFreeText = $"Free:{FileOperationService.FormatSize(free)}";
+                        driveUsedText = $"Used:{FileOperationService.FormatSize(used)}";
+                        driveFreeText = $"Free:{FileOperationService.FormatSize(free)}";
+                    }
                 }
             }
             catch
@@ -249,6 +377,17 @@ namespace MidFD.Helpers
 
             result.DriveUsed = driveUsedText;
             result.DriveFree = driveFreeText;
+        }
+
+        private static string BuildCachedFileName(InputState state)
+        {
+            string baseName = state.CurrentItemText ?? string.Empty;
+            if (!state.ShowExtensions || string.IsNullOrWhiteSpace(state.CurrentItemExtensionText))
+            {
+                return baseName;
+            }
+
+            return $"{baseName}.{state.CurrentItemExtensionText}";
         }
 
         private static string FormatAttributes(FileAttributes attr)

@@ -155,10 +155,12 @@ public sealed class PackDialog : Form
             Text = "形式(&F):"
         };
 
+        int comboTop = currentTop + 24;
+
         _formatComboBox = new ComboBox
         {
             Left = sideMargin,
-            Top = currentTop + 22,
+            Top = comboTop,
             Width = 150,
             DropDownStyle = ComboBoxStyle.DropDownList,
             TabIndex = 2
@@ -181,6 +183,7 @@ public sealed class PackDialog : Form
         }
         _formatComboBox.SelectedIndex = selectedIndex;
         _formatComboBox.SelectedIndexChanged += (_, _) => SyncOutputExtension();
+        SyncOutputExtension();
 
         var compressionLabel = new Label
         {
@@ -193,7 +196,7 @@ public sealed class PackDialog : Form
         _compressionComboBox = new ComboBox
         {
             Left = 188,
-            Top = currentTop + 22,
+            Top = comboTop,
             Width = 160,
             DropDownStyle = ComboBoxStyle.DropDownList,
             TabIndex = 3
@@ -221,7 +224,7 @@ public sealed class PackDialog : Form
         _splitComboBox = new ComboBox
         {
             Left = 370,
-            Top = currentTop + 22,
+            Top = comboTop,
             Width = 218,
             DropDownStyle = ComboBoxStyle.DropDownList,
             TabIndex = 4
@@ -237,7 +240,7 @@ public sealed class PackDialog : Form
         _customSplitTextBox = new TextBox
         {
             Left = 370,
-            Top = currentTop + 54,
+            Top = comboTop + 32,
             Width = 218,
             Enabled = false,
             PlaceholderText = "custom: 10m / 1g",

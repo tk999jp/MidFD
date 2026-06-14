@@ -22,17 +22,28 @@ public class QuickAccessDialog : Form
     private readonly string _currentPath;
     private readonly QuickAccessStore _workingStore;
     private readonly IReadOnlyList<QuickAccessEntry> _historyEntries;
+    private readonly QuickAccessOpenDiagnostics? _diagnostics;
+    private bool _openCompletionLogged;
 
     public string? SelectedPath { get; private set; }
     public QuickAccessEntry? SelectedEntry { get; private set; }
     public QuickAccessStore UpdatedStore => _workingStore.Clone();
     public QuickAccessDialogCloseAction CloseAction { get; private set; } = QuickAccessDialogCloseAction.Cancel;
 
-    public QuickAccessDialog(QuickAccessStore store, string currentPath, IReadOnlyList<QuickAccessEntry> historyEntries)
+    public QuickAccessDialog(
+        QuickAccessStore store,
+        string currentPath,
+        IReadOnlyList<QuickAccessEntry> historyEntries,
+        QuickAccessOpenDiagnostics? diagnostics = null)
     {
         const int sideMargin = 16;
         const int topMargin = 8;
-        _workingStore = store.Clone();
+        _diagnostics = diagnostics;
+        _workingStore = _diagnostics?.MeasureStep(
+            "QuickAccess.LoadConfig",
+            store.Clone,
+            cloned => $"itemCount={cloned.Bookmarks.Count + cloned.Aliases.Count + cloned.Commands.Count + cloned.Recents.Count} source=in-memory-store success=success")
+            ?? store.Clone();
         _currentPath = currentPath;
         _historyEntries = historyEntries;
 
@@ -220,15 +231,34 @@ public class QuickAccessDialog : Form
         CancelButton = _cancelButton;
 
         KeyDown += QuickAccessDialog_KeyDown;
-        _queryTextBox.TextChanged += (_, _) => RefreshItems();
+        _queryTextBox.TextChanged += (_, _) => RefreshItems("QueryChanged");
         _queryTextBox.KeyDown += QueryTextBox_KeyDown;
 
-        RefreshItems();
+        RefreshItems("Initial");
         _tabControl.SelectedIndex = 0;
         EnsureSelection(_registeredListView);
-        UpdateContextText();
-        UpdateButtonState();
-        Shown += (_, _) => BeginInvoke(new Action(FocusSearchBox));
+        _diagnostics?.MeasureStep("QuickAccess.ApplyUi", () =>
+        {
+            UpdateContextText();
+            UpdateButtonState();
+        }, $"itemCount={GetActiveListView().Items.Count} success=success");
+        if (_diagnostics == null)
+        {
+            UpdateContextText();
+            UpdateButtonState();
+        }
+
+        Shown += (_, _) =>
+        {
+            BeginInvoke(new Action(FocusSearchBox));
+            if (_openCompletionLogged)
+            {
+                return;
+            }
+
+            _openCompletionLogged = true;
+            _diagnostics?.LogOpenEnd(GetActiveTabName(), GetActiveListView().Items.Count);
+        };
     }
 
     private ListView CreateListView()
@@ -332,14 +362,32 @@ public class QuickAccessDialog : Form
         }
     }
 
-    private void RefreshItems()
+    private void RefreshItems(string reason)
+    {
+        if (_diagnostics != null)
+        {
+            _diagnostics.MeasureStep(
+                "QuickAccess.BuildItems",
+                () =>
+                {
+                    RefreshItemsCore();
+                    return GetActiveListView().Items.Count;
+                },
+                itemCount => $"reason={reason} itemCount={itemCount} success=success");
+            return;
+        }
+
+        RefreshItemsCore();
+    }
+
+    private void RefreshItemsCore()
     {
         string selectedPath = GetSelectedEntry()?.Path ?? string.Empty;
         string query = _queryTextBox.Text;
 
-        IReadOnlyList<QuickAccessEntry> registeredEntries = QuickAccessService.FilterEntries(QuickAccessService.GetRegisteredEntries(_workingStore), query);
-        IReadOnlyList<QuickAccessEntry> recentEntries = QuickAccessService.FilterEntries(QuickAccessService.GetRecentEntries(_workingStore), query);
-        IReadOnlyList<QuickAccessEntry> historyEntries = QuickAccessService.FilterEntries(QuickAccessService.GetHistoryEntries(_historyEntries), query);
+        IReadOnlyList<QuickAccessEntry> registeredEntries = QuickAccessService.FilterEntries(QuickAccessService.GetRegisteredEntries(_workingStore), query, _diagnostics);
+        IReadOnlyList<QuickAccessEntry> recentEntries = QuickAccessService.FilterEntries(QuickAccessService.GetRecentEntries(_workingStore), query, _diagnostics);
+        IReadOnlyList<QuickAccessEntry> historyEntries = QuickAccessService.FilterEntries(QuickAccessService.GetHistoryEntries(_historyEntries), query, _diagnostics);
 
         RefreshList(_registeredListView, registeredEntries);
         RefreshList(_recentListView, recentEntries);
@@ -361,13 +409,13 @@ public class QuickAccessDialog : Form
 
         foreach (QuickAccessEntry entry in entries)
         {
+            string status = QuickAccessService.GetEntryStatusLabel(entry, _currentPath, _diagnostics);
             var item = new ListViewItem(entry.DisplayName);
             item.SubItems.Add(QuickAccessService.GetEntryValueLabel(entry));
             item.SubItems.Add(QuickAccessService.GetEntryKindLabel(entry));
-            item.SubItems.Add(QuickAccessService.GetEntryStatusLabel(entry, _currentPath));
-            item.ToolTipText = QuickAccessService.GetEntryTooltipText(entry, _currentPath);
+            item.SubItems.Add(status);
+            item.ToolTipText = QuickAccessService.GetEntryTooltipText(entry, _currentPath, _diagnostics, status);
             item.Tag = entry;
-            string status = QuickAccessService.GetEntryStatusLabel(entry, _currentPath);
             if (status.StartsWith("見つからない", StringComparison.Ordinal))
             {
                 item.ForeColor = Color.DarkSalmon;
@@ -525,7 +573,7 @@ public class QuickAccessDialog : Form
             out string normalizedPath,
             out string message))
         {
-            RefreshItems();
+            RefreshItems("AddEntry");
             _tabControl.SelectedIndex = 0;
             SelectPath(_registeredListView, normalizedPath);
         }
@@ -574,7 +622,7 @@ public class QuickAccessDialog : Form
             out string normalizedPath,
             out string message))
         {
-            RefreshItems();
+            RefreshItems("EditSelected");
             _tabControl.SelectedIndex = 0;
             SelectPath(_registeredListView, normalizedPath);
         }
@@ -600,7 +648,7 @@ public class QuickAccessDialog : Form
 
         if (QuickAccessService.RemoveManagedEntry(_workingStore, entry))
         {
-            RefreshItems();
+            RefreshItems("DeleteSelected");
             _tabControl.SelectedIndex = 0;
             EnsureSelection(_registeredListView);
             UpdateButtonState();
@@ -667,15 +715,28 @@ public class QuickAccessDialog : Form
         IWin32Window owner,
         QuickAccessStore store,
         string currentPath,
-        IReadOnlyList<QuickAccessEntry> historyEntries)
+        IReadOnlyList<QuickAccessEntry> historyEntries,
+        QuickAccessOpenDiagnostics? diagnostics = null)
     {
-        using var dialog = new QuickAccessDialog(store, currentPath, historyEntries);
+        using var dialog = new QuickAccessDialog(store, currentPath, historyEntries, diagnostics);
         if (dialog.ShowDialog(owner) == DialogResult.OK)
         {
+            diagnostics?.LogDialogClose(dialog.CloseAction.ToString(), dialog.SelectedEntry?.Path);
             return new QuickAccessDialogResult(dialog.CloseAction, dialog.SelectedEntry, dialog.UpdatedStore);
         }
 
+        diagnostics?.LogDialogClose(QuickAccessDialogCloseAction.Cancel.ToString(), null);
         return new QuickAccessDialogResult(QuickAccessDialogCloseAction.Cancel, null, null);
+    }
+
+    private string GetActiveTabName()
+    {
+        return _tabControl.SelectedIndex switch
+        {
+            1 => "Recent",
+            2 => "History",
+            _ => "Registered"
+        };
     }
 }
 

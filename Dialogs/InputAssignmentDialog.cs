@@ -1,4 +1,5 @@
 using MidFD.Commands;
+using System.Globalization;
 using MidFD.Configuration;
 using MidFD.Helpers;
 using MidFD.Models;
@@ -8,6 +9,8 @@ namespace MidFD.Dialogs;
 
 public sealed class InputAssignmentDialog : Form
 {
+    private const int FunctionBarLabelMaxDisplayCells = 6;
+    private const int FunctionBarLabelTextBoxMaxLength = 12;
     private const string ReservedFunctionSlotCommandId = "__reserved_altf4__";
     private enum FunctionLayer
     {
@@ -1011,26 +1014,27 @@ public sealed class InputAssignmentDialog : Form
     internal static bool ValidateFunctionBarLabel(string input, out string errorMessage)
     {
         errorMessage = string.Empty;
+        string normalized = InputSettings.NormalizeFunctionBarLabelText(input);
 
-        if (input.Contains(":") || input.Contains("："))
+        if (normalized.Contains(":") || normalized.Contains("："))
         {
             errorMessage = "\":\" (コロン) は含められません。";
             return false;
         }
 
-        if (input.Contains("\n") || input.Contains("\r") || input.Contains("\t"))
+        if (normalized.Contains("\n") || normalized.Contains("\r") || normalized.Contains("\t"))
         {
             errorMessage = "改行やタブは含められません。";
             return false;
         }
 
-        if (GetHalfWidthLength(input) > 4)
+        if (GetFunctionBarLabelDisplayCellCount(normalized) > FunctionBarLabelMaxDisplayCells)
         {
-            errorMessage = "表示名は半角換算で最大4文字までです（全角は2文字まで）。";
+            errorMessage = "表示名は半角6セル、全角3文字相当まで入力できます。";
             return false;
         }
 
-        if (System.Text.RegularExpressions.Regex.IsMatch(input, @"^(F\d+|Shift\+F\d+)\s*:?", System.Text.RegularExpressions.RegexOptions.IgnoreCase))
+        if (System.Text.RegularExpressions.Regex.IsMatch(normalized, @"^(F\d+|Shift\+F\d+)\s*:?", System.Text.RegularExpressions.RegexOptions.IgnoreCase))
         {
             errorMessage = "キー表記 (F1: 等) の混入は禁止されています。";
             return false;
@@ -1039,20 +1043,37 @@ public sealed class InputAssignmentDialog : Form
         return true;
     }
 
-    private static int GetHalfWidthLength(string value)
+    private static int GetFunctionBarLabelDisplayCellCount(string value)
     {
         if (string.IsNullOrEmpty(value))
         {
             return 0;
         }
 
-        int length = 0;
-        foreach (char ch in value)
+        int cells = 0;
+        TextElementEnumerator enumerator = StringInfo.GetTextElementEnumerator(value);
+        while (enumerator.MoveNext())
         {
-            length += ch > 0x7F ? 2 : 1;
+            cells += IsFunctionBarLabelSingleCell(enumerator.GetTextElement()) ? 1 : 2;
         }
 
-        return length;
+        return cells;
+    }
+
+    private static bool IsFunctionBarLabelSingleCell(string textElement)
+    {
+        if (string.IsNullOrEmpty(textElement))
+        {
+            return true;
+        }
+
+        if (!System.Text.Rune.TryGetRuneAt(textElement, 0, out System.Text.Rune rune))
+        {
+            return false;
+        }
+
+        int scalar = rune.Value;
+        return (scalar >= 0x0020 && scalar <= 0x007E) || (scalar >= 0xFF61 && scalar <= 0xFF9F);
     }
 
     private Dictionary<string, FunctionBarLabelOverride> GetFunctionBarLabelOverrideMap(FunctionLayer layer, bool isFdCompatible)
@@ -2098,7 +2119,7 @@ public sealed class InputAssignmentDialog : Form
             return;
         }
 
-        textBox.MaxLength = 8;
+        textBox.MaxLength = FunctionBarLabelTextBoxMaxLength;
         textBox.BorderStyle = BorderStyle.FixedSingle;
 
         textBox.KeyPress -= FunctionGridLabelTextBox_KeyPress;
@@ -2142,7 +2163,7 @@ public sealed class InputAssignmentDialog : Form
         int selLength = tb.SelectionLength;
 
         string newText = currentText.Remove(selStart, selLength).Insert(selStart, e.KeyChar.ToString());
-        if (GetHalfWidthLength(newText) > 4)
+        if (!ValidateFunctionBarLabel(newText, out _))
         {
             e.Handled = true;
         }
@@ -2171,7 +2192,7 @@ public sealed class InputAssignmentDialog : Form
             invalid = true;
         }
 
-        if (GetHalfWidthLength(text) > 4)
+        if (!ValidateFunctionBarLabel(text, out _))
         {
             invalid = true;
         }

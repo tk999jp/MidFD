@@ -93,6 +93,18 @@ internal sealed class JsonTrashManifestStore : ITrashManifestStore
         return updated;
     }
 
+    public int RemoveRecordsByTrashPaths(TrashManifest manifest, IEnumerable<string> trashPaths)
+    {
+        var paths = new HashSet<string>(trashPaths, StringComparer.OrdinalIgnoreCase);
+        if (paths.Count == 0)
+        {
+            return 0;
+        }
+
+        int removed = manifest.Records.RemoveAll(record => paths.Contains(record.TrashPath));
+        return removed;
+    }
+
     public bool TryGetRecordByOriginalPath(TrashManifest manifest, string originalPath, out TrashManifestRecord? record)
     {
         record = manifest.Records

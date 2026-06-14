@@ -12,7 +12,7 @@ internal static class ArchiveFileTypeHelper
 {
     private static readonly HashSet<string> _supportedExtensions = new(StringComparer.OrdinalIgnoreCase)
     {
-        ".zip", ".7z", ".rar", ".tar", ".gz", ".tgz", ".bz2", ".xz", ".cab", ".lzh"
+        ".zip", ".7z", ".rar", ".tar", ".gz", ".tgz", ".bz2", ".xz", ".cab", ".lzh", ".wim"
     };
 
     /// <summary>
@@ -43,5 +43,14 @@ internal static class ArchiveFileTypeHelper
         if (!IsArchive(path)) return false;
         if (checkFileExists && !File.Exists(path)) return false;
         return true;
+    }
+
+    public static bool CanUseTarFallbackForUnpack(string? path)
+    {
+        if (!IsArchive(path)) return false;
+
+        string? ext = Path.GetExtension(path);
+        return !string.Equals(ext, ".zip", StringComparison.OrdinalIgnoreCase)
+            && !string.Equals(ext, ".wim", StringComparison.OrdinalIgnoreCase);
     }
 }

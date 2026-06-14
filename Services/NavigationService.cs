@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
@@ -213,6 +213,10 @@ public class NavigationService
     public static string NormalizeDirectoryForCompare(string path)
     {
         if (string.IsNullOrWhiteSpace(path)) return string.Empty;
+        if (path.Length == 2 && path[1] == ':' && char.IsLetter(path[0]))
+        {
+            path = path + Path.DirectorySeparatorChar;
+        }
         try
         {
             return Path.GetFullPath(path).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);

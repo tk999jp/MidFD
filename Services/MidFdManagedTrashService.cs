@@ -136,6 +136,9 @@ public static class MidFdManagedTrashService
     private static int _crossVolumeMoveCount;
     private static int _sameVolumeMoveCount;
     private static int _appDataFallbackMoveCount;
+    private static readonly SemaphoreSlim RetentionCleanupGate = new(1, 1);
+    private static DateTime _lastRetentionCleanupStartedUtc = DateTime.MinValue;
+    private static readonly TimeSpan RetentionCleanupThrottle = TimeSpan.FromMinutes(5);
 
     public static void RecordDbOperationTimings(long connMs, long transMs, long delMs, long insMs, long commitMs)
     {
@@ -466,8 +469,27 @@ public static class MidFdManagedTrashService
             ? existing.BatchId
             : CreateBatchId();
         int itemIndex = TryParseItemIndex(existing?.ItemId, out int parsedIndex) ? parsedIndex : 1;
-        
+
         return MoveToTrash(item.BeforePath, batchId, itemIndex, skipRegistration, out outRecord, suppressLogging: suppressLogging);
+    }
+
+    public static Task RunRetentionCleanupAsync(
+        Configuration.AppSettings? settings,
+        FileOperationUndoRedoService? undoRedoService,
+        string trigger)
+    {
+        if (settings?.FileOperations == null || !settings.FileOperations.ManagedTrashAutoHandoffEnabled)
+        {
+            return Task.CompletedTask;
+        }
+
+        int retentionDays = Math.Clamp(settings.FileOperations.ManagedTrashUndoRetentionDays, 1, 365);
+        if (retentionDays <= 0)
+        {
+            return Task.CompletedTask;
+        }
+
+        return Task.Run(() => RunRetentionCleanupCore(retentionDays, undoRedoService, trigger));
     }
 
     public static void EmptyTrash()
@@ -523,6 +545,354 @@ public static class MidFdManagedTrashService
         LogService.Info(
             $"[MidFdTrash] Empty completed. deleted={deleted}, cleaned={cleaned}, " +
             $"pruned={pruned}, itemsRoots={itemsRoots.Count}, remaining={manifest.Records.Count}");
+    }
+
+    private static void RunRetentionCleanupCore(int retentionDays, FileOperationUndoRedoService? undoRedoService, string trigger)
+    {
+        if (!RetentionCleanupGate.Wait(0))
+        {
+            LogService.Info($"[MidFdTrashCleanup] Skipped because cleanup is already running. trigger={trigger}");
+            return;
+        }
+
+        try
+        {
+            DateTime startedUtc = DateTime.UtcNow;
+            if (_lastRetentionCleanupStartedUtc != DateTime.MinValue &&
+                startedUtc - _lastRetentionCleanupStartedUtc < RetentionCleanupThrottle)
+            {
+                LogService.Info($"[MidFdTrashCleanup] Skipped because throttled. trigger={trigger}");
+                return;
+            }
+
+            _lastRetentionCleanupStartedUtc = startedUtc;
+
+            TrashManifest manifest = LoadManifest();
+
+            // Part 1: Collect expired items tracked in manifest
+            List<TrashManifestRecord> expiredRecords = manifest.Records
+                .Where(record => IsExpiredManagedTrashRecord(record, startedUtc, retentionDays))
+                .ToList();
+
+            var manifestTrashPaths = new HashSet<string>(manifest.Records.Select(r => r.TrashPath), StringComparer.OrdinalIgnoreCase);
+
+            // Part 2: Scan physical .midfd-trash roots for untracked legacy items
+            List<string> legacyExpiredPaths = new();
+            List<string> knownRoots = CollectKnownItemsRoots(manifest);
+            foreach (string itemsRoot in knownRoots)
+            {
+                if (!Directory.Exists(itemsRoot) || !IsSafeItemsRoot(itemsRoot))
+                {
+                    continue;
+                }
+
+                try
+                {
+                    // Search structure: itemsRoot/yyyyMMddHHmmssfff-xxxx/itemIndex/original_filename
+                    // The standard directory structure created by MidFD has batch directory at top-level under itemsRoot
+                    foreach (string batchDir in Directory.EnumerateDirectories(itemsRoot))
+                    {
+                        try
+                        {
+                            string batchName = Path.GetFileName(batchDir);
+                            // Validate batch directory format or use file metadata as fallback
+                            DateTime batchTime = DateTime.MinValue;
+                            // Batch directory format usually starts with yyyyMMddHHmmssfff (17 chars)
+                            if (batchName.Length >= 17 && DateTime.TryParseExact(batchName[..17], "yyyyMMddHHmmssfff", null, System.Globalization.DateTimeStyles.AssumeUniversal | System.Globalization.DateTimeStyles.AdjustToUniversal, out DateTime parsedTime))
+                            {
+                                batchTime = parsedTime.ToUniversalTime();
+                            }
+
+                            // Enumerate index subdirectories (like 00000001, 1, etc.)
+                            foreach (string indexDir in Directory.EnumerateDirectories(batchDir))
+                            {
+                                foreach (string file in Directory.EnumerateFiles(indexDir))
+                                {
+                                    if (manifestTrashPaths.Contains(file))
+                                    {
+                                        continue;
+                                    }
+
+                                    // Check expiration
+                                    DateTime fileTime = batchTime;
+                                    if (fileTime == DateTime.MinValue)
+                                    {
+                                        try
+                                        {
+                                            DateTime createTime = File.GetCreationTimeUtc(file);
+                                            DateTime writeTime = File.GetLastWriteTimeUtc(file);
+                                            fileTime = createTime < writeTime ? createTime : writeTime;
+                                        }
+                                        catch
+                                        {
+                                            continue;
+                                        }
+                                    }
+
+                                    if (fileTime != DateTime.MinValue && fileTime < startedUtc && startedUtc - fileTime >= TimeSpan.FromDays(Math.Clamp(retentionDays, 1, 365)))
+                                    {
+                                        legacyExpiredPaths.Add(file);
+                                    }
+                                }
+
+                                foreach (string dir in Directory.EnumerateDirectories(indexDir))
+                                {
+                                    if (manifestTrashPaths.Contains(dir))
+                                    {
+                                        continue;
+                                    }
+
+                                    DateTime dirTime = batchTime;
+                                    if (dirTime == DateTime.MinValue)
+                                    {
+                                        try
+                                        {
+                                            DateTime createTime = Directory.GetCreationTimeUtc(dir);
+                                            DateTime writeTime = Directory.GetLastWriteTimeUtc(dir);
+                                            dirTime = createTime < writeTime ? createTime : writeTime;
+                                        }
+                                        catch
+                                        {
+                                            continue;
+                                        }
+                                    }
+
+                                    if (dirTime != DateTime.MinValue && dirTime < startedUtc && startedUtc - dirTime >= TimeSpan.FromDays(Math.Clamp(retentionDays, 1, 365)))
+                                    {
+                                        legacyExpiredPaths.Add(dir);
+                                    }
+                                }
+                            }
+                        }
+                        catch (Exception ex)
+                        {
+                            LogService.Warn($"[MidFdTrashCleanup] Failed scanning batch directory for legacy items. dir={batchDir}, error={ex.Message}");
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    LogService.Warn($"[MidFdTrashCleanup] Failed scanning items root. root={itemsRoot}, error={ex.Message}");
+                }
+            }
+
+            // Combine both targets. Track manifest paths to remove records later, legacy paths just get recycled
+            var allTargets = expiredRecords.Select(r => (Path: r.TrashPath, IsLegacy: false))
+                .Concat(legacyExpiredPaths.Select(p => (Path: p, IsLegacy: true)))
+                .ToList();
+
+            var handedOffPaths = new List<string>();
+            int skippedCount = 0;
+            int failedCount = 0;
+            const int batchSize = 32;
+
+            for (int index = 0; index < allTargets.Count; index += batchSize)
+            {
+                List<(string Path, bool IsLegacy)> batch = allTargets.Skip(index).Take(batchSize).ToList();
+                List<string> batchPaths = new();
+                foreach (var target in batch)
+                {
+                    if (!CanHandoffToRecycleBin(target.Path))
+                    {
+                        skippedCount++;
+                        continue;
+                    }
+
+                    if (!PathExists(target.Path))
+                    {
+                        skippedCount++;
+                        LogService.Warn($"[MidFdTrashCleanup] Skipped expired item because trash path is missing. path={target.Path}");
+                        continue;
+                    }
+
+                    batchPaths.Add(target.Path);
+                }
+
+                if (batchPaths.Count == 0)
+                {
+                    continue;
+                }
+
+                try
+                {
+                    ShellRecycleBinDeleteService.Result result = ShellRecycleBinDeleteService
+                        .DeleteToRecycleBinAsync(batchPaths, IntPtr.Zero, CancellationToken.None, static _ => { })
+                        .GetAwaiter()
+                        .GetResult();
+
+                    var successPaths = new HashSet<string>(result.SuccessPaths, StringComparer.OrdinalIgnoreCase);
+                    if (successPaths.Count > 0)
+                    {
+                        // Remove from manifest only if tracked
+                        int removed = ManifestStore.RemoveRecordsByTrashPaths(manifest, successPaths);
+                        if (removed > 0)
+                        {
+                            undoRedoService?.PruneTrashDeleteItemsByRecycleBinPaths(successPaths);
+                        }
+                        handedOffPaths.AddRange(successPaths);
+
+                        // Slice U1: prune empty item index and batch directories for succeeded paths
+                        foreach (string path in successPaths)
+                        {
+                            try
+                            {
+                                string? parentIndexDir = Path.GetDirectoryName(path);
+                                if (!string.IsNullOrEmpty(parentIndexDir) && Directory.Exists(parentIndexDir))
+                                {
+                                    // Verify it is inside a safe items root and is indeed a subdirectory of it
+                                    if (TryGetItemsRootForTrashPath(path, out string? itemsRoot) && !string.IsNullOrEmpty(itemsRoot))
+                                    {
+                                        // Delete index dir if empty
+                                        if (!Directory.EnumerateFileSystemEntries(parentIndexDir).Any())
+                                        {
+                                            Directory.Delete(parentIndexDir, recursive: false);
+                                            LogService.Info($"[MidFdTrashCleanup] Pruned empty index directory. path={parentIndexDir}");
+
+                                            // Delete batch dir if empty
+                                            string? parentBatchDir = Path.GetDirectoryName(parentIndexDir);
+                                            if (!string.IsNullOrEmpty(parentBatchDir) && Directory.Exists(parentBatchDir) &&
+                                                !string.Equals(parentBatchDir.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar), itemsRoot.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar), StringComparison.OrdinalIgnoreCase))
+                                            {
+                                                if (!Directory.EnumerateFileSystemEntries(parentBatchDir).Any())
+                                                {
+                                                    Directory.Delete(parentBatchDir, recursive: false);
+                                                    LogService.Info($"[MidFdTrashCleanup] Pruned empty batch directory. path={parentBatchDir}");
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            catch (Exception ex)
+                            {
+                                LogService.Warn($"[MidFdTrashCleanup] Failed to prune empty parent directory post-handoff. path={path}, error={ex.Message}");
+                            }
+                        }
+                    }
+
+                    if (result.SuccessCount < batchPaths.Count)
+                    {
+                        failedCount += batchPaths.Count - result.SuccessCount;
+                    }
+
+                    if (result.FailCount > 0 || result.AnyOperationsAborted || result.HResult < 0)
+                    {
+                        LogService.Warn(
+                            $"[MidFdTrashCleanup] recycle-bin handoff finished with partial failure. " +
+                            $"trigger={trigger}, success={result.SuccessCount}, fail={result.FailCount}, " +
+                            $"aborted={result.AnyOperationsAborted}, hr=0x{result.HResult:X8}");
+                    }
+                }
+                catch (Exception ex)
+                {
+                    failedCount += batchPaths.Count;
+                    LogService.Warn($"[MidFdTrashCleanup] recycle-bin handoff failed. trigger={trigger}, batchCount={batchPaths.Count}, error={ex.Message}");
+                }
+            }
+
+            // Slice U2: scan and prune empty batch/index directories that are already empty under known items roots
+            int emptyPruned = 0;
+            foreach (string itemsRoot in knownRoots)
+            {
+                if (!Directory.Exists(itemsRoot) || !IsSafeItemsRoot(itemsRoot))
+                {
+                    continue;
+                }
+
+                try
+                {
+                    foreach (string batchDir in Directory.EnumerateDirectories(itemsRoot))
+                    {
+                        try
+                        {
+                            foreach (string indexDir in Directory.EnumerateDirectories(batchDir))
+                            {
+                                if (Directory.Exists(indexDir) && !Directory.EnumerateFileSystemEntries(indexDir).Any())
+                                {
+                                    Directory.Delete(indexDir, recursive: false);
+                                    emptyPruned++;
+                                    LogService.Info($"[MidFdTrashCleanup] Pruned stale empty index directory. path={indexDir}");
+                                }
+                            }
+
+                            if (Directory.Exists(batchDir) && !Directory.EnumerateFileSystemEntries(batchDir).Any())
+                            {
+                                Directory.Delete(batchDir, recursive: false);
+                                emptyPruned++;
+                                LogService.Info($"[MidFdTrashCleanup] Pruned stale empty batch directory. path={batchDir}");
+                            }
+                        }
+                        catch (Exception ex)
+                        {
+                            LogService.Warn($"[MidFdTrashCleanup] Failed pruning empty directory during scan. dir={batchDir}, error={ex.Message}");
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    LogService.Warn($"[MidFdTrashCleanup] Failed scanning for empty directories. root={itemsRoot}, error={ex.Message}");
+                }
+            }
+
+            if (handedOffPaths.Count > 0 && _activeBatchManifest == null)
+            {
+                SaveManifest(manifest);
+            }
+
+            LogService.Info(
+                $"[MidFdTrashCleanup] Completed. trigger={trigger}, retentionDays={retentionDays}, " +
+                $"expiredRecords={expiredRecords.Count}, legacyExpired={legacyExpiredPaths.Count}, " +
+                $"handedOff={handedOffPaths.Count}, emptyContainersPruned={emptyPruned}, skipped={skippedCount}, failed={failedCount}");
+        }
+        finally
+        {
+            RetentionCleanupGate.Release();
+        }
+    }
+
+    private static bool IsExpiredManagedTrashRecord(TrashManifestRecord record, DateTime nowUtc, int retentionDays)
+    {
+        if (record.Status != TrashRecordStatus.InTrash)
+        {
+            return false;
+        }
+
+        if (record.DeletedAtUtc == default || record.DeletedAtUtc == DateTime.MinValue)
+        {
+            return false;
+        }
+
+        if (record.DeletedAtUtc > nowUtc)
+        {
+            return false;
+        }
+
+        return nowUtc - record.DeletedAtUtc >= TimeSpan.FromDays(Math.Clamp(retentionDays, 1, 365));
+    }
+
+    private static bool PathExists(string path)
+    {
+        return File.Exists(path) || Directory.Exists(path);
+    }
+
+    private static bool CanHandoffToRecycleBin(string path)
+    {
+        try
+        {
+            string fullPath = Path.GetFullPath(path);
+            string? root = Path.GetPathRoot(fullPath);
+            if (string.IsNullOrWhiteSpace(root))
+            {
+                return false;
+            }
+
+            return new DriveInfo(root).DriveType == DriveType.Fixed;
+        }
+        catch (Exception ex)
+        {
+            LogService.Warn($"[MidFdTrashCleanup] Failed to inspect drive type for handoff. path={path}, error={ex.Message}");
+            return false;
+        }
     }
 
     public static string CreateBatchId()

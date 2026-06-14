@@ -1,4 +1,4 @@
-﻿using System.IO;
+using System.IO;
 using System.Drawing;
 using System.Diagnostics;
 using System.Threading;
@@ -148,6 +148,13 @@ public partial class MainForm : Form
         };
         menu.Items.Add(openDefaultItem);
         menu.Items.Add(new ToolStripSeparator());
+
+        var sevenZipMenu = Create7ZipMenu(selection);
+        if (sevenZipMenu != null)
+        {
+            menu.Items.Add(sevenZipMenu);
+        }
+
         var sendToMenu = new ToolStripMenuItem("送る(&N)");
         PopulateSendToMenu(sendToMenu);
         if (sendToMenu.DropDownItems.Count == 0)
@@ -156,7 +163,7 @@ public partial class MainForm : Form
             sendToMenu.DropDownItems.Add(new ToolStripMenuItem("(項目なし)") { Enabled = false });
         }
         menu.Items.Add(sendToMenu);
-        var explorerItem = new ToolStripMenuItem("Explorerで選択", null, (s, e) =>
+        var explorerItem = new ToolStripMenuItem("エクスプローラーで表示", null, (s, e) =>
         {
             if (!canUseItemPath || itemPath == null)
             {
@@ -229,6 +236,12 @@ public partial class MainForm : Form
             Enabled = canRegisterItem
         };
         menu.Items.Add(quickAccessItem);
+        menu.Items.Add(new ToolStripSeparator());
+        var propertiesItem = new ToolStripMenuItem("プロパティ", null, (s, e) => ExecuteProperties(selection))
+        {
+            Enabled = !isBusy && hasSelection
+        };
+        menu.Items.Add(propertiesItem);
     }
 
     private void BuildBrowserBlankContextMenu(ContextMenuStrip menu)
@@ -241,7 +254,7 @@ public partial class MainForm : Form
             (ShellClipboardService.HasFileDrop() ||
              ShellClipboardService.HasImage() ||
              ((_settings.FileOperations?.ClipboardPasteTextAsFileEnabled ?? false) && ShellClipboardService.HasText())));
-        bool canQuickAccess = !isReadOnly && !isBusy && canCurrentPath && Directory.Exists(_navigationService.CurrentPath);
+        bool canQuickAccess = !isReadOnly && !isBusy && canCurrentPath;
         menu.Items.Add(new ToolStripMenuItem("貼り付け", null, (s, e) =>
             ExecuteCommandFromUi(CommandIds.ClipboardPaste, CommandScope.Browser, "BrowserContextMenu.Blank.Paste"))
         {
@@ -299,7 +312,22 @@ public partial class MainForm : Form
                     // 標準の圧縮機能やサブメニューと混同・重複するのを防ぐため、送るメニューからは除外する
                     continue;
                 }
-                var item = new ToolStripMenuItem(name, null, (s, e) => ExecuteSendTo(file));
+                Image? iconImage = null;
+                try
+                {
+                    using (var assocIcon = Icon.ExtractAssociatedIcon(file))
+                    {
+                        if (assocIcon != null)
+                        {
+                            iconImage = assocIcon.ToBitmap();
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    LogService.Detail($"SendTo アイコン取得失敗 (安全に無視): {file}, {ex.Message}");
+                }
+                var item = new ToolStripMenuItem(name, iconImage, (s, e) => ExecuteSendTo(file));
                 sendToMenu.DropDownItems.Add(item);
             }
         }
@@ -354,12 +382,9 @@ public partial class MainForm : Form
 
         if (ExternalToolLaunchCoordinator.ShouldConfirmEmptyMarkedPaths(definition, context))
         {
-            var result = MessageBox.Show(
-                this,
-                ExternalToolLaunchCoordinator.BuildEmptyMarkedPathsConfirmationMessage(),
-                "外部ツール起動確認",
-                MessageBoxButtons.YesNo,
-                MessageBoxIcon.Question);
+            var result = ShowEmptyMarkedPathsConfirmationDialog(
+                ExternalToolLaunchCoordinator.BuildEmptyMarkedPathsConfirmationMessage()
+            );
             if (result != DialogResult.Yes)
             {
                 ShowStatusMessage("外部ツールの起動をキャンセルしました。");
@@ -374,6 +399,53 @@ public partial class MainForm : Form
         else
         {
             ShowStatusMessage($"外部ツールを起動しました: {definition.DisplayName}");
+        }
+    }
+
+    private DialogResult ShowEmptyMarkedPathsConfirmationDialog(string message)
+    {
+        using (var form = new Form())
+        {
+            form.Text = "外部ツール起動確認";
+            form.FormBorderStyle = FormBorderStyle.FixedDialog;
+            form.MaximizeBox = false;
+            form.MinimizeBox = false;
+            form.ShowInTaskbar = false;
+            form.StartPosition = FormStartPosition.CenterParent;
+            form.ClientSize = new Size(420, 140);
+
+            var label = new Label
+            {
+                Text = message,
+                Location = new Point(15, 15),
+                Size = new Size(390, 60),
+                TextAlign = ContentAlignment.MiddleLeft
+            };
+
+            var btnYes = new Button
+            {
+                Text = "はい(&Y)",
+                DialogResult = DialogResult.Yes,
+                Location = new Point(210, 90),
+                Size = new Size(90, 30)
+            };
+
+            var btnNo = new Button
+            {
+                Text = "いいえ(&N)",
+                DialogResult = DialogResult.No,
+                Location = new Point(310, 90),
+                Size = new Size(90, 30)
+            };
+
+            form.Controls.Add(label);
+            form.Controls.Add(btnYes);
+            form.Controls.Add(btnNo);
+
+            form.AcceptButton = btnYes;
+            form.CancelButton = btnNo;
+
+            return form.ShowDialog(this);
         }
     }
 

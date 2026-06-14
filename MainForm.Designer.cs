@@ -131,7 +131,7 @@ partial class MainForm
         titleHeaderPanel.SuspendLayout();
         statusStrip.SuspendLayout();
         SuspendLayout();
-        // 
+        //
         // outerHostPanel
         // 
         outerHostPanel.BackColor = Color.Black;
@@ -592,16 +592,15 @@ partial class MainForm
         statusStrip.Name = "statusStrip";
         statusStrip.Size = new Size(800, 26);
         statusStrip.TabIndex = 2;
-        // 
+        //
         // statusLabel
         // 
         statusLabel.Font = new Font("Consolas", 10F);
         statusLabel.Name = "statusLabel";
         statusLabel.Size = new Size(63, 20);
         statusLabel.Text = "Ready.";
-        // 
         // messageTimer
-        // 
+        //
         messageTimer.Interval = 10000;
         // 
         // 

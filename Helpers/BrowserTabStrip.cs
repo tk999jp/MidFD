@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Drawing;
 using System.Linq;
@@ -90,6 +90,10 @@ public sealed class BrowserTabStrip : Control
         }
     }
 
+    private int _categoryDragStartIndex = -1;
+    private int _categoryDragHoverInsertionIndex = -1;
+    private bool _isCategoryDragActive;
+
     public event EventHandler? SelectedIndexChanged;
     public event EventHandler<BrowserTabStripCategoryEventArgs>? CategoryClicked;
     public event EventHandler? AddTabClicked;
@@ -97,6 +101,8 @@ public sealed class BrowserTabStrip : Control
     public event EventHandler<BrowserTabStripMouseEventArgs>? TabRightClicked;
     public event EventHandler<BrowserTabStripMouseEventArgs>? TabMiddleClicked;
     public event EventHandler<BrowserTabStripReorderEventArgs>? TabReordered;
+    public event EventHandler<BrowserTabStripReorderEventArgs>? CategoryReordered;
+    public event EventHandler<Point>? TabListDropDownOpening;
 
     public BrowserTabStrip()
     {
@@ -300,6 +306,15 @@ public sealed class BrowserTabStrip : Control
             DrawTabText(e.Graphics, bounds, _tabs[tabIndex], isSelected);
         }
 
+        if (!isOverflow && _tabBounds.Count > 0)
+        {
+            Rectangle lastTabBounds = _tabBounds[^1];
+            if (lastTabBounds.Right + addTabWidth <= contentRight)
+            {
+                _addTabBounds = new Rectangle(lastTabBounds.Right, tabRowTop, addTabWidth, tabRowHeight);
+            }
+        }
+
         // 2. 外枠 (outer frame) を描画。連続した実線として強調。
         DrawLowerTabRowFrame(e.Graphics, lowerRowBounds, baselineY, baselineColor);
 
@@ -320,6 +335,9 @@ public sealed class BrowserTabStrip : Control
 
         DrawDragInsertionIndicator(e.Graphics, tabRowTop, baselineY);
         DrawDragGhost(e.Graphics, baselineY);
+
+        DrawCategoryDragInsertionIndicator(e.Graphics, categoryRowHeight);
+        DrawCategoryDragGhost(e.Graphics, categoryRowHeight);
     }
 
     private void DrawEmptyTabRow(Graphics graphics, Rectangle rowBounds, int baselineY)
@@ -390,6 +408,14 @@ public sealed class BrowserTabStrip : Control
         if (categoryIndex >= 0)
         {
             ResetDragReorderState();
+            if (e.Button == MouseButtons.Left && _categories[categoryIndex].Kind != BrowserTabStripCategoryItemKind.ManageEntry)
+            {
+                _categoryDragStartIndex = categoryIndex;
+                _dragMouseDownPoint = e.Location;
+                _dragCurrentMousePoint = e.Location;
+                _categoryDragHoverInsertionIndex = -1;
+                _isCategoryDragActive = false;
+            }
             return;
         }
 
@@ -430,6 +456,18 @@ public sealed class BrowserTabStrip : Control
     {
         base.OnMouseUp(e);
 
+        if (e.Button == MouseButtons.Left && _isCategoryDragActive)
+        {
+            int dragStartIndex = _categoryDragStartIndex;
+            int targetIndex = ResolveDropTargetIndex(dragStartIndex, _categoryDragHoverInsertionIndex);
+            ResetDragReorderState();
+            if (dragStartIndex >= 0 && targetIndex >= 0 && dragStartIndex != targetIndex)
+            {
+                CategoryReordered?.Invoke(this, new BrowserTabStripReorderEventArgs(dragStartIndex, targetIndex));
+                return;
+            }
+        }
+
         if (e.Button == MouseButtons.Left && _isReorderDragActive)
         {
             int dragStartIndex = _dragStartIndex;
@@ -444,6 +482,7 @@ public sealed class BrowserTabStrip : Control
 
         if (e.Button == MouseButtons.Left || e.Button == MouseButtons.Right)
         {
+            bool wasCategoryDrag = _categoryDragStartIndex >= 0;
             ResetDragReorderState();
             if (e.Button == MouseButtons.Left && TryHandleTabNavigationClick(e.Location))
             {
@@ -459,9 +498,13 @@ public sealed class BrowserTabStrip : Control
             int categoryIndex = GetCategoryIndexAt(e.Location);
             if (categoryIndex >= 0 && categoryIndex < _categories.Count)
             {
-                BrowserTabStripCategoryItem category = _categories[categoryIndex];
-                CategoryClicked?.Invoke(this, new BrowserTabStripCategoryEventArgs(categoryIndex, category.CategoryId, category.Kind, e.Button, e.Location));
-                return;
+                // ドラッグ並び替え中ではなかった場合のみ、カテゴリ切り替えクリックとして処理
+                if (e.Button == MouseButtons.Right || wasCategoryDrag)
+                {
+                    BrowserTabStripCategoryItem category = _categories[categoryIndex];
+                    CategoryClicked?.Invoke(this, new BrowserTabStripCategoryEventArgs(categoryIndex, category.CategoryId, category.Kind, e.Button, e.Location));
+                    return;
+                }
             }
         }
 
@@ -819,52 +862,89 @@ public sealed class BrowserTabStrip : Control
 
     private bool TryHandleDragReorderMove(MouseEventArgs e)
     {
-        if ((e.Button & MouseButtons.Left) == 0 || _dragStartIndex < 0 || _dragStartIndex >= _tabs.Count)
+        if ((e.Button & MouseButtons.Left) == 0)
         {
             return false;
         }
 
-        if (ShowCategoryRow && _categories.Count > 0 && e.Location.Y < GetCategoryRowHeight())
+        // カテゴリのドラッグ処理
+        if (_categoryDragStartIndex >= 0 && _categoryDragStartIndex < _categories.Count)
         {
             _dragCurrentMousePoint = e.Location;
-            if (_isReorderDragActive)
+            if (!_isCategoryDragActive)
             {
-                _dragHoverInsertionIndex = GetInsertionIndexAt(e.Location);
+                Size dragSize = SystemInformation.DragSize;
+                Rectangle dragRect = new(
+                    _dragMouseDownPoint.X - dragSize.Width / 2,
+                    _dragMouseDownPoint.Y - dragSize.Height / 2,
+                    dragSize.Width,
+                    dragSize.Height);
+                if (dragRect.Contains(e.Location))
+                {
+                    return false;
+                }
+                _isCategoryDragActive = true;
+            }
+
+            int insertionIndex = GetCategoryInsertionIndexAt(e.Location);
+            if (_categoryDragHoverInsertionIndex != insertionIndex)
+            {
+                _categoryDragHoverInsertionIndex = insertionIndex;
                 Invalidate();
                 return true;
             }
 
-            return false;
-        }
-
-        _dragCurrentMousePoint = e.Location;
-
-        if (!_isReorderDragActive)
-        {
-            Size dragSize = SystemInformation.DragSize;
-            Rectangle dragRect = new(
-                _dragMouseDownPoint.X - dragSize.Width / 2,
-                _dragMouseDownPoint.Y - dragSize.Height / 2,
-                dragSize.Width,
-                dragSize.Height);
-            if (dragRect.Contains(e.Location))
-            {
-                return false;
-            }
-
-            _isReorderDragActive = true;
-        }
-
-        int insertionIndex = GetInsertionIndexAt(e.Location);
-        if (_dragHoverInsertionIndex == insertionIndex)
-        {
             Invalidate();
             return true;
         }
 
-        _dragHoverInsertionIndex = insertionIndex;
-        Invalidate();
-        return true;
+        // タブのドラッグ処理
+        if (_dragStartIndex >= 0 && _dragStartIndex < _tabs.Count)
+        {
+            if (ShowCategoryRow && _categories.Count > 0 && e.Location.Y < GetCategoryRowHeight())
+            {
+                _dragCurrentMousePoint = e.Location;
+                if (_isReorderDragActive)
+                {
+                    _dragHoverInsertionIndex = GetInsertionIndexAt(e.Location);
+                    Invalidate();
+                    return true;
+                }
+
+                return false;
+            }
+
+            _dragCurrentMousePoint = e.Location;
+
+            if (!_isReorderDragActive)
+            {
+                Size dragSize = SystemInformation.DragSize;
+                Rectangle dragRect = new(
+                    _dragMouseDownPoint.X - dragSize.Width / 2,
+                    _dragMouseDownPoint.Y - dragSize.Height / 2,
+                    dragSize.Width,
+                    dragSize.Height);
+                if (dragRect.Contains(e.Location))
+                {
+                    return false;
+                }
+
+                _isReorderDragActive = true;
+            }
+
+            int insertionIndex = GetInsertionIndexAt(e.Location);
+            if (_dragHoverInsertionIndex == insertionIndex)
+            {
+                Invalidate();
+                return true;
+            }
+
+            _dragHoverInsertionIndex = insertionIndex;
+            Invalidate();
+            return true;
+        }
+
+        return false;
     }
 
     private void DrawDragInsertionIndicator(Graphics graphics, int tabRowTop, int baselineY)
@@ -1173,26 +1253,33 @@ public sealed class BrowserTabStrip : Control
 
     private void ShowTabListMenu()
     {
-        if (_tabs.Count == 0)
+        if (TabListDropDownOpening != null)
         {
-            return;
+            TabListDropDownOpening.Invoke(this, new Point(_tabListBounds.Left, _tabListBounds.Bottom));
         }
-
-        ContextMenuStrip menu = new();
-        for (int i = 0; i < _tabs.Count; i++)
+        else
         {
-            int tabIndex = i;
-            ToolStripMenuItem item = new($"{i + 1}: {_tabs[i].Text}")
+            if (_tabs.Count == 0)
             {
-                Checked = i == _selectedIndex,
-                CheckOnClick = false,
-                ToolTipText = _tabs[i].ToolTipText ?? string.Empty
-            };
-            item.Click += (_, _) => SelectedIndex = tabIndex;
-            menu.Items.Add(item);
-        }
+                return;
+            }
 
-        menu.Show(this, _tabListBounds.Left, _tabListBounds.Bottom);
+            ContextMenuStrip menu = new();
+            for (int i = 0; i < _tabs.Count; i++)
+            {
+                int tabIndex = i;
+                ToolStripMenuItem item = new($"{i + 1}: {_tabs[i].Text}")
+                {
+                    Checked = i == _selectedIndex,
+                    CheckOnClick = false,
+                    ToolTipText = _tabs[i].ToolTipText ?? string.Empty
+                };
+                item.Click += (_, _) => SelectedIndex = tabIndex;
+                menu.Items.Add(item);
+            }
+
+            menu.Show(this, _tabListBounds.Left, _tabListBounds.Bottom);
+        }
     }
 
     private void MoveFirstVisibleTab(int delta)
@@ -1213,7 +1300,8 @@ public sealed class BrowserTabStrip : Control
 
     private void ResetDragReorderState()
     {
-        if (!_isReorderDragActive && _dragStartIndex < 0 && _dragHoverInsertionIndex < 0)
+        if (!_isReorderDragActive && _dragStartIndex < 0 && _dragHoverInsertionIndex < 0 &&
+            !_isCategoryDragActive && _categoryDragStartIndex < 0 && _categoryDragHoverInsertionIndex < 0)
         {
             return;
         }
@@ -1223,7 +1311,90 @@ public sealed class BrowserTabStrip : Control
         _dragMouseDownPoint = Point.Empty;
         _dragCurrentMousePoint = Point.Empty;
         _isReorderDragActive = false;
+
+        _categoryDragStartIndex = -1;
+        _categoryDragHoverInsertionIndex = -1;
+        _isCategoryDragActive = false;
+
         Invalidate();
+    }
+
+    private int GetCategoryInsertionIndexAt(Point location)
+    {
+        if (_categoryBounds.Count == 0)
+        {
+            return 0;
+        }
+
+        int validCategoryCount = _categories.Count;
+        if (validCategoryCount > 0 && _categories[^1].Kind == BrowserTabStripCategoryItemKind.ManageEntry)
+        {
+            validCategoryCount--;
+        }
+
+        if (validCategoryCount == 0)
+        {
+            return 0;
+        }
+
+        for (int i = 0; i < validCategoryCount; i++)
+        {
+            Rectangle bounds = _categoryBounds[i];
+            int midX = bounds.Left + bounds.Width / 2;
+            if (location.X < midX)
+            {
+                return i;
+            }
+        }
+
+        return validCategoryCount;
+    }
+
+    private void DrawCategoryDragInsertionIndicator(Graphics graphics, int categoryRowHeight)
+    {
+        if (!_isCategoryDragActive || _categoryDragHoverInsertionIndex < 0 || _categoryBounds.Count == 0)
+        {
+            return;
+        }
+
+        int indicatorX;
+        if (_categoryDragHoverInsertionIndex < _categoryBounds.Count)
+        {
+            indicatorX = _categoryBounds[_categoryDragHoverInsertionIndex].Left;
+        }
+        else
+        {
+            int validCategoryCount = _categories.Count;
+            if (validCategoryCount > 0 && _categories[^1].Kind == BrowserTabStripCategoryItemKind.ManageEntry)
+            {
+                validCategoryCount--;
+            }
+            indicatorX = validCategoryCount > 0 ? _categoryBounds[validCategoryCount - 1].Right : 0;
+        }
+
+        using Pen indicatorPen = new(AttentionBorderColor, 2);
+        graphics.DrawLine(indicatorPen, indicatorX, 2, indicatorX, categoryRowHeight - 4);
+    }
+
+    private void DrawCategoryDragGhost(Graphics graphics, int categoryRowHeight)
+    {
+        if (!_isCategoryDragActive || _categoryDragStartIndex < 0 || _categoryDragStartIndex >= _categories.Count || _categoryDragStartIndex >= _categoryBounds.Count)
+        {
+            return;
+        }
+
+        Rectangle sourceBounds = _categoryBounds[_categoryDragStartIndex];
+        int offsetX = _dragCurrentMousePoint.X - _dragMouseDownPoint.X;
+        Rectangle ghostBounds = new(sourceBounds.X + offsetX, sourceBounds.Y, sourceBounds.Width, sourceBounds.Height);
+
+        Rectangle shadowBounds = ghostBounds;
+        shadowBounds.Offset(2, 2);
+        using (SolidBrush shadowBrush = new(Color.FromArgb(48, Color.Black)))
+        {
+            graphics.FillRectangle(shadowBrush, shadowBounds);
+        }
+
+        DrawCategory(graphics, ghostBounds, _categories[_categoryDragStartIndex], _categoryDragStartIndex == _selectedCategoryIndex, false);
     }
 
     private static Color BlendColor(Color from, Color to, double amount)

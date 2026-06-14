@@ -98,6 +98,7 @@ public partial class ImageViewerForm : Form
     public string? CurrentPath => _currentPath;
     public bool HasLoadedImage => _originalImage != null;
     public event Action<Keys>? BrowserNavigationRequested;
+    public event Action? MarkToggleRequested;
 
     public ImageViewerForm(PreviewSettings? previewSettings = null, FeatureGateService? featureGate = null)
     {
@@ -592,6 +593,17 @@ public partial class ImageViewerForm : Form
 
     private void ImageViewerForm_KeyDown(object? sender, KeyEventArgs e)
     {
+        if (e.KeyCode == Keys.Space && !e.Control && !e.Alt)
+        {
+            if (!HasEditableInputFocus())
+            {
+                MarkToggleRequested?.Invoke();
+                e.Handled = true;
+                e.SuppressKeyPress = true;
+            }
+            return;
+        }
+
         if (_isVideoStillMode)
         {
             if (e.Control && e.KeyCode == Keys.Enter)
@@ -703,6 +715,12 @@ public partial class ImageViewerForm : Form
             e.Handled = true;
             e.SuppressKeyPress = true;
         }
+    }
+
+    private bool HasEditableInputFocus()
+    {
+        Control? activeControl = ActiveControl;
+        return activeControl is TextBoxBase or ComboBox or NumericUpDown or ToolStrip;
     }
 
     private void ImageViewerForm_MouseWheel(object? sender, MouseEventArgs e)

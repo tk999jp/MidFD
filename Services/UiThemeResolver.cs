@@ -13,6 +13,10 @@ internal static class UiThemeResolver
         "MidFD Default",
         "Terminal Green",
         "Amber",
+        "Mono Dark",
+        "Cyber",
+        "Violet",
+        "Sepia",
         "Classic Blue",
         "Light"
     };
@@ -26,6 +30,10 @@ internal static class UiThemeResolver
     {
         if (displayColorPreset == null) return "MidFD Default";
         if (displayColorPreset.IndexOf("Light", StringComparison.OrdinalIgnoreCase) >= 0) return "Light";
+        if (displayColorPreset.IndexOf("Mono Dark", StringComparison.OrdinalIgnoreCase) >= 0) return "Mono Dark";
+        if (displayColorPreset.IndexOf("Cyber", StringComparison.OrdinalIgnoreCase) >= 0) return "Cyber";
+        if (displayColorPreset.IndexOf("Violet", StringComparison.OrdinalIgnoreCase) >= 0) return "Violet";
+        if (displayColorPreset.IndexOf("Sepia", StringComparison.OrdinalIgnoreCase) >= 0) return "Sepia";
         if (displayColorPreset.IndexOf("Green", StringComparison.OrdinalIgnoreCase) >= 0) return "Terminal Green";
         if (displayColorPreset.IndexOf("Amber", StringComparison.OrdinalIgnoreCase) >= 0) return "Amber";
         // ClassicCyan / MidFD Classic Cyan などは MidFD Default（黒+シアン）へ
@@ -33,14 +41,69 @@ internal static class UiThemeResolver
     }
 
     /// <summary>
-    /// AppearanceSettings から UI テーマ色を解決する。優先順位:
-    ///   1. ColorTheme から UI 基調色を自動解決
-    ///   2. CustomUiThemeColorsEnabled == true の場合のみ手動指定色で上書き
+    /// AppearanceSettings から UI クローム色を解決する。
+    /// 一覧配色を基準に chrome/header/status を追従させ、viewer は従来テーマのまま維持する。
     /// </summary>
     public static UiThemeColors Resolve(AppearanceSettings? appearance)
     {
         string presetName = MapFromDisplayColor(appearance?.ColorTheme);
         var baseColors = Resolve(presetName);
+
+        if (appearance == null)
+        {
+            return baseColors;
+        }
+
+        var tempSettings = new AppSettings
+        {
+            Appearance = appearance.Clone()
+        };
+        var listColors = FileListColorResolver.ResolveColors(tempSettings);
+        string canonicalPreset = FileListColorResolver.CanonicalizePresetKey(appearance.ColorTheme);
+
+        if (string.Equals(canonicalPreset, "ClassicCyan", StringComparison.OrdinalIgnoreCase))
+        {
+            baseColors = new UiThemeColors
+            {
+                ChromeBackColor = baseColors.ChromeBackColor,
+                ChromeForeColor = baseColors.ChromeForeColor,
+                AccentColor = baseColors.AccentColor,
+                HeaderBackColor = baseColors.HeaderBackColor,
+                HeaderForeColor = baseColors.HeaderForeColor,
+                StatusBackColor = baseColors.StatusBackColor,
+                StatusForeColor = baseColors.StatusForeColor,
+                ViewerBackColor = baseColors.ViewerBackColor,
+                ViewerForeColor = baseColors.ViewerForeColor,
+                ViewerStatusBackColor = baseColors.ViewerStatusBackColor,
+                ViewerStatusForeColor = baseColors.ViewerStatusForeColor,
+                BorderColor = baseColors.BorderColor,
+                SeparatorColor = baseColors.SeparatorColor
+            };
+
+            if (appearance.CustomUiThemeColorsEnabled)
+            {
+                baseColors = ApplyCustomColors(baseColors, appearance);
+            }
+
+            return baseColors;
+        }
+
+        baseColors = new UiThemeColors
+        {
+            ChromeBackColor = listColors.Background,
+            ChromeForeColor = listColors.NormalFile,
+            AccentColor = listColors.NormalFile,
+            HeaderBackColor = listColors.Background,
+            HeaderForeColor = listColors.NormalFile,
+            StatusBackColor = listColors.Background,
+            StatusForeColor = listColors.NormalFile,
+            ViewerBackColor = baseColors.ViewerBackColor,
+            ViewerForeColor = baseColors.ViewerForeColor,
+            ViewerStatusBackColor = baseColors.ViewerStatusBackColor,
+            ViewerStatusForeColor = baseColors.ViewerStatusForeColor,
+            BorderColor = baseColors.BorderColor,
+            SeparatorColor = baseColors.SeparatorColor
+        };
 
         // 手動指定色が有効な場合、ファイラー/ビューア色を上書きする
         if (appearance?.CustomUiThemeColorsEnabled == true)
@@ -134,6 +197,70 @@ internal static class UiThemeResolver
                 ViewerStatusForeColor = Color.FromArgb(255, 210, 120),
                 BorderColor = Color.FromArgb(220, 220, 220),
                 SeparatorColor = Color.FromArgb(130, 84, 0)
+            },
+            "Mono Dark" => new UiThemeColors
+            {
+                ChromeBackColor = Color.FromArgb(18, 18, 18),
+                ChromeForeColor = Color.FromArgb(214, 214, 214),
+                AccentColor = Color.FromArgb(176, 176, 176),
+                HeaderBackColor = Color.FromArgb(24, 24, 24),
+                HeaderForeColor = Color.FromArgb(214, 214, 214),
+                StatusBackColor = Color.FromArgb(18, 18, 18),
+                StatusForeColor = Color.FromArgb(214, 214, 214),
+                ViewerBackColor = Color.FromArgb(28, 28, 28),
+                ViewerForeColor = Color.FromArgb(236, 236, 236),
+                ViewerStatusBackColor = Color.FromArgb(18, 18, 18),
+                ViewerStatusForeColor = Color.FromArgb(214, 214, 214),
+                BorderColor = Color.FromArgb(96, 96, 96),
+                SeparatorColor = Color.FromArgb(64, 64, 64)
+            },
+            "Cyber" => new UiThemeColors
+            {
+                ChromeBackColor = Color.FromArgb(16, 22, 36),
+                ChromeForeColor = Color.FromArgb(214, 246, 255),
+                AccentColor = Color.FromArgb(72, 240, 255),
+                HeaderBackColor = Color.FromArgb(22, 28, 44),
+                HeaderForeColor = Color.FromArgb(214, 246, 255),
+                StatusBackColor = Color.FromArgb(16, 22, 36),
+                StatusForeColor = Color.FromArgb(214, 246, 255),
+                ViewerBackColor = Color.FromArgb(30, 18, 44),
+                ViewerForeColor = Color.FromArgb(238, 246, 255),
+                ViewerStatusBackColor = Color.FromArgb(16, 22, 36),
+                ViewerStatusForeColor = Color.FromArgb(214, 246, 255),
+                BorderColor = Color.FromArgb(72, 240, 255),
+                SeparatorColor = Color.FromArgb(142, 56, 188)
+            },
+            "Violet" => new UiThemeColors
+            {
+                ChromeBackColor = Color.FromArgb(24, 16, 36),
+                ChromeForeColor = Color.FromArgb(220, 208, 248),
+                AccentColor = Color.FromArgb(184, 144, 255),
+                HeaderBackColor = Color.FromArgb(28, 20, 42),
+                HeaderForeColor = Color.FromArgb(220, 208, 248),
+                StatusBackColor = Color.FromArgb(24, 16, 36),
+                StatusForeColor = Color.FromArgb(220, 208, 248),
+                ViewerBackColor = Color.FromArgb(32, 20, 48),
+                ViewerForeColor = Color.FromArgb(240, 236, 252),
+                ViewerStatusBackColor = Color.FromArgb(24, 16, 36),
+                ViewerStatusForeColor = Color.FromArgb(220, 208, 248),
+                BorderColor = Color.FromArgb(132, 108, 190),
+                SeparatorColor = Color.FromArgb(86, 68, 124)
+            },
+            "Sepia" => new UiThemeColors
+            {
+                ChromeBackColor = Color.FromArgb(38, 30, 22),
+                ChromeForeColor = Color.FromArgb(224, 206, 178),
+                AccentColor = Color.FromArgb(196, 168, 124),
+                HeaderBackColor = Color.FromArgb(44, 34, 24),
+                HeaderForeColor = Color.FromArgb(224, 206, 178),
+                StatusBackColor = Color.FromArgb(38, 30, 22),
+                StatusForeColor = Color.FromArgb(224, 206, 178),
+                ViewerBackColor = Color.FromArgb(52, 40, 28),
+                ViewerForeColor = Color.FromArgb(244, 236, 220),
+                ViewerStatusBackColor = Color.FromArgb(38, 30, 22),
+                ViewerStatusForeColor = Color.FromArgb(224, 206, 178),
+                BorderColor = Color.FromArgb(152, 124, 88),
+                SeparatorColor = Color.FromArgb(96, 74, 48)
             },
             // Classic Blue: 青背景/レトロブルー系（旧MidFD Classic Cyan相当）
             "Classic Blue" => new UiThemeColors

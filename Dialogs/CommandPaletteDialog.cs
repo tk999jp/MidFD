@@ -290,14 +290,9 @@ public sealed class CommandPaletteDialog : Form
 
     private bool TryHandlePaletteActionKey(Keys key, bool fromSearchBox)
     {
-        // Escape: 検索文字がある場合はクリア、空なら閉じる
+        // Escape: そのまま cancel/close する
         if (key == Keys.Escape)
         {
-            if (!string.IsNullOrEmpty(_searchBox.Text))
-            {
-                _searchBox.Text = string.Empty;
-                return true;
-            }
             DialogResult = DialogResult.Cancel;
             Close();
             return true;

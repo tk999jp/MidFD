@@ -9,6 +9,7 @@ internal interface ITrashManifestStore
     int UpsertRecord(TrashManifest manifest, TrashManifestRecord record);
     bool UpdateRecordStatus(TrashManifest manifest, string trashPath, TrashRecordStatus status);
     int UpdateRecordStatuses(TrashManifest manifest, IEnumerable<string> trashPaths, TrashRecordStatus status);
+    int RemoveRecordsByTrashPaths(TrashManifest manifest, IEnumerable<string> trashPaths);
     bool TryGetRecordByOriginalPath(TrashManifest manifest, string originalPath, out TrashManifestRecord? record);
     (int inserted, int updated, int skipped) UpsertRecords(TrashManifest manifest, IEnumerable<TrashManifestRecord> records);
 }

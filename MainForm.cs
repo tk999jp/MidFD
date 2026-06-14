@@ -62,6 +62,27 @@ public partial class MainForm : Form
     private const int MinimumNormalWindowWidth = 980;
     private const int MinimumNormalWindowHeight = 480;
     private const int MinimumUsableClientAreaHeight = 120;
+    private const float HeaderStatusMinimumReadableFontSize = 8f;
+    private const int HeaderStatusResponsiveFontDebounceMs = 150;
+    // 通常運用の app.log を汚さないため、詳細な header/status 診断は debugger 接続時のみ出す。
+    private static readonly bool HeaderStatusFontRouteDiagnosticLoggingEnabled = Debugger.IsAttached;
+    private const int HeaderRow2ClockSafetyGap = 8;
+    private readonly record struct HeaderRow1FitMetrics(
+        int RowWidth,
+        int LeftRequiredWidth,
+        int ClockReservedWidth,
+        int SafetyGap,
+        int GuardBand,
+        int TotalRequiredWidth,
+        int AvailableLeftWidth,
+        bool Fits,
+        int PageWidth,
+        int TotalWidth,
+        int UsedWidth,
+        int FreeWidth,
+        int ClockMeasuredWidth,
+        string ClockText,
+        string FreeText);
     private Rectangle? _lastKnownGoodNormalBounds;
     private bool _isApplyingWindowBoundsRecovery;
     private Rectangle? _normalBoundsBeforeMinimize;
@@ -148,12 +169,16 @@ public partial class MainForm : Form
     private FileListColorResolver.ResolvedColors? _resolvedColors;
     private readonly string? _startupProfileOverride;
     private FeatureProfile _featureProfile = FeatureProfile.Full;
+    // Diagnostic logging: unique ID for each selection change
+    private static long _selectionIdCounter = 0;
     private FeatureGateService _featureGate = new(FeatureProfile.Full);
     private CancellationTokenSource? _previewCts;
     private CancellationTokenSource? _fileOpCts; // Phase 3-fileop-async1: コピー等の非同期操作用
     private long _fileOperationCancelRequestedTimestamp;
     private string? _activeFileOperationName;
     private int _fileOperationStatusVersion;
+    private FileOperationItemProgressState? _fileOperationItemProgressState;
+    private FileOperationProgressDialog? _fileOperationProgressDialog;
     private FileOperationProgressFallbackForm? _shellDeleteProgressFallback;
     private FileOperationProgressFallbackForm? _undoRedoProgressFallback;
     private FileOperationProgressFallbackForm? _archiveProgressFallback;
@@ -193,13 +218,29 @@ public partial class MainForm : Form
     private string _markSummaryCache = string.Empty;
     private string _markSummaryCachePath = string.Empty;
     private int _markSummaryCacheCount = -1;
+    private string _markSummaryCacheSizeText = string.Empty;
+    private string _markSummaryCacheCompact = string.Empty;
     private bool _recentMultiMarkIntentActive;
     private string _recentMultiMarkIntentDirectory = string.Empty;
     private int _recentMultiMarkIntentCursorIndex = -1;
     private IReadOnlyList<string> _recentMultiMarkIntentMarkedPaths = Array.Empty<string>();
     // Phase 2g-fix3a: Row 1 専用時計 Timer
     private System.Windows.Forms.Timer? _headerClockTimer;
+    private System.Windows.Forms.Timer? _headerStatusResizeDebounceTimer;
+    // Phase: Browser UpdateInfoPanel debounce corrective
+    // カーソル移動時の補助表示更新を debounce するための Timer と sequence counter。
+    // 選択状態・操作対象は即時維持し、UpdateInfoPanel 系の表示更新だけを遅延予約する。
+    private System.Windows.Forms.Timer? _updateInfoPanelDebounceTimer;
+    private long _updateInfoPanelDebounceSeq = 0;
     private Font? _headerPaintFont; // titleHeaderPanel_Paint で使用するフォント保持用
+    private Font? _headerStatusResponsiveOwnedFont;
+    private Size _lastHeaderStatusResponsiveClientSize = Size.Empty;
+    private int _lastHeaderStatusResponsiveDpi;
+    private bool _updatingHeaderStatusResponsiveFont;
+    private string _lastHeaderResponsiveDiagSnapshot = string.Empty;
+    private DateTime _lastHeaderResponsiveDiagUtc = DateTime.MinValue;
+    private string _lastHeaderResponsiveStabilizeDiagSnapshot = string.Empty;
+    private DateTime _lastHeaderResponsiveStabilizeDiagUtc = DateTime.MinValue;
     // Phase 3-fix2b: Drag-out (MidFD → 外部) 用の状態管理
     private const string InternalDragArchiveFormat = "MidFD.InternalDragArchiveHandoff";
     private const string InternalDragArchiveMarkerValue = "1";
@@ -339,6 +380,8 @@ public partial class MainForm : Form
     private readonly ToolTip _browserFileNameToolTip = new();
     private int _browserFileNameToolTipIndex = -1;
     private string? _browserFileNameToolTipText;
+    private string _lastHeaderRightDiagSnapshot = string.Empty;
+    private DateTime _lastHeaderRightDiagUtc = DateTime.MinValue;
     private readonly ToolTip _fKeyToolTip = new();
     private int _fKeyToolTipIndex = -1;
     private ContextMenuStrip? _headerPathContextMenu;
@@ -668,6 +711,15 @@ public partial class MainForm : Form
         this.FormClosing += (s, e) =>
         {
             _directoryRefreshDebounceTimer.Stop();
+            _headerStatusResizeDebounceTimer?.Stop();
+            _headerStatusResizeDebounceTimer?.Dispose();
+            _headerStatusResizeDebounceTimer = null;
+            _updateInfoPanelDebounceTimer?.Stop();
+            _updateInfoPanelDebounceTimer?.Dispose();
+            _updateInfoPanelDebounceTimer = null;
+            _headerStatusResponsiveOwnedFont?.Dispose();
+            _headerStatusResponsiveOwnedFont = null;
+            CloseFileOperationProgressDialog();
             DisposeCurrentDirectoryWatcher();
             SaveWindowSettings();
             SavePreviewSettings();
@@ -687,6 +739,21 @@ public partial class MainForm : Form
             }
         };
         this.Move += (s, e) => PositionPreviewPopup();
+        this.ClientSizeChanged += (s, e) =>
+        {
+            if (this.WindowState != FormWindowState.Minimized)
+            {
+                ScheduleHeaderStatusResponsiveFontRecompute("ClientSizeChanged");
+            }
+        };
+        this.ResizeEnd += (s, e) =>
+        {
+            if (this.WindowState != FormWindowState.Minimized)
+            {
+                LogHeaderResponsiveStabilizeDiag("Finalize", "ResizeEnd", lblPage?.Font ?? GetHeaderStatusResponsiveBaseFont(), null, skippedReason: "force-final-recompute");
+                RecomputeHeaderStatusResponsiveFontNow("ResizeEnd");
+            }
+        };
         this.Resize += (s, e) =>
         {
             if (this.WindowState == FormWindowState.Minimized)
@@ -720,13 +787,19 @@ public partial class MainForm : Form
                         TryCaptureCurrentNormalBounds();
                     }
                 }
+
+                ScheduleHeaderStatusResponsiveFontRecompute($"Resize:{this.WindowState}");
             }
         };
+        this.DpiChanged += (s, e) => ScheduleHeaderStatusResponsiveFontRecompute("DpiChanged");
         this.Activated += MainForm_Activated;
         this.Shown += MainForm_Shown; // Phase 2g-fix6.2c: 初期フォーカス安定化
     }
     private void MainForm_Shown(object? sender, EventArgs e)
     {
+        DragArchiveService.CleanupDragArchivesOnStartup(DragArchiveService.GetDragArchiveTempDirectory());
+        _ = MidFdManagedTrashService.RunRetentionCleanupAsync(_settings, _fileOperationUndoRedoService, "Startup");
+
         // 初回表示レイアウト完了直後に確実にフォーカスを置く
         if (_uiMode == UIMode.Browser)
         {
@@ -740,6 +813,7 @@ public partial class MainForm : Form
                 UpdateFunctionBar();
                 functionBarPanel.PerformLayout();
                 functionBarPanel.Invalidate();
+                ScheduleHeaderStatusResponsiveFontRecompute("ShownPostLayout");
                 if (!browserPanel.Focused)
                 {
                     browserPanel.Focus();
@@ -1001,8 +1075,10 @@ private void InitializeBrowserTabControl()
     _browserTabStrip.AddTabClicked += BrowserTabStrip_AddTabClicked;
     _browserTabStrip.SelectedIndexChanged += BrowserTabStrip_SelectedIndexChanged;
     _browserTabStrip.TabReordered += BrowserTabStrip_TabReordered;
+    _browserTabStrip.CategoryReordered += BrowserTabStrip_CategoryReordered;
     _browserTabStrip.TabDoubleClicked += BrowserTabStrip_TabDoubleClicked;
     _browserTabStrip.TabRightClicked += BrowserTabStrip_TabRightClicked;
+    _browserTabStrip.TabListDropDownOpening += BrowserTabStrip_TabListDropDownOpening;
     _browserTabHostPanel.Controls.Add(_browserTabStrip);
     outerHostPanel.Controls.Add(_browserTabHostPanel);
     outerHostPanel.Controls.SetChildIndex(_browserTabHostPanel, 1);
@@ -1697,7 +1773,9 @@ private void InitializeBrowserTabControl()
             $"TabsBefore={_browserTabs.Count} ActiveIndexBefore={_activeBrowserTabIndex}");
         if (string.Equals(targetCategoryId, _activeBrowserTabCategoryId, StringComparison.OrdinalIgnoreCase))
         {
+            ClearBrowserTabCategoryContextState();
             RefreshBrowserTabHeaders();
+            UpdateMenuStripState();
             _browserTabStrip?.Invalidate();
             _browserTabHostPanel?.Invalidate();
             browserPanel.Focus();
@@ -1712,7 +1790,8 @@ private void InitializeBrowserTabControl()
         _browserTabs.Clear();
         _browserTabs.AddRange(targetTabs);
         _activeBrowserTabCategoryId = targetCategoryId;
-        _browserTabContextIndex = -1;
+        ClearBrowserTabContextState();
+        ClearBrowserTabCategoryContextState();
         RefreshBrowserTabHeaders();
         if (_browserTabs.Count > 0)
         {
@@ -1724,6 +1803,7 @@ private void InitializeBrowserTabControl()
             _activeBrowserTabIndex = -1;
         }
         RefreshBrowserTabHeaders();
+        UpdateMenuStripState();
         _browserTabStrip?.Invalidate();
         _browserTabHostPanel?.Invalidate();
         StoreActiveBrowserTabCategorySessionState(updateCompatibilityMirror: false);
@@ -1996,6 +2076,7 @@ private void InitializeBrowserTabControl()
             return;
         }
         _browserTabCategoryContextMenu = new ContextMenuStrip();
+        _browserTabCategoryContextMenu.Closed += (_, _) => ClearBrowserTabCategoryContextState();
         _addBrowserTabCategoryContextMenuItem = new ToolStripMenuItem("カテゴリ追加");
         _addBrowserTabCategoryContextMenuItem.ShortcutKeyDisplayString = "Ctrl+Shift+N";
         _addBrowserTabCategoryContextMenuItem.Click += (_, _) => AddGeneratedBrowserTabCategory();
@@ -2347,7 +2428,7 @@ private void InitializeBrowserTabControl()
             {
                 stripCategories.Add(new BrowserTabStripCategoryItem(
                     BrowserTabStrip.ManageCategoriesEntryId,
-                    "+ カテゴリ",
+                    "+",
                     "新しいカテゴリを追加します。",
                     BrowserTabStripCategoryItemKind.ManageEntry));
             }
@@ -2925,6 +3006,7 @@ private void InitializeBrowserTabControl()
             return;
         }
         _browserTabContextMenu = new ContextMenuStrip();
+        _browserTabContextMenu.Closed += (_, _) => ClearBrowserTabContextState();
         _toggleBrowserTabLockContextMenuItem = new ToolStripMenuItem();
         _toggleBrowserTabLockContextMenuItem.Click += (_, _) =>
         {
@@ -3437,6 +3519,11 @@ private void InitializeBrowserTabControl()
     }
     private void LogAltHint(string message)
     {
+        if (!HeaderStatusFontRouteDiagnosticLoggingEnabled)
+        {
+            return;
+        }
+
         LogService.Info($"[AltHint] {message}");
     }
     private void LogBrowserImageImportInfo(string message)
@@ -3838,10 +3925,14 @@ private void InitializeBrowserTabControl()
             menuBuildResult.HelpMenu
         });
 
-        mainMenuStrip.Renderer = new MenuIntegratedNavigationRenderer();
+        string menuPreset = UiThemeResolver.MapFromDisplayColor(_settings.Appearance?.ColorTheme);
+        var menuThemeColors = UiThemeResolver.Resolve(menuPreset);
+        ApplyMenuStripRenderer(
+            FileListColorResolver.NormalizeCoreTheme(_settings.Appearance?.ColorTheme, _settings) == "Light",
+            menuThemeColors.ChromeForeColor);
 
         mainMenuStrip.ContextMenuStrip = new ContextMenuStrip();
-        var hideItem = new ToolStripMenuItem("ナビゲーションボタンを非表示にする");
+        var hideItem = new ToolStripMenuItem("戻る・進む・上へ・更新ボタンを非表示にする");
         hideItem.Click += (s, e) =>
         {
             if (_settings.Appearance != null)
@@ -3852,6 +3943,7 @@ private void InitializeBrowserTabControl()
             }
         };
         mainMenuStrip.ContextMenuStrip.Items.Add(hideItem);
+        UpdateBrowserToolbarVisibility();
 
         foreach (ToolStripMenuItem rootMenu in mainMenuStrip.Items.OfType<ToolStripMenuItem>())
         {
@@ -4123,18 +4215,34 @@ private void InitializeBrowserTabControl()
     }
     private sealed class MenuIntegratedNavigationColorTable : ProfessionalColorTable
     {
+        private readonly bool _isLightPalette;
+
+        public MenuIntegratedNavigationColorTable(bool isLightPalette)
+        {
+            _isLightPalette = isLightPalette;
+        }
+
         public override Color MenuItemSelected => Color.FromArgb(40, 128, 128, 128);
         public override Color MenuItemSelectedGradientBegin => Color.FromArgb(40, 128, 128, 128);
         public override Color MenuItemSelectedGradientEnd => Color.FromArgb(40, 128, 128, 128);
         public override Color MenuItemBorder => Color.FromArgb(80, 128, 128, 128);
         public override Color MenuBorder => Color.FromArgb(80, 128, 128, 128);
-        public override Color ToolStripDropDownBackground => Color.WhiteSmoke;
+        public override Color ToolStripDropDownBackground => _isLightPalette ? Color.FromArgb(248, 248, 248) : Color.WhiteSmoke;
     }
 
     private sealed class MenuIntegratedNavigationRenderer : ToolStripProfessionalRenderer
     {
-        public MenuIntegratedNavigationRenderer() : base(new MenuIntegratedNavigationColorTable())
+        private readonly bool _isLightPalette;
+        private readonly Color _commandTextColor;
+        private readonly Color _commandAccentColor;
+
+        public MenuIntegratedNavigationRenderer(bool isLightPalette, Color commandTextColor) : base(new MenuIntegratedNavigationColorTable(isLightPalette))
         {
+            _isLightPalette = isLightPalette;
+            _commandTextColor = commandTextColor;
+            _commandAccentColor = isLightPalette
+                ? Color.FromArgb(180, 180, 180)
+                : Color.FromArgb(commandTextColor.R, commandTextColor.G, commandTextColor.B);
         }
 
         protected override void OnRenderButtonBackground(ToolStripItemRenderEventArgs e)
@@ -4150,11 +4258,13 @@ private void InitializeBrowserTabControl()
 
             if (btn.Selected || btn.Pressed)
             {
-                using (var brush = new SolidBrush(Color.FromArgb(0, 64, 64)))
+                Color fillColor = _isLightPalette ? Color.FromArgb(224, 224, 224) : Color.FromArgb(0, 64, 64);
+                Color borderColor = _isLightPalette ? Color.FromArgb(180, 180, 180) : _commandAccentColor;
+                using (var brush = new SolidBrush(fillColor))
                 {
                     g.FillRectangle(brush, rect);
                 }
-                using (var pen = new Pen(Color.FromArgb(0, 255, 255)))
+                using (var pen = new Pen(borderColor))
                 {
                     g.DrawRectangle(pen, rect.X, rect.Y, rect.Width - 1, rect.Height - 1);
                 }
@@ -4190,11 +4300,13 @@ private void InitializeBrowserTabControl()
             {
                 if (item.Selected || item.Pressed)
                 {
-                    using (var brush = new SolidBrush(Color.FromArgb(0, 64, 64)))
+                    Color fillColor = _isLightPalette ? Color.FromArgb(224, 224, 224) : Color.FromArgb(0, 64, 64);
+                    Color borderColor = _isLightPalette ? Color.FromArgb(180, 180, 180) : _commandAccentColor;
+                    using (var brush = new SolidBrush(fillColor))
                     {
                         g.FillRectangle(brush, rect);
                     }
-                    using (var pen = new Pen(Color.FromArgb(0, 255, 255)))
+                    using (var pen = new Pen(borderColor))
                     {
                         g.DrawRectangle(pen, rect.X, rect.Y, rect.Width - 1, rect.Height - 1);
                     }
@@ -4212,12 +4324,16 @@ private void InitializeBrowserTabControl()
                 }
                 else
                 {
-                    e.TextColor = item.Enabled ? Color.FromArgb(0, 255, 255) : Color.Gray;
+                    e.TextColor = item.Enabled
+                        ? (_isLightPalette ? Color.FromArgb(32, 32, 32) : _commandTextColor)
+                        : Color.Gray;
                 }
             }
             else if (e.Item is ToolStripButton btn)
             {
-                e.TextColor = btn.Enabled ? Color.FromArgb(0, 255, 255) : Color.Gray;
+                e.TextColor = btn.Enabled
+                    ? (_isLightPalette ? Color.FromArgb(32, 32, 32) : _commandTextColor)
+                    : Color.Gray;
             }
             base.OnRenderItemText(e);
         }
@@ -4254,6 +4370,16 @@ private void InitializeBrowserTabControl()
         }
     }
 
+    private void ApplyMenuStripRenderer(bool isLightPalette, Color commandTextColor)
+    {
+        if (mainMenuStrip == null)
+        {
+            return;
+        }
+
+        mainMenuStrip.Renderer = new MenuIntegratedNavigationRenderer(isLightPalette, commandTextColor);
+    }
+
     private static (int Height, Padding Padding) CalculateMenuStripMetrics(Font menuFont)
     {
         return (28, new Padding(4, 1, 0, 1));
@@ -4274,11 +4400,15 @@ private void InitializeBrowserTabControl()
         return new Padding(horizontal, 1, horizontal, 1);
     }
     private void SynchronizeMenuStripFontAndLayout(Font menuFont)
-    {
-        if (mainMenuStrip == null)
+        {
+            if (mainMenuStrip == null)
         {
             return;
         }
+        var menuThemeColors = UiThemeResolver.Resolve(UiThemeResolver.MapFromDisplayColor(_settings.Appearance?.ColorTheme));
+        mainMenuStrip.Renderer = new MenuIntegratedNavigationRenderer(
+            FileListColorResolver.NormalizeCoreTheme(_settings.Appearance?.ColorTheme, _settings) == "Light",
+            menuThemeColors.ChromeForeColor);
         mainMenuStrip.SuspendLayout();
         try
         {
@@ -4523,6 +4653,12 @@ private void InitializeBrowserTabControl()
             MidFdManagedTrashService.EmptyTrash();
             _fileOperationUndoRedoService.ClearTrashDeleteBatches();
             ShowStatusMessage("MidFD管理ゴミ箱を空にしました。");
+
+            string currentPath = _navigationService.CurrentPath;
+            if (!string.IsNullOrEmpty(currentPath) && currentPath.Contains(".midfd-trash", StringComparison.OrdinalIgnoreCase))
+            {
+                ReloadCurrentDirectory("管理ゴミ箱を空にしたため再読込しました。", force: true);
+            }
         }
         catch (Exception ex)
         {
@@ -4546,6 +4682,24 @@ private void InitializeBrowserTabControl()
         {
             _reloadCurrentDirectoryMenuItem.Enabled = _uiMode == UIMode.Browser && !IsCurrentDirectoryBusy();
         }
+    }
+    private void ClearBrowserTabContextState()
+    {
+        _browserTabContextIndex = -1;
+    }
+    private void ClearBrowserTabCategoryContextState()
+    {
+        _browserTabCategoryContextCategoryId = null;
+        _browserTabCategoryContextKind = BrowserTabStripCategoryItemKind.Category;
+    }
+    private void DismissTransientContextMenus()
+    {
+        _browserItemContextMenu?.Close();
+        _browserBlankContextMenu?.Close();
+        _browserTabContextMenu?.Close();
+        _browserTabCategoryContextMenu?.Close();
+        ClearBrowserTabContextState();
+        ClearBrowserTabCategoryContextState();
     }
     private void ExecuteCreateDirectory()
     {
@@ -4661,15 +4815,7 @@ private void InitializeBrowserTabControl()
                 if (!string.IsNullOrEmpty(currentPath))
                 {
                     string ext = Path.GetExtension(currentPath);
-                    if (string.Equals(ext, ".zip", StringComparison.OrdinalIgnoreCase) ||
-                        string.Equals(ext, ".7z", StringComparison.OrdinalIgnoreCase) ||
-                        string.Equals(ext, ".rar", StringComparison.OrdinalIgnoreCase) ||
-                        string.Equals(ext, ".tar", StringComparison.OrdinalIgnoreCase) ||
-                        string.Equals(ext, ".gz", StringComparison.OrdinalIgnoreCase) ||
-                        string.Equals(ext, ".tgz", StringComparison.OrdinalIgnoreCase) ||
-                        string.Equals(ext, ".bz2", StringComparison.OrdinalIgnoreCase) ||
-                        string.Equals(ext, ".xz", StringComparison.OrdinalIgnoreCase) ||
-                        string.Equals(ext, ".lzh", StringComparison.OrdinalIgnoreCase) ||
+                    if (ArchiveFileTypeHelper.IsArchive(currentPath) ||
                         string.Equals(ext, ".lha", StringComparison.OrdinalIgnoreCase))
                     {
                         selectionKind = CommandStateCoordinator.BrowserSelectionKind.ArchiveCandidate;
@@ -5233,6 +5379,112 @@ private void InitializeBrowserTabControl()
         return darkContrast >= lightContrast ? darkCandidate : lightCandidate;
     }
 
+    private (Color EnabledBack, Color EnabledFore, Color Border, Color HotKeyBack, Color HoverBack, Color PressedBack) ResolveDarkStandardFunctionThemeColors(
+        string presetKey,
+        FileListColorResolver.ResolvedColors resolved)
+    {
+        presetKey = FileListColorResolver.CanonicalizePresetKey(presetKey);
+
+        if (string.Equals(presetKey, "Slate", StringComparison.OrdinalIgnoreCase))
+        {
+            Color enabledBack = BlendColors(resolved.Background, resolved.Directory, 0.42);
+            Color enabledFore = PickReadableTextColor(enabledBack, resolved.NormalFile, Color.White);
+            return (
+                enabledBack,
+                enabledFore,
+                resolved.Directory,
+                BlendColors(enabledBack, Color.White, 0.08),
+                BlendColors(enabledBack, Color.White, 0.16),
+                BlendColors(enabledBack, Color.Black, 0.18));
+        }
+
+        if (string.Equals(presetKey, "Violet", StringComparison.OrdinalIgnoreCase))
+        {
+            Color enabledBack = BlendColors(resolved.Background, resolved.Directory, 0.44);
+            Color enabledFore = PickReadableTextColor(enabledBack, resolved.NormalFile, Color.White);
+            return (
+                enabledBack,
+                enabledFore,
+                resolved.Directory,
+                BlendColors(enabledBack, Color.White, 0.08),
+                BlendColors(enabledBack, Color.White, 0.16),
+                BlendColors(enabledBack, Color.Black, 0.18));
+        }
+
+        if (string.Equals(presetKey, "Sepia", StringComparison.OrdinalIgnoreCase))
+        {
+            Color enabledBack = BlendColors(resolved.Background, resolved.Directory, 0.46);
+            Color enabledFore = PickReadableTextColor(enabledBack, resolved.NormalFile, Color.White);
+            return (
+                enabledBack,
+                enabledFore,
+                resolved.Directory,
+                BlendColors(enabledBack, Color.White, 0.06),
+                BlendColors(enabledBack, Color.White, 0.16),
+                BlendColors(enabledBack, Color.Black, 0.18));
+        }
+
+        if (string.Equals(presetKey, "Mono Dark", StringComparison.OrdinalIgnoreCase))
+        {
+            Color enabledBack = BlendColors(resolved.Background, resolved.Directory, 0.40);
+            Color enabledFore = PickReadableTextColor(enabledBack, resolved.NormalFile, Color.White);
+            return (
+                enabledBack,
+                enabledFore,
+                resolved.Directory,
+                BlendColors(enabledBack, Color.White, 0.06),
+                BlendColors(enabledBack, Color.White, 0.14),
+                BlendColors(enabledBack, Color.Black, 0.18));
+        }
+
+        if (string.Equals(presetKey, "Cyber", StringComparison.OrdinalIgnoreCase))
+        {
+            Color enabledBack = BlendColors(resolved.Background, resolved.Directory, 0.52);
+            Color enabledFore = PickReadableTextColor(enabledBack, resolved.NormalFile, Color.White);
+            return (
+                enabledBack,
+                enabledFore,
+                resolved.Directory,
+                BlendColors(enabledBack, resolved.System, 0.28),
+                BlendColors(enabledBack, Color.White, 0.20),
+                BlendColors(enabledBack, Color.Black, 0.18));
+        }
+
+        if (string.Equals(presetKey, "Green", StringComparison.OrdinalIgnoreCase))
+        {
+            Color enabledBack = BlendColors(resolved.Background, resolved.Directory, 0.36);
+            Color enabledFore = PickReadableTextColor(enabledBack, resolved.NormalFile, Color.White);
+            return (
+                enabledBack,
+                enabledFore,
+                resolved.Directory,
+                BlendColors(enabledBack, Color.White, 0.08),
+                BlendColors(enabledBack, Color.White, 0.18),
+                BlendColors(enabledBack, Color.Black, 0.18));
+        }
+
+        if (string.Equals(presetKey, "Amber", StringComparison.OrdinalIgnoreCase))
+        {
+            Color enabledBack = BlendColors(resolved.Background, resolved.Directory, 0.38);
+            Color enabledFore = PickReadableTextColor(enabledBack, resolved.NormalFile, Color.White);
+            return (
+                enabledBack,
+                enabledFore,
+                resolved.Directory,
+                BlendColors(enabledBack, Color.White, 0.06),
+                BlendColors(enabledBack, Color.White, 0.16),
+                BlendColors(enabledBack, Color.Black, 0.18));
+        }
+
+        return (
+            Color.FromArgb(60, 120, 180),
+            Color.FromArgb(220, 238, 255),
+            Color.FromArgb(70, 100, 120),
+            Color.FromArgb(70, 140, 110),
+            Color.FromArgb(70, 132, 192),
+            Color.FromArgb(46, 92, 140));
+    }
+
     private FunctionBarColorPalette GetFunctionBarColors(bool isWinFdCompatible)
     {
         var resolved = _resolvedColors ?? FileListColorResolver.ResolveColors(_settings);
@@ -5241,6 +5493,38 @@ private void InitializeBrowserTabControl()
 
         // 現在のテーマを象徴する Directory (フォルダ色: ClassicCyan=シアン, Green=緑, Amber=黄/黄金など) を主調色として使用
         Color accentColor = resolved.Directory;
+        Color? customBackColor = UiThemeResolver.TryParseColor(_settings.Appearance?.CustomFunctionBarBackColor);
+        Color? customForeColor = UiThemeResolver.TryParseColor(_settings.Appearance?.CustomFunctionBarForeColor);
+        bool hasCustomFunctionBarColors = customBackColor.HasValue || customForeColor.HasValue;
+
+        if (hasCustomFunctionBarColors)
+        {
+            Color enabledBack = customBackColor ?? (isLightTheme ? Color.FromArgb(228, 228, 228) : Color.FromArgb(60, 120, 180));
+            Color barBack = resolved.Background;
+            Color barFore = customForeColor ?? (isLightTheme ? Color.FromArgb(32, 32, 32) : Color.FromArgb(220, 238, 255));
+            Color disabledBack = BlendColors(barBack, enabledBack, isLightTheme ? 0.12 : 0.50);
+            Color disabledForeBase = PickReadableTextColor(disabledBack, Color.Black, Color.White);
+            Color disabledFore = BlendColors(disabledForeBase, disabledBack, isLightTheme ? 0.20 : 0.35);
+            if (GetContrastRatio(disabledFore, disabledBack) < (isLightTheme ? 3.0 : 3.2))
+            {
+                disabledFore = disabledForeBase;
+            }
+
+            return new FunctionBarColorPalette
+            {
+                BackColor = barBack,
+                BorderColor = isLightTheme ? Color.FromArgb(200, 200, 200) : Color.FromArgb(70, 100, 120),
+                EnabledBackColor = enabledBack,
+                EnabledTextColor = barFore,
+                DisabledBackColor = disabledBack,
+                DisabledTextColor = disabledFore,
+                DisabledBorderColor = BlendColors(barBack, enabledBack, isLightTheme ? 0.06 : 0.03),
+                HotKeyBackColor = BlendColors(enabledBack, Color.Yellow, isLightTheme ? 0.30 : 0.18),
+                HotKeyTextColor = barFore,
+                HoverBackColor = BlendColors(enabledBack, Color.White, isLightTheme ? 0.28 : 0.18),
+                PressedBackColor = BlendColors(enabledBack, Color.Black, isLightTheme ? 0.10 : 0.20)
+            };
+        }
 
         if (isWinFdCompatible)
         {
@@ -5309,17 +5593,18 @@ private void InitializeBrowserTabControl()
                     disabledFore = BlendColors(disabledForeBase, disabledBack, 0.25);
                 }
 
+                Color frameBack = BlendColors(barBack, enabledBack, 0.18);
                 Color disabledBorder = BlendColors(barBack, enabledBack, 0.03); // 3%ブレンドで超極薄境界線
 
                 return new FunctionBarColorPalette
                 {
-                    BackColor = barBack,
-                    BorderColor = barBack,
+                    BackColor = frameBack,
+                    BorderColor = enabledBack,
                     EnabledBackColor = enabledBack,
                     EnabledTextColor = Color.Black, // WinFDの伝統である極めて高い判読性の確保
                     DisabledBackColor = disabledBack,
                     DisabledTextColor = disabledFore,
-                    DisabledBorderColor = disabledBorder,
+                    DisabledBorderColor = BlendColors(barBack, enabledBack, 0.18),
                     HotKeyBackColor = Color.Yellow,
                     HotKeyTextColor = Color.Black,
                     HoverBackColor = BlendColors(enabledBack, Color.White, 0.25),
@@ -5330,7 +5615,40 @@ private void InitializeBrowserTabControl()
         else
         {
             Color barBack = resolved.Background;
+            if (isLightTheme)
+            {
+                Color lightEnabledBack = Color.FromArgb(228, 228, 228);
+                Color lightDisabledBack = Color.FromArgb(236, 236, 236);
+                Color lightDisabledTextBase = PickReadableTextColor(lightDisabledBack, Color.Black, Color.White);
+                Color lightDisabledText = BlendColors(lightDisabledTextBase, lightDisabledBack, 0.25);
+                if (GetContrastRatio(lightDisabledText, lightDisabledBack) < 3.2)
+                {
+                    lightDisabledText = lightDisabledTextBase;
+                }
+
+                return new FunctionBarColorPalette
+                {
+                    BackColor = barBack,
+                    BorderColor = Color.FromArgb(198, 198, 198),
+                    EnabledBackColor = lightEnabledBack,
+                    EnabledTextColor = Color.FromArgb(32, 32, 32),
+                    DisabledBackColor = lightDisabledBack,
+                    DisabledTextColor = lightDisabledText,
+                    DisabledBorderColor = Color.FromArgb(210, 210, 210),
+                    HotKeyBackColor = Color.FromArgb(246, 242, 220),
+                    HotKeyTextColor = Color.FromArgb(32, 32, 32),
+                    HoverBackColor = Color.FromArgb(220, 220, 220),
+                    PressedBackColor = Color.FromArgb(210, 210, 210)
+                };
+            }
+
             Color enabledBack = Color.FromArgb(60, 120, 180);
+            Color enabledFore = Color.FromArgb(220, 238, 255);
+            Color borderColor = Color.FromArgb(70, 100, 120);
+            Color hotKeyBack = Color.FromArgb(70, 140, 110);
+            Color hoverBack = Color.FromArgb(70, 132, 192);
+            Color pressedBack = Color.FromArgb(46, 92, 140);
+            (enabledBack, enabledFore, borderColor, hotKeyBack, hoverBack, pressedBack) = ResolveDarkStandardFunctionThemeColors(_settings.Appearance?.ColorTheme ?? "ClassicCyan", resolved);
             Color disabledBack = BlendColors(barBack, enabledBack, 0.5);
             Color disabledTextBase = PickReadableTextColor(disabledBack, Color.Black, Color.White);
             Color disabledText = BlendColors(disabledTextBase, disabledBack, 0.35);
@@ -5342,18 +5660,18 @@ private void InitializeBrowserTabControl()
             return new FunctionBarColorPalette
             {
                 BackColor = barBack,
-                BorderColor = Color.FromArgb(70, 100, 120),
+                BorderColor = borderColor,
                 EnabledBackColor = enabledBack,
-                EnabledTextColor = Color.FromArgb(220, 238, 255),
+                EnabledTextColor = enabledFore,
                 DisabledBackColor = disabledBack,
                 DisabledTextColor = disabledText,
                 DisabledBorderColor = Color.FromArgb(45, 58, 68),
 
-                HotKeyBackColor = Color.FromArgb(70, 140, 110),
-                HotKeyTextColor = Color.White,
+                HotKeyBackColor = hotKeyBack,
+                HotKeyTextColor = enabledFore,
 
-                HoverBackColor = Color.FromArgb(70, 132, 192),
-                PressedBackColor = Color.FromArgb(46, 92, 140)
+                HoverBackColor = hoverBack,
+                PressedBackColor = pressedBack
             };
         }
     }
@@ -5493,14 +5811,17 @@ private void InitializeBrowserTabControl()
         return "";
     }
 
-    private int GetFunctionBarLayerBadgeWidth(bool isShift, bool isCtrl, bool isAlt)
+    private int GetFunctionBarLayerBadgeWidth(bool isShift, bool isCtrl, bool isAlt, Font font)
     {
         string text = GetFunctionBarLayerBadgeText(isShift, isCtrl, isAlt);
         if (string.IsNullOrEmpty(text))
         {
             return 0;
         }
-        return 48;
+        int panelWidth = functionBarPanel?.ClientSize.Width ?? 1024;
+        if (panelWidth <= 0) panelWidth = 1024;
+        float scale = GetFunctionBarEffectiveScale(font, panelWidth);
+        return (int)Math.Round(48 * scale);
     }
 
     private System.Drawing.Drawing2D.GraphicsPath CreateRoundedRectanglePath(Rectangle rect, int radius)
@@ -5520,11 +5841,22 @@ private void InitializeBrowserTabControl()
         string text = GetFunctionBarLayerBadgeText(isShift, isCtrl, isAlt);
         if (string.IsNullOrEmpty(text)) return;
 
-        int badgeW = GetFunctionBarLayerBadgeWidth(isShift, isCtrl, isAlt);
+        int badgeW = GetFunctionBarLayerBadgeWidth(isShift, isCtrl, isAlt, font);
+        int badgeY;
+        int badgeH;
+        if (rects != null && rects.Length > 0)
+        {
+            badgeY = rects[0].Y;
+            badgeH = rects[0].Height;
+        }
+        else
+        {
+            int slotHeight = GetFunctionBarSlotHeight(g, font);
+            badgeY = Math.Max(panelBounds.Top, panelBounds.Bottom - slotHeight - 2);
+            badgeH = slotHeight;
+        }
         const int paddingX = 4;
-        const int paddingY = 3;
-        int badgeH = panelBounds.Height - (paddingY * 2);
-        var badgeRect = new Rectangle(panelBounds.X + paddingX, panelBounds.Y + paddingY, badgeW - (paddingX * 2), badgeH);
+        var badgeRect = new Rectangle(panelBounds.X + paddingX, badgeY, badgeW - (paddingX * 2), badgeH);
 
         // 1番目のスロットと重ならないようにガード
         if (rects != null && rects.Length > 0)
@@ -5553,7 +5885,10 @@ private void InitializeBrowserTabControl()
             }
         }
 
-        using var badgeFont = new Font(font.FontFamily, 8.5F, FontStyle.Bold);
+        int panelWidth = functionBarPanel?.ClientSize.Width ?? 1024;
+        if (panelWidth <= 0) panelWidth = 1024;
+        float scale = GetFunctionBarEffectiveScale(font, panelWidth);
+        using var badgeFont = new Font(font.FontFamily, Math.Clamp(8.5F * scale, 8.0F, 18.0F), FontStyle.Bold);
         TextRenderer.DrawText(
             g,
             text,
@@ -5589,43 +5924,49 @@ private void InitializeBrowserTabControl()
             Size suffixSize = string.IsNullOrEmpty(suffix)
                 ? Size.Empty
                 : TextRenderer.MeasureText(graphics, suffix, font, Size.Empty, TextFormatFlags.NoPadding);
-            int totalWidth = prefixSize.Width + hotKeySize.Width + suffixSize.Width;
-            int startX = labelRect.X + Math.Max(0, (labelRect.Width - totalWidth) / 2);
-            int textY = labelRect.Y + Math.Max(0, (labelRect.Height - TextRenderer.MeasureText(graphics, normalizedLabel, font, Size.Empty, TextFormatFlags.NoPadding).Height) / 2);
-            if (isPressed)
-            {
-                textY += 1;
+                int totalWidth = prefixSize.Width + hotKeySize.Width + suffixSize.Width;
+                if (totalWidth <= labelRect.Width)
+                {
+                    int startX = labelRect.X + Math.Max(0, (labelRect.Width - totalWidth) / 2);
+                    if (startX > labelRect.X)
+                    {
+                        startX -= 1;
+                    }
+                    int measuredHeight = TextRenderer.MeasureText(graphics, normalizedLabel, font, Size.Empty, TextFormatFlags.NoPadding).Height;
+                    int contentHeight = Math.Min(labelRect.Height, Math.Max(measuredHeight, hotKeySize.Height));
+                    int textY = labelRect.Y + Math.Max(0, (labelRect.Height - contentHeight) / 2);
+                if (isPressed)
+                {
+                    textY = Math.Min(labelRect.Bottom - contentHeight, textY + 1);
+                }
+
+                Rectangle prefixRect = new Rectangle(startX, textY, prefixSize.Width, contentHeight);
+                Rectangle hotKeyRect = new Rectangle(startX + prefixSize.Width, textY, hotKeySize.Width, contentHeight);
+                Rectangle suffixRect = new Rectangle(startX + prefixSize.Width + hotKeySize.Width, textY, suffixSize.Width, contentHeight);
+
+                if (hotKeyRect.Width > 0)
+                {
+                    Rectangle highlightRect = Rectangle.Intersect(hotKeyRect, labelRect);
+                    using var highlightBrush = new SolidBrush(palette.HotKeyBackColor);
+                    graphics.FillRectangle(highlightBrush, highlightRect);
+                }
+
+                Color normalText = isEnabled ? palette.EnabledTextColor : palette.DisabledTextColor;
+                TextRenderer.DrawText(graphics, prefix, font, prefixRect, normalText, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding);
+                TextRenderer.DrawText(graphics, hotKey, font, hotKeyRect, palette.HotKeyTextColor, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding);
+                TextRenderer.DrawText(graphics, suffix, font, suffixRect, normalText, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding);
+                return;
             }
-
-            Rectangle prefixRect = new Rectangle(startX, textY, prefixSize.Width, labelRect.Height);
-            Rectangle hotKeyRect = new Rectangle(startX + prefixSize.Width, textY, hotKeySize.Width, labelRect.Height);
-            Rectangle suffixRect = new Rectangle(startX + prefixSize.Width + hotKeySize.Width, textY, suffixSize.Width, labelRect.Height);
-
-            if (hotKeyRect.Width > 0)
-            {
-                Rectangle highlightRect = hotKeyRect;
-                highlightRect.Inflate(1, 0);
-                using var highlightBrush = new SolidBrush(palette.HotKeyBackColor);
-                graphics.FillRectangle(highlightBrush, highlightRect);
-            }
-
-            Color normalText = isEnabled ? palette.EnabledTextColor : palette.DisabledTextColor;
-            TextRenderer.DrawText(graphics, prefix, font, prefixRect, normalText, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding);
-            TextRenderer.DrawText(graphics, hotKey, font, hotKeyRect, palette.HotKeyTextColor, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding);
-            TextRenderer.DrawText(graphics, suffix, font, suffixRect, normalText, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding);
-
-            return;
         }
 
         Color textColor = isEnabled ? palette.EnabledTextColor : palette.DisabledTextColor;
-        Size textSize = TextRenderer.MeasureText(graphics, normalizedLabel, font, Size.Empty, TextFormatFlags.NoPadding);
-        Rectangle textRect = new Rectangle(labelRect.X + Math.Max(0, (labelRect.Width - textSize.Width) / 2), labelRect.Y, textSize.Width, labelRect.Height);
+        Rectangle textRect = labelRect;
         if (isPressed)
         {
             textRect.Offset(0, 1);
         }
         TextRenderer.DrawText(graphics, normalizedLabel, font, textRect, textColor,
-            TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding);
+            TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix | TextFormatFlags.NoPadding);
     }
 
     private void DrawFunctionBarButtonFrame(
@@ -5650,10 +5991,12 @@ private void InitializeBrowserTabControl()
             graphics.FillRectangle(bgBrush, cellRect);
         }
 
-        Color borderCol = isEnabled ? palette.BorderColor : palette.DisabledBorderColor;
+        Color borderCol = isEnabled
+            ? BlendColors(cellBg, palette.BackColor, 0.22)
+            : BlendColors(cellBg, palette.BackColor, 0.14);
         if (emphasizeBorder && isEnabled)
         {
-            borderCol = BlendColors(borderCol, palette.EnabledTextColor, 0.18);
+            borderCol = BlendColors(borderCol, palette.BackColor, 0.28);
         }
 
         using (var borderPen = new Pen(borderCol))
@@ -5665,13 +6008,13 @@ private void InitializeBrowserTabControl()
         {
             if (isPressed)
             {
-                Color innerDarkCol = Color.FromArgb(80, BlendColors(palette.EnabledBackColor, Color.Black, 0.3));
+                Color innerDarkCol = Color.FromArgb(40, BlendColors(cellBg, palette.BackColor, 0.20));
                 using var innerDarkPen = new Pen(innerDarkCol);
                 graphics.DrawRectangle(innerDarkPen, cellRect.X + 1, cellRect.Y + 1, cellRect.Width - 3, cellRect.Height - 3);
             }
             else if (isHovered)
             {
-                Color innerLightCol = Color.FromArgb(120, BlendColors(palette.EnabledBackColor, Color.White, 0.5));
+                Color innerLightCol = Color.FromArgb(56, BlendColors(cellBg, palette.BackColor, 0.12));
                 using var innerLightPen = new Pen(innerLightCol);
                 graphics.DrawRectangle(innerLightPen, cellRect.X + 1, cellRect.Y + 1, cellRect.Width - 3, cellRect.Height - 3);
             }
@@ -5686,47 +6029,92 @@ private void InitializeBrowserTabControl()
             return rects;
         }
 
-        const int labelPaddingX = 6;
-        const int minLabelW = 34;
-        const int innerGap = 12;
-        const int groupGap = 24;
-
-        int[] labelWidths = new int[labels.Count];
-        int totalW = 0;
+        int labelHeight;
+        int labelWidth;
         using (var g = CreateGraphics())
         {
-            for (int i = 0; i < labels.Count; i++)
-            {
-                string labelText = InputSettings.NormalizeFunctionBarLabelText(labels[i]);
-                Size sz = string.IsNullOrWhiteSpace(labelText)
-                    ? Size.Empty
-                    : TextRenderer.MeasureText(g, labelText, font, Size.Empty, TextFormatFlags.NoPadding);
-                int width = Math.Max(minLabelW, sz.Width + (labelPaddingX * 2));
-                labelWidths[i] = width;
-                totalW += width;
-                if (i < labels.Count - 1)
-                {
-                    totalW += (i == 3 || i == 7) ? groupGap : innerGap;
-                }
-            }
+            labelHeight = GetFunctionBarSlotHeight(g, font);
+            labelWidth = GetFunctionBarSlotWidth(bounds, font, labels.Count, 0);
         }
 
-        int startX = bounds.Left + Math.Max(0, (bounds.Width - totalW) / 2);
-        int labelHeight = Math.Max(18, bounds.Height - 2);
-        int labelY = bounds.Bottom - labelHeight;
+        int totalGap = GetFunctionBarLabelGapTotal(labels.Count);
+        int buttonGroupWidth = (labelWidth * labels.Count) + totalGap;
+        int startX = bounds.Left + Math.Max(0, (bounds.Width - buttonGroupWidth) / 2);
+        int labelY = Math.Max(bounds.Top, bounds.Bottom - labelHeight - 2);
 
         int currentX = startX;
         for (int i = 0; i < labels.Count; i++)
         {
-            rects[i] = new Rectangle(currentX, labelY, labelWidths[i], labelHeight);
-            currentX += labelWidths[i];
+            rects[i] = new Rectangle(currentX, labelY, labelWidth, labelHeight);
+            currentX += labelWidth;
             if (i < labels.Count - 1)
             {
-                currentX += (i == 3 || i == 7) ? groupGap : innerGap;
+                currentX += (i == 3 || i == 7) ? FunctionBarGroupGap : FunctionBarInnerGap;
             }
         }
 
         return rects;
+    }
+
+    private static int GetFunctionBarLabelGapTotal(int labelCount)
+    {
+        if (labelCount <= 1)
+        {
+            return 0;
+        }
+
+        int totalGap = 0;
+        for (int i = 0; i < labelCount - 1; i++)
+        {
+            totalGap += (i == 3 || i == 7) ? FunctionBarGroupGap : FunctionBarInnerGap;
+        }
+
+        return totalGap;
+    }
+
+    private int GetFunctionBarSlotCellWidth(Font font)
+    {
+        int panelWidth = functionBarPanel?.ClientSize.Width ?? 1024;
+        if (panelWidth <= 0) panelWidth = 1024;
+        float scale = GetFunctionBarEffectiveScale(font, panelWidth);
+        return Math.Clamp((int)Math.Round(font.Size * 1.05F), 6, (int)Math.Round(12 * scale));
+    }
+
+    private int GetFunctionBarSlotHeight(Graphics g, Font font)
+    {
+        int measuredHeight = TextRenderer.MeasureText(
+            g,
+            "Hg",
+            font,
+            Size.Empty,
+            TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix).Height;
+        int panelWidth = functionBarPanel?.ClientSize.Width ?? 1024;
+        if (panelWidth <= 0) panelWidth = 1024;
+        float scale = GetFunctionBarEffectiveScale(font, panelWidth);
+        int baseHeight = Math.Clamp(measuredHeight + 4, 16, (int)Math.Round(24 * scale));
+        if (functionBarPanel != null && functionBarPanel.ClientSize.Height > 0)
+        {
+            int maxAllowed = Math.Max(16, functionBarPanel.ClientSize.Height - 4);
+            return Math.Min(baseHeight, maxAllowed);
+        }
+        return baseHeight;
+    }
+
+    private int GetFunctionBarSlotWidth(Rectangle bounds, Font font, int labelCount, int badgeReserveWidth)
+    {
+        int cellWidth = GetFunctionBarSlotCellWidth(font);
+        int desiredSlotWidth = (cellWidth * FunctionBarFixedCellCount) + (FunctionBarSlotPaddingX * 2);
+        int totalGap = GetFunctionBarLabelGapTotal(labelCount);
+        int availableWidth = Math.Max(0, bounds.Width - badgeReserveWidth - totalGap - (FunctionBarSlotPaddingX * 2));
+        int maxSlotWidthByPanel = labelCount > 0 ? availableWidth / labelCount : 0;
+        if (maxSlotWidthByPanel <= 0)
+        {
+            return FunctionBarSlotMinWidth;
+        }
+
+        int slotWidth = Math.Min(desiredSlotWidth, maxSlotWidthByPanel);
+        slotWidth = Math.Max(slotWidth, FunctionBarSlotMinWidth);
+        return Math.Min(slotWidth, maxSlotWidthByPanel);
     }
 
     private Rectangle[] CalculateWinFdFunctionBarLabelRects(Rectangle bounds, Font font)
@@ -5835,6 +6223,7 @@ private void InitializeBrowserTabControl()
         Color borderCol = isEnabled ? palette.BorderColor : palette.DisabledBorderColor;
         using (var borderPen = new Pen(borderCol))
         {
+            graphics.DrawLine(borderPen, labelRect.Left, labelRect.Top, labelRect.Right - 1, labelRect.Top);
             graphics.DrawLine(borderPen, labelRect.Left, labelRect.Bottom - 1, labelRect.Right - 1, labelRect.Bottom - 1);
             graphics.DrawLine(borderPen, labelRect.Left, labelRect.Top, labelRect.Left, labelRect.Bottom - 1);
             graphics.DrawLine(borderPen, labelRect.Right - 1, labelRect.Top, labelRect.Right - 1, labelRect.Bottom - 1);
@@ -5917,14 +6306,15 @@ private void InitializeBrowserTabControl()
     {
         if (index < 0 || index >= 12) return;
 
-        using var font = _headerPaintFont != null
+        using var layoutFont = _headerPaintFont != null
             ? new Font(_headerPaintFont.FontFamily, _headerPaintFont.Size, _headerPaintFont.Style)
             : new Font("Consolas", 10F);
+        using var functionBarFont = CreateFunctionBarRenderFont(layoutFont);
 
         var profile = FunctionKeyProfileService.ResolveProfile(CurrentFunctionKeyProfileValue);
         var layoutModels = BuildFunctionBarSlotModels(profile, false, false, false);
         var labels = layoutModels.Select(model => model.LayoutLabel).ToArray();
-        var rects = CalculateFunctionBarLabelRects(functionBarPanel.ClientRectangle, font, labels);
+        var rects = CalculateFunctionBarLabelRects(functionBarPanel.ClientRectangle, functionBarFont, labels);
         if (index < rects.Length)
         {
             var r = rects[index];
@@ -6069,6 +6459,7 @@ private void InitializeBrowserTabControl()
     }
     private void ApplyDirectoryLoadUi(BrowserLoadCoordinator.DirectoryLoadResult result)
     {
+        DismissTransientContextMenus();
         bool directoryChanged = !string.Equals(
             NavigationService.NormalizeDirectoryForCompare(result.PreviousPath),
             NavigationService.NormalizeDirectoryForCompare(result.NewPath),
@@ -6093,6 +6484,7 @@ private void InitializeBrowserTabControl()
         CaptureActiveBrowserTabState(captureMarks: false);
         UpdateCurrentDirectoryWatcher(result.NewPath, "ApplyDirectoryLoadUi");
         TryProcessPendingCurrentDirectoryRefresh("ApplyDirectoryLoadUi");
+        UpdateMenuStripState();
         // Phase: header stream / initial final relayout corrective follow-up
         // ディレクトリ読み込みとタブ状態確定後の最終レイアウトを保証する
         UpdateInfoPanel();
@@ -6596,11 +6988,12 @@ private void InitializeBrowserTabControl()
         {
             LogService.Info(
                 $"[CancelRuntime] MarkCancelRequested before. source={source}, thread={Environment.CurrentManagedThreadId}, " +
-                $"requested={_fileOpCts.IsCancellationRequested}, progressForm={_shellDeleteProgressFallback != null}");
+                $"requested={_fileOpCts.IsCancellationRequested}, progressForm={_shellDeleteProgressFallback != null}, progressDialog={_fileOperationProgressDialog != null}");
             _shellDeleteProgressFallback?.MarkCancelRequested();
+            _fileOperationProgressDialog?.MarkCancelRequested();
             LogService.Info(
                 $"[CancelRuntime] MarkCancelRequested after. source={source}, thread={Environment.CurrentManagedThreadId}, " +
-                $"requested={_fileOpCts.IsCancellationRequested}, progressForm={_shellDeleteProgressFallback != null}");
+                $"requested={_fileOpCts.IsCancellationRequested}, progressForm={_shellDeleteProgressFallback != null}, progressDialog={_fileOperationProgressDialog != null}");
             if (!_fileOpCts.IsCancellationRequested)
             {
                 LogService.Warn(
@@ -6638,6 +7031,7 @@ private void InitializeBrowserTabControl()
             _fileOpCts != null ||
             !string.IsNullOrWhiteSpace(_activeFileOperationName) ||
             _shellDeleteProgressFallback != null ||
+            _fileOperationProgressDialog != null ||
             _isFileOperationUndoRedoBusy ||
             _undoRedoProgressFallback != null;
     }
@@ -7389,11 +7783,55 @@ private void InitializeBrowserTabControl()
     /// Phase 3-input-cmdkey-clipui1: ProcessCmdKey における Browser 文脈の列数設定 (1-9) を helper 化。
     /// </summary>
     /// <summary>
+    /// Phase: Browser UpdateInfoPanel debounce corrective
+    /// カーソル移動/選択変更に伴う補助表示更新を 150ms debounce して予約する。
+    /// latest-wins: 新しい選択変更が来たら前回予約をキャンセルし、最後の選択だけ UpdateInfoPanel を実行する。
+    /// 選択状態・操作対象は即時維持。フォーム破棄/終了時はタイマーを安全にキャンセルする。
+    /// _updateInfoPanelFiredSeq: 今回の Tick で発火すべき seq を保持し、Tick 時に _updateInfoPanelDebounceSeq と比較する。
+    /// </summary>
+    private long _updateInfoPanelFiredSeq = 0;
+    private void ScheduleUpdateInfoPanelDebounced()
+    {
+        const int DebounceMs = 150;
+        long seq = System.Threading.Interlocked.Increment(ref _updateInfoPanelDebounceSeq);
+        LogService.Detail($"[Browser.UpdateInfoPanelDebounce.Schedule] seq={seq} delayMs={DebounceMs}");
+        if (_updateInfoPanelDebounceTimer == null)
+        {
+            _updateInfoPanelDebounceTimer = new System.Windows.Forms.Timer();
+            _updateInfoPanelDebounceTimer.Tick += (_, _) =>
+            {
+                _updateInfoPanelDebounceTimer.Stop();
+                long expected = System.Threading.Interlocked.Read(ref _updateInfoPanelFiredSeq);
+                long current = System.Threading.Interlocked.Read(ref _updateInfoPanelDebounceSeq);
+                if (expected != current)
+                {
+                    LogService.Detail($"[Browser.UpdateInfoPanelDebounce.Skip] seq={expected} currentSeq={current} canceled=true reason=Superseded");
+                    return;
+                }
+                var sw = System.Diagnostics.Stopwatch.StartNew();
+                LogService.Detail($"[Browser.UpdateInfoPanelDebounce.Fire] seq={expected}");
+                UpdateInfoPanel();
+                sw.Stop();
+                LogService.Detail($"[Browser.UpdateInfoPanelDebounce.Fire] seq={expected} elapsedMs={sw.ElapsedMilliseconds} done=true");
+            };
+        }
+        else
+        {
+            LogService.Detail($"[Browser.UpdateInfoPanelDebounce.Cancel] seq={seq} reason=NewSchedule");
+            _updateInfoPanelDebounceTimer.Stop();
+        }
+        // 発火時に期待する seq を記録してからタイマー起動
+        System.Threading.Interlocked.Exchange(ref _updateInfoPanelFiredSeq, seq);
+        _updateInfoPanelDebounceTimer.Interval = DebounceMs;
+        _updateInfoPanelDebounceTimer.Start();
+    }
+    /// <summary>
     /// WinFD風の上部情報欄（Info行・Name行）を更新する。
     /// カーソル位置のアイテム情報とマーク/ファイル数を表示する。
     /// </summary>
     private void UpdateInfoPanel()
     {
+        LogFontRouteDiag("UpdateInfoPanel:START");
         // 1. 表示項目の取得
         var currentItem = GetCurrentBrowserItem();
         int itemsPerPage = GetBrowserItemsPerPage(out _, out int rowsPerColumn);
@@ -7401,6 +7839,7 @@ private void InitializeBrowserTabControl()
         var state = new HeaderPresentationHelper.InputState
         {
             CurrentPath = _navigationService.CurrentPath,
+            CurrentPathKind = NetworkPathResolutionPolicy.GetPathKind(_navigationService.CurrentPath),
             CursorIndex = _browserCursorIndex,
             ItemCount = fileListView.Items.Count,
             ItemsPerPage = itemsPerPage,
@@ -7408,8 +7847,16 @@ private void InitializeBrowserTabControl()
             ColumnCount = _columnCount,
             MarkedFiles = _markedFiles,
             CachedMarkSummary = GetMarkSummaryForHeader(),
+            CachedMarkCount = _markSummaryCacheCount,
+            CachedMarkSizeText = _markSummaryCacheSizeText,
+            CachedMarkSummaryCompact = _markSummaryCacheCompact,
             CurrentItemText = currentItem?.Text,
             CurrentItemPath = currentItem?.Tag as string,
+            CurrentItemExtensionText = currentItem != null && currentItem.SubItems.Count > 1 ? currentItem.SubItems[1].Text : null,
+            CurrentItemSizeText = currentItem != null && currentItem.SubItems.Count > 2 ? currentItem.SubItems[2].Text : null,
+            CurrentItemDateText = currentItem != null && currentItem.SubItems.Count > 3 ? currentItem.SubItems[3].Text : null,
+            CurrentItemAttrText = currentItem != null && currentItem.SubItems.Count > 4 ? currentItem.SubItems[4].Text : null,
+            CurrentItemIsDirectory = currentItem != null && (currentItem.Text == ".." || (currentItem.SubItems.Count > 1 && string.Equals(currentItem.SubItems[1].Text, "<DIR>", StringComparison.OrdinalIgnoreCase))),
             SortKind = _currentSort,
             SortAscending = _sortAscending,
             FilterPattern = _filterPattern,
@@ -7425,17 +7872,13 @@ private void InitializeBrowserTabControl()
         // 4. UI への適用
         lblPage.Text = display.Page;
         lblTotal.Text = display.Total;
-        // 【Path行右端】 (lblSort): Mark優先 (Compact形式)、なければSort/Filter
+        // 【Path行右端】 (lblSort): Mark優先（省略禁止）、なければSort/Filter
+        // Px1 header-right-clipping-corrective:
+        //   FitMarkSummaryCompact によるMarkSize省略を廃止し、実測幅優先・省略禁止に変更。
+        //   右側blockは実文字列測定幅+paddingで確保し、pathRightMaxWidthで切り詰めない。
         bool hasMarks = display.MarkCount > 0 && !string.IsNullOrWhiteSpace(display.MarkSizeText);
-        int pathRightMaxWidth = Math.Min(
-            Math.Max(220, infoRow2Panel.ClientSize.Width / 2),
-            Math.Max(80, infoRow2Panel.ClientSize.Width - 80));
         string pathRightText = hasMarks
-            ? FitMarkSummaryCompact(
-                display.MarkCount,
-                display.MarkSizeText,
-                lblSort.Font,
-                pathRightMaxWidth)
+            ? $"Mark: {display.MarkCount} MarkSize: {display.MarkSizeText}"
             : display.SortFilter;
         lblSort.Text = pathRightText;
         lblSort.Visible = !string.IsNullOrWhiteSpace(pathRightText);
@@ -7443,12 +7886,14 @@ private void InitializeBrowserTabControl()
         string itemRightText = display.ItemMetaWithoutSize;
         lblFileStatsEx.Text = itemRightText;
         lblFileStatsEx.Visible = !string.IsNullOrWhiteSpace(itemRightText);
-        // 【Corrective】 右端ラベルの幅をテキストに合わせて調整
+        // 【Corrective】 右側blockの幅を実測幅優先で算出（pathRightMaxWidthによる切り詰めを廃止）
+        //   RightBlockPadding: 描画余白として確保する最小ピクセル数
+        const int RightBlockPadding = 16;
         int sortWidth = !string.IsNullOrWhiteSpace(pathRightText)
-            ? Math.Min(MeasureHeaderTextWidth(pathRightText, lblSort.Font) + 12, pathRightMaxWidth)
+            ? MeasureHeaderLabelReservedWidth(lblSort, pathRightText, RightBlockPadding)
             : 0;
         int metaWidth = !string.IsNullOrWhiteSpace(itemRightText)
-            ? Math.Max(MeasureHeaderTextWidth(itemRightText, lblFileStatsEx.Font) + 12, 180)
+            ? Math.Max(MeasureHeaderLabelReservedWidth(lblFileStatsEx, itemRightText, RightBlockPadding), 180)
             : 0;
         lblSort.Width = sortWidth;
         lblFileStatsEx.Width = metaWidth;
@@ -7481,6 +7926,8 @@ private void InitializeBrowserTabControl()
         // Row 2 は custom paint のため、テキスト更新後に幅再計算と再描画を明示する
         UpdateHeaderInteractionTooltips();
         RefreshHeaderDisplay();
+        LogHeaderRightDiag("UpdateInfoPanel", display.MarkCount, display.MarkSizeText, pathRightText, itemRightText);
+        LogFontRouteDiag("UpdateInfoPanel:END");
     }
     private string GetMarkSummaryForHeader()
     {
@@ -7488,11 +7935,50 @@ private void InitializeBrowserTabControl()
         {
             _markSummaryCache = string.Empty;
             _markSummaryCacheCount = 0;
+            _markSummaryCacheSizeText = string.Empty;
+            _markSummaryCacheCompact = string.Empty;
             _markSummaryCachePath = NavigationService.NormalizeDirectoryForCompare(_navigationService.CurrentPath);
             _markSummaryDirty = false;
             return string.Empty;
         }
         string currentDir = NavigationService.NormalizeDirectoryForCompare(_navigationService.CurrentPath);
+        bool deferAuxiliaryResolution = NetworkPathResolutionPolicy.IsAuxiliaryResolutionDeferred(_navigationService.CurrentPath) ||
+            _markedFiles.Any(NetworkPathResolutionPolicy.IsUncPath);
+        if (deferAuxiliaryResolution)
+        {
+            if (_markSummaryCacheCount > 0 && !string.IsNullOrWhiteSpace(_markSummaryCache))
+            {
+                NetworkPathResolutionPolicy.LogDecision(
+                    "NetworkPathResolutionDeferral.AuxiliaryUseCached",
+                    "HeaderInfo.MarkSummary",
+                    nameof(GetMarkSummaryForHeader),
+                    _navigationService.CurrentPath,
+                    usedCached: true,
+                    resolvedSync: false,
+                    reason: "cached-mark-summary");
+                return _markSummaryCache;
+            }
+
+            _markSummaryCacheCount = _markedFiles.Count;
+            _markSummaryCacheSizeText = string.Empty;
+            _markSummaryCacheCompact = _markSummaryCacheCount > 0
+                ? $"Mark: {_markSummaryCacheCount} MarkSize: ?"
+                : string.Empty;
+            if (string.IsNullOrWhiteSpace(_markSummaryCache))
+            {
+                _markSummaryCache = string.Empty;
+            }
+
+            NetworkPathResolutionPolicy.LogDecision(
+                "NetworkPathResolutionDeferral.Skip",
+                "HeaderInfo.MarkSummary",
+                nameof(GetMarkSummaryForHeader),
+                _navigationService.CurrentPath,
+                usedCached: false,
+                resolvedSync: false,
+                reason: "unc-path");
+            return string.Empty;
+        }
         if (!_markSummaryDirty
             && _markSummaryCacheCount == _markedFiles.Count
             && string.Equals(_markSummaryCachePath, currentDir, StringComparison.OrdinalIgnoreCase))
@@ -7526,7 +8012,9 @@ private void InitializeBrowserTabControl()
             }
         }
         string outsideInfo = outsideCurrentDirectoryCount > 0 ? $" Out:{outsideCurrentDirectoryCount}" : "";
-        _markSummaryCache = $"Mark:{_markedFiles.Count,3} ({fileCount} Files){outsideInfo} {FileOperationService.FormatSize(totalSize)}";
+        _markSummaryCacheSizeText = FileOperationService.FormatSize(totalSize);
+        _markSummaryCache = $"Mark:{_markedFiles.Count,3} ({fileCount} Files){outsideInfo} {_markSummaryCacheSizeText}";
+        _markSummaryCacheCompact = $"Mark: {_markedFiles.Count} MarkSize: {_markSummaryCacheSizeText}";
         _markSummaryCacheCount = _markedFiles.Count;
         _markSummaryCachePath = currentDir;
         _markSummaryDirty = false;
@@ -7542,6 +8030,10 @@ private void InitializeBrowserTabControl()
             ? $"Mark:{_markedFiles.Count,3}"
             : string.Empty;
         _markSummaryCacheCount = _markedFiles.Count;
+        _markSummaryCacheSizeText = string.Empty;
+        _markSummaryCacheCompact = _markedFiles.Count > 0
+            ? $"Mark: {_markedFiles.Count} MarkSize: ?"
+            : string.Empty;
         _markSummaryCachePath = NavigationService.NormalizeDirectoryForCompare(_navigationService.CurrentPath);
         _markSummaryDirty = false;
     }
@@ -7783,10 +8275,12 @@ private void InitializeBrowserTabControl()
                 g.FillRectangle(bgBrush, rect);
             }
             // テキスト描画 (WinFD寄せ: Mark Slot を導入し、* とファイル名を分離)
-            int markSlotWidth = 15;
+            int iconSize = Math.Clamp((int)Math.Round(font.Height * 0.9), 12, 48);
+            bool showItemIcons = _settings.Appearance?.ShowItemIcons ?? true;
+            int markSlotWidth = GetBrowserMarkSlotWidth(font, showItemIcons, iconSize);
             Rectangle markRect = new Rectangle(rect.X, rect.Y, markSlotWidth, rect.Height);
-            int iconSlotWidth = (_settings.Appearance?.ShowItemIcons ?? true) ? 18 : 0;
-            Rectangle iconRect = new Rectangle(rect.X + markSlotWidth, rect.Y + Math.Max(0, (rect.Height - 16) / 2), 16, 16);
+            int iconSlotWidth = showItemIcons ? (iconSize + 2) : 0;
+            Rectangle iconRect = new Rectangle(rect.X + markSlotWidth, rect.Y + Math.Max(0, (rect.Height - iconSize) / 2), iconSize, iconSize);
             Rectangle textRect = new Rectangle(rect.X + markSlotWidth + iconSlotWidth, rect.Y, rect.Width - markSlotWidth - iconSlotWidth, rect.Height);
             if (isMarked)
             {
@@ -7864,13 +8358,19 @@ private void InitializeBrowserTabControl()
         {
             string? fullPath = item.Tag as string;
             bool isDirectory = IsDirectoryListItem(item, fullPath);
-            using var icon = (Icon)BrowserItemIconProvider.GetSmallIcon(fullPath, isDirectory).Clone();
+            using var icon = (Icon)BrowserItemIconProvider.GetIcon(fullPath, isDirectory, iconRect.Width).Clone();
             g.DrawIcon(icon, iconRect);
         }
         catch
         {
             // アイコン取得失敗時は一覧描画を優先して無視する
         }
+    }
+    private static int GetBrowserMarkSlotWidth(Font font, bool showItemIcons, int iconSize)
+    {
+        int baseSlotWidth = showItemIcons ? Math.Clamp(iconSize / 2 + 8, 18, 32) : 15;
+        int markGlyphWidth = TextRenderer.MeasureText("*", font, Size.Empty, TextFormatFlags.NoPadding | TextFormatFlags.SingleLine).Width;
+        return Math.Max(baseSlotWidth, markGlyphWidth + 8);
     }
     private string BuildBrowserDisplayText(ListViewItem item, int availableWidth, Font font, Graphics g)
     {
@@ -8331,7 +8831,7 @@ private void InitializeBrowserTabControl()
         menu.DropDownItems.Add(unpackItem);
         var packEachFolderItemSub = new ToolStripMenuItem("個別圧縮...", null, async (s, e) =>
         {
-            await ExecutePack(forcePackEachFolderIndividually: true);
+            await ExecutePackEachIndividuallyDirectAsync();
         })
         {
             Enabled = !isReadOnly && CanPackEachFolderIndividually(res)
@@ -8653,7 +9153,7 @@ private void InitializeBrowserTabControl()
             string[]? files = e.Data.GetData(DataFormats.FileDrop) as string[];
             if (files == null || files.Length == 0) return;
             string msg = $"{files.Length} 件の項目を現在のディレクトリにコピーしますか？\n宛先: {_navigationService.CurrentPath}";
-            var result = MessageBox.Show(msg, "Drag-in (Copy)", MessageBoxButtons.YesNo, MessageBoxIcon.Question);
+            var result = ShowDragInCopyConfirmationDialog(msg);
             if (result != DialogResult.Yes)
             {
                 ShowStatusMessage("コピーはキャンセルされました。");
@@ -8822,6 +9322,160 @@ private void InitializeBrowserTabControl()
         browserPanel.Focus();
         ShowStatusMessage("タブ順を入れ替えました。");
     }
+    private void BrowserTabStrip_CategoryReordered(object? sender, BrowserTabStripReorderEventArgs e)
+    {
+        if (e.FromIndex < 0 || e.FromIndex >= _browserTabCategories.Count || e.ToIndex < 0 || e.ToIndex >= _browserTabCategories.Count || e.FromIndex == e.ToIndex)
+        {
+            return;
+        }
+
+        BrowserTabCategoryDefinition moved = _browserTabCategories[e.FromIndex];
+        _browserTabCategories.RemoveAt(e.FromIndex);
+        _browserTabCategories.Insert(e.ToIndex, moved);
+
+        SyncBrowserTabCategoryDefinitionsToSettings();
+
+        var sessionCategories = _settings.Session.BrowserTabCategories;
+        if (sessionCategories != null)
+        {
+            BrowserTabCategorySessionState? movedSession = sessionCategories.FirstOrDefault(c => c.CategoryId == moved.Id);
+            if (movedSession != null)
+            {
+                int sFrom = sessionCategories.IndexOf(movedSession);
+                if (sFrom >= 0)
+                {
+                    sessionCategories.RemoveAt(sFrom);
+                    int targetSIndex = Math.Min(e.ToIndex, sessionCategories.Count);
+                    sessionCategories.Insert(targetSIndex, movedSession);
+                }
+            }
+        }
+
+        var snapshot = _settings.Session.BrowserTabRestoreSnapshot;
+        if (snapshot != null && snapshot.Categories != null)
+        {
+            var matchedCat = snapshot.Categories.FirstOrDefault(c => c.Id == moved.Id);
+            if (matchedCat != null)
+            {
+                int snapFrom = snapshot.Categories.IndexOf(matchedCat);
+                if (snapFrom >= 0)
+                {
+                    snapshot.Categories.RemoveAt(snapFrom);
+                    int targetSnapIndex = Math.Min(e.ToIndex, snapshot.Categories.Count);
+                    snapshot.Categories.Insert(targetSnapIndex, matchedCat);
+                }
+            }
+        }
+
+        _lastBrowserTabHeaderSnapshotKey = null;
+        SettingsManager.Save(_settings);
+        RefreshBrowserTabHeaders();
+        ShowStatusMessage("カテゴリ順を入れ替えました。");
+    }
+    private void BrowserTabStrip_TabListDropDownOpening(object? sender, Point e)
+    {
+        ContextMenuStrip menu = new();
+
+        var categoryDefs = _settings.BrowserTabs.Categories ?? new List<BrowserTabCategoryDefinition>();
+        var activeCategoryId = _activeBrowserTabCategoryId;
+
+        foreach (var category in categoryDefs)
+        {
+            ToolStripMenuItem categoryMenuItem = new ToolStripMenuItem(string.IsNullOrWhiteSpace(category.DisplayName) ? "既定" : category.DisplayName);
+
+            List<BrowserTabState> tabsOfCategory = new();
+            int selectedTabIndex = -1;
+
+            if (category.Id == activeCategoryId)
+            {
+                tabsOfCategory = _browserTabs.ToList();
+                selectedTabIndex = _activeBrowserTabIndex;
+                categoryMenuItem.Checked = true;
+            }
+            else
+            {
+                var categorySession = _settings.Session.BrowserTabCategories?.FirstOrDefault(c => c.CategoryId == category.Id);
+                if (categorySession != null)
+                {
+                    tabsOfCategory = categorySession.OpenTabs.Select(tabState => new BrowserTabState
+                    {
+                        Id = tabState.TabId,
+                        Title = GetBrowserTabTitle(tabState.CurrentPath),
+                        CurrentPath = tabState.CurrentPath,
+                        IsLocked = tabState.IsLocked,
+                        StartupPath = tabState.StartupPath,
+                        IsReadOnly = tabState.IsReadOnly,
+                        FilterLock = tabState.FilterLock?.Clone() ?? new TabFilterLockState(),
+                        MarkedPaths = tabState.MarkedPaths ?? new List<string>(),
+                        Navigation = new NavigationService.NavigationSnapshot
+                        {
+                            BackHistory = tabState.BackHistory ?? new List<string>(),
+                            ForwardHistory = tabState.ForwardHistory ?? new List<string>(),
+                            LastVisitedPathByDrive = (tabState.LastVisitedPathByDrive ?? new Dictionary<string, string>())
+                                .Where(kvp => !string.IsNullOrEmpty(kvp.Key))
+                                .ToDictionary(kvp => kvp.Key[0], kvp => kvp.Value)
+                        },
+                        FocusTargetName = tabState.FocusTargetName,
+                        CursorIndex = tabState.CursorIndex,
+                        ColumnCount = tabState.ColumnCount,
+                        SortKind = tabState.SortKind,
+                        SortAscending = tabState.SortAscending
+                    }).ToList();
+                    selectedTabIndex = categorySession.ActiveTabIndex;
+                }
+            }
+
+            if (tabsOfCategory.Count > 0)
+            {
+                for (int i = 0; i < tabsOfCategory.Count; i++)
+                {
+                    int tabIndex = i;
+                    string catId = category.Id;
+                    var tab = tabsOfCategory[i];
+                    string tabTitle = string.IsNullOrWhiteSpace(tab.Title) ? "新しいタブ" : tab.Title;
+                    if (tab.IsLocked)
+                    {
+                        tabTitle = "■ " + tabTitle;
+                    }
+                    if (tab.IsReadOnly)
+                    {
+                        tabTitle = "[RO] " + tabTitle;
+                    }
+
+                    ToolStripMenuItem tabMenuItem = new ToolStripMenuItem($"{i + 1}: {tabTitle}")
+                    {
+                        Checked = (category.Id == activeCategoryId && i == selectedTabIndex),
+                        ToolTipText = tab.CurrentPath
+                    };
+
+                    tabMenuItem.Click += (_, _) =>
+                    {
+                        SwitchBrowserTabCategory(catId);
+                        SwitchBrowserTab(tabIndex);
+                    };
+
+                    categoryMenuItem.DropDownItems.Add(tabMenuItem);
+                }
+            }
+            else
+            {
+                ToolStripMenuItem emptyItem = new ToolStripMenuItem("(空のカテゴリ)") { Enabled = false };
+                categoryMenuItem.DropDownItems.Add(emptyItem);
+            }
+
+            categoryMenuItem.Click += (_, _) =>
+            {
+                SwitchBrowserTabCategory(category.Id);
+            };
+
+            menu.Items.Add(categoryMenuItem);
+        }
+
+        if (_browserTabStrip != null)
+        {
+            menu.Show(_browserTabStrip, e);
+        }
+    }
     private void BrowserPanel_MouseMove(object? sender, MouseEventArgs e)
     {
         if (_uiMode != UIMode.Browser) return;
@@ -8913,7 +9567,8 @@ private void InitializeBrowserTabControl()
                         ShowStatusMessage("ドラッグ用ZIPを作成中...");
                         Application.DoEvents(); // UI描画の更新
 
-                        string tempDir = Path.Combine(Path.GetTempPath(), "MidFD", "DragArchive");
+                        string tempDir = DragArchiveService.GetDragArchiveTempDirectory();
+                        DragArchiveService.CleanupDragArchivesBeforeCreation(tempDir);
                         DragArchiveService.DragArchiveInfo archiveInfo = DragArchiveService.GetOrCreateInfoZip(
                             tempDir,
                             dragPaths,
@@ -8921,7 +9576,8 @@ private void InitializeBrowserTabControl()
                         zipPath = archiveInfo.ArchivePath;
                         archiveBaseDirectory = archiveInfo.BaseDirectory;
 
-                        ShowStatusMessage("ドラッグ用ZIPを作成しました。");
+                        long archiveSizeBytes = new FileInfo(zipPath).Length;
+                        ShowStatusMessage($"ドラッグ用ZIPを作成しました。{archiveInfo.ItemCount}件 / {FileOperationService.FormatSize(archiveSizeBytes)}");
                         var data = new DataObject();
                         data.SetData(DataFormats.FileDrop, new string[] { zipPath });
                         data.SetData(InternalDragArchiveFormat, false, InternalDragArchiveMarkerValue);
@@ -9371,8 +10027,10 @@ private void InitializeBrowserTabControl()
         Rectangle rect = new Rectangle(col * colWidth + 5, row * itemHeight + 5, colWidth - 10, itemHeight);
         hoverBounds = rect;
 
-        int markSlotWidth = 15;
-        int iconSlotWidth = (_settings.Appearance?.ShowItemIcons ?? true) ? 18 : 0;
+        int iconSize = Math.Clamp((int)Math.Round(browserPanel.Font.Height * 0.9), 12, 48);
+        bool showItemIcons = _settings.Appearance?.ShowItemIcons ?? true;
+        int markSlotWidth = GetBrowserMarkSlotWidth(browserPanel.Font, showItemIcons, iconSize);
+        int iconSlotWidth = showItemIcons ? (iconSize + 2) : 0;
         Rectangle textRect = new Rectangle(
             rect.X + markSlotWidth + iconSlotWidth,
             rect.Y,
@@ -12255,6 +12913,7 @@ private void InitializeBrowserTabControl()
             _imageViewers.Remove(viewer);
         };
         viewer.BrowserNavigationRequested += keyData => TryHandleBrowserCmdKeyNavigation(keyData);
+        viewer.MarkToggleRequested += () => ToggleMark(moveNext: true);
         _imageViewers.Add(viewer);
         viewer.Show();
         if (mediaKind == PreviewKind.Video)
@@ -12352,13 +13011,7 @@ private void InitializeBrowserTabControl()
             ShowStatusMessage("固定タブの親フォルダが見つかりません。");
             return true;
         }
-        var result = MessageBox.Show(
-            this,
-            "固定タブの範囲外です。親フォルダを新しいタブで開きますか？",
-            "固定タブ範囲外",
-            MessageBoxButtons.YesNo,
-            MessageBoxIcon.Question);
-        if (result != DialogResult.Yes)
+        if (!ShowLockedRootParentNavigationConfirm())
         {
             ShowStatusMessage("固定タブの範囲外への移動をキャンセルしました。");
             return true;
@@ -12368,6 +13021,90 @@ private void InitializeBrowserTabControl()
             ShowStatusMessage("固定タブの親フォルダを新しいタブで開きました。");
         }
         return true;
+    }
+    private bool ShowLockedRootParentNavigationConfirm()
+    {
+        using var dialog = new Form
+        {
+            Text = "固定タブ範囲外",
+            StartPosition = FormStartPosition.CenterParent,
+            FormBorderStyle = FormBorderStyle.FixedDialog,
+            MinimizeBox = false,
+            MaximizeBox = false,
+            ShowIcon = false,
+            ShowInTaskbar = false,
+            ControlBox = false,
+            AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
+            Padding = new Padding(0),
+            Font = SystemFonts.MessageBoxFont
+        };
+
+        var layout = new TableLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
+            ColumnCount = 2,
+            RowCount = 2,
+            Padding = new Padding(16)
+        };
+        layout.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100F));
+        layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+
+        var icon = new PictureBox
+        {
+            Image = SystemIcons.Question.ToBitmap(),
+            SizeMode = PictureBoxSizeMode.AutoSize,
+            Margin = new Padding(0, 2, 12, 0)
+        };
+        layout.Controls.Add(icon, 0, 0);
+        layout.SetRowSpan(icon, 2);
+
+        var messageLabel = new Label
+        {
+            AutoSize = true,
+            MaximumSize = new Size(360, 0),
+            Text = "固定タブの範囲外です。親フォルダを新しいタブで開きますか？",
+            Margin = new Padding(0, 0, 0, 16)
+        };
+        layout.Controls.Add(messageLabel, 1, 0);
+
+        var yesButton = new Button
+        {
+            AutoSize = true,
+            MinimumSize = new Size(86, 28),
+            Text = "はい(&Y)",
+            DialogResult = DialogResult.Yes
+        };
+        var noButton = new Button
+        {
+            AutoSize = true,
+            MinimumSize = new Size(86, 28),
+            Text = "いいえ(&N)",
+            DialogResult = DialogResult.No
+        };
+
+        var buttonPanel = new FlowLayoutPanel
+        {
+            AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
+            Dock = DockStyle.Fill,
+            FlowDirection = FlowDirection.RightToLeft,
+            WrapContents = false,
+            Margin = new Padding(0)
+        };
+        buttonPanel.Controls.Add(noButton);
+        buttonPanel.Controls.Add(yesButton);
+        layout.Controls.Add(buttonPanel, 1, 1);
+
+        dialog.AcceptButton = yesButton;
+        dialog.CancelButton = noButton;
+        dialog.Controls.Add(layout);
+
+        return dialog.ShowDialog(this) == DialogResult.Yes;
     }
     private void ExecuteLogdisk()
     {
@@ -13599,6 +14336,7 @@ private void InitializeBrowserTabControl()
         int deleteStatusVersion = _fileOperationStatusVersion;
         bool useShellGuardedRecycleBinDelete = !usePermanentDelete && !useMidFdManagedTrash && totalCount <= ShellGuardedRecycleBinDeleteMaxItems;
         ShowStatusMessage(FileOperationPresentationHelper.GetOperationStartingMessage("Delete", totalCount));
+        StartFileOperationProgressIndicator("Delete", totalCount);
         if (!usePermanentDelete)
         {
             ShowShellDeleteProgressFallback(deleteStatusVersion, totalCount);
@@ -14496,17 +15234,21 @@ private void InitializeBrowserTabControl()
             string mode = usePermanentDelete ? "PermanentDelete" : (useMidFdManagedTrash ? "MidFdManagedTrash" : "WindowsRecycleBin");
             LogService.Info($"[LargeDeletePerf] BatchSummary operationId={midFdTrashBatchId} mode={mode} count={totalCount} success={successCount} fail={failCount} canceled={exitStatus == FileOpExitStatus.Canceled} totalMs={deleteTotalStopwatch.ElapsedMilliseconds} undoRecorded={recordedRecycleBinUndo}");
             LogService.Info($"[LargeDeletePerf] StageSummary operationId={midFdTrashBatchId} selectionResolveMs={selectionResolveMs} outsideWarningMs={outsideWarningMs} confirmDialogMs={confirmDialogMs} focusTargetPrepareMs={focusTargetPrepareMs} deleteLoopMs={deleteLoopTotalMs} manifestOperationMs={manifestOperationTotalMs} manifestFileMoveMs={manifestFileMoveTotalMs} manifestUpsertMs={manifestUpsertTotalMs} manifestLogMs={manifestLogTotalMs} manifestLogSuppressedCount={manifestLogSuppressedCount} manifestLogSuccessCount={manifestSuccessLogCount} manifestChunkSummaryCount={manifestChunkSummaryCount} manifestSlowItemCount={manifestSlowItemCount} manifestUpsertCount={manifestUpsertCount} manifestAppendMode={manifestAppendMode} manifestAppendCount={manifestAppendCount} manifestUpsertScanCount={manifestUpsertScanCount} manifestAppendMs={manifestAppendMs} manifestRecordCountBefore={manifestRecordCountBefore} manifestRecordCountAfter={manifestRecordCountAfter} manifestSaveCount={manifestSaveCount} manifestFlushCount={manifestFlushCount} manifestSaveTotalMs={manifestSaveTotalMs} dbConnMs={manifestDiagnostics.DbConnectionOpenMs} dbTransMs={manifestDiagnostics.DbTransactionBeginMs} dbDelMs={manifestDiagnostics.DbDeleteLoopMs} dbInsMs={manifestDiagnostics.DbInsertLoopMs} dbCommitMs={manifestDiagnostics.DbCommitMs} [ManagedTrashPerfInvestigation] totalFileMoveMs={manifestDiagnostics.TotalFileMoveMs} crossVolumeMoveCount={manifestDiagnostics.CrossVolumeMoveCount} sameVolumeCount={manifestDiagnostics.SameVolumeMoveCount} appDataFallbackCount={manifestDiagnostics.AppDataFallbackMoveCount} cancelLatencyMs={cancelLatencyMs} progressUiMs={progressUiTotalMs} progressCount={progressUpdateCount} progressiveRemovalMs={progressiveRemovalTotalMs} uiFlushCount={progressiveRemovalCount} uiFlushMaxMs={uiFlushMaxMs} markRemovalMs={markRemovalTotalMs} headerMenuUpdateMs={headerMenuUpdateTotalMs} postReloadMs={postOperationMs} undoRecordMs={undoRecordMs}");
+            if (useMidFdManagedTrash && successCount > 0)
+            {
+                _ = MidFdManagedTrashService.RunRetentionCleanupAsync(_settings, _fileOperationUndoRedoService, "DeleteComplete");
+            }
         }
     }
     private void ScheduleBrowserFocusReturnAfterFileOperation(string reason)
     {
-        if (IsDisposed || !IsHandleCreated)
+        if (!CanRestoreBrowserFocusAfterFileOperation())
         {
             return;
         }
         BeginInvoke(new Action(() =>
         {
-            if (IsDisposed || _uiMode != UIMode.Browser || !browserPanel.Visible)
+            if (!CanRestoreBrowserFocusAfterFileOperation() || _uiMode != UIMode.Browser || !browserPanel.Visible)
             {
                 return;
             }
@@ -14516,6 +15258,26 @@ private void InitializeBrowserTabControl()
                 $"[FileOperationFocus] Browser focus returned. reason={reason}, " +
                 $"activeControl={DescribeControl(ActiveControl)}, browserFocused={browserPanel.Focused}");
         }));
+    }
+    private bool CanRestoreBrowserFocusAfterFileOperation()
+    {
+        if (IsDisposed || !IsHandleCreated || !Visible)
+        {
+            return false;
+        }
+        Form? activeForm = Form.ActiveForm;
+        if (activeForm != null && !ReferenceEquals(activeForm, this))
+        {
+            return false;
+        }
+        foreach (Form ownedForm in OwnedForms)
+        {
+            if (ownedForm != null && !ownedForm.IsDisposed && ownedForm.Visible)
+            {
+                return false;
+            }
+        }
+        return true;
     }
     private void ShowFileOperationUndoRedoProgressFallback(string operationName, int totalCount)
     {
@@ -14705,6 +15467,7 @@ private void InitializeBrowserTabControl()
             return;
         }
         CloseShellDeleteProgressFallback();
+        StartFileOperationProgressIndicator("Delete", totalCount);
         var form = new FileOperationProgressFallbackForm("削除", totalCount, () =>
         {
             RequestActiveFileOperationCancel("ShellDeleteProgressFallback");
@@ -14734,6 +15497,7 @@ private void InitializeBrowserTabControl()
         {
             return;
         }
+        UpdateFileOperationProgressIndicatorIfCurrent(statusVersion, "Delete", processedCount, totalCount);
         _shellDeleteProgressFallback?.UpdateProgress(
             processedCount,
             totalCount,
@@ -14933,13 +15697,19 @@ private void InitializeBrowserTabControl()
             CancellationToken token = PrepareFileOperation(pasteOperationDisplayName);
             int pasteStatusVersion = _fileOperationStatusVersion;
             ShowStatusMessage(FileOperationPresentationHelper.GetOperationStartingMessage("Paste", validPaths.Count, destDir));
+            StartFileOperationProgressIndicator(isCut ? "Move" : "Copy", validPaths.Count);
             IProgress<FileOperationProgress> progress = _fileOperationDialogCoordinator.CreatePasteProgress(
                 isCut,
                 message => ShowFileOperationStatusIfCurrent(
                     pasteStatusVersion,
                     (_fileOpCts?.IsCancellationRequested ?? false)
                         ? FileOperationPresentationHelper.GetCancelRequestedMessage(_activeFileOperationName ?? pasteOperationDisplayName)
-                        : message));
+                        : message),
+                p => UpdateFileOperationProgressIndicatorIfCurrent(
+                    pasteStatusVersion,
+                    isCut ? "Move" : "Copy",
+                    p.ProcessedCount,
+                    p.TotalCount));
             var result = await Task.Run(() =>
             {
                 string? firstSuccessName = null;
@@ -15278,6 +16048,7 @@ private void InitializeBrowserTabControl()
     }
     private void HandlePostOperation(FileOperationResult result)
     {
+        CompleteFileOperationProgressIndicator();
         var totalStopwatch = Stopwatch.StartNew();
         long finalizeMs = 0;
         long clearPreviewMs = 0;
@@ -15347,6 +16118,16 @@ private void InitializeBrowserTabControl()
     {
         return _isClipboardBusy && statusVersion == _fileOperationStatusVersion;
     }
+    private static FileOperationItemProgressKind ResolveFileOperationItemProgressKind(string operationDisplayName)
+    {
+        return operationDisplayName switch
+        {
+            "Copy" or "コピー" or "貼り付け(コピー)" => FileOperationItemProgressKind.Copy,
+            "Move" or "移動" or "貼り付け(移動)" => FileOperationItemProgressKind.Move,
+            "Delete" or "削除" or "完全削除" => FileOperationItemProgressKind.Delete,
+            _ => FileOperationItemProgressKind.Other
+        };
+    }
     private void ShowFileOperationStatusIfCurrent(int statusVersion, string message)
     {
         if (!IsCurrentFileOperationStatusVersion(statusVersion))
@@ -15360,6 +16141,38 @@ private void InitializeBrowserTabControl()
         }
         ShowStatusMessage(message);
     }
+    private void UpdateFileOperationProgressIndicatorIfCurrent(
+        int statusVersion,
+        string operationDisplayName,
+        int processedCount,
+        int totalCount)
+    {
+        if (!IsCurrentFileOperationStatusVersion(statusVersion))
+        {
+            return;
+        }
+
+        bool isIndeterminate = totalCount <= 0;
+        UpdateFileOperationItemProgressState(new FileOperationItemProgressState(
+            ResolveFileOperationItemProgressKind(operationDisplayName),
+            processedCount,
+            totalCount,
+            isIndeterminate,
+            true));
+    }
+    private void StartFileOperationProgressIndicator(string operationDisplayName, int totalCount)
+    {
+        UpdateFileOperationItemProgressState(new FileOperationItemProgressState(
+            ResolveFileOperationItemProgressKind(operationDisplayName),
+            0,
+            totalCount,
+            totalCount <= 0,
+            true));
+    }
+    private void CompleteFileOperationProgressIndicator()
+    {
+        ClearFileOperationItemProgressState();
+    }
     private void ShowFileOperationProgressIfCurrent(
         int statusVersion,
         string operationDisplayName,
@@ -15369,6 +16182,7 @@ private void InitializeBrowserTabControl()
         bool usePasteProgress = false,
         bool isCut = false)
     {
+        UpdateFileOperationProgressIndicatorIfCurrent(statusVersion, operationDisplayName, processedCount, totalCount);
         string message = (_fileOpCts?.IsCancellationRequested ?? false)
             ? FileOperationPresentationHelper.GetCancelRequestedMessage(_activeFileOperationName ?? operationDisplayName)
             : usePasteProgress
@@ -15391,6 +16205,7 @@ private void InitializeBrowserTabControl()
     private void FinalizeFileOperation()
     {
         _fileOperationStatusVersion++;
+        CompleteFileOperationProgressIndicator();
         _fileOpCts?.Dispose();
         _fileOpCts = null;
         _isClipboardBusy = false;
@@ -16024,9 +16839,14 @@ private void InitializeBrowserTabControl()
             return;
         }
         // 縦方向の欠けを防止するため、フォント高さに基づいて StatusStrip の高さを確保する。
-        // 目安としてフォント高さ + 6px (上下 3px ずつ) 程度を確保する。最小 24px。
-        int desiredHeight = Math.Max(24, statusStrip.Font.Height + 6);
-        if (statusStrip.AutoSize || statusStrip.Height < desiredHeight)
+        // 目安としてフォント実測高さ + 6px (上下 3px ずつ) 程度を確保する。最小 24px。
+        int measuredTextHeight = TextRenderer.MeasureText(
+            "AgjQy|漢/",
+            statusLabel.Font,
+            Size.Empty,
+            TextFormatFlags.NoPadding | TextFormatFlags.SingleLine).Height;
+        int desiredHeight = Math.Max(24, measuredTextHeight + 6);
+        if (statusStrip.AutoSize || statusStrip.Height != desiredHeight)
         {
             // AutoSize が ON だと Height 指定が効かない場合があるため
             statusStrip.AutoSize = false;
@@ -16051,6 +16871,485 @@ private void InitializeBrowserTabControl()
             - 4);
         statusLabel.AutoSize = false;
         statusLabel.Width = width;
+    }
+    private void UpdateFileOperationItemProgressState(FileOperationItemProgressState state)
+    {
+        _fileOperationItemProgressState = state;
+        if (!state.IsActive)
+        {
+            CloseFileOperationProgressDialog();
+            return;
+        }
+
+        var dialog = EnsureFileOperationProgressDialog();
+        dialog.UpdateProgress(state, _fileOpCts?.IsCancellationRequested ?? false);
+        NormalizeStatusLabelLayout();
+    }
+    private void ClearFileOperationItemProgressState()
+    {
+        _fileOperationItemProgressState = null;
+        CloseFileOperationProgressDialog();
+    }
+    private FileOperationProgressDialog EnsureFileOperationProgressDialog()
+    {
+        if (_fileOperationProgressDialog == null || _fileOperationProgressDialog.IsDisposed)
+        {
+            _fileOperationProgressDialog = new FileOperationProgressDialog(
+                () => RequestActiveFileOperationCancel("FileOperationProgressDialog"),
+                canCancel: _fileOpCts != null);
+            PositionFileOperationProgressDialog(_fileOperationProgressDialog);
+            _fileOperationProgressDialog.Show(this);
+        }
+        else if (!_fileOperationProgressDialog.Visible)
+        {
+            PositionFileOperationProgressDialog(_fileOperationProgressDialog);
+            _fileOperationProgressDialog.Show(this);
+        }
+
+        return _fileOperationProgressDialog;
+    }
+    private void PositionFileOperationProgressDialog(FileOperationProgressDialog dialog)
+    {
+        Rectangle ownerClientBounds = RectangleToScreen(ClientRectangle);
+        Rectangle workingArea = Screen.FromRectangle(ownerClientBounds).WorkingArea;
+        int centeredX = ownerClientBounds.Left + (ownerClientBounds.Width - dialog.Width) / 2;
+        int lowerBiasY = ownerClientBounds.Top + (ownerClientBounds.Height * 2 / 3) - (dialog.Height / 2);
+        int bottomBiasY = ownerClientBounds.Bottom - dialog.Height - Math.Max(48, ownerClientBounds.Height / 8);
+        int x = Math.Max(
+            workingArea.Left,
+            Math.Min(centeredX, workingArea.Right - dialog.Width));
+        int y = Math.Max(
+            workingArea.Top,
+            Math.Min(Math.Min(lowerBiasY, bottomBiasY), workingArea.Bottom - dialog.Height));
+        dialog.Location = new Point(x, y);
+    }
+    private void CloseFileOperationProgressDialog()
+    {
+        var dialog = _fileOperationProgressDialog;
+        _fileOperationProgressDialog = null;
+        _fileOperationItemProgressState = null;
+        if (dialog == null)
+        {
+            return;
+        }
+        try
+        {
+            if (!dialog.IsDisposed)
+            {
+                dialog.Close();
+            }
+        }
+        catch
+        {
+            // 進捗ダイアログの後始末失敗は主処理を止めない。
+        }
+    }
+    private Font GetHeaderStatusResponsiveBaseFont()
+    {
+        if (_headerPaintFont != null)
+        {
+            return _headerPaintFont;
+        }
+
+        if (fileListView?.Font != null)
+        {
+            return fileListView.Font;
+        }
+
+        if (browserPanel?.Font != null)
+        {
+            return browserPanel.Font;
+        }
+
+        return this.Font;
+    }
+    private void ApplyHeaderStatusFontToControls(Font font)
+    {
+        lblClock.Font = font;
+        lblPath.Font = font;
+        lblSort.Font = font;
+        lblItemAttr.Font = font;
+        lblFileDate.Font = font;
+        lblFileStats.Font = font;
+        lblFileStatsEx.Font = font;
+        lblName.Font = font;
+        lblPage.Font = font;
+        lblTotal.Font = font;
+        lblUsed.Font = font;
+        lblFree.Font = font;
+        statusStrip.Font = font;
+        statusLabel.Font = font;
+    }
+    private void ApplyResolvedHeaderStatusFontForCurrentWindow(Font baseFont, Font resolvedFont, string reason)
+    {
+        ApplyHeaderStatusFontToControls(resolvedFont);
+
+        var headerMetrics = HeaderLayoutHelper.CalculateMetrics(resolvedFont, 4);
+        titleHeaderPanel.Height = headerMetrics.TitleHeaderHeight;
+        headerPanel.Height = headerMetrics.RowHeight;
+        infoRow2Panel.Height = headerMetrics.RowHeight;
+        infoRow4Panel.Height = headerMetrics.RowHeight;
+        topPanel.Height = headerMetrics.TopPanelHeight;
+
+        UpdateInfoPanel();
+        LayoutHeaderZones();
+        NormalizeStatusLabelLayout();
+
+        contentFramePanel.Invalidate();
+        titleHeaderPanel.Invalidate();
+        headerPanel.Invalidate();
+        topPanel.Invalidate();
+        infoRow2Panel.Invalidate();
+        infoRow4Panel.Invalidate();
+        statusStrip.Invalidate();
+
+        LogHeaderResponsiveDiag("Apply", reason, baseFont, resolvedFont);
+    }
+    private void ScheduleHeaderStatusResponsiveFontRecompute(string reason)
+    {
+        if (Disposing || IsDisposed)
+        {
+            return;
+        }
+
+        _headerStatusResizeDebounceTimer ??= new System.Windows.Forms.Timer
+        {
+            Interval = HeaderStatusResponsiveFontDebounceMs
+        };
+
+        _headerStatusResizeDebounceTimer.Tick -= HeaderStatusResizeDebounceTimer_Tick;
+        _headerStatusResizeDebounceTimer.Tick += HeaderStatusResizeDebounceTimer_Tick;
+        _headerStatusResizeDebounceTimer.Stop();
+        _headerStatusResizeDebounceTimer.Start();
+        LogHeaderResponsiveDiag("Schedule", reason, GetHeaderStatusResponsiveBaseFont(), null, scheduled: true);
+    }
+    private void HeaderStatusResizeDebounceTimer_Tick(object? sender, EventArgs e)
+    {
+        _headerStatusResizeDebounceTimer?.Stop();
+        LogHeaderResponsiveDiag("Tick", "resize-debounce", GetHeaderStatusResponsiveBaseFont(), null);
+        RecomputeHeaderStatusResponsiveFontNow("resize-debounce");
+    }
+    private void ApplyHeaderStatusResponsiveFontWithOwnership(Font baseFont, Font resolvedFont, string reason)
+    {
+        Font? previousOwnedFont = _headerStatusResponsiveOwnedFont;
+        if (ReferenceEquals(resolvedFont, baseFont))
+        {
+            _headerStatusResponsiveOwnedFont = null;
+        }
+        else
+        {
+            _headerStatusResponsiveOwnedFont = resolvedFont;
+        }
+
+        ApplyResolvedHeaderStatusFontForCurrentWindow(baseFont, resolvedFont, reason);
+        LogHeaderResponsiveStabilizeDiag("Apply", reason, resolvedFont, GetCurrentHeaderRow1FitMetrics(resolvedFont), fontDisposeSuppressed: previousOwnedFont != null && !ReferenceEquals(previousOwnedFont, resolvedFont));
+    }
+    private void RecomputeHeaderStatusResponsiveFontNow(string reason)
+    {
+        if (_updatingHeaderStatusResponsiveFont)
+        {
+            LogHeaderResponsiveDiag("Skip", $"{reason}:reentry", GetHeaderStatusResponsiveBaseFont(), null, skippedReason: "reentry");
+            return;
+        }
+
+        if (Disposing || IsDisposed || !IsHandleCreated || headerPanel == null || headerPanel.IsDisposed)
+        {
+            LogHeaderResponsiveDiag("Skip", $"{reason}:invalid", GetHeaderStatusResponsiveBaseFont(), null, skippedReason: "invalid-state");
+            return;
+        }
+
+        Size clientSize = ClientSize;
+        int currentDpi = DeviceDpi;
+        bool isResizeReason =
+            reason.Contains("resize", StringComparison.OrdinalIgnoreCase) ||
+            reason.Contains("size", StringComparison.OrdinalIgnoreCase) ||
+            reason.Contains("dpi", StringComparison.OrdinalIgnoreCase);
+        bool forceRecompute =
+            reason.Equals("ResizeEnd", StringComparison.OrdinalIgnoreCase) ||
+            reason.Contains("SettingsApplied", StringComparison.OrdinalIgnoreCase) ||
+            reason.Contains("SettingsOK", StringComparison.OrdinalIgnoreCase) ||
+            reason.Contains("DpiChanged", StringComparison.OrdinalIgnoreCase);
+
+        if (clientSize.Width <= 0 || clientSize.Height <= 0 || headerPanel.ClientSize.Width <= 0)
+        {
+            LogHeaderResponsiveDiag("Skip", $"{reason}:zero-size", GetHeaderStatusResponsiveBaseFont(), null, skippedReason: "zero-size");
+            return;
+        }
+
+        Font currentAppliedFont = lblPage?.Font ?? GetHeaderStatusResponsiveBaseFont();
+        HeaderRow1FitMetrics currentAppliedMetrics = GetCurrentHeaderRow1FitMetrics(currentAppliedFont);
+
+        if (isResizeReason &&
+            clientSize == _lastHeaderStatusResponsiveClientSize &&
+            currentDpi == _lastHeaderStatusResponsiveDpi &&
+            !forceRecompute &&
+            currentAppliedMetrics.Fits)
+        {
+            LogHeaderResponsiveDiag("Skip", $"{reason}:unchanged", GetHeaderStatusResponsiveBaseFont(), null, skippedReason: "same-clientsize");
+            LogHeaderResponsiveStabilizeDiag("Skip", reason, currentAppliedFont, currentAppliedMetrics, skippedReason: "same-clientsize-fit-ok");
+            return;
+        }
+
+        _updatingHeaderStatusResponsiveFont = true;
+        try
+        {
+            Font baseFont = GetHeaderStatusResponsiveBaseFont();
+            Font resolvedFont = ResolveAdaptiveHeaderStatusFont(baseFont);
+            ApplyHeaderStatusResponsiveFontWithOwnership(baseFont, resolvedFont, reason);
+            _lastHeaderStatusResponsiveClientSize = clientSize;
+            _lastHeaderStatusResponsiveDpi = currentDpi;
+
+            HeaderRow1FitMetrics postApplyMetrics = GetCurrentHeaderRow1FitMetrics(resolvedFont);
+            LogHeaderResponsiveDiag("End", reason, baseFont, resolvedFont);
+            LogHeaderResponsiveStabilizeDiag("Apply", reason, resolvedFont, postApplyMetrics, skippedReason: postApplyMetrics.Fits ? "-" : "fit-warning");
+        }
+        finally
+        {
+            _updatingHeaderStatusResponsiveFont = false;
+        }
+    }
+    private Font ResolveAdaptiveHeaderStatusFont(Font baseFont)
+    {
+        if (headerPanel == null || headerPanel.IsDisposed)
+        {
+            return baseFont;
+        }
+
+        int rowWidth = Math.Max(0, headerPanel.ClientSize.Width);
+        if (rowWidth <= 0)
+        {
+            LogAdaptiveFontDiag("EARLY_RETURN", baseFont, rowWidth, baseFont.Size, true);
+            return baseFont;
+        }
+
+        string clockText = lblClock?.Text ?? string.Empty;
+        string pageText = lblPage?.Text ?? string.Empty;
+        string totalText = lblTotal?.Text ?? string.Empty;
+        string usedText = lblUsed?.Text ?? string.Empty;
+        string freeText = lblFree?.Text ?? string.Empty;
+
+        float baseWidth = Math.Max(1, MinimumNormalWindowWidth);
+        // Px1 overscale cap: widthRatio は縮小補助のみ (1超えで拡大しない)。
+        // 4K fullscreen等の広幅でも header/status font は baseFont.Size を超えない。
+        float widthScale = MathF.Min(1f, MathF.Sqrt(Math.Max(0.25f, rowWidth / baseWidth)));
+        float ratioTarget = baseFont.Size * widthScale;   // widthScale <= 1 なので ratioTarget <= baseFont.Size
+        float minSize = Math.Min(baseFont.Size, HeaderStatusMinimumReadableFontSize);
+        float maxSize = baseFont.Size;                    // 上限 = 一覧fontサイズ。widthRatioで拡大しない
+        float bestSize = minSize;
+        bool fitFound = false;
+        HeaderRow1FitMetrics bestFitMetrics = default;
+
+        for (int i = 0; i < 10; i++)
+        {
+            // i=0: maxSize (= baseFont.Size) から探索開始。fit しなければ下方binary search
+            float candidateSize = i == 0
+                ? maxSize
+                : (minSize + maxSize) / 2f;
+            using Font candidateFont = new(baseFont.FontFamily, candidateSize, baseFont.Style, GraphicsUnit.Point);
+            HeaderRow1FitMetrics fitMetrics = GetHeaderRow1FitMetrics(candidateFont, rowWidth, pageText, totalText, usedText, freeText, clockText);
+            if (fitMetrics.Fits)
+            {
+                fitFound = true;
+                bestSize = candidateSize;
+                minSize = candidateSize;
+                bestFitMetrics = fitMetrics;
+            }
+            else
+            {
+                maxSize = candidateSize;
+            }
+        }
+
+        if (!fitFound)
+        {
+            using Font minDiagnosticFont = new(baseFont.FontFamily, minSize, baseFont.Style, GraphicsUnit.Point);
+            HeaderRow1FitMetrics minFitMetrics = GetHeaderRow1FitMetrics(
+                minDiagnosticFont,
+                rowWidth,
+                pageText,
+                totalText,
+                usedText,
+                freeText,
+                clockText);
+            LogAdaptiveFontDiag("ROW1_TOTAL_FIT_NG", baseFont, rowWidth, minSize, false, minSize, maxSize, ratioTarget, widthScale, pageText, clockText);
+            LogHeaderResponsiveDiag(
+                "Row1TotalFit",
+                "fit-ng",
+                baseFont,
+                null,
+                rowWidth: minFitMetrics.RowWidth,
+                leftRequiredWidth: minFitMetrics.LeftRequiredWidth,
+                rightClockWidth: minFitMetrics.ClockReservedWidth,
+                availableLeftWidth: minFitMetrics.AvailableLeftWidth,
+                fitResult: false,
+                freeMeasuredWidth: minFitMetrics.FreeWidth,
+                clockMeasuredWidth: minFitMetrics.ClockMeasuredWidth,
+                guardBand: minFitMetrics.GuardBand);
+            return new Font(baseFont.FontFamily, minSize, baseFont.Style, GraphicsUnit.Point);
+        }
+
+        if (Math.Abs(bestSize - baseFont.Size) < 0.01f)
+        {
+            LogHeaderResponsiveDiag(
+                "Row1TotalFit",
+                "base-font-fit",
+                baseFont,
+                baseFont,
+                rowWidth: bestFitMetrics.RowWidth,
+                leftRequiredWidth: bestFitMetrics.LeftRequiredWidth,
+                rightClockWidth: bestFitMetrics.ClockReservedWidth,
+                availableLeftWidth: bestFitMetrics.AvailableLeftWidth,
+                fitResult: true,
+                freeMeasuredWidth: bestFitMetrics.FreeWidth,
+                clockMeasuredWidth: bestFitMetrics.ClockMeasuredWidth,
+                guardBand: bestFitMetrics.GuardBand);
+            return baseFont;
+        }
+
+        LogAdaptiveFontDiag("END", baseFont, rowWidth, bestSize, fitFound, minSize, maxSize, ratioTarget, widthScale, pageText, clockText);
+        using Font diagnosticFont = new(baseFont.FontFamily, bestSize, baseFont.Style, GraphicsUnit.Point);
+        LogHeaderResponsiveDiag(
+            "Row1TotalFit",
+            "resolved-fit",
+            baseFont,
+            diagnosticFont,
+            rowWidth: bestFitMetrics.RowWidth,
+            leftRequiredWidth: bestFitMetrics.LeftRequiredWidth,
+            rightClockWidth: bestFitMetrics.ClockReservedWidth,
+            availableLeftWidth: bestFitMetrics.AvailableLeftWidth,
+            fitResult: true,
+            freeMeasuredWidth: bestFitMetrics.FreeWidth,
+            clockMeasuredWidth: bestFitMetrics.ClockMeasuredWidth,
+            guardBand: bestFitMetrics.GuardBand);
+        return new Font(baseFont.FontFamily, bestSize, baseFont.Style, GraphicsUnit.Point);
+    }
+    private int GetHeaderRow2LeftRequiredWidth(Font font, string pageText, string totalText, string usedText, string freeText)
+    {
+        int pageWidth = MeasureHeaderRow2SegmentWidth(font, pageText, lblPage);
+        int totalWidth = MeasureHeaderRow2SegmentWidth(font, totalText, lblTotal);
+        int usedWidth = MeasureHeaderRow2SegmentWidth(font, usedText, lblUsed);
+        int freeWidth = MeasureHeaderRow2SegmentWidth(font, freeText, lblFree);
+        return pageWidth + totalWidth + usedWidth + freeWidth + (HeaderRow2ClockSafetyGap * 4);
+    }
+    private int GetHeaderRow1FitGuardPx(Font font)
+    {
+        int dpiGuard = (int)Math.Ceiling(12f * Math.Max(1, DeviceDpi) / 96f);
+        int heightGuard = GetSafeHeaderFontHeight(font) / 2;
+        int textGuard = MeasureHeaderDisplayWidth("00", font);
+        return Math.Max(dpiGuard, Math.Max(heightGuard, textGuard));
+    }
+    private int GetSafeHeaderFontHeight(Font? font)
+    {
+        Font safeFont = font ?? SystemFonts.DefaultFont;
+        try
+        {
+            return Math.Max(1, safeFont.Height);
+        }
+        catch (ArgumentException)
+        {
+            int fallbackHeight = Math.Max(1, TextRenderer.MeasureText("00", SystemFonts.DefaultFont, Size.Empty, TextFormatFlags.NoPadding | TextFormatFlags.SingleLine).Height);
+            LogHeaderResponsiveStabilizeDiag("FontHeightFallback", "GetHeaderRow1FitGuardPx", safeFont, null, skippedReason: "font-height-argument-exception", exceptionPrevented: true);
+            return fallbackHeight;
+        }
+    }
+    private HeaderRow1FitMetrics GetHeaderRow1FitMetrics(
+        Font font,
+        int rowWidth,
+        string pageText,
+        string totalText,
+        string usedText,
+        string freeText,
+        string clockText)
+    {
+        int pageWidth = MeasureHeaderRow2SegmentWidth(font, pageText, lblPage);
+        int totalWidth = MeasureHeaderRow2SegmentWidth(font, totalText, lblTotal);
+        int usedWidth = MeasureHeaderRow2SegmentWidth(font, usedText, lblUsed);
+        int freeWidth = MeasureHeaderRow2SegmentWidth(font, freeText, lblFree);
+        int leftRequiredWidth = pageWidth + totalWidth + usedWidth + freeWidth + (HeaderRow2ClockSafetyGap * 4);
+        int clockReservedWidth = GetHeaderClockReservedWidth(font);
+        int clockMeasuredWidth = MeasureHeaderDisplayWidth(clockText, font);
+        int guardBand = GetHeaderRow1FitGuardPx(font);
+        int totalRequiredWidth = leftRequiredWidth + clockReservedWidth + HeaderRow2ClockSafetyGap + guardBand;
+        int availableLeftWidth = Math.Max(0, rowWidth - clockReservedWidth - HeaderRow2ClockSafetyGap - guardBand);
+        bool fits = totalRequiredWidth <= rowWidth && leftRequiredWidth <= availableLeftWidth;
+        return new HeaderRow1FitMetrics(
+            rowWidth,
+            leftRequiredWidth,
+            clockReservedWidth,
+            HeaderRow2ClockSafetyGap,
+            guardBand,
+            totalRequiredWidth,
+            availableLeftWidth,
+            fits,
+            pageWidth,
+            totalWidth,
+            usedWidth,
+            freeWidth,
+            clockMeasuredWidth,
+            clockText,
+            freeText);
+    }
+    private int GetHeaderClockReservedWidth(Font font)
+    {
+        if (lblClock == null)
+        {
+            return 0;
+        }
+
+        return Math.Max(0, MeasureHeaderLabelReservedWidth(lblClock, lblClock.Text, font, HeaderRow2ClockSafetyGap));
+    }
+    private HeaderRow1FitMetrics GetCurrentHeaderRow1FitMetrics(Font font)
+    {
+        return GetHeaderRow1FitMetrics(
+            font,
+            Math.Max(0, headerPanel?.ClientSize.Width ?? 0),
+            lblPage?.Text ?? string.Empty,
+            lblTotal?.Text ?? string.Empty,
+            lblUsed?.Text ?? string.Empty,
+            lblFree?.Text ?? string.Empty,
+            lblClock?.Text ?? string.Empty);
+    }
+    private int GetHeaderRow2AvailableLeftWidth(Font font)
+    {
+        int rowWidth = Math.Max(0, headerPanel?.ClientSize.Width ?? 0);
+        HeaderRow1FitMetrics metrics = GetHeaderRow1FitMetrics(
+            font,
+            rowWidth,
+            lblPage?.Text ?? string.Empty,
+            lblTotal?.Text ?? string.Empty,
+            lblUsed?.Text ?? string.Empty,
+            lblFree?.Text ?? string.Empty,
+            lblClock?.Text ?? string.Empty);
+        return metrics.AvailableLeftWidth;
+    }
+    private void LogHeaderRow2LayoutDiagnostics(int clockReservedWidth, int zoneAvailableWidth, HeaderLayoutHelper.ZoneWidths widths)
+    {
+        if (!HeaderStatusFontRouteDiagnosticLoggingEnabled)
+        {
+            return;
+        }
+
+        Font row2Font = lblPage?.Font ?? lblClock?.Font ?? SystemFonts.DefaultFont;
+        Rectangle clockBounds = lblClock?.Bounds ?? Rectangle.Empty;
+        Font clockFont = lblClock?.Font ?? row2Font;
+        string pageText = lblPage?.Text ?? string.Empty;
+        string totalText = lblTotal?.Text ?? string.Empty;
+        string usedText = lblUsed?.Text ?? string.Empty;
+        string freeText = lblFree?.Text ?? string.Empty;
+        string clockText = lblClock?.Text ?? string.Empty;
+        HeaderRow1FitMetrics metrics = GetHeaderRow1FitMetrics(row2Font, headerPanel.ClientSize.Width, pageText, totalText, usedText, freeText, clockText);
+        int clockLeft = Math.Max(0, headerPanel.ClientSize.Width - metrics.ClockReservedWidth);
+        int zoneWidthsTotal = widths.Zone1 + widths.Zone2 + widths.Zone3 + widths.Zone4;
+        LogService.Info(
+            $"[HeaderRow2LayoutDiag] panel={headerPanel.ClientSize} lblClock.Bounds={clockBounds} lblClock.Text='{clockText}' lblClock.Font.Size={clockFont.Size:0.##} " +
+            $"clockMeasuredWidth={metrics.ClockMeasuredWidth} clockReservedWidth={metrics.ClockReservedWidth} zoneAvailableWidth={zoneAvailableWidth} " +
+            $"pageMeasuredWidth={metrics.PageWidth} totalMeasuredWidth={metrics.TotalWidth} usedMeasuredWidth={metrics.UsedWidth} freeMeasuredWidth={metrics.FreeWidth} leftRequiredWidth={metrics.LeftRequiredWidth} " +
+            $"guardBand={metrics.GuardBand} totalRequiredWidth={metrics.TotalRequiredWidth} availableLeftWidth={metrics.AvailableLeftWidth} fitResult={metrics.Fits} " +
+            $"zone1={headerZone1.Bounds} zone2={headerZone2.Bounds} zone3={headerZone3.Bounds} zone4={headerZone4.Bounds} " +
+            $"zoneTexts=[{pageText}|{totalText}|{usedText}|{freeText}] " +
+            $"zoneRights=[{headerZone1.Right},{headerZone2.Right},{headerZone3.Right},{headerZone4.Right}] clockLeft={clockLeft} " +
+            $"clockMargin={clockLeft - headerZone4.Right} fits={headerZone4.Right <= clockLeft - metrics.SafetyGap - metrics.GuardBand} " +
+            $"zoneWidths=[{widths.Zone1},{widths.Zone2},{widths.Zone3},{widths.Zone4}] zoneWidthsTotal={zoneWidthsTotal}");
     }
     /// <summary>
     /// Phase 5-viewer-status-finefix1: Viewer の状態表示を NotificationService 経由で永続的に適用する。
@@ -16216,13 +17515,7 @@ private void InitializeBrowserTabControl()
         long estimatedBytes = EstimateLargeTextSelectionBytes(_largeFileState, startLine, endLine);
         if (IsLargeTextClipboardCopyTooLarge(lineCount, estimatedBytes))
         {
-            var result = MessageBox.Show(
-                $"{lineCount:N0} 行 / 約 {FileOperationService.FormatSize(estimatedBytes)} の選択範囲です。\n" +
-                "クリップボードへは大きすぎるため、直接コピーしません。\n\n" +
-                "選択範囲をファイルへ保存しますか？",
-                "LargeText 大量コピー",
-                MessageBoxButtons.YesNo,
-                MessageBoxIcon.Warning);
+            var result = ShowLargeTextClipboardCopyConfirmationDialog(lineCount, estimatedBytes);
             if (result == DialogResult.Yes)
             {
                 await ExportLargeTextCharacterSelectionAsync(range, estimatedBytes, token);
@@ -16594,7 +17887,7 @@ private void InitializeBrowserTabControl()
     private async Task ExecuteArchiveExtractAsync(ArchiveExtractRequest request)
     {
         if (GuardReadOnlyBrowserTab("解凍")) return;
-        if (GuardClipboardBusy("処理中のため archive を解凍できません"))
+        if (GuardClipboardBusy())
         {
             return;
         }
@@ -16726,13 +18019,15 @@ private void InitializeBrowserTabControl()
         var token = PrepareFileOperation(entryPlan.BusyOperationName);
         int copyStatusVersion = _fileOperationStatusVersion;
         ShowStatusMessage(FileOperationPresentationHelper.GetOperationStartingMessage("Copy", totalCount, destDir));
+        StartFileOperationProgressIndicator("Copy", totalCount);
         IProgress<FileOperationProgress> progress = _fileOperationDialogCoordinator.CreateOperationProgress(
             "Copy",
             message => ShowFileOperationStatusIfCurrent(
                 copyStatusVersion,
                 (_fileOpCts?.IsCancellationRequested ?? false)
                     ? FileOperationPresentationHelper.GetCancelRequestedMessage(_activeFileOperationName ?? "Copy")
-                    : message));
+                    : message),
+            p => UpdateFileOperationProgressIndicatorIfCurrent(copyStatusVersion, "Copy", p.ProcessedCount, p.TotalCount));
         try
         {
             var result = await Task.Run(() =>
@@ -16951,13 +18246,15 @@ private void InitializeBrowserTabControl()
         var token = PrepareFileOperation(entryPlan.BusyOperationName);
         int moveStatusVersion = _fileOperationStatusVersion;
         ShowStatusMessage(FileOperationPresentationHelper.GetOperationStartingMessage("Move", totalCount, normalizedDestDir));
+        StartFileOperationProgressIndicator("Move", totalCount);
         IProgress<FileOperationProgress> progress = _fileOperationDialogCoordinator.CreateOperationProgress(
             "Move",
             message => ShowFileOperationStatusIfCurrent(
                 moveStatusVersion,
                 (_fileOpCts?.IsCancellationRequested ?? false)
                     ? FileOperationPresentationHelper.GetCancelRequestedMessage(_activeFileOperationName ?? "Move")
-                    : message));
+                    : message),
+            p => UpdateFileOperationProgressIndicatorIfCurrent(moveStatusVersion, "Move", p.ProcessedCount, p.TotalCount));
         try
         {
             var result = await Task.Run(() =>
@@ -17276,7 +18573,212 @@ private void InitializeBrowserTabControl()
     }
     private static bool CanPackEachFolderIndividually(SelectionResult selection)
     {
-        return selection.Count > 1;
+        return selection.Count >= 1;
+    }
+    private async Task ExecutePackEachIndividuallyDirectAsync()
+    {
+        if (GuardReadOnlyBrowserTab("圧縮")) return;
+        var selection = ResolveSelection();
+        if (selection.Count == 0)
+        {
+            ShowStatusMessage("圧縮(Pack)対象がありません。");
+            return;
+        }
+        if (!CanPackEachFolderIndividually(selection))
+        {
+            return;
+        }
+
+        string? exePath = SevenZipService.ResolveExecutable(_settings.SevenZip?.ExePath);
+        bool hasSevenZip = !string.IsNullOrWhiteSpace(exePath) && File.Exists(exePath);
+        bool useFallback = !hasSevenZip;
+        bool useTarFallback = useFallback && TarFallbackService.IsAvailable();
+        bool useZipFallback = useFallback && !useTarFallback;
+
+        string outputDir = _navigationService.CurrentPath;
+        string extension = ".zip"; // ユーザー観測に合わせ原則zip
+
+        // 混在時確認
+        var allTargets = selection.FullPaths.ToList();
+        var folderTargets = allTargets.Where(Directory.Exists).ToList();
+        var fileTargets = allTargets.Where(File.Exists).ToList();
+        var targetsToProcess = allTargets;
+        if (folderTargets.Any() && fileTargets.Any())
+        {
+            DialogResult dr = DialogResult.None;
+            this.Invoke(() =>
+            {
+                dr = MessageBox.Show(
+                    this,
+                    "フォルダとファイルが混在しています。\nファイルも個別に圧縮しますか？\n\n「はい」：ファイルも個別に圧縮します\n「いいえ」：フォルダのみを個別に圧縮します（ファイルは除外）",
+                    "個別圧縮の確認",
+                    MessageBoxButtons.YesNoCancel,
+                    MessageBoxIcon.Question);
+            });
+            if (dr == DialogResult.Cancel) return;
+            if (dr == DialogResult.No)
+            {
+                targetsToProcess = folderTargets;
+            }
+        }
+
+        // 衝突チェック
+        bool anyCollision = false;
+        foreach (var target in targetsToProcess)
+        {
+            string itemArchivePath = Path.Combine(outputDir, Path.GetFileName(target) + extension);
+            if (File.Exists(itemArchivePath))
+            {
+                anyCollision = true;
+                break;
+            }
+        }
+        PackExistingArchiveAction individualCollisionAction = PackExistingArchiveAction.Add;
+        if (anyCollision)
+        {
+            this.Invoke(() =>
+            {
+                individualCollisionAction = ShowPackExistingArchiveActionDialog(this, "個別圧縮先のアーカイブ");
+            });
+            if (individualCollisionAction == PackExistingArchiveAction.Cancel)
+            {
+                ShowStatusMessage("圧縮はキャンセルされました。");
+                return;
+            }
+        }
+
+        if (GuardClipboardBusy()) return;
+
+        var token = PrepareFileOperation("圧縮");
+        ShowArchiveProgressFallback("圧縮", targetsToProcess.Count);
+        ShowStatusMessage($"{targetsToProcess.Count} 件の項目を個別圧縮中...");
+        FileOpExitStatus exitStatus = FileOpExitStatus.Success;
+
+        try
+        {
+            exitStatus = await Task.Run(() =>
+            {
+                int successCount = 0;
+                for (int i = 0; i < targetsToProcess.Count; i++)
+                {
+                    if (token.IsCancellationRequested) return FileOpExitStatus.Canceled;
+                    string sourcePath = targetsToProcess[i];
+                    string itemName = Path.GetFileName(sourcePath);
+                    if (string.IsNullOrEmpty(itemName)) itemName = "item_" + i;
+                    string itemArchivePath = Path.Combine(outputDir, itemName + extension);
+
+                    // 上書き選択時は既存ファイルを削除 (個別圧縮では単純削除で対応)
+                    if (individualCollisionAction == PackExistingArchiveAction.Overwrite && File.Exists(itemArchivePath))
+                    {
+                        try { File.Delete(itemArchivePath); }
+                        catch (Exception ex) { LogService.Error($"Failed to delete existing archive for overwrite: {itemArchivePath}", ex); }
+                    }
+
+                    this.Invoke(() =>
+                    {
+                        ShowStatusMessage($"個別圧縮中 ({i + 1}/{targetsToProcess.Count}): {itemName}");
+                        UpdateArchiveProgressFallbackState("圧縮", $"個別圧縮中 ({i + 1}/{targetsToProcess.Count}): {itemName}");
+                    });
+
+                    if (useFallback && !useTarFallback)
+                    {
+                        ZipFallbackService.Pack(itemArchivePath, new[] { sourcePath });
+                        successCount++;
+                        continue;
+                    }
+
+                    if (useTarFallback)
+                    {
+                        string? baseDir = Path.GetDirectoryName(sourcePath);
+                        string relPath = Path.GetFileName(sourcePath);
+                        if (string.IsNullOrEmpty(baseDir)) baseDir = _navigationService.CurrentPath;
+                        var tarRes = TarFallbackService.Pack(itemArchivePath, baseDir, new[] { relPath }, token, line =>
+                        {
+                            ShowStatusMessage($"個別圧縮中 ({i + 1}/{targetsToProcess.Count}): {itemName}");
+                            BeginInvoke(new Action(() => UpdateArchiveProgressFallbackState("圧縮", $"個別圧縮中 ({i + 1}/{targetsToProcess.Count}): {itemName}")));
+                        });
+                        if (tarRes.ExitCode == 0)
+                        {
+                            successCount++;
+                        }
+                        else if (!token.IsCancellationRequested)
+                        {
+                            this.Invoke(() => MessageBox.Show($"{itemName} の圧縮中にエラーが発生しました。\nExitCode: {tarRes.ExitCode}\n\n[エラー出力]\n{tarRes.Error}", "エラー", MessageBoxButtons.OK, MessageBoxIcon.Error));
+                        }
+                        continue;
+                    }
+
+                    // 7-Zipでの圧縮
+                    var sources = new List<string>();
+                    if (Directory.Exists(sourcePath))
+                    {
+                        sources.Add(Path.Combine(sourcePath, "*"));
+                    }
+                    else
+                    {
+                        sources.Add(sourcePath);
+                    }
+
+                    var itemRequest = new PackRequest
+                    {
+                        OutputArchivePath = itemArchivePath,
+                        Format = PackArchiveFormat.Zip,
+                        CompressionLevel = PackCompressionLevel.Normal,
+                        SplitSize = "",
+                        PackEachFolderIndividually = true
+                    };
+
+                    var res = SevenZipService.Pack(exePath!, sources, itemRequest, token, line =>
+                    {
+                        if (TryExtractSevenZipProgress(line, out string percent))
+                        {
+                            ShowStatusMessage($"個別圧縮中 ({i + 1}/{targetsToProcess.Count} {percent}%): {itemName}");
+                            BeginInvoke(new Action(() =>
+                                UpdateArchiveProgressFallbackState("圧縮", $"個別圧縮中 ({i + 1}/{targetsToProcess.Count} {percent}%): {itemName}")));
+                        }
+                    });
+                    if (res.ExitCode == 0)
+                    {
+                        successCount++;
+                    }
+                    else if (!token.IsCancellationRequested)
+                    {
+                        this.Invoke(() => MessageBox.Show($"{itemName} の圧縮中にエラーが発生しました。\nExitCode: {res.ExitCode}\n\n[エラー出力]\n{res.Error}", "エラー", MessageBoxButtons.OK, MessageBoxIcon.Error));
+                    }
+                }
+                return successCount == targetsToProcess.Count ? FileOpExitStatus.Success : (successCount > 0 ? FileOpExitStatus.Success : FileOpExitStatus.Error);
+            }, token);
+        }
+        catch (OperationCanceledException)
+        {
+            exitStatus = FileOpExitStatus.Canceled;
+        }
+        catch (Exception ex)
+        {
+            exitStatus = FileOpExitStatus.Error;
+            LogService.Error("ExecutePackEachIndividuallyDirectAsync async error", ex);
+            MessageBox.Show($"圧縮中に予期せぬエラーが発生しました:\n{ex.Message}", "エラー", MessageBoxButtons.OK, MessageBoxIcon.Error);
+        }
+        finally
+        {
+            CompleteArchiveProgressFallback(exitStatus == FileOpExitStatus.Success ? "圧縮完了" : exitStatus == FileOpExitStatus.Canceled ? "圧縮中断" : "圧縮失敗");
+            FinalizeFileOperation();
+            CloseArchiveProgressFallback();
+            LoadDirectory(_navigationService.CurrentPath);
+            if (exitStatus == FileOpExitStatus.Success)
+            {
+                ClearMarks();
+                ShowStatusMessage("個別圧縮が完了しました。");
+            }
+            else if (exitStatus == FileOpExitStatus.Canceled)
+            {
+                ShowStatusMessage("圧縮は中断されました。");
+            }
+            else
+            {
+                ShowStatusMessage("圧縮失敗");
+            }
+        }
     }
     private async Task ExecutePack(bool forcePackEachFolderIndividually = false)
     {
@@ -17290,19 +18792,30 @@ private void InitializeBrowserTabControl()
         string defaultName = BuildPackDefaultArchiveName(selection, _navigationService.CurrentPath);
         string selectionSummary = BuildPackSelectionSummary(selection);
         bool canPackEachFolder = CanPackEachFolderIndividually(selection);
+        bool canUseSingleFileOnlyFormats = selection.Count == 1 && !string.IsNullOrWhiteSpace(selection.FirstPath) && File.Exists(selection.FirstPath!);
         string? exePath = SevenZipService.ResolveExecutable(_settings.SevenZip?.ExePath);
         bool hasSevenZip = !string.IsNullOrWhiteSpace(exePath) && File.Exists(exePath);
         IReadOnlyList<PackArchiveFormat> availableFormats;
         string hintText;
         if (hasSevenZip)
         {
-            availableFormats = new[]
+            var formats = new List<PackArchiveFormat>
             {
                 PackArchiveFormat.Zip,
                 PackArchiveFormat.SevenZip,
-                PackArchiveFormat.Tar
+                PackArchiveFormat.Tar,
+                PackArchiveFormat.Wim
             };
-            hintText = "zip / 7z / tar を扱います。個別圧縮は複数対象のとき有効です。";
+            if (canUseSingleFileOnlyFormats)
+            {
+                formats.Add(PackArchiveFormat.Xz);
+                formats.Add(PackArchiveFormat.GZip);
+                formats.Add(PackArchiveFormat.BZip2);
+            }
+            availableFormats = formats;
+            hintText = canUseSingleFileOnlyFormats
+                ? "zip / 7z / tar / wim / xz / gzip / bzip2 を扱います。個別圧縮は複数対象のとき有効です。"
+                : "zip / 7z / tar / wim を扱います。個別圧縮は複数対象のとき有効です。";
         }
         else if (TarFallbackService.IsAvailable())
         {
@@ -17339,11 +18852,11 @@ private void InitializeBrowserTabControl()
             ShowStatusMessage("圧縮はキャンセルされました。");
             return;
         }
-        if ((request.Format == PackArchiveFormat.GZip || request.Format == PackArchiveFormat.BZip2 || request.Format == PackArchiveFormat.Xz) && selection.Count != 1)
+        if ((request.Format == PackArchiveFormat.GZip || request.Format == PackArchiveFormat.BZip2 || request.Format == PackArchiveFormat.Xz) && !canUseSingleFileOnlyFormats)
         {
             MessageBox.Show(
                 this,
-                "gzip / bzip2 / xz は単一ファイルの圧縮のみ対応です。複数項目を圧縮する場合は zip / 7z / tar を選択してください。",
+                "gzip / bzip2 / xz は単一ファイルの圧縮のみ対応です。複数項目またはフォルダを圧縮する場合は zip / 7z / tar / wim を選択してください。",
                 "Pack",
                 MessageBoxButtons.OK,
                 MessageBoxIcon.Information);
@@ -17837,6 +19350,7 @@ private void InitializeBrowserTabControl()
         string? exePath = SevenZipService.ResolveExecutable(_settings.SevenZip?.ExePath);
         bool canUseZipFallbackOnly = archivePaths.All(path =>
             string.Equals(Path.GetExtension(path), ".zip", StringComparison.OrdinalIgnoreCase));
+        bool canUseTarFallbackOnly = archivePaths.All(ArchiveFileTypeHelper.CanUseTarFallbackForUnpack);
         bool useZipFallback = false;
         bool useTarFallback = false;
         if (string.IsNullOrWhiteSpace(exePath) || !File.Exists(exePath))
@@ -17846,7 +19360,7 @@ private void InitializeBrowserTabControl()
                 useZipFallback = true;
                 ShowStatusMessage("7-Zip が見つからないため、Windows 標準 zip 解凍で実行します。");
             }
-            else if (TarFallbackService.IsAvailable())
+            else if (canUseTarFallbackOnly && TarFallbackService.IsAvailable())
             {
                 useTarFallback = true;
                 ShowStatusMessage("7-Zip が見つからないため、Windows 標準機能 (tar.exe) で解凍を実行します。");
@@ -18304,8 +19818,8 @@ private void InitializeBrowserTabControl()
         {
             _browserCursorIndex = fileListView.SelectedIndices[0];
         }
-        // Info/Name 行をリアルタイム更新
-        UpdateInfoPanel();
+        // Info/Name 行を debounce 更新 (カーソル移動に伴う補助表示のみ遅延)
+        ScheduleUpdateInfoPanelDebounced();
         // プレビューエンコーディングを Auto にリセット
         _viewerEncodingOverride = ViewerEncoding.Auto;
         var currentItem = GetCurrentBrowserItem();
@@ -18313,15 +19827,40 @@ private void InitializeBrowserTabControl()
         PreviewKind currentSelectionKind = GetBrowserSelectionPreviewKind(currentItem, currentPath);
         bool isImageSelection = currentSelectionKind == PreviewKind.Image;
         var viewer = GetReusableImageViewer();
+        var selectionId = Interlocked.Increment(ref _selectionIdCounter);
+        var selStartTime = Stopwatch.GetTimestamp();
+        string diagPathKind = GetBrowserSelectionPathKind(currentPath);
+        string diagPathRoot = GetBrowserSelectionPathRoot(currentPath);
+        string diagExtension = currentPath != null ? Path.GetExtension(currentPath) : string.Empty;
+        LogService.Info(
+            $"[Browser.SelectionChanged.Start] selectionId={selectionId}" +
+            $" pathKind={diagPathKind} pathRoot={diagPathRoot} extension={diagExtension}" +
+            $" previewKind={currentSelectionKind} isImageSelection={isImageSelection} viewerAvailable={viewer != null}");
         if (isImageSelection && viewer != null)
         {
+            var loadStartTime = Stopwatch.GetTimestamp();
+            LogService.Info($"[Browser.SelectionChanged.ImageViewerLoad.Start] selectionId={selectionId}");
             viewer.LoadMedia(currentPath!, currentSelectionKind, showErrorMessage: false);
+            var ensureStartTime = Stopwatch.GetTimestamp();
             viewer.EnsureVisibleAndActivated();
+            var loadEndTime = Stopwatch.GetTimestamp();
+            long loadMediaElapsedMs = (ensureStartTime - loadStartTime) * 1000 / Stopwatch.Frequency;
+            long ensureVisibleElapsedMs = (loadEndTime - ensureStartTime) * 1000 / Stopwatch.Frequency;
+            LogService.Info(
+                $"[Browser.SelectionChanged.ImageViewerLoad.End] selectionId={selectionId}" +
+                $" loadMediaElapsedMs={loadMediaElapsedMs} ensureVisibleElapsedMs={ensureVisibleElapsedMs}" +
+                $" pathKind={diagPathKind} pathRoot={diagPathRoot} extension={diagExtension}");
+        }
+        else if (isImageSelection)
+        {
+            LogService.Info($"[Browser.SelectionChanged.ImageViewerLoad.Skip] selectionId={selectionId} reason=NoViewer");
         }
         else if (!isImageSelection && (_settings.Preview?.CloseImageViewerOnNonImageSelection ?? false))
         {
             CloseImageViewers();
         }
+        long selElapsedMs = (Stopwatch.GetTimestamp() - selStartTime) * 1000 / Stopwatch.Frequency;
+        LogService.Info($"[Browser.SelectionChanged.End] selectionId={selectionId} elapsedMs={selElapsedMs}");
         UpdateMenuStripState();
         // Browser自動preview対象のみ事前クリアし、対象外は不要な再描画を避ける
         if (IsBrowserAutoPreviewEligible(currentSelectionKind))
@@ -18380,6 +19919,18 @@ private void InitializeBrowserTabControl()
         var rawKind = PreviewService.GetPreviewKindShallow(fullPath ?? string.Empty, isDirectory);
         return GetEffectivePreviewKind(fullPath ?? string.Empty, rawKind);
     }
+    /// <summary>パス種別を UNC/DriveLetter/Unknown に分類する。フルパスは返さない。</summary>
+    private static string GetBrowserSelectionPathKind(string? path)
+    {
+        return NetworkPathResolutionPolicy.GetPathKind(path);
+    }
+
+    /// <summary>パスのルート部分を診断ログ用に丸めて返す。フルパスは返さない。</summary>
+    private static string GetBrowserSelectionPathRoot(string? path)
+    {
+        return NetworkPathResolutionPolicy.GetPathRoot(path);
+    }
+
     private static bool IsBrowserAutoPreviewEligible(PreviewKind kind)
     {
         return kind == PreviewKind.Image;
@@ -19519,6 +21070,10 @@ private void InitializeBrowserTabControl()
             HideTransientOverlaysBeforeModalDialog();
             BrowserTabRuntimeStateSnapshot runtimeBrowserTabState = CaptureBrowserTabRuntimeStateSnapshot();
             using var form = new SettingsForm(_settings, _featureProfile, initialTab);
+            form.ManualEmptyManagedTrashRequested += (s, e) =>
+            {
+                EmptyMidFdManagedTrash();
+            };
             form.SettingsApplied += (s, e) =>
             {
                 var reloaded = MidFD.Configuration.SettingsManager.Load(out SettingsManager.SettingsLoadMetadata settingsLoadMetadata);
@@ -19538,6 +21093,7 @@ private void InitializeBrowserTabControl()
                 ApplyFeatureProfile(settingsLoadMetadata.IsMouseGesturesExplicit);
                 RestoreBrowserTabRuntimeStateSnapshot(runtimeBrowserTabState);
                 LogService.ApplySettings(_settings.Logging);
+                LogFontRouteDiag("SettingsApplied:BeforeApplyFontSettings");
                 ApplyFontSettings();
                 ApplyColorSettings();
                 viewerTextBox.WordWrap = _settings.Preview.ViewerWordWrap;
@@ -19554,6 +21110,7 @@ private void InitializeBrowserTabControl()
                 LoadDirectory(_navigationService.CurrentPath);
                 RebuildMenuStripAfterSettingsApply();
                 UpdateFunctionBar();
+                LogFontRouteDiag("SettingsApplied:AfterAll");
                 ShowStatusMessage("設定を適用しました。");
             };
             var result = form.ShowDialog(this);
@@ -19578,6 +21135,7 @@ private void InitializeBrowserTabControl()
                 ApplyFeatureProfile(settingsLoadMetadata.IsMouseGesturesExplicit);
                 RestoreBrowserTabRuntimeStateSnapshot(runtimeBrowserTabState);
                 LogService.ApplySettings(_settings.Logging);
+                LogFontRouteDiag("SettingsOK:BeforeApplyFontSettings");
                 ApplyFontSettings();
                 ApplyColorSettings();
                 viewerTextBox.WordWrap = _settings.Preview.ViewerWordWrap;
@@ -19594,6 +21152,7 @@ private void InitializeBrowserTabControl()
                 LoadDirectory(_navigationService.CurrentPath);
                 RebuildMenuStripAfterSettingsApply();
                 UpdateFunctionBar();
+                LogFontRouteDiag("SettingsOK:AfterAll");
                 ShowStatusMessage("設定を保存しました。");
             }
         }
@@ -19970,10 +21529,15 @@ private void InitializeBrowserTabControl()
     private void ExecuteQuickAccess()
     {
         HideCommandHintOverlay("ExecuteQuickAccess");
-        IReadOnlyList<QuickAccessEntry> historyEntries = QuickAccessService.BuildHistoryEntries(
-            _navigationService.GetBackHistorySnapshot(),
-            _navigationService.GetForwardHistorySnapshot());
-        var result = QuickAccessDialog.Show(this, _quickAccessStore, _navigationService.CurrentPath, historyEntries);
+        var diagnostics = new QuickAccessOpenDiagnostics(QuickAccessOpenDiagnostics.CreateOperationId());
+        diagnostics.LogOpenStart(_navigationService.CurrentPath, _quickAccessStore);
+        IReadOnlyList<string> backHistory = _navigationService.GetBackHistorySnapshot();
+        IReadOnlyList<string> forwardHistory = _navigationService.GetForwardHistorySnapshot();
+        IReadOnlyList<QuickAccessEntry> historyEntries = diagnostics.MeasureStep(
+            "QuickAccess.BuildHistory",
+            () => QuickAccessService.BuildHistoryEntries(backHistory, forwardHistory),
+            entries => $"itemCount={entries.Count} backCount={backHistory.Count} forwardCount={forwardHistory.Count} success=success");
+        var result = QuickAccessDialog.Show(this, _quickAccessStore, _navigationService.CurrentPath, historyEntries, diagnostics);
         if (result.Action == QuickAccessDialogCloseAction.Cancel)
         {
             return;
@@ -20089,6 +21653,7 @@ private void InitializeBrowserTabControl()
     private void ApplyFontSettings()
     {
         if (_settings.Fonts == null) return;
+        LogFontRouteDiag("ApplyFontSettings:START");
         // Phase 2f-fix2: レイアウト遷移中の中間描画を抑制する
         this.SuspendLayout();
         try
@@ -20102,13 +21667,22 @@ private void InitializeBrowserTabControl()
             // 重要行 (FileListFontSize を反映)
             var filerInfoFont = new Font(filerFamily, filerSize);
             _headerPaintFont = filerInfoFont; // Phase 2g-fix3a: Paint 向けに保持
+            Font headerStatusFont = ResolveAdaptiveHeaderStatusFont(filerInfoFont);
+            Font? previousResponsiveOwnedFont = _headerStatusResponsiveOwnedFont;
+            if (ReferenceEquals(headerStatusFont, filerInfoFont))
+            {
+                _headerStatusResponsiveOwnedFont = null;
+            }
+            else
+            {
+                _headerStatusResponsiveOwnedFont = headerStatusFont;
+            }
+            // Px1 diag: adaptive font result
+            LogFontRouteDiag($"ApplyFontSettings:AfterResolve baseSize={filerInfoFont.Size:0.##} resultSize={headerStatusFont.Size:0.##} panelW={headerPanel?.ClientSize.Width ?? -1}");
             // 高さをフォントに合わせて動的に調整
-            var metrics = HeaderLayoutHelper.CalculateMetrics(filerInfoFont, 4);
-            titleHeaderPanel.Height = metrics.TitleHeaderHeight;
-            headerPanel.Height = metrics.RowHeight;
+            var functionBarMetrics = HeaderLayoutHelper.CalculateMetrics(filerInfoFont, 4);
             sepBeforeTopPanel.Height = 1;
             sepBeforeTopPanel.Visible = true;
-            infoRow2Panel.Height = metrics.RowHeight;
             infoRow2Panel.Visible = true;
             sepAfterRow2.Height = 0;
             sepAfterRow2.Visible = false;
@@ -20116,31 +21690,23 @@ private void InitializeBrowserTabControl()
             infoRow3Panel.Visible = false;
             sepAfterRow3.Height = 0;
             sepAfterRow3.Visible = false;
-            infoRow4Panel.Height = metrics.RowHeight;
             infoRow4Panel.Visible = true;
             sepAfterRow4.Height = 1;
             sepAfterRow4.Visible = true;
-            topPanel.Height = metrics.TopPanelHeight;
-            _functionBarPreferredHeight = metrics.RowHeight;
-            functionBarPanel.Height = metrics.RowHeight;
-            lblClock.Font = filerInfoFont;
+            _functionBarPreferredHeight = functionBarMetrics.RowHeight;
+            functionBarPanel.Height = functionBarMetrics.RowHeight;
             // Phase 5-ui-layout-fix2: BringToFront ハックは Dock 順が正しければ不要なため削除
             foreach (var lbl in lblFuncKeys)
             {
                 lbl.Font = filerInfoFont;
             }
-            lblPath.Font = filerInfoFont;
-            lblSort.Font = filerInfoFont;
-            lblItemAttr.Font = filerInfoFont;
-            lblFileDate.Font = filerInfoFont;
-            lblFileStats.Font = filerInfoFont;
-            lblFileStatsEx.Font = filerInfoFont;
-            lblName.Font = filerInfoFont;
-            lblPage.Font = filerInfoFont;
-            lblTotal.Font = filerInfoFont;
-            lblUsed.Font = filerInfoFont;
-            lblFree.Font = filerInfoFont;
-            statusLabel.Font = filerInfoFont;
+            ApplyResolvedHeaderStatusFontForCurrentWindow(filerInfoFont, headerStatusFont, "ApplyFontSettings:initial");
+            LogHeaderResponsiveStabilizeDiag(
+                "Apply",
+                "ApplyFontSettings:initial",
+                headerStatusFont,
+                GetCurrentHeaderRow1FitMetrics(headerStatusFont),
+                fontDisposeSuppressed: previousResponsiveOwnedFont != null && !ReferenceEquals(previousResponsiveOwnedFont, headerStatusFont));
             SynchronizeMenuStripFontAndLayout(CreateMenuStripFont());
             LogMenuStripLayoutMetrics("ApplyFontSettings");
             // Phase 2g-fix4a: 配色の適用 (定数化)
@@ -20152,9 +21718,9 @@ private void InitializeBrowserTabControl()
             viewerTextBox.Font = viewerFont;
             viewerMessageLabel.Font = viewerFont;
             // Phase 2f-fix2: レイアウト確定前にテキストの値を最新化しておく
-            UpdateInfoPanel();
-            // Phase 2g-fix2: テキスト更新後に Zone 幅を動的に計算する
-            LayoutHeaderZones();
+            LogFontRouteDiag("ApplyFontSettings:BeforeUpdateInfoPanel");
+            LogHeaderRightDiag("ApplyFontSettings");
+            LogFontRouteDiag("ApplyFontSettings:END");
             // Phase 3-bottom-funcbar-fontsync-fix2: 表示の確実な復帰 (BringToFront は overlay の原因になるため削除)
             LayoutFunctionBar();
             functionBarPanel.Invalidate();
@@ -20180,6 +21746,7 @@ private void InitializeBrowserTabControl()
         headerZone2.Invalidate();
         headerZone3.Invalidate();
         headerZone4.Invalidate();
+        RecomputeHeaderStatusResponsiveFontNow("ApplyFontSettings:post-layout");
     }
     /// <summary>
     /// UTF-8 マルチバイト文字の途中で切断されない安全な長さを取得する（バッファ末尾の切り出し境界用）。
@@ -20227,14 +21794,30 @@ private void InitializeBrowserTabControl()
     {
         if (headerZone1 == null || headerZone2 == null || headerZone3 == null || headerZone4 == null) return;
         if (!this.IsHandleCreated) return;
-        var widths = HeaderLayoutHelper.CalculateZoneWidths(
-            headerPanel.ClientSize.Width - lblClock.Width,
-            lblPage.Font,
+        // Px1 diag: LayoutHeaderZones:START log は clock tick毎秒呼出しで大量出力になるため削除
+        if (lblClock != null && !lblClock.IsDisposed)
+        {
+            lblClock.AutoSize = false;
+            lblClock.Width = GetHeaderClockReservedWidth(lblClock.Font);
+        }
+
+        Font clockFont = lblClock?.Font ?? lblPage.Font;
+        HeaderRow1FitMetrics row1FitMetrics = GetHeaderRow1FitMetrics(
+            clockFont,
+            headerPanel.ClientSize.Width,
             lblPage.Text,
             lblTotal.Text,
             lblUsed.Text,
             lblFree.Text,
-            this.MinimumSize.Width
+            lblClock?.Text ?? string.Empty);
+        int zoneAvailableWidth = row1FitMetrics.AvailableLeftWidth;
+        var widths = CalculateRow2ZoneWidthsFromMeasuredTexts(
+            zoneAvailableWidth,
+            lblPage.Font,
+            lblPage.Text,
+            lblTotal.Text,
+            lblUsed.Text,
+            lblFree.Text
         );
         headerZone1.Width = widths.Zone1;
         headerZone2.Width = widths.Zone2;
@@ -20246,6 +21829,48 @@ private void InitializeBrowserTabControl()
             LogService.Info($"[WindowFloorHitIntercept] MinimumSize width audit: {this.MinimumSize.Width} -> {minimumFormWidth}");
             this.MinimumSize = new Size(minimumFormWidth, this.MinimumSize.Height);
         }
+        LogHeaderRow2LayoutDiagnostics(row1FitMetrics.ClockReservedWidth, zoneAvailableWidth, widths);
+        // Px1 diag: LayoutHeaderZones:END log は clock tick毎秒呼出しで大量出力になるため削除
+    }
+    private HeaderLayoutHelper.ZoneWidths CalculateRow2ZoneWidthsFromMeasuredTexts(
+        int availableWidth,
+        Font font,
+        string pageText,
+        string totalText,
+        string usedText,
+        string freeText)
+    {
+        int p1 = MeasureHeaderRow2SegmentWidth(font, pageText, lblPage) + HeaderRow2ClockSafetyGap;
+        int p2 = MeasureHeaderRow2SegmentWidth(font, totalText, lblTotal) + HeaderRow2ClockSafetyGap;
+        int p3 = MeasureHeaderRow2SegmentWidth(font, usedText, lblUsed) + HeaderRow2ClockSafetyGap;
+        int p4 = MeasureHeaderRow2SegmentWidth(font, freeText, lblFree) + HeaderRow2ClockSafetyGap;
+
+        int totalMin = p1 + p2 + p3 + p4;
+        var result = new HeaderLayoutHelper.ZoneWidths();
+
+        if (availableWidth > totalMin)
+        {
+            int extra = availableWidth - totalMin;
+            double w1 = 1.0, w2 = 1.6, w3 = 1.6, w4 = 1.8;
+            double totalWeight = w1 + w2 + w3 + w4;
+
+            result.Zone1 = p1 + (int)(extra * w1 / totalWeight);
+            result.Zone2 = p2 + (int)(extra * w2 / totalWeight);
+            result.Zone3 = p3 + (int)(extra * w3 / totalWeight);
+            result.Zone4 = p4 + (int)(extra * w4 / totalWeight);
+        }
+        else
+        {
+            double scale = totalMin > 0 ? (double)availableWidth / totalMin : 1d;
+            result.Zone1 = Math.Max(1, (int)Math.Floor(p1 * scale));
+            result.Zone2 = Math.Max(1, (int)Math.Floor(p2 * scale));
+            result.Zone3 = Math.Max(1, (int)Math.Floor(p3 * scale));
+            result.Zone4 = Math.Max(1, Math.Max(availableWidth - result.Zone1 - result.Zone2 - result.Zone3, 1));
+        }
+
+        int requiredMinFormWidth = totalMin + 40;
+        result.MinimumFormWidth = Math.Clamp(requiredMinFormWidth, 400, 1200);
+        return result;
     }
     /// <summary>
     /// Phase 34A: ヘッダラベルの配置を動的に計算する。
@@ -20338,6 +21963,10 @@ private void InitializeBrowserTabControl()
     {
         // 秒単位の時計文字列を更新
         lblClock.Text = DateTime.Now.ToString("yyyy-MM-dd(ddd) HH:mm:ss");
+        // Px1 diag note: UpdateTitleHeaderClock は LayoutHeaderZones のみ呼び、
+        //   ResolveAdaptiveHeaderStatusFont は呼ばない (font は ApplyFontSettings 後そのまま)。
+        LayoutHeaderZones();
+        LogHeaderRightDiag("UpdateTitleHeaderClock");
         // 再描画を要求
         lblClock.Invalidate();
         contentFramePanel.Invalidate();
@@ -20347,9 +21976,9 @@ private void InitializeBrowserTabControl()
     /// <summary>
     /// Phase 2g-fix4a: 各要素への配色適用を一括して行う。
     /// </summary>
-        private void ApplyColorSettings()
+    private void ApplyColorSettings()
     {
-        // UIクローム/Viewerは既存テーマ基調を維持し、一覧配色プリセットには連動させない。
+        // UIクロームは一覧配色に追従し、Viewer は従来のテーマ基調を維持する。
         MidFDColors.ApplyTheme(FileListColorResolver.NormalizeCoreTheme(_settings.Appearance?.ColorTheme));
 
         var uiThemeColors = UiThemeResolver.Resolve(_settings.Appearance);
@@ -20388,15 +22017,20 @@ private void InitializeBrowserTabControl()
         fileListView.BackColor = _resolvedColors.Background;
         browserPanel.ForeColor = _resolvedColors.NormalFile;
         browserPanel.BackColor = _resolvedColors.Background;
-        mainMenuStrip.BackColor = uiThemeColors.ChromeBackColor;
-        mainMenuStrip.ForeColor = uiThemeColors.ChromeForeColor;
+        string menuPreset = UiThemeResolver.MapFromDisplayColor(_settings.Appearance?.ColorTheme);
+        var menuThemeColors = UiThemeResolver.Resolve(menuPreset);
+        mainMenuStrip.BackColor = menuThemeColors.ChromeBackColor;
+        mainMenuStrip.ForeColor = menuThemeColors.ChromeForeColor;
+        ApplyMenuStripRenderer(
+            FileListColorResolver.NormalizeCoreTheme(_settings.Appearance?.ColorTheme, _settings) == "Light",
+            menuThemeColors.ChromeForeColor);
         foreach (ToolStripItem item in mainMenuStrip.Items)
         {
-            item.BackColor = uiThemeColors.ChromeBackColor;
-            item.ForeColor = uiThemeColors.ChromeForeColor;
+            item.BackColor = menuThemeColors.ChromeBackColor;
+            item.ForeColor = menuThemeColors.ChromeForeColor;
             if (item is ToolStripMenuItem rootItem)
             {
-                ApplyDropDownTheme(rootItem, uiThemeColors.ChromeBackColor, uiThemeColors.ChromeForeColor);
+                ApplyDropDownTheme(rootItem, menuThemeColors.ChromeBackColor, menuThemeColors.ChromeForeColor);
             }
         }
         UpdateBrowserToolbarVisibility();
@@ -20436,13 +22070,17 @@ private void InitializeBrowserTabControl()
         lblName.BackColor = uiThemeColors.HeaderBackColor;
         lblTitle.BackColor = uiThemeColors.HeaderBackColor;
 
+        bool isCompatible = FunctionKeyProfileService.ResolveProfile(CurrentFunctionKeyProfileValue) == FunctionKeyProfile.FDCompatible;
+        var functionColors = GetFunctionBarColors(isCompatible);
+        functionBarPanel.BackColor = functionColors.BackColor;
+
         // FunctionBar のラベル色を更新
         if (lblFuncKeys != null)
         {
             foreach (var lbl in lblFuncKeys)
             {
-                lbl.BackColor = uiThemeColors.ChromeBackColor;
-                lbl.ForeColor = uiThemeColors.ChromeForeColor;
+                lbl.BackColor = functionColors.EnabledBackColor;
+                lbl.ForeColor = functionColors.EnabledTextColor;
             }
         }
         statusStrip.BackColor = uiThemeColors.StatusBackColor;
@@ -20472,9 +22110,6 @@ private void InitializeBrowserTabControl()
                 ApplyMarkColor(item, fullPath);
             }
         }
-        bool isCompatible = FunctionKeyProfileService.ResolveProfile(CurrentFunctionKeyProfileValue) == FunctionKeyProfile.FDCompatible;
-        var functionColors = GetFunctionBarColors(isCompatible);
-        functionBarPanel.BackColor = functionColors.BackColor;
         functionBarPanel.Invalidate();
 
         fileListView.Invalidate();
@@ -20513,17 +22148,17 @@ private void InitializeBrowserTabControl()
     }
     private HeaderColorPalette GetHeaderColors()
     {
-        // ColorTheme から UI 基調色を自動解決し、手動指定ON時はその文字色を優先する。
-        string resolvedPreset = UiThemeResolver.MapFromDisplayColor(_settings.Appearance?.ColorTheme);
+        // 一覧配色から UI クロームを追従させつつ、既存基本 preset の header 細部色は従来契約を維持する。
+        string canonicalPreset = FileListColorResolver.CanonicalizePresetKey(_settings.Appearance?.ColorTheme);
         var resolvedUiColors = UiThemeResolver.Resolve(_settings.Appearance);
         bool useCustomUiTheme = _settings.Appearance?.CustomUiThemeColorsEnabled == true;
 
-        return resolvedPreset switch
+        return canonicalPreset switch
         {
-            "Terminal Green" => new HeaderColorPalette
+            "Green" => new HeaderColorPalette
             {
-                HeaderTitleFore = useCustomUiTheme ? resolvedUiColors.ChromeForeColor : Color.Yellow,
-                HeaderClockFore = useCustomUiTheme ? resolvedUiColors.ChromeForeColor : Color.Yellow,
+                HeaderTitleFore = useCustomUiTheme ? resolvedUiColors.ChromeForeColor : Color.Lime,
+                HeaderClockFore = useCustomUiTheme ? resolvedUiColors.ChromeForeColor : Color.Lime,
                 HeaderRow2Fore = useCustomUiTheme ? resolvedUiColors.ChromeForeColor : Color.Lime,
                 HeaderRow2Value = Color.White,
                 HeaderPathFore = useCustomUiTheme ? resolvedUiColors.ChromeForeColor : Color.Lime,
@@ -20540,16 +22175,6 @@ private void InitializeBrowserTabControl()
                 HeaderMetaFore = useCustomUiTheme ? resolvedUiColors.ChromeForeColor : Color.FromArgb(255, 210, 120),
                 HeaderNameFore = useCustomUiTheme ? resolvedUiColors.ChromeForeColor : Color.FromArgb(255, 235, 180)
             },
-            "Classic Blue" => new HeaderColorPalette
-            {
-                HeaderTitleFore = useCustomUiTheme ? resolvedUiColors.ChromeForeColor : Color.Cyan,
-                HeaderClockFore = useCustomUiTheme ? resolvedUiColors.ChromeForeColor : Color.Cyan,
-                HeaderRow2Fore = useCustomUiTheme ? resolvedUiColors.ChromeForeColor : Color.Cyan,
-                HeaderRow2Value = Color.White,
-                HeaderPathFore = useCustomUiTheme ? resolvedUiColors.ChromeForeColor : Color.Cyan,
-                HeaderMetaFore = useCustomUiTheme ? resolvedUiColors.ChromeForeColor : Color.Cyan,
-                HeaderNameFore = useCustomUiTheme ? resolvedUiColors.ChromeForeColor : Color.LightCyan
-            },
             "Light" => new HeaderColorPalette
             {
                 HeaderTitleFore = useCustomUiTheme ? resolvedUiColors.ChromeForeColor : Color.Black,
@@ -20560,7 +22185,17 @@ private void InitializeBrowserTabControl()
                 HeaderMetaFore = useCustomUiTheme ? resolvedUiColors.ChromeForeColor : Color.FromArgb(80, 80, 80),
                 HeaderNameFore = useCustomUiTheme ? resolvedUiColors.ChromeForeColor : Color.Black
             },
-            // "MidFD Default" / ClassicCyan連動 / Default: 黒+シアン基調（従来MidFD寄り）
+            "Slate" or "Mono Dark" or "Cyber" or "Violet" or "Sepia" => new HeaderColorPalette
+            {
+                HeaderTitleFore = resolvedUiColors.ChromeForeColor,
+                HeaderClockFore = resolvedUiColors.ChromeForeColor,
+                HeaderRow2Fore = resolvedUiColors.ChromeForeColor,
+                HeaderRow2Value = Color.White,
+                HeaderPathFore = resolvedUiColors.ChromeForeColor,
+                HeaderMetaFore = resolvedUiColors.ChromeForeColor,
+                HeaderNameFore = resolvedUiColors.ChromeForeColor
+            },
+            // ClassicCyan は既存標準 preset として従来 header 配色を維持する。
             _ => new HeaderColorPalette
             {
                 HeaderTitleFore = useCustomUiTheme ? resolvedUiColors.ChromeForeColor : Color.Yellow,
@@ -20659,8 +22294,11 @@ private void InitializeBrowserTabControl()
         }
         // UI 反映
         targetItem.Selected = true;
-        targetItem.Focused = true;
-        targetItem.EnsureVisible();
+        if (CanRestoreBrowserFocusAfterFileOperation())
+        {
+            targetItem.Focused = true;
+            targetItem.EnsureVisible();
+        }
         _browserCursorIndex = targetItem.Index;
         // 状態更新
         UpdateInfoPanel();
@@ -20719,6 +22357,231 @@ private void InitializeBrowserTabControl()
         lblName.SendToBack();
         this.PerformLayout();
     }
+    /// <summary>
+    /// Px1 header/status font application route diagnostic helper.
+    /// app.log へ出力する。
+    /// </summary>
+    private void LogFontRouteDiag(string eventName, [System.Runtime.CompilerServices.CallerMemberName] string caller = "")
+    {
+        if (!HeaderStatusFontRouteDiagnosticLoggingEnabled)
+        {
+            return;
+        }
+
+        try
+        {
+            var sb = new System.Text.StringBuilder();
+            sb.Append($"[FontRouteDiag] t={Environment.TickCount64} event={eventName} caller={caller}");
+            sb.Append($" clientW={this.ClientSize.Width} clientH={this.ClientSize.Height}");
+            if (headerPanel != null && !headerPanel.IsDisposed)
+                sb.Append($" headerPanelW={headerPanel.ClientSize.Width}");
+            if (fileListView != null && !fileListView.IsDisposed && fileListView.Font != null)
+                sb.Append($" filerFont={fileListView.Font.Name}/{fileListView.Font.Size:0.##}/{fileListView.Font.Height}");
+            if (browserPanel != null && !browserPanel.IsDisposed && browserPanel.Font != null)
+                sb.Append($" browserFont={browserPanel.Font.Name}/{browserPanel.Font.Size:0.##}");
+            sb.Append($" headerPaintFont={(_headerPaintFont != null ? $"{_headerPaintFont.Size:0.##}/{_headerPaintFont.Height}" : "null")}");
+            if (lblPage?.Font != null) sb.Append($" lblPage.FontSz={lblPage.Font.Size:0.##}");
+            if (lblTotal?.Font != null) sb.Append($" lblTotal.FontSz={lblTotal.Font.Size:0.##}");
+            if (lblUsed?.Font != null) sb.Append($" lblUsed.FontSz={lblUsed.Font.Size:0.##}");
+            if (lblFree?.Font != null) sb.Append($" lblFree.FontSz={lblFree.Font.Size:0.##}");
+            if (lblClock?.Font != null) sb.Append($" lblClock.FontSz={lblClock.Font.Size:0.##}");
+            if (lblSort?.Font != null) sb.Append($" lblSort.FontSz={lblSort.Font.Size:0.##}");
+            if (lblFileStatsEx?.Font != null) sb.Append($" lblFileStatsEx.FontSz={lblFileStatsEx.Font.Size:0.##}");
+            if (statusLabel?.Font != null) sb.Append($" statusLabel.FontSz={statusLabel.Font.Size:0.##}");
+            sb.Append($" funcBarH={functionBarPanel?.Height ?? -1} funcBarPrefH={_functionBarPreferredHeight}");
+            sb.Append($" listFontSz={_settings?.Fonts?.FileListFontSize ?? -1}");
+            LogService.Info(sb.ToString());
+        }
+        catch { /* diagnostic should not throw */ }
+    }
+
+    /// <summary>
+    /// Px1 header/status font route diagnostic: ResolveAdaptiveHeaderStatusFont の入出力をログする。
+    /// </summary>
+    private void LogAdaptiveFontDiag(
+        string tag,
+        Font baseFont,
+        float availableWidth,
+        float bestSize,
+        bool fitFound,
+        float minSize = -1,
+        float maxSize = -1,
+        float ratioTarget = -1,
+        float widthRatio = -1,   // 旧称。widthScale対応のため引数名はそのまま維持
+        string? pageText = null,
+        string? clockText = null)
+    {
+        if (!HeaderStatusFontRouteDiagnosticLoggingEnabled)
+        {
+            return;
+        }
+
+        LogService.Info(
+            $"[AdaptiveFontDiag] {tag} availableW={availableWidth} baseSize={baseFont.Size:0.##} bestSize={bestSize:0.##} fitFound={fitFound} " +
+            $"minSize={minSize:0.##} maxSize={maxSize:0.##} ratioTarget={ratioTarget:0.##} widthRatio={widthRatio:0.###} " +
+            $"pageChars={pageText?.Length ?? 0} clockChars={clockText?.Length ?? 0}");
+    }
+    private void LogHeaderResponsiveDiag(
+        string eventName,
+        string reason,
+        Font baseFont,
+        Font? resolvedFont,
+        bool scheduled = false,
+        string? skippedReason = null,
+        int? rowWidth = null,
+        int? leftRequiredWidth = null,
+        int? rightClockWidth = null,
+        int? availableLeftWidth = null,
+        bool? fitResult = null,
+        int? freeMeasuredWidth = null,
+        int? clockMeasuredWidth = null,
+        int? guardBand = null)
+    {
+        if (!HeaderStatusFontRouteDiagnosticLoggingEnabled)
+        {
+            return;
+        }
+
+        Size clientSize = ClientSize;
+        Size headerClientSize = headerPanel?.ClientSize ?? Size.Empty;
+        Font effectiveResolvedFont = resolvedFont ?? lblPage?.Font ?? baseFont;
+        Font rowFont = lblPage?.Font ?? effectiveResolvedFont;
+        string pageText = lblPage?.Text ?? string.Empty;
+        string totalText = lblTotal?.Text ?? string.Empty;
+        string usedText = lblUsed?.Text ?? string.Empty;
+        string freeText = lblFree?.Text ?? string.Empty;
+        int resolvedClockReservedWidth = rightClockWidth
+            ?? (lblClock?.Font != null ? GetHeaderClockReservedWidth(lblClock.Font) : GetHeaderClockReservedWidth(effectiveResolvedFont));
+        int resolvedLeftRequiredWidth = leftRequiredWidth
+            ?? GetHeaderRow2LeftRequiredWidth(
+                rowFont,
+                pageText,
+                totalText,
+                usedText,
+                freeText);
+        int resolvedRowWidth = rowWidth ?? headerClientSize.Width;
+        int resolvedGuardBand = guardBand ?? GetHeaderRow1FitGuardPx(rowFont);
+        int resolvedAvailableLeftWidth = availableLeftWidth ?? Math.Max(0, resolvedRowWidth - resolvedClockReservedWidth - HeaderRow2ClockSafetyGap - resolvedGuardBand);
+        int resolvedTotalRequiredWidth = resolvedLeftRequiredWidth + resolvedClockReservedWidth + HeaderRow2ClockSafetyGap + resolvedGuardBand;
+        bool resolvedFitResult = fitResult ?? (resolvedTotalRequiredWidth <= resolvedRowWidth && resolvedLeftRequiredWidth <= resolvedAvailableLeftWidth);
+        string clockText = lblClock?.Text ?? string.Empty;
+        int resolvedClockMeasuredWidth = clockMeasuredWidth ?? MeasureHeaderDisplayWidth(clockText, rowFont);
+        int resolvedFreeMeasuredWidth = freeMeasuredWidth ?? MeasureHeaderRow2SegmentWidth(rowFont, lblFree?.Text ?? string.Empty, lblFree);
+        string markSizeText = ExtractMarkSizeText(lblSort?.Text);
+        string snapshot =
+            $"{eventName}|{reason}|{clientSize}|{headerClientSize}|{DeviceDpi}|{baseFont.Size:0.##}|{effectiveResolvedFont.Size:0.##}|{resolvedRowWidth}|{resolvedLeftRequiredWidth}|{resolvedClockReservedWidth}|{resolvedGuardBand}|{resolvedAvailableLeftWidth}|{resolvedFitResult}|{scheduled}|{skippedReason}";
+        DateTime nowUtc = DateTime.UtcNow;
+        if (snapshot == _lastHeaderResponsiveDiagSnapshot && (nowUtc - _lastHeaderResponsiveDiagUtc) < TimeSpan.FromSeconds(10))
+        {
+            return;
+        }
+
+        _lastHeaderResponsiveDiagSnapshot = snapshot;
+        _lastHeaderResponsiveDiagUtc = nowUtc;
+        LogService.Info(
+            $"[HeaderResponsiveDiag] event={eventName} reason={reason} scheduled={scheduled} skippedReason={skippedReason ?? "-"} " +
+            $"ClientSize={clientSize} headerClientSize={headerClientSize} DeviceDpi={DeviceDpi} " +
+            $"baseFontSize={baseFont.Size:0.##} resultFontSize={effectiveResolvedFont.Size:0.##} " +
+            $"lblPage.FontSz={lblPage?.Font?.Size:0.##} lblClock.FontSz={lblClock?.Font?.Size:0.##} statusLabel.FontSz={statusLabel?.Font?.Size:0.##} " +
+            $"rowWidth={resolvedRowWidth} leftRequiredWidth={resolvedLeftRequiredWidth} rightClockWidth={resolvedClockReservedWidth} guardBand={resolvedGuardBand} totalRequiredWidth={resolvedTotalRequiredWidth} availableLeftWidth={resolvedAvailableLeftWidth} fitResult={resolvedFitResult} " +
+            $"pageLen={pageText.Length} totalLen={totalText.Length} usedLen={usedText.Length} freeLen={freeText.Length} " +
+            $"FreeMeasuredWidth={resolvedFreeMeasuredWidth} clockText='{clockText}' clockMeasuredWidth={resolvedClockMeasuredWidth} MarkSizeText='{markSizeText}'");
+    }
+    private void LogHeaderResponsiveStabilizeDiag(
+        string eventName,
+        string reason,
+        Font currentFont,
+        HeaderRow1FitMetrics? metrics,
+        string? skippedReason = null,
+        bool fontDisposeSuppressed = false,
+        bool exceptionPrevented = false)
+    {
+        if (!HeaderStatusFontRouteDiagnosticLoggingEnabled)
+        {
+            return;
+        }
+
+        HeaderRow1FitMetrics resolvedMetrics = metrics ?? GetCurrentHeaderRow1FitMetrics(currentFont);
+        string snapshot =
+            $"{eventName}|{reason}|{ClientSize}|{DeviceDpi}|{currentFont.Size:0.##}|{resolvedMetrics.RowWidth}|{resolvedMetrics.LeftRequiredWidth}|{resolvedMetrics.ClockReservedWidth}|{resolvedMetrics.TotalRequiredWidth}|{resolvedMetrics.Fits}|{skippedReason}|{fontDisposeSuppressed}|{exceptionPrevented}";
+        DateTime nowUtc = DateTime.UtcNow;
+        if (snapshot == _lastHeaderResponsiveStabilizeDiagSnapshot && (nowUtc - _lastHeaderResponsiveStabilizeDiagUtc) < TimeSpan.FromSeconds(3))
+        {
+            return;
+        }
+
+        _lastHeaderResponsiveStabilizeDiagSnapshot = snapshot;
+        _lastHeaderResponsiveStabilizeDiagUtc = nowUtc;
+        LogService.Info(
+            $"[HeaderResponsiveStabilizeDiag] event={eventName} reason={reason} ClientSize={ClientSize} DeviceDpi={DeviceDpi} " +
+            $"baseFontSize={GetHeaderStatusResponsiveBaseFont().Size:0.##} resolvedFontSize={currentFont.Size:0.##} appliedFontSize={lblPage?.Font?.Size:0.##} " +
+            $"rowWidth={resolvedMetrics.RowWidth} leftRequiredWidth={resolvedMetrics.LeftRequiredWidth} clockReservedWidth={resolvedMetrics.ClockReservedWidth} totalRequiredWidth={resolvedMetrics.TotalRequiredWidth} fitResult={resolvedMetrics.Fits} " +
+            $"skipReason={skippedReason ?? "-"} fontDisposeSuppressed={fontDisposeSuppressed} exceptionPrevented={exceptionPrevented}");
+    }
+    private void LogHeaderRightDiag(
+        string eventName,
+        int markCount = -1,
+        string? markSizeText = null,
+        string? pathRightText = null,
+        string? itemRightText = null,
+        int clockReservedWidth = -1)
+    {
+        if (!HeaderStatusFontRouteDiagnosticLoggingEnabled)
+        {
+            return;
+        }
+
+        string currentPathRightText = pathRightText ?? lblSort?.Text ?? string.Empty;
+        string currentItemRightText = itemRightText ?? lblFileStatsEx?.Text ?? string.Empty;
+        string currentClockText = lblClock?.Text ?? string.Empty;
+        Font sortFont = lblSort?.Font ?? SystemFonts.DefaultFont;
+        Font clockFont = lblClock?.Font ?? sortFont;
+        int pathRightMeasuredWidth = Math.Max(
+            MeasureHeaderTextWidth(currentPathRightText, sortFont),
+            MeasureHeaderControlTextWidth(currentPathRightText, sortFont));
+        int clockMeasuredWidth = Math.Max(
+            MeasureHeaderTextWidth(currentClockText, clockFont),
+            MeasureHeaderControlTextWidth(currentClockText, clockFont));
+        int resolvedClockReservedWidth = clockReservedWidth >= 0
+            ? clockReservedWidth
+            : GetHeaderClockReservedWidth(clockFont);
+        Rectangle sortBounds = lblSort?.Bounds ?? Rectangle.Empty;
+        Rectangle itemBounds = lblFileStatsEx?.Bounds ?? Rectangle.Empty;
+        Rectangle clockBounds = lblClock?.Bounds ?? Rectangle.Empty;
+        Size infoRow2Size = infoRow2Panel?.ClientSize ?? Size.Empty;
+        Size headerSize = headerPanel?.ClientSize ?? Size.Empty;
+        float fontSize = sortFont.Size;
+        bool markSizeMissing = markCount > 0 && string.IsNullOrWhiteSpace(markSizeText);
+        bool markValueClipped = lblSort != null && lblSort.Visible && lblSort.Width < pathRightMeasuredWidth;
+        bool clockTimeMissing = !string.IsNullOrWhiteSpace(currentClockText) && !currentClockText.Contains(':');
+        bool clockValueClipped = lblClock != null && lblClock.Visible && lblClock.Width < clockMeasuredWidth;
+        bool anomaly = markSizeMissing || markValueClipped || clockTimeMissing || clockValueClipped;
+        if (eventName == "UpdateTitleHeaderClock" && !anomaly)
+        {
+            return;
+        }
+
+        string snapshot =
+            $"{eventName}|{markCount}|{markSizeText}|{currentPathRightText}|{currentItemRightText}|{lblSort?.Width}|{sortBounds}|" +
+            $"{currentClockText}|{lblClock?.Width}|{clockBounds}|{resolvedClockReservedWidth}|{infoRow2Size}|{headerSize}|{fontSize:0.##}";
+        DateTime nowUtc = DateTime.UtcNow;
+        if (!anomaly && snapshot == _lastHeaderRightDiagSnapshot && (nowUtc - _lastHeaderRightDiagUtc) < TimeSpan.FromSeconds(15))
+        {
+            return;
+        }
+
+        _lastHeaderRightDiagSnapshot = snapshot;
+        _lastHeaderRightDiagUtc = nowUtc;
+        LogService.Info(
+            $"[HeaderRightDiag] event={eventName} MarkCount={markCount} MarkSizeText='{markSizeText ?? "<null>"}' " +
+            $"pathRightText='{currentPathRightText}' lblSort.Text='{lblSort?.Text ?? string.Empty}' lblSort.Width={lblSort?.Width ?? -1} lblSort.Bounds={sortBounds} " +
+            $"pathRightMeasuredWidth={pathRightMeasuredWidth} itemRightText='{currentItemRightText}' lblFileStatsEx.Text='{lblFileStatsEx?.Text ?? string.Empty}' " +
+            $"lblFileStatsEx.Width={lblFileStatsEx?.Width ?? -1} lblFileStatsEx.Bounds={itemBounds} " +
+            $"lblClock.Text='{currentClockText}' lblClock.Width={lblClock?.Width ?? -1} lblClock.Bounds={clockBounds} " +
+            $"clockMeasuredWidth={clockMeasuredWidth} clockReservedWidth={resolvedClockReservedWidth} " +
+            $"infoRow2Panel.ClientSize={infoRow2Size} headerPanel.ClientSize={headerSize} fontSize={fontSize:0.##}");
+    }
+
     private static int MeasureHeaderTextWidth(string text, Font font)
     {
         if (string.IsNullOrEmpty(text))
@@ -20731,6 +22594,73 @@ private void InitializeBrowserTabControl()
             Size.Empty,
             TextFormatFlags.NoPadding | TextFormatFlags.SingleLine
         ).Width;
+    }
+    private static int MeasureHeaderControlTextWidth(string text, Font font)
+    {
+        if (string.IsNullOrEmpty(text))
+        {
+            return 0;
+        }
+        return TextRenderer.MeasureText(
+            text,
+            font,
+            Size.Empty,
+            TextFormatFlags.SingleLine
+        ).Width;
+    }
+    private static int MeasureHeaderDisplayWidth(string text, Font font)
+    {
+        return Math.Max(
+            MeasureHeaderTextWidth(text, font),
+            MeasureHeaderControlTextWidth(text, font));
+    }
+    private static int MeasureHeaderRow2SegmentWidth(Font font, string text, Label? label)
+    {
+        if (string.IsNullOrEmpty(text))
+        {
+            return 0;
+        }
+
+        int width = MeasureHeaderDisplayWidth(text, font);
+        if (label != null)
+        {
+            width += label.Padding.Horizontal;
+        }
+
+        return width;
+    }
+    private static string ExtractMarkSizeText(string? sortText)
+    {
+        if (string.IsNullOrWhiteSpace(sortText))
+        {
+            return string.Empty;
+        }
+
+        const string marker = "MarkSize:";
+        int markerIndex = sortText.IndexOf(marker, StringComparison.OrdinalIgnoreCase);
+        if (markerIndex < 0)
+        {
+            return string.Empty;
+        }
+
+        return sortText[(markerIndex + marker.Length)..].Trim();
+    }
+    private static int MeasureHeaderLabelReservedWidth(Label? label, string text, int extraPadding)
+    {
+        Font font = label?.Font ?? SystemFonts.DefaultFont;
+        return MeasureHeaderLabelReservedWidth(label, text, font, extraPadding);
+    }
+    private static int MeasureHeaderLabelReservedWidth(Label? label, string text, Font font, int extraPadding)
+    {
+        if (label == null || string.IsNullOrEmpty(text))
+        {
+            return 0;
+        }
+
+        int measuredWidth = Math.Max(
+            MeasureHeaderTextWidth(text, font),
+            MeasureHeaderControlTextWidth(text, font));
+        return measuredWidth + label.Padding.Horizontal + extraPadding;
     }
     private static string FitTextWithEllipsis(string text, Font font, int maxWidth, string ellipsis = "...")
     {
@@ -21006,4 +22936,102 @@ private void InitializeBrowserTabControl()
         lblName.Cursor = string.IsNullOrWhiteSpace(fullPath) ? Cursors.Default : Cursors.Hand;
     }
     #endregion
+
+    private DialogResult ShowDragInCopyConfirmationDialog(string message)
+    {
+        using (var form = new Form())
+        {
+            form.Text = "Drag-in (Copy)";
+            form.FormBorderStyle = FormBorderStyle.FixedDialog;
+            form.MaximizeBox = false;
+            form.MinimizeBox = false;
+            form.ShowInTaskbar = false;
+            form.StartPosition = FormStartPosition.CenterParent;
+            form.ClientSize = new Size(420, 140);
+
+            var label = new Label
+            {
+                Text = message,
+                Location = new Point(15, 15),
+                Size = new Size(390, 60),
+                TextAlign = ContentAlignment.MiddleLeft
+            };
+
+            var btnYes = new Button
+            {
+                Text = "はい(&Y)",
+                DialogResult = DialogResult.Yes,
+                Location = new Point(210, 90),
+                Size = new Size(90, 30)
+            };
+
+            var btnNo = new Button
+            {
+                Text = "いいえ(&N)",
+                DialogResult = DialogResult.No,
+                Location = new Point(310, 90),
+                Size = new Size(90, 30)
+            };
+
+            form.Controls.Add(label);
+            form.Controls.Add(btnYes);
+            form.Controls.Add(btnNo);
+
+            form.AcceptButton = btnYes;
+            form.CancelButton = btnNo;
+
+            return form.ShowDialog(this);
+        }
+    }
+
+    private DialogResult ShowLargeTextClipboardCopyConfirmationDialog(int lineCount, long estimatedBytes)
+    {
+        string message = $"{lineCount:N0} 行 / 約 {FileOperationService.FormatSize(estimatedBytes)} の選択範囲です。\n" +
+                         "クリップボードへは大きすぎるため、直接コピーしません。\n\n" +
+                         "選択範囲をファイルへ保存しますか？";
+
+        using (var form = new Form())
+        {
+            form.Text = "LargeText 大量コピー";
+            form.FormBorderStyle = FormBorderStyle.FixedDialog;
+            form.MaximizeBox = false;
+            form.MinimizeBox = false;
+            form.ShowInTaskbar = false;
+            form.StartPosition = FormStartPosition.CenterParent;
+            form.ClientSize = new Size(420, 140);
+
+            var label = new Label
+            {
+                Text = message,
+                Location = new Point(15, 15),
+                Size = new Size(390, 60),
+                TextAlign = ContentAlignment.MiddleLeft
+            };
+
+            var btnYes = new Button
+            {
+                Text = "はい(&Y)",
+                DialogResult = DialogResult.Yes,
+                Location = new Point(210, 90),
+                Size = new Size(90, 30)
+            };
+
+            var btnNo = new Button
+            {
+                Text = "いいえ(&N)",
+                DialogResult = DialogResult.No,
+                Location = new Point(310, 90),
+                Size = new Size(90, 30)
+            };
+
+            form.Controls.Add(label);
+            form.Controls.Add(btnYes);
+            form.Controls.Add(btnNo);
+
+            form.AcceptButton = btnYes;
+            form.CancelButton = btnNo;
+
+            return form.ShowDialog(this);
+        }
+    }
 }

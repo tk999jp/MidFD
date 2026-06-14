@@ -50,14 +50,10 @@ namespace MidFD.Helpers
         {
             if (isCancelRequested)
             {
-                return string.IsNullOrWhiteSpace(operationLabel)
-                    ? "中断処理中です。完了までお待ちください。"
-                    : $"{GetOperationLabelOrDefault(operationLabel)}を中断中です。完了までお待ちください。";
+                return "中断処理中です。完了までお待ちください。";
             }
 
-            string message = string.IsNullOrWhiteSpace(operationLabel)
-                ? "処理中のため操作できません。"
-                : $"処理中のため {GetOperationLabelOrDefault(operationLabel)} できません。";
+            string message = "処理中のためこの操作は実行できません。";
 
             if (canCancel)
             {
@@ -85,13 +81,13 @@ namespace MidFD.Helpers
         public static string GetOperationProgressMessage(string operationName, int processedCount, int totalCount, string currentFileName)
         {
             string action = GetOperationLabelOrDefault(operationName);
-            return $"{processedCount}/{totalCount} 件 {action}中: {currentFileName}";
+            return $"{action}中: {processedCount} / {totalCount} 項目";
         }
 
         public static string GetPasteProgressMessage(bool isCut, int processedCount, int totalCount, string currentFileName)
         {
             string action = isCut ? "貼り付け(移動)" : "貼り付け(コピー)";
-            return $"{processedCount}/{totalCount} 件 {action}中: {currentFileName}";
+            return $"{action}中: {processedCount} / {totalCount} 項目";
         }
 
         public static string GetConflictConfirmationMessage(string operationName, string targetName)

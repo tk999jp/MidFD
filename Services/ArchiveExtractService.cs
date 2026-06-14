@@ -1,3 +1,4 @@
+using MidFD.Helpers;
 using MidFD.Models;
 
 namespace MidFD.Services;
@@ -142,7 +143,7 @@ public static class ArchiveExtractService
             }
 
             // それ以外は TarFallbackService を試す
-            if (TarFallbackService.IsAvailable())
+            if (ArchiveFileTypeHelper.CanUseTarFallbackForUnpack(request.ArchivePath) && TarFallbackService.IsAvailable())
             {
                 try
                 {

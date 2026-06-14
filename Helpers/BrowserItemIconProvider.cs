@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Drawing;
 using System.IO;
@@ -7,13 +7,14 @@ using System.Runtime.InteropServices;
 namespace MidFD.Helpers;
 
 /// <summary>
-/// Browser 一覧で使う小アイコンを軽量に取得・キャッシュする。
-/// Explorer 風の大アイコン化は行わず、拡張子単位の小アイコンだけを扱う。
+/// Browser 一覧で使うアイコンを軽量に取得・キャッシュする。
+/// フォントサイズ/DPIに応じて Small/Large シェルアイコンを自動選択してロードする。
 /// </summary>
 public static class BrowserItemIconProvider
 {
     private const uint SHGFI_ICON = 0x000000100;
     private const uint SHGFI_SMALLICON = 0x000000001;
+    private const uint SHGFI_LARGEICON = 0x000000000;
     private const uint SHGFI_USEFILEATTRIBUTES = 0x000000010;
     private const uint FILE_ATTRIBUTE_FILE = 0x00000080;
     private const uint FILE_ATTRIBUTE_DIRECTORY = 0x00000010;
@@ -23,7 +24,14 @@ public static class BrowserItemIconProvider
 
     public static Icon GetSmallIcon(string? fullPath, bool isDirectory)
     {
-        string cacheKey = BuildCacheKey(fullPath, isDirectory);
+        return GetIcon(fullPath, isDirectory, 16);
+    }
+
+    public static Icon GetIcon(string? fullPath, bool isDirectory, int targetSize)
+    {
+        bool useLarge = targetSize > 16;
+        string sizeSuffix = useLarge ? "_L" : "_S";
+        string cacheKey = BuildCacheKey(fullPath, isDirectory) + sizeSuffix;
 
         lock (SyncRoot)
         {
@@ -32,7 +40,7 @@ public static class BrowserItemIconProvider
                 return cached;
             }
 
-            var icon = LoadShellIcon(fullPath, isDirectory) ?? SystemIcons.Application;
+            var icon = LoadShellIcon(fullPath, isDirectory, useLarge) ?? SystemIcons.Application;
             IconCache[cacheKey] = icon;
             return icon;
         }
@@ -54,7 +62,7 @@ public static class BrowserItemIconProvider
         return extension.ToLowerInvariant();
     }
 
-    private static Icon? LoadShellIcon(string? fullPath, bool isDirectory)
+    private static Icon? LoadShellIcon(string? fullPath, bool isDirectory, bool useLarge)
     {
         string iconSource = isDirectory
             ? "folder"
@@ -62,12 +70,13 @@ public static class BrowserItemIconProvider
 
         uint fileAttributes = isDirectory ? FILE_ATTRIBUTE_DIRECTORY : FILE_ATTRIBUTE_FILE;
         SHFILEINFO shinfo = new();
+        uint sizeFlags = useLarge ? SHGFI_LARGEICON : SHGFI_SMALLICON;
         IntPtr result = SHGetFileInfo(
             iconSource,
             fileAttributes,
             ref shinfo,
             (uint)Marshal.SizeOf<SHFILEINFO>(),
-            SHGFI_ICON | SHGFI_SMALLICON | SHGFI_USEFILEATTRIBUTES);
+            SHGFI_ICON | sizeFlags | SHGFI_USEFILEATTRIBUTES);
 
         if (result == IntPtr.Zero || shinfo.hIcon == IntPtr.Zero)
         {

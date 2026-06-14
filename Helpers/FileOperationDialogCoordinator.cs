@@ -1,4 +1,4 @@
-﻿using MidFD.Dialogs;
+using MidFD.Dialogs;
 using MidFD.Models;
 using MidFD.Services;
 
@@ -81,7 +81,7 @@ public sealed class FileOperationDialogCoordinator
         }
 
         string message = FileOperationPresentationHelper.GetCreateDirectoryConfirmationMessage(destinationDirectory);
-        DialogResult result = MessageBox.Show(message, "確認", MessageBoxButtons.YesNo, MessageBoxIcon.Question);
+        DialogResult result = ShowCreateDirectoryConfirmationDialog(owner, message);
         if (result != DialogResult.Yes)
         {
             return false;
@@ -96,6 +96,53 @@ public sealed class FileOperationDialogCoordinator
         {
             MessageBox.Show($"ディレクトリの作成に失敗しました: {ex.Message}", "エラー", MessageBoxButtons.OK, MessageBoxIcon.Error);
             return false;
+        }
+    }
+
+    private DialogResult ShowCreateDirectoryConfirmationDialog(IWin32Window owner, string message)
+    {
+        using (var form = new System.Windows.Forms.Form())
+        {
+            form.Text = "確認";
+            form.FormBorderStyle = System.Windows.Forms.FormBorderStyle.FixedDialog;
+            form.MaximizeBox = false;
+            form.MinimizeBox = false;
+            form.ShowInTaskbar = false;
+            form.StartPosition = System.Windows.Forms.FormStartPosition.CenterParent;
+            form.ClientSize = new System.Drawing.Size(420, 140);
+
+            var label = new System.Windows.Forms.Label
+            {
+                Text = message,
+                Location = new System.Drawing.Point(15, 15),
+                Size = new System.Drawing.Size(390, 60),
+                TextAlign = System.Drawing.ContentAlignment.MiddleLeft
+            };
+
+            var btnYes = new System.Windows.Forms.Button
+            {
+                Text = "はい(&Y)",
+                DialogResult = System.Windows.Forms.DialogResult.Yes,
+                Location = new System.Drawing.Point(210, 90),
+                Size = new System.Drawing.Size(90, 30)
+            };
+
+            var btnNo = new System.Windows.Forms.Button
+            {
+                Text = "いいえ(&N)",
+                DialogResult = System.Windows.Forms.DialogResult.No,
+                Location = new System.Drawing.Point(310, 90),
+                Size = new System.Drawing.Size(90, 30)
+            };
+
+            form.Controls.Add(label);
+            form.Controls.Add(btnYes);
+            form.Controls.Add(btnNo);
+
+            form.AcceptButton = btnYes;
+            form.CancelButton = btnNo;
+
+            return form.ShowDialog(owner);
         }
     }
 
@@ -196,10 +243,14 @@ public sealed class FileOperationDialogCoordinator
         return PasteCollisionResolver.Resolve(owner, sourcePath, destPath, allowRename, isCut, ref applyToAllDecision);
     }
 
-    public IProgress<FileOperationProgress> CreateOperationProgress(string operationName, Action<string> showStatusMessage)
+    public IProgress<FileOperationProgress> CreateOperationProgress(
+        string operationName,
+        Action<string> showStatusMessage,
+        Action<FileOperationProgress>? showProgress = null)
     {
         return new Progress<FileOperationProgress>(p =>
         {
+            showProgress?.Invoke(p);
             showStatusMessage(FileOperationPresentationHelper.GetOperationProgressMessage(
                 operationName,
                 p.ProcessedCount,
@@ -208,10 +259,14 @@ public sealed class FileOperationDialogCoordinator
         });
     }
 
-    public IProgress<FileOperationProgress> CreatePasteProgress(bool isCut, Action<string> showStatusMessage)
+    public IProgress<FileOperationProgress> CreatePasteProgress(
+        bool isCut,
+        Action<string> showStatusMessage,
+        Action<FileOperationProgress>? showProgress = null)
     {
         return new Progress<FileOperationProgress>(p =>
         {
+            showProgress?.Invoke(p);
             showStatusMessage(FileOperationPresentationHelper.GetPasteProgressMessage(
                 isCut,
                 p.ProcessedCount,

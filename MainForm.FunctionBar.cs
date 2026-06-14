@@ -23,6 +23,36 @@ namespace MidFD;
 
 public partial class MainForm : Form
 {
+    private const int FunctionBarFixedCellCount = 6;
+    private const int FunctionBarSlotPaddingX = 2;
+    private const int FunctionBarSlotMinWidth = 46;
+    private const int FunctionBarInnerGap = 5;
+    private const int FunctionBarGroupGap = 20;
+    private const int FunctionBarLayerBadgeReserveWidth = 48;
+    private const int FunctionBarLayerBadgeLeftPadding = 4;
+
+    private static float GetFunctionBarEffectiveScale(Font layoutFont, int panelWidth)
+    {
+        float fontScale = layoutFont.Size / 10.0F;
+        fontScale = Math.Clamp(fontScale, 1.0F, 3.0F);
+
+        // 横方向フィットのためのスケール逆算
+        // 12スロット同一幅 (desiredSlotWidthBase=76) + バッジ予約幅 (badgeReserveWidthBase=48) = 960
+        // 固定ギャップ合計 = 89 (InnerGap*9 + GroupGap*2 + SlotPadding*2 = 5*9 + 20*2 + 2*2 = 89)
+        float widthFitScale = (panelWidth - 89.0F) / 960.0F;
+        widthFitScale = Math.Clamp(widthFitScale, 1.0F, 3.0F);
+
+        return Math.Min(fontScale, widthFitScale);
+    }
+
+    private Font CreateFunctionBarRenderFont(Font baseFont)
+    {
+        int panelWidth = functionBarPanel?.ClientSize.Width ?? 1024;
+        if (panelWidth <= 0) panelWidth = 1024;
+        float scale = GetFunctionBarEffectiveScale(baseFont, panelWidth);
+        float size = Math.Clamp(baseFont.Size * 0.78F, 7.5F, 10.0F * scale);
+        return new Font(baseFont.FontFamily, size, baseFont.Style, GraphicsUnit.Point);
+    }
 
     private void InitializeFunctionBarToolTip()
     {
@@ -131,11 +161,15 @@ public partial class MainForm : Form
 
     private bool ShouldShowBrowserFunctionBarForCurrentProfile()
     {
-        return true;
+        return _settings.Appearance?.ShowFunctionBar ?? true;
     }
 
     private bool ShouldShowFunctionBarForCurrentContext()
     {
+        if (!(_settings.Appearance?.ShowFunctionBar ?? true))
+        {
+            return false;
+        }
         if (_uiMode == UIMode.Browser)
         {
             return ShouldShowBrowserFunctionBarForCurrentProfile();
@@ -152,6 +186,10 @@ public partial class MainForm : Form
         if (shouldShow)
         {
             functionBarPanel.Height = _functionBarPreferredHeight;
+        }
+        else
+        {
+            functionBarPanel.Height = 0;
         }
         contentFramePanel.PerformLayout();
         mainAreaPanel.PerformLayout();
@@ -545,11 +583,12 @@ public partial class MainForm : Form
     private void FunctionBarPanel_MouseMove(object? sender, MouseEventArgs e)
     {
         if (_uiMode != UIMode.Browser || !ShouldShowBrowserFunctionBarForCurrentProfile()) return;
-        using var font = _headerPaintFont != null
+        using var layoutFont = _headerPaintFont != null
             ? new Font(_headerPaintFont.FontFamily, _headerPaintFont.Size, _headerPaintFont.Style)
             : new Font("Consolas", 10F);
+        using var functionBarFont = CreateFunctionBarRenderFont(layoutFont);
 
-        int index = HitTestFunctionKeyIndex(e.Location, functionBarPanel.ClientRectangle, font);
+        int index = HitTestFunctionKeyIndex(e.Location, functionBarPanel.ClientRectangle, functionBarFont);
         if (index != _hoveredFuncKeyIndex)
         {
             int oldIndex = _hoveredFuncKeyIndex;
@@ -567,11 +606,12 @@ public partial class MainForm : Form
         if (_uiMode != UIMode.Browser || !ShouldShowBrowserFunctionBarForCurrentProfile()) return;
         if (e.Button != MouseButtons.Left) return;
 
-        using var font = _headerPaintFont != null
+        using var layoutFont = _headerPaintFont != null
             ? new Font(_headerPaintFont.FontFamily, _headerPaintFont.Size, _headerPaintFont.Style)
             : new Font("Consolas", 10F);
+        using var functionBarFont = CreateFunctionBarRenderFont(layoutFont);
 
-        int index = HitTestFunctionKeyIndex(e.Location, functionBarPanel.ClientRectangle, font);
+        int index = HitTestFunctionKeyIndex(e.Location, functionBarPanel.ClientRectangle, functionBarFont);
         if (index >= 0)
         {
             var profile = FunctionKeyProfileService.ResolveProfile(CurrentFunctionKeyProfileValue);
@@ -628,11 +668,12 @@ public partial class MainForm : Form
         if (_uiMode != UIMode.Browser || !ShouldShowBrowserFunctionBarForCurrentProfile()) return;
         if (e.Button != MouseButtons.Left) return;
 
-        using var font = _headerPaintFont != null
+        using var layoutFont = _headerPaintFont != null
             ? new Font(_headerPaintFont.FontFamily, _headerPaintFont.Size, _headerPaintFont.Style)
             : new Font("Consolas", 10F);
+        using var functionBarFont = CreateFunctionBarRenderFont(layoutFont);
 
-        int index = HitTestFunctionKeyIndex(e.Location, functionBarPanel.ClientRectangle, font);
+        int index = HitTestFunctionKeyIndex(e.Location, functionBarPanel.ClientRectangle, functionBarFont);
         if (index < 0) return;
 
         var profile = FunctionKeyProfileService.ResolveProfile(CurrentFunctionKeyProfileValue);
@@ -656,9 +697,10 @@ public partial class MainForm : Form
         int totalW = panel.ClientSize.Width;
         int totalH = panel.ClientSize.Height;
         if (totalW <= 0 || totalH <= 0) return;
-        using var font = _headerPaintFont != null
+        using var layoutFont = _headerPaintFont != null
             ? new Font(_headerPaintFont.FontFamily, _headerPaintFont.Size, _headerPaintFont.Style)
             : new Font("Consolas", 10F);
+        using var functionBarFont = CreateFunctionBarRenderFont(layoutFont);
 
         var snapshot = _cachedCommandUiSnapshot;
         bool isCompatible = FunctionKeyProfileService.ResolveProfile(CurrentFunctionKeyProfileValue) == FunctionKeyProfile.FDCompatible;
@@ -671,20 +713,11 @@ public partial class MainForm : Form
         var (isShift, isCtrl, isAlt) = GetActiveFunctionBarLayer();
         Rectangle[]? activeRects = null;
 
-        if (isCompatible)
-        {
-            // WinFD互換表示の上辺全幅罫線 (パレットの無効境界色に連動)
-            using (var sepPen = new Pen(palette.DisabledBorderColor, 1))
-            {
-                e.Graphics.DrawLine(sepPen, 0, 0, totalW - 1, 0);
-            }
-        }
-
         var profile = FunctionKeyProfileService.ResolveProfile(CurrentFunctionKeyProfileValue);
         var models = BuildFunctionBarSlotModels(profile, isShift, isCtrl, isAlt);
         var layoutModels = BuildFunctionBarSlotModels(profile, false, false, false);
         var labels = layoutModels.Select(model => model.LayoutLabel).ToArray();
-        activeRects = CalculateFunctionBarLabelRects(panel.ClientRectangle, font, labels);
+        activeRects = CalculateFunctionBarLabelRects(panel.ClientRectangle, functionBarFont, labels);
         for (int i = 0; i < 12; i++)
         {
             var model = models[i];
@@ -698,23 +731,22 @@ public partial class MainForm : Form
             string displayText = model.DisplayLabel;
             if (!string.IsNullOrEmpty(displayText))
             {
-                Size fullSize = TextRenderer.MeasureText(e.Graphics, displayText, font, rect.Size, TextFormatFlags.NoPadding);
+                Size fullSize = TextRenderer.MeasureText(e.Graphics, displayText, functionBarFont, rect.Size, TextFormatFlags.NoPadding);
                 if (fullSize.Width > rect.Width)
                 {
                     displayText = GetShortenedLabel(model.ShortLabel);
                 }
-                DrawFunctionBarButtonText(e.Graphics, rect, displayText, model.HotKeyChar, font, palette, isEnabled, isPressed);
+                DrawFunctionBarButtonText(e.Graphics, rect, displayText, model.HotKeyChar, functionBarFont, palette, isEnabled, isPressed);
             }
         }
 
         // 左端バッジ描画
-        int badgeW = GetFunctionBarLayerBadgeWidth(isShift, isCtrl, isAlt);
+        int badgeW = GetFunctionBarLayerBadgeWidth(isShift, isCtrl, isAlt, functionBarFont);
         if (badgeW > 0)
         {
-            DrawFunctionBarLayerBadge(e.Graphics, panel.ClientRectangle, activeRects, font, palette, isShift, isCtrl, isAlt);
+            DrawFunctionBarLayerBadge(e.Graphics, panel.ClientRectangle, activeRects, layoutFont, palette, isShift, isCtrl, isAlt);
         }
     }
-
     private void UpdateFunctionBarToolTip(int index, Point location)
     {
         if (index < 0 || !_settings.Input.ShowFunctionBarTooltips)

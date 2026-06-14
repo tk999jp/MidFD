@@ -12,6 +12,11 @@ namespace MidFD;
 /// </summary>
 public class SettingsForm : Form
 {
+    private const string FontPreviewSampleText =
+        "貴社の記者が汽車で帰社した。\r\n" +
+        "Aaあぁアァ亜宇 0123456789 ()[]{}<>\r\n" +
+        "Yesterday all my troubles seemed so far away.";
+
     private readonly AppSettings _settings;
 
     private readonly TextBox _sevenZipPathBox;
@@ -31,6 +36,7 @@ public class SettingsForm : Form
     private readonly CheckBox _showHiddenFilesCheckBox;
     private readonly CheckBox _showItemIconsCheckBox;
     private readonly CheckBox _useUnderlineCursorCheckBox;
+    private readonly CheckBox _showFunctionBarCheckBox;
     private readonly CheckBox _showBrowserToolbarCheckBox;
     private readonly ComboBox _fileDisplayModeCombo;
     private readonly ComboBox _dateFormatCombo;
@@ -50,6 +56,8 @@ public class SettingsForm : Form
     private readonly CheckBox _confirmDeleteCheckBox;
     private readonly CheckBox _confirmPermanentDeleteCheckBox;
     private readonly CheckBox _useMidFdManagedTrashCheckBox;
+    private readonly CheckBox _managedTrashAutoHandoffCheckBox;
+    private readonly NumericUpDown _managedTrashUndoRetentionDaysBox;
     private readonly CheckBox _reloadAfterFileOperationCheckBox;
     private readonly CheckBox _selectCreatedItemCheckBox;
     private readonly CheckBox _clipboardPasteTextAsFileCheckBox;
@@ -98,17 +106,10 @@ public class SettingsForm : Form
     private readonly Panel _fileListColorCurrentPreviewPanel;
     private readonly ListView _fileListColorPreviewPanel;
     private readonly Label _fileListColorWarningLabel;
+    private readonly Panel _functionBarPreviewPanel;
     private bool _updatingColorFromUi;
     private bool _suppressColorUiEvents;
     private bool _fileListCustomColorsEnabledForSave;
-
-    // UIクローム/Viewer 手動指定色コントロール
-    private readonly CheckBox _customUiThemeCheckBox;
-    private readonly Button _customUiThemeEditButton;
-    private readonly Panel _customFilerBackPreview;
-    private readonly Panel _customFilerForePreview;
-    private readonly Panel _customViewerBackPreview;
-    private readonly Panel _customViewerForePreview;
 
     public enum InitialTab
     {
@@ -121,6 +122,7 @@ public class SettingsForm : Form
     }
 
     public event EventHandler? SettingsApplied;
+    public event EventHandler? ManualEmptyManagedTrashRequested;
 
     public SettingsForm(AppSettings settings, FeatureProfile effectiveProfile, InitialTab initialTab = InitialTab.Display)
     {
@@ -226,7 +228,7 @@ public class SettingsForm : Form
         tabDisplay.AutoScroll = false;
         tabColor.AutoScroll = false;
 
-        (_filerFontCombo, _filerFontSizeBox, _showBrowserTabCategoryRowCheckBox, _showExtensionsCheckBox, _showDirectoryMarkerCheckBox, _showHiddenFilesCheckBox, _showItemIconsCheckBox, _useUnderlineCursorCheckBox, _showBrowserToolbarCheckBox, _fileDisplayModeCombo, _dateFormatCombo, _sizeFormatCombo,
+        (_filerFontCombo, _filerFontSizeBox, _showBrowserTabCategoryRowCheckBox, _showExtensionsCheckBox, _showDirectoryMarkerCheckBox, _showHiddenFilesCheckBox, _showItemIconsCheckBox, _useUnderlineCursorCheckBox, _showFunctionBarCheckBox, _showBrowserToolbarCheckBox, _fileDisplayModeCombo, _dateFormatCombo, _sizeFormatCombo,
          _viewerFontCombo, _viewerFontSizeBox, _viewerWordWrapCheckBox, _reuseImageViewerCheckBox, _closeImageViewerOnNonImageCheckBox, _rememberImageViewerBoundsCheckBox)
             = BuildDisplayAndPreviewTab(tabDisplay, fonts, dateFormats, sizeFormats);
 
@@ -243,14 +245,9 @@ public class SettingsForm : Form
         _fileListColorCurrentPreviewPanel = colorTabResult.FileListColorCurrentPreviewPanel;
         _fileListColorPreviewPanel = colorTabResult.FileListColorPreviewPanel;
         _fileListColorWarningLabel = colorTabResult.FileListColorWarningLabel;
-        _customUiThemeCheckBox = colorTabResult.CustomUiThemeCheckBox;
-        _customUiThemeEditButton = colorTabResult.CustomUiThemeEditButton;
-        _customFilerBackPreview = colorTabResult.CustomFilerBackPreview;
-        _customFilerForePreview = colorTabResult.CustomFilerForePreview;
-        _customViewerBackPreview = colorTabResult.CustomViewerBackPreview;
-        _customViewerForePreview = colorTabResult.CustomViewerForePreview;
+        _functionBarPreviewPanel = colorTabResult.FunctionBarPreviewPanel;
 
-        (_confirmDeleteCheckBox, _confirmPermanentDeleteCheckBox, _useMidFdManagedTrashCheckBox, _reloadAfterFileOperationCheckBox, _selectCreatedItemCheckBox, _clipboardPasteTextAsFileCheckBox,
+        (_confirmDeleteCheckBox, _confirmPermanentDeleteCheckBox, _useMidFdManagedTrashCheckBox, _managedTrashAutoHandoffCheckBox, _managedTrashUndoRetentionDaysBox, _reloadAfterFileOperationCheckBox, _selectCreatedItemCheckBox, _clipboardPasteTextAsFileCheckBox,
          _enableMouseGesturesCheckBox, _enableWorkspaceSnapshotCheckBox, _restoreLastPathCheckBox)
             = BuildOperationAndInputTab(tabOperation);
 
@@ -317,7 +314,7 @@ public class SettingsForm : Form
         };
     }
 
-    private (ComboBox filerFont, NumericUpDown filerSize, CheckBox showBrowserTabCategoryRow, CheckBox showExtensions, CheckBox showDirectoryMarker, CheckBox showHiddenFiles, CheckBox showItemIcons, CheckBox useUnderlineCursor, CheckBox showBrowserToolbar, ComboBox fileDisplayMode, ComboBox dateFormat, ComboBox sizeFormat,
+    private (ComboBox filerFont, NumericUpDown filerSize, CheckBox showBrowserTabCategoryRow, CheckBox showExtensions, CheckBox showDirectoryMarker, CheckBox showHiddenFiles, CheckBox showItemIcons, CheckBox useUnderlineCursor, CheckBox showFunctionBar, CheckBox showBrowserToolbar, ComboBox fileDisplayMode, ComboBox dateFormat, ComboBox sizeFormat,
              ComboBox viewerFont, NumericUpDown viewerSize, CheckBox viewerWordWrap, CheckBox reuseImageViewer, CheckBox closeOnNonImage, CheckBox rememberBounds)
         BuildDisplayAndPreviewTab(TabPage tab, string[] fonts, string[] dateFormats, string[] sizeFormats)
     {
@@ -330,15 +327,27 @@ public class SettingsForm : Form
         int topY = 22;
 
         // --- Left: List Display ---
-        var groupList = new GroupBox { Text = "一覧表示", Location = new Point(8, 6), Size = new Size(500, 414) };
+        var groupList = new GroupBox { Text = "一覧表示", Location = new Point(8, 6), Size = new Size(500, 520) };
         tab.Controls.Add(groupList);
 
         int top = topY;
 
-        AddLabel(groupList, "フォント:", top, lblW);
-        var filerFont = AddComboBox(groupList, inpX, top, 190, fonts, _settings.Fonts.FileListFontFamily);
-        var filerSize = AddNumericUpDown(groupList, sizeX, top, 60, (decimal)_settings.Fonts.FileListFontSize);
+        var fileListFontLabel = new Label
+        {
+            Text = "一覧表示フォント:",
+            Location = new Point(16, top + 4),
+            Size = new Size(112, 20),
+            TextAlign = ContentAlignment.MiddleLeft
+        };
+        groupList.Controls.Add(fileListFontLabel);
+        var filerFont = AddFontComboBox(groupList, 130, top, 176, fonts, _settings.Fonts.FileListFontFamily);
+        var filerSize = AddNumericUpDown(groupList, 314, top, 60, (decimal)_settings.Fonts.FileListFontSize);
         top += rowH + 8;
+
+        int fileListPreviewTop = top + 4;
+        var fileListFontSample = CreateFontSampleTextBox(new Point(16, fileListPreviewTop), new Size(460, 104), FontPreviewSampleText);
+        groupList.Controls.Add(fileListFontSample);
+        top += 112;
 
         // チェックボックス群（1列配置）
         int checkY = top;
@@ -355,7 +364,9 @@ public class SettingsForm : Form
         checkY += 24;
         var useUnderlineCursor = AddCheckBox(groupList, "カーソル行をアンダーライン表示", 16, checkY, _settings.Appearance.UseUnderlineCursor);
         checkY += 24;
-        var showBrowserToolbar = AddCheckBox(groupList, "ナビゲーションボタンを表示する", 16, checkY, _settings.Appearance.ShowBrowserToolbar);
+        var showBrowserToolbar = AddCheckBox(groupList, "上部の戻る・進む・上へ・更新ボタンを表示する", 16, checkY, _settings.Appearance.ShowBrowserToolbar);
+        checkY += 24;
+        var showFunctionBar = AddCheckBox(groupList, "下部のファンクションバーを表示する", 16, checkY, _settings.Appearance.ShowFunctionBar);
         top = checkY + 28;
 
         AddLabel(groupList, "一覧表示:", top, lblW);
@@ -378,55 +389,49 @@ public class SettingsForm : Form
 
         top = topY;
         AddLabel(groupViewer, "Viewer フォント:", top, 110);
-        var viewerFont = AddComboBox(groupViewer, 120, top, 178, fonts, _settings.Fonts.ViewerFontFamily);
+        var viewerFont = AddFontComboBox(groupViewer, 120, top, 178, fonts, _settings.Fonts.ViewerFontFamily);
         var viewerSize = AddNumericUpDown(groupViewer, sizeX, top, 60, (decimal)_settings.Fonts.ViewerFontSize);
 
-        var viewerFontSample = new TextBox
-        {
-            Text = "貴社の記者が汽車で帰社した。\r\nAaあぁアァ亜宇 0123456789 ()[]{}<>\r\nYesterday all my troubles seemed so far away.",
-            Location = new Point(16, top + 40),
-            Size = new Size(460,90),
-            Multiline = true,
-            ScrollBars = ScrollBars.Vertical
-        };
+        var viewerFontSample = CreateFontSampleTextBox(new Point(16, top + 40), new Size(460, 104), FontPreviewSampleText);
         groupViewer.Controls.Add(viewerFontSample);
 
-        viewerFont.DrawMode = DrawMode.OwnerDrawFixed;
-        viewerFont.ItemHeight = 20;
-        viewerFont.DrawItem += (s, e) =>
+        Font? fileListFontSampleOwnedFont = null;
+        Font? viewerFontSampleOwnedFont = null;
+        Disposed += (_, _) =>
         {
-            if (e.Index < 0) return;
-            e.DrawBackground();
-            string fontName = viewerFont.Items[e.Index]?.ToString() ?? "";
-            Font fontToDraw;
-            try
-            {
-                fontToDraw = new Font(fontName, 10);
-            }
-            catch
-            {
-                fontToDraw = e.Font ?? viewerFont.Font;
-            }
-
-            using (fontToDraw)
-            {
-                using var brush = new SolidBrush(e.ForeColor);
-                var textBounds = new Rectangle(e.Bounds.X + 2, e.Bounds.Y, e.Bounds.Width - 2, e.Bounds.Height);
-                e.Graphics.DrawString(fontName, fontToDraw, brush, textBounds);
-            }
-            e.DrawFocusRectangle();
+            fileListFontSampleOwnedFont?.Dispose();
+            viewerFontSampleOwnedFont?.Dispose();
         };
 
-        var updateSample = new EventHandler((_, _) =>
+        void UpdateFontSample(TextBox sample, ref Font? ownedFont, string familyName, float size)
         {
-            try { viewerFontSample.Font = new Font(viewerFont.Text, (float)viewerSize.Value); } catch { }
-        });
-        viewerFont.SelectedIndexChanged += updateSample;
-        viewerFont.TextChanged += updateSample;
-        viewerSize.ValueChanged += updateSample;
-        updateSample(null!, EventArgs.Empty);
+            Font? nextFont = CreatePreviewFont(familyName, size);
+            if (nextFont == null)
+            {
+                ownedFont?.Dispose();
+                ownedFont = null;
+                sample.Font = sample.Parent?.Font ?? SystemFonts.DefaultFont;
+                return;
+            }
 
-        top += 140;
+            ownedFont?.Dispose();
+            ownedFont = nextFont;
+            sample.Font = nextFont;
+        }
+
+        void UpdateFileListFontSample() => UpdateFontSample(fileListFontSample, ref fileListFontSampleOwnedFont, filerFont.Text, (float)filerSize.Value);
+        void UpdateViewerFontSample() => UpdateFontSample(viewerFontSample, ref viewerFontSampleOwnedFont, viewerFont.Text, (float)viewerSize.Value);
+
+        filerFont.SelectedIndexChanged += (_, _) => UpdateFileListFontSample();
+        filerFont.TextChanged += (_, _) => UpdateFileListFontSample();
+        filerSize.ValueChanged += (_, _) => UpdateFileListFontSample();
+        viewerFont.SelectedIndexChanged += (_, _) => UpdateViewerFontSample();
+        viewerFont.TextChanged += (_, _) => UpdateViewerFontSample();
+        viewerSize.ValueChanged += (_, _) => UpdateViewerFontSample();
+        UpdateFileListFontSample();
+        UpdateViewerFontSample();
+
+        top += 145;
 
         var viewerWordWrap = AddCheckBox(groupViewer, "折り返しを既定で ON にする", checkX, top, _settings.Preview.ViewerWordWrap);
         top += rowH;
@@ -437,18 +442,18 @@ public class SettingsForm : Form
         var rememberBounds = AddCheckBox(groupViewer, "ビューアの位置/サイズを記憶する", checkX, top, _settings.Preview.RememberImageViewerBounds);
         groupViewer.Height = rememberBounds.Bottom + 16;
 
-        return (filerFont, filerSize, showBrowserTabCategoryRow, showExtensions, showDirectoryMarker, showHiddenFiles, showItemIcons, useUnderlineCursor, showBrowserToolbar, fileDisplayMode, dateFormat, sizeFormat,
+        return (filerFont, filerSize, showBrowserTabCategoryRow, showExtensions, showDirectoryMarker, showHiddenFiles, showItemIcons, useUnderlineCursor, showFunctionBar, showBrowserToolbar, fileDisplayMode, dateFormat, sizeFormat,
                 viewerFont, viewerSize, viewerWordWrap, reuseImageViewer, closeOnNonImage, rememberBounds);
     }
 
-    private (CheckBox confirmDelete, CheckBox confirmPermanentDelete, CheckBox useMidFdManagedTrash, CheckBox reloadAfterFileOperation, CheckBox selectCreatedItem, CheckBox clipboardPasteTextAsFile,
+    private (CheckBox confirmDelete, CheckBox confirmPermanentDelete, CheckBox useMidFdManagedTrash, CheckBox managedTrashAutoHandoff, NumericUpDown managedTrashUndoRetentionDays, CheckBox reloadAfterFileOperation, CheckBox selectCreatedItem, CheckBox clipboardPasteTextAsFile,
              CheckBox enableMouseGestures, CheckBox enableWorkspaceSnapshot, CheckBox restoreLastPath)
         BuildOperationAndInputTab(TabPage tab)
     {
         int rowH = 28;
 
         // --- Left: File Operation ---
-        var groupFile = new GroupBox { Text = "ファイル操作", Location = new Point(8, 6), Size = new Size(490, 480) };
+        var groupFile = new GroupBox { Text = "ファイル操作", Location = new Point(8, 6), Size = new Size(490, 528) };
         tab.Controls.Add(groupFile);
 
         int top = 28;
@@ -460,6 +465,31 @@ public class SettingsForm : Form
         top += rowH;
         Label managedTrashHint = AddWrappedHintLabel(groupFile, 32, top, 430, "ON: Ctrl+Z による復元が可能になります。\n環境に応じ SQLite / JSON を自動選択します。");
         top = managedTrashHint.Bottom + 10;
+
+        var managedTrashAutoHandoff = AddCheckBox(groupFile, "期限切れ退避ファイルを自動整理する", 16, top, _settings.FileOperations.ManagedTrashAutoHandoffEnabled);
+        top += rowH;
+        AddLabel(groupFile, "Undo保持日数:", top, 112);
+        var managedTrashUndoRetentionDays = AddNumericUpDown(groupFile, 130, top, 72, _settings.FileOperations.ManagedTrashUndoRetentionDays);
+        managedTrashUndoRetentionDays.Minimum = 1;
+        managedTrashUndoRetentionDays.Maximum = 365;
+        managedTrashUndoRetentionDays.DecimalPlaces = 0;
+        managedTrashUndoRetentionDays.Increment = 1;
+        top += rowH - 2;
+        var managedTrashRetentionHint = AddWrappedHintLabel(groupFile, 32, top, 430, "指定日数を過ぎた MidFD 管理ゴミ箱内の退避項目を Windows ごみ箱へ移します。");
+        top = managedTrashRetentionHint.Bottom + 8;
+
+        var btnEmptyTrash = new Button
+        {
+            Text = "MidFD管理ゴミ箱を今すぐ空にする...",
+            Location = new Point(32, top),
+            Size = new Size(240, 28)
+        };
+        btnEmptyTrash.Click += (s, e) =>
+        {
+            ManualEmptyManagedTrashRequested?.Invoke(this, EventArgs.Empty);
+        };
+        groupFile.Controls.Add(btnEmptyTrash);
+        top += rowH + 6;
 
         var reloadAfterFileOperation = AddCheckBox(groupFile, "操作後に一覧を再読込する", 16, top, _settings.FileOperations.ReloadAfterFileOperation);
         top += rowH;
@@ -525,7 +555,7 @@ public class SettingsForm : Form
         var workspaceHint = AddWrappedHintLabel(groupAdvanced, 32, advancedTop + 24, 444, "作業状態の復元と拡張管理導線を有効にします。\n復元内容は「起動・ログ」で調整します。");
         advancedTop = workspaceHint.Bottom + 8;
 
-        return (confirmDelete, confirmPermanentDelete, useMidFdManagedTrash, reloadAfterFileOperation, selectCreatedItem, clipboardPasteTextAsFile, enableMouseGestures, enableWorkspaceSnapshot, restoreLastPath);
+        return (confirmDelete, confirmPermanentDelete, useMidFdManagedTrash, managedTrashAutoHandoff, managedTrashUndoRetentionDays, reloadAfterFileOperation, selectCreatedItem, clipboardPasteTextAsFile, enableMouseGestures, enableWorkspaceSnapshot, restoreLastPath);
     }
 
     private (CheckBox restoreTabsOnStartup, CheckBox restoreWindowBounds, CheckBox restoreColumnCount, CheckBox restoreSort)
@@ -940,6 +970,34 @@ public class SettingsForm : Form
         return cb;
     }
 
+    private ComboBox AddFontComboBox(Control parent, int x, int top, int width, string[] items, string current)
+    {
+        var cb = AddComboBox(parent, x, top, width, items, current);
+        cb.DrawMode = DrawMode.OwnerDrawFixed;
+        cb.IntegralHeight = false;
+        cb.ItemHeight = Math.Max(20, cb.Font.Height + 6);
+        cb.DrawItem += FontCombo_DrawItem;
+        return cb;
+    }
+
+    private static TextBox CreateFontSampleTextBox(Point location, Size size, string text)
+    {
+        return new TextBox
+        {
+            Text = text,
+            Location = location,
+            Size = size,
+            Multiline = true,
+            ReadOnly = false,
+            ScrollBars = ScrollBars.Both,
+            WordWrap = false,
+            AcceptsReturn = true,
+            AcceptsTab = false,
+            TabStop = true,
+            BorderStyle = BorderStyle.FixedSingle
+        };
+    }
+
     private ComboBox AddEditableComboBox(Control parent, int x, int top, int width, string[] items, string current)
     {
         var cb = new ComboBox
@@ -976,6 +1034,67 @@ public class SettingsForm : Form
 
         parent.Controls.Add(cb);
         return cb;
+    }
+
+    private static Font? CreatePreviewFont(string familyName, float size)
+    {
+        if (string.IsNullOrWhiteSpace(familyName))
+        {
+            return null;
+        }
+
+        try
+        {
+            return new Font(familyName, size, FontStyle.Regular, GraphicsUnit.Point);
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private void FontCombo_DrawItem(object? sender, DrawItemEventArgs e)
+    {
+        if (sender is not ComboBox combo)
+        {
+            return;
+        }
+
+        e.DrawBackground();
+
+        string fontName = e.Index >= 0
+            ? combo.Items[e.Index]?.ToString() ?? string.Empty
+            : combo.Text;
+
+        if (string.IsNullOrWhiteSpace(fontName))
+        {
+            e.DrawFocusRectangle();
+            return;
+        }
+
+        Font fallbackFont = e.Font ?? combo.Font;
+        Font? drawFont = CreatePreviewFont(fontName, fallbackFont.Size);
+        bool ownsFont = drawFont != null;
+        drawFont ??= fallbackFont;
+
+        try
+        {
+            var textBounds = new Rectangle(e.Bounds.X + 2, e.Bounds.Y, Math.Max(0, e.Bounds.Width - 4), e.Bounds.Height);
+            var textColor = (e.State & DrawItemState.Selected) == DrawItemState.Selected
+                ? SystemColors.HighlightText
+                : combo.ForeColor;
+            TextFormatFlags flags = TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPadding;
+            TextRenderer.DrawText(e.Graphics, fontName, drawFont, textBounds, textColor, flags);
+        }
+        finally
+        {
+            if (ownsFont)
+            {
+                drawFont.Dispose();
+            }
+        }
+
+        e.DrawFocusRectangle();
     }
 
     private NumericUpDown AddNumericUpDown(Control parent, int x, int top, int width, decimal current)
@@ -1653,15 +1772,11 @@ public class SettingsForm : Form
         _settings.Fonts.ViewerFontSize = (float)_viewerFontSizeBox.Value;
 
         PersistEditedFileListColorsAsPresetIfNeeded();
-        _settings.Appearance.ColorTheme = _colorThemeCombo.Text;
+        _settings.Appearance.ColorTheme = FileListColorResolver.CanonicalizePresetKey(_colorThemeCombo.Text);
         _settings.Appearance.UseCustomFileListColors = _fileListCustomColorsEnabledForSave;
         _settings.Appearance.EnableSemanticColorAssist = _enableColorAssistCheckBox.Checked;
-        _settings.Appearance.CustomUiThemeColorsEnabled = _customUiThemeCheckBox.Checked;
-        _settings.Appearance.CustomFilerBackColor = UiThemeResolver.ToHexString(GetPreviewColor(_customFilerBackPreview, _settings.Appearance.CustomFilerBackColor));
-        _settings.Appearance.CustomFilerForeColor = UiThemeResolver.ToHexString(GetPreviewColor(_customFilerForePreview, _settings.Appearance.CustomFilerForeColor));
-        _settings.Appearance.CustomViewerBackColor = UiThemeResolver.ToHexString(GetPreviewColor(_customViewerBackPreview, _settings.Appearance.CustomViewerBackColor));
-        _settings.Appearance.CustomViewerForeColor = UiThemeResolver.ToHexString(GetPreviewColor(_customViewerForePreview, _settings.Appearance.CustomViewerForeColor));
         _settings.Appearance.ShowBrowserTabCategoryRow = _showBrowserTabCategoryRowCheckBox.Checked;
+        _settings.Appearance.ShowFunctionBar = _showFunctionBarCheckBox.Checked;
         _settings.Appearance.ShowBrowserToolbar = _showBrowserToolbarCheckBox.Checked;
         _settings.Appearance.ShowExtensions = _showExtensionsCheckBox.Checked;
         _settings.Appearance.ShowDirectoryMarker = _showDirectoryMarkerCheckBox.Checked;
@@ -1700,6 +1815,8 @@ public class SettingsForm : Form
         _settings.FileOperations.ConfirmDelete = _confirmDeleteCheckBox.Checked;
         _settings.FileOperations.ConfirmPermanentDelete = _confirmPermanentDeleteCheckBox.Checked;
         _settings.FileOperations.UseMidFdManagedTrash = _useMidFdManagedTrashCheckBox.Checked;
+        _settings.FileOperations.ManagedTrashAutoHandoffEnabled = _managedTrashAutoHandoffCheckBox.Checked;
+        _settings.FileOperations.ManagedTrashUndoRetentionDays = (int)_managedTrashUndoRetentionDaysBox.Value;
         // _settings.FileOperations.ManagedTrashStoreMode は Initialize 時に自動決定するためUIからは変更しない
 
         _settings.FileOperations.ReloadAfterFileOperation = _reloadAfterFileOperationCheckBox.Checked;
@@ -1958,25 +2075,13 @@ public class SettingsForm : Form
         public required Panel FileListColorCurrentPreviewPanel;
         public required ListView FileListColorPreviewPanel;
         public required Label FileListColorWarningLabel;
-        public required CheckBox CustomUiThemeCheckBox;
-        public required Button CustomUiThemeEditButton;
-        public required Panel CustomFilerBackPreview;
-        public required Panel CustomFilerForePreview;
-        public required Panel CustomViewerBackPreview;
-        public required Panel CustomViewerForePreview;
-    }
-
-    private static Color GetPreviewColor(Panel preview, string? fallbackHex)
-    {
-        if (preview.BackColor != Color.Empty && preview.BackColor != Control.DefaultBackColor)
-            return preview.BackColor;
-        return UiThemeResolver.TryParseColor(fallbackHex) ?? Color.Black;
+        public required Panel FunctionBarPreviewPanel;
     }
 
     private ColorTabResult BuildColorTab(TabPage tab)
     {
-        var groupCustom = new GroupBox { Text = "一覧配色カスタマイズ", Location = new Point(8, 6), Size = new Size(500, 330) };
-        var groupPreview = new GroupBox { Text = "プレビュー", Location = new Point(520, 6), Size = new Size(500, 330) };
+        var groupCustom = new GroupBox { Text = "一覧配色カスタマイズ", Location = new Point(8, 6), Size = new Size(492, 372) };
+        var groupPreview = new GroupBox { Text = "プレビュー", Location = new Point(508, 6), Size = new Size(492, 372) };
         tab.Controls.Add(groupCustom);
         tab.Controls.Add(groupPreview);
 
@@ -2017,9 +2122,9 @@ public class SettingsForm : Form
         top += 30;
         var btnReset = new Button
         {
-            Text = "選択プリセットでリセット",
+            Text = "選択表示色へ戻す",
             Location = new Point(12, top),
-            Size = new Size(165, 26)
+            Size = new Size(152, 26)
         };
 
         var enableColorAssistCheckBox = new CheckBox
@@ -2037,11 +2142,14 @@ public class SettingsForm : Form
         var fileListColorFieldListBox = new ListBox
         {
             Location = new Point(12, top),
-            Size = new Size(165, 210),
+            Size = new Size(165, 120),
             DrawMode = DrawMode.OwnerDrawFixed,
-            ItemHeight = 22
+            ItemHeight = 22,
+            IntegralHeight = false
         };
         fileListColorFieldListBox.Items.AddRange(ColorFieldItems.Select(x => x.DisplayName).ToArray());
+        int fileListColorListHeight = (fileListColorFieldListBox.ItemHeight * fileListColorFieldListBox.Items.Count) + 10;
+        fileListColorFieldListBox.Size = new Size(165, fileListColorListHeight);
         groupCustom.Controls.Add(fileListColorFieldListBox);
 
         int adjX = 196;
@@ -2128,7 +2236,7 @@ public class SettingsForm : Form
         groupCustom.Controls.Add(lblB);
         groupCustom.Controls.Add(fileListColorBlueBox);
 
-        top += 210;
+        top += fileListColorListHeight;
         var warningLabelLocal = new Label
         {
             Location = new Point(12, top),
@@ -2137,101 +2245,17 @@ public class SettingsForm : Form
         };
         groupCustom.Controls.Add(warningLabelLocal);
 
-        // ── UI基調色グループ ──────────────────────────────────
-        var groupUiColors = new GroupBox
-        {
-            Text = "UI基調色（メニュー/ヘッダ/ステータス/Viewer）",
-            Location = new Point(8, 342),
-            Size = new Size(1002, 150)
-        };
-        tab.Controls.Add(groupUiColors);
-
-        int ux = 12;
-        int uy = 20;
-
-        var syncModeNote = new Label
-        {
-            Text = "通常は表示色に合わせます。個別に変えたい場合だけ手動指定してください。",
-            Location = new Point(ux, uy + 2),
-            Size = new Size(970, 20),
-            ForeColor = Color.DimGray
-        };
-        groupUiColors.Controls.Add(syncModeNote);
-        uy += 24;
-
-        var customCb = new CheckBox
-        {
-            Text = "UI基調色を手動指定する",
-            Location = new Point(ux, uy),
-            AutoSize = true,
-            Checked = _settings.Appearance.CustomUiThemeColorsEnabled
-        };
-
-        var customEditButton = new Button
-        {
-            Text = "UI基調色を調整...",
-            Location = new Point(ux + 190, uy - 2),
-            Size = new Size(140, 26)
-        };
-
-        groupUiColors.Controls.AddRange(new Control[] { customCb, customEditButton });
-        uy += 32;
-
-        var lblFilerColors = new Label { Text = "ファイラー:", Location = new Point(ux, uy + 3), Size = new Size(68, 20), TextAlign = ContentAlignment.MiddleRight };
-        lblFilerColors.Text = "UI:";
-        var filerBackLbl = new Label { Text = "背景", Location = new Point(ux + 72, uy + 3), Size = new Size(28, 20) };
-        var filerBackPreview = CreateColorPreview(ux + 104, uy, TryLoadColor(_settings.Appearance.CustomFilerBackColor, Color.FromArgb(16, 20, 28)));
-        var filerForeLbl = new Label { Text = "文字", Location = new Point(ux + 148, uy + 3), Size = new Size(28, 20) };
-        var filerForePreview = CreateColorPreview(ux + 180, uy, TryLoadColor(_settings.Appearance.CustomFilerForeColor, Color.Cyan));
-
-        var lblViewerColors = new Label { Text = "ビューア:", Location = new Point(ux + 236, uy + 3), Size = new Size(68, 20), TextAlign = ContentAlignment.MiddleRight };
-        var viewerBackLbl = new Label { Text = "背景", Location = new Point(ux + 308, uy + 3), Size = new Size(28, 20) };
-        var viewerBackPreview = CreateColorPreview(ux + 340, uy, TryLoadColor(_settings.Appearance.CustomViewerBackColor, Color.FromArgb(0, 0, 64)));
-        var viewerForeLbl = new Label { Text = "文字", Location = new Point(ux + 384, uy + 3), Size = new Size(28, 20) };
-        var viewerForePreview = CreateColorPreview(ux + 416, uy, TryLoadColor(_settings.Appearance.CustomViewerForeColor, Color.FromArgb(200, 220, 255)));
-
-        groupUiColors.Controls.AddRange(new Control[] {
-            lblFilerColors, filerBackLbl, filerBackPreview, filerForeLbl, filerForePreview,
-            lblViewerColors, viewerBackLbl, viewerBackPreview, viewerForeLbl, viewerForePreview
-        });
-        uy += 28;
-
-        var uiColorsNoteLabel = new Label
-        {
-            Text = "※ ファイル一覧の背景/文字色は上の「一覧配色カスタマイズ」で変更します。",
-            Location = new Point(ux, uy),
-            Size = new Size(970, 32),
-            ForeColor = Color.DimGray
-        };
-        groupUiColors.Controls.Add(uiColorsNoteLabel);
-
-        customCb.CheckedChanged += (_, _) =>
-        {
-            if (_suppressColorUiEvents) return;
-            SetCustomColorRowEnabled(customCb.Checked);
-            UpdatePreview();
-        };
-
-        customEditButton.Click += (_, _) => ShowUiThemeColorSettingsDialog();
-
-        filerBackPreview.Click += (_, _) => { if (customCb.Checked) ShowUiThemeColorSettingsDialog(); };
-        filerForePreview.Click += (_, _) => { if (customCb.Checked) ShowUiThemeColorSettingsDialog(); };
-        viewerBackPreview.Click += (_, _) => { if (customCb.Checked) ShowUiThemeColorSettingsDialog(); };
-        viewerForePreview.Click += (_, _) => { if (customCb.Checked) ShowUiThemeColorSettingsDialog(); };
-
-        // groupCustom 内の旧 syncUiThemeCheckBox と UIテーマComboBox は groupUiColors へ移設したため削除
-
         var fileListColorPreviewPanel = new ListView
         {
             Location = new Point(10, 20),
-            Size = new Size(480, 298),
+            Size = new Size(472, 220),
             View = View.Details,
             FullRowSelect = true,
             HeaderStyle = ColumnHeaderStyle.None,
             OwnerDraw = true,
             MultiSelect = false
         };
-        fileListColorPreviewPanel.Columns.Add("Name", 476);
+        fileListColorPreviewPanel.Columns.Add("Name", 468);
 
         var previewItems = new[]
         {
@@ -2246,6 +2270,42 @@ public class SettingsForm : Form
         };
         fileListColorPreviewPanel.Items.AddRange(previewItems);
         groupPreview.Controls.Add(fileListColorPreviewPanel);
+        int functionPreviewTop = fileListColorPreviewPanel.Bottom - 1;
+        var functionPreviewPanel = new Panel
+        {
+            Location = new Point(10, functionPreviewTop),
+            Size = new Size(472, 24),
+            BorderStyle = BorderStyle.None
+        };
+        string[] functionSampleLabels = { "F1", "F2", "F3", "F4", "F5", "F6", "F7", "F8", "F9", "F10" };
+        int functionLabelX = 8;
+        FunctionPreviewPalette functionPalette = ResolveFunctionPreviewPalette();
+        foreach (string sampleLabel in functionSampleLabels)
+        {
+            int sampleWidth = sampleLabel.Length >= 3 ? 44 : 38;
+            var sample = new Label
+            {
+                Text = sampleLabel,
+                Location = new Point(functionLabelX, 2),
+                Size = new Size(sampleWidth, 20),
+                Margin = Padding.Empty,
+                Padding = Padding.Empty,
+                TextAlign = ContentAlignment.MiddleCenter,
+                BackColor = functionPalette.ButtonBackColor,
+                ForeColor = functionPalette.ButtonForeColor
+            };
+            sample.Paint += (_, e) =>
+            {
+                FunctionPreviewPalette currentPalette = ResolveFunctionPreviewPalette();
+                Color borderColor = BlendColors(sample.BackColor, currentPalette.PanelBackColor, 0.22);
+                using var pen = new Pen(borderColor);
+                e.Graphics.DrawRectangle(pen, 0, 0, sample.Width - 1, sample.Height - 1);
+            };
+            functionPreviewPanel.Controls.Add(sample);
+            functionLabelX += sampleWidth + 5;
+        }
+
+        groupPreview.Controls.Add(functionPreviewPanel);
 
         fileListColorFieldListBox.DrawItem += FileListColorFieldListBox_DrawItem;
         fileListColorFieldListBox.SelectedIndexChanged += (s, e) => UpdateColorTabUiFromModel();
@@ -2290,6 +2350,8 @@ public class SettingsForm : Form
         fileListColorPreviewPanel.DrawSubItem += PreviewListView_DrawSubItem;
         fileListColorPreviewPanel.SelectedIndexChanged += (s, e) => fileListColorPreviewPanel.Invalidate();
 
+        UpdatePreview();
+
         return new ColorTabResult
         {
             EnableColorAssistCheckBox = enableColorAssistCheckBox,
@@ -2304,12 +2366,7 @@ public class SettingsForm : Form
             FileListColorCurrentPreviewPanel = fileListColorCurrentPreviewPanel,
             FileListColorPreviewPanel = fileListColorPreviewPanel,
             FileListColorWarningLabel = warningLabelLocal,
-            CustomUiThemeCheckBox = customCb,
-            CustomUiThemeEditButton = customEditButton,
-            CustomFilerBackPreview = filerBackPreview,
-            CustomFilerForePreview = filerForePreview,
-            CustomViewerBackPreview = viewerBackPreview,
-            CustomViewerForePreview = viewerForePreview
+            FunctionBarPreviewPanel = functionPreviewPanel
         };
     }
 
@@ -2327,6 +2384,199 @@ public class SettingsForm : Form
     private static Color TryLoadColor(string? hex, Color fallback)
         => UiThemeResolver.TryParseColor(hex) ?? fallback;
 
+    private static Color BlendColors(Color baseColor, Color targetColor, double targetWeight)
+    {
+        double clampedWeight = Math.Clamp(targetWeight, 0.0, 1.0);
+        double sourceWeight = 1.0 - clampedWeight;
+        int r = (int)Math.Round((baseColor.R * sourceWeight) + (targetColor.R * clampedWeight));
+        int g = (int)Math.Round((baseColor.G * sourceWeight) + (targetColor.G * clampedWeight));
+        int b = (int)Math.Round((baseColor.B * sourceWeight) + (targetColor.B * clampedWeight));
+        return Color.FromArgb(r, g, b);
+    }
+
+    private AppSettings BuildColorTabPreviewSettings()
+    {
+        var previewSettings = _settings.Clone();
+        bool enableColorAssist = _enableColorAssistCheckBox != null
+            ? _enableColorAssistCheckBox.Checked
+            : _settings.Appearance.EnableSemanticColorAssist;
+        previewSettings.Appearance.UseCustomFileListColors = _fileListCustomColorsEnabledForSave;
+        previewSettings.Appearance.EnableSemanticColorAssist = enableColorAssist;
+        previewSettings.Appearance.ColorTheme = FileListColorResolver.CanonicalizePresetKey(_colorThemeCombo?.Text ?? _settings.Appearance.ColorTheme);
+        return previewSettings;
+    }
+
+    private sealed record FunctionPreviewPalette(
+        Color PanelBackColor,
+        Color ButtonBackColor,
+        Color ButtonForeColor,
+        Color ButtonBorderColor);
+
+    private (Color ButtonBackColor, Color ButtonForeColor, Color ButtonBorderColor) ResolveDarkStandardFunctionPreviewColors(
+        string presetKey,
+        FileListColorResolver.ResolvedColors resolved)
+    {
+        presetKey = FileListColorResolver.CanonicalizePresetKey(presetKey);
+
+        if (string.Equals(presetKey, "Slate", StringComparison.OrdinalIgnoreCase))
+        {
+            Color buttonBack = BlendColors(resolved.Background, resolved.Directory, 0.42);
+            Color buttonFore = FileListColorResolver.GetContrastRatio(buttonBack, resolved.NormalFile)
+                >= FileListColorResolver.GetContrastRatio(buttonBack, Color.White)
+                ? resolved.NormalFile
+                : Color.White;
+            return (buttonBack, buttonFore, resolved.Directory);
+        }
+
+        if (string.Equals(presetKey, "Violet", StringComparison.OrdinalIgnoreCase))
+        {
+            Color buttonBack = BlendColors(resolved.Background, resolved.Directory, 0.44);
+            Color buttonFore = FileListColorResolver.GetContrastRatio(buttonBack, resolved.NormalFile)
+                >= FileListColorResolver.GetContrastRatio(buttonBack, Color.White)
+                ? resolved.NormalFile
+                : Color.White;
+            return (buttonBack, buttonFore, resolved.Directory);
+        }
+
+        if (string.Equals(presetKey, "Sepia", StringComparison.OrdinalIgnoreCase))
+        {
+            Color buttonBack = BlendColors(resolved.Background, resolved.Directory, 0.46);
+            Color buttonFore = FileListColorResolver.GetContrastRatio(buttonBack, resolved.NormalFile)
+                >= FileListColorResolver.GetContrastRatio(buttonBack, Color.White)
+                ? resolved.NormalFile
+                : Color.White;
+            return (buttonBack, buttonFore, resolved.Directory);
+        }
+
+        if (string.Equals(presetKey, "Mono Dark", StringComparison.OrdinalIgnoreCase))
+        {
+            Color buttonBack = BlendColors(resolved.Background, resolved.Directory, 0.40);
+            Color buttonFore = FileListColorResolver.GetContrastRatio(buttonBack, resolved.NormalFile)
+                >= FileListColorResolver.GetContrastRatio(buttonBack, Color.White)
+                ? resolved.NormalFile
+                : Color.White;
+            return (buttonBack, buttonFore, resolved.Directory);
+        }
+
+        if (string.Equals(presetKey, "Cyber", StringComparison.OrdinalIgnoreCase))
+        {
+            Color buttonBack = BlendColors(resolved.Background, resolved.Directory, 0.52);
+            Color buttonFore = FileListColorResolver.GetContrastRatio(buttonBack, resolved.NormalFile)
+                >= FileListColorResolver.GetContrastRatio(buttonBack, Color.White)
+                ? resolved.NormalFile
+                : Color.White;
+            return (buttonBack, buttonFore, resolved.Directory);
+        }
+
+        if (string.Equals(presetKey, "Green", StringComparison.OrdinalIgnoreCase))
+        {
+            Color buttonBack = BlendColors(resolved.Background, resolved.Directory, 0.36);
+            Color buttonFore = FileListColorResolver.GetContrastRatio(buttonBack, resolved.NormalFile)
+                >= FileListColorResolver.GetContrastRatio(buttonBack, Color.White)
+                ? resolved.NormalFile
+                : Color.White;
+            return (buttonBack, buttonFore, resolved.Directory);
+        }
+
+        if (string.Equals(presetKey, "Amber", StringComparison.OrdinalIgnoreCase))
+        {
+            Color buttonBack = BlendColors(resolved.Background, resolved.Directory, 0.38);
+            Color buttonFore = FileListColorResolver.GetContrastRatio(buttonBack, resolved.NormalFile)
+                >= FileListColorResolver.GetContrastRatio(buttonBack, Color.White)
+                ? resolved.NormalFile
+                : Color.White;
+            return (buttonBack, buttonFore, resolved.Directory);
+        }
+
+        return (
+            Color.FromArgb(60, 120, 180),
+            Color.FromArgb(220, 238, 255),
+            Color.FromArgb(70, 100, 120));
+    }
+
+    private FunctionPreviewPalette ResolveFunctionPreviewPalette()
+    {
+        AppSettings previewSettings = BuildColorTabPreviewSettings();
+        var resolved = FileListColorResolver.ResolveColors(previewSettings);
+        string themeNormalized = FileListColorResolver.NormalizeCoreTheme(previewSettings.Appearance.ColorTheme, previewSettings);
+        bool isLightTheme = themeNormalized == "Light";
+        bool isWinFdCompatible = FunctionKeyProfileService.ResolveProfile(previewSettings.Input.FunctionKeyProfile) == FunctionKeyProfile.FDCompatible;
+
+        Color accentColor = resolved.Directory;
+        Color? customBackColor = UiThemeResolver.TryParseColor(previewSettings.Appearance.CustomFunctionBarBackColor);
+        Color? customForeColor = UiThemeResolver.TryParseColor(previewSettings.Appearance.CustomFunctionBarForeColor);
+        bool hasCustomFunctionBarColors = customBackColor.HasValue || customForeColor.HasValue;
+
+        if (hasCustomFunctionBarColors)
+        {
+            FunctionPreviewPalette defaults = ResolveDefaultFunctionPreviewPalette(previewSettings);
+            Color buttonBack = customBackColor ?? defaults.ButtonBackColor;
+            Color buttonFore = customForeColor ?? defaults.ButtonForeColor;
+            Color panelBack = defaults.PanelBackColor;
+            Color borderColor = isLightTheme ? Color.FromArgb(200, 200, 200) : Color.FromArgb(70, 100, 120);
+            return new FunctionPreviewPalette(panelBack, buttonBack, buttonFore, borderColor);
+        }
+
+        return ResolveDefaultFunctionPreviewPalette(previewSettings);
+    }
+
+    private FunctionPreviewPalette ResolveDefaultFunctionPreviewPalette(AppSettings previewSettings)
+    {
+        var resolved = FileListColorResolver.ResolveColors(previewSettings);
+        string themeNormalized = FileListColorResolver.NormalizeCoreTheme(previewSettings.Appearance.ColorTheme, previewSettings);
+        bool isLightTheme = themeNormalized == "Light";
+        bool isWinFdCompatible = FunctionKeyProfileService.ResolveProfile(previewSettings.Input.FunctionKeyProfile) == FunctionKeyProfile.FDCompatible;
+        Color accentColor = resolved.Directory;
+
+        if (isWinFdCompatible)
+        {
+            if (isLightTheme)
+            {
+                Color panelBack = Color.FromArgb(235, 235, 235);
+                Color buttonBack = BlendColors(Color.White, accentColor, 0.25);
+                if (FileListColorResolver.GetRelativeLuminance(buttonBack) < 0.6)
+                {
+                    buttonBack = Color.FromArgb(200, 240, 240);
+                }
+
+                return new FunctionPreviewPalette(
+                    panelBack,
+                    buttonBack,
+                    Color.Black,
+                    Color.FromArgb(200, 200, 200));
+            }
+
+            Color darkPanelBack = resolved.Background;
+            Color darkButtonBack = accentColor;
+            if (FileListColorResolver.GetRelativeLuminance(darkButtonBack) < 0.25)
+            {
+                darkButtonBack = BlendColors(darkButtonBack, Color.White, 0.5);
+            }
+
+            return new FunctionPreviewPalette(
+                darkPanelBack,
+                darkButtonBack,
+                Color.Black,
+                darkPanelBack);
+        }
+
+        if (isLightTheme)
+        {
+            return new FunctionPreviewPalette(
+                resolved.Background,
+                Color.FromArgb(228, 228, 228),
+                Color.FromArgb(32, 32, 32),
+                Color.FromArgb(198, 198, 198));
+        }
+
+        (Color previewButtonBack, Color previewButtonFore, Color previewButtonBorder) = ResolveDarkStandardFunctionPreviewColors(previewSettings.Appearance.ColorTheme, resolved);
+        return new FunctionPreviewPalette(
+            resolved.Background,
+            previewButtonBack,
+            previewButtonFore,
+            previewButtonBorder);
+    }
+
     private void InitializeColorTabState()
     {
         _suppressColorUiEvents = true;
@@ -2339,11 +2589,6 @@ public class SettingsForm : Form
             {
                 _fileListColorFieldListBox.SelectedIndex = 0;
             }
-
-            // カスタムUI色の初期化
-            _customUiThemeCheckBox.Checked = _settings.Appearance.CustomUiThemeColorsEnabled;
-            bool customEnabled = _settings.Appearance.CustomUiThemeColorsEnabled;
-            SetCustomColorRowEnabled(customEnabled);
         }
         finally
         {
@@ -2362,7 +2607,7 @@ public class SettingsForm : Form
         e.DrawBackground();
 
         var item = ColorFieldItems[e.Index];
-        Color color = GetCurrentFieldColor(item.PropertyName);
+        Color color = GetCurrentFieldColor(item);
 
         int boxSize = e.Bounds.Height - 4;
         Rectangle colorBox = new Rectangle(e.Bounds.X + 2, e.Bounds.Y + 2, boxSize, boxSize);
@@ -2384,15 +2629,21 @@ public class SettingsForm : Form
         e.DrawFocusRectangle();
     }
 
-    private Color GetCurrentFieldColor(string propertyName)
+    private Color GetCurrentFieldColor(ColorFieldItem item)
     {
-        string? hex = GetPropertyValue(_settings.Appearance.CustomFileListColors, propertyName);
+        if (item.IsFunctionColor)
+        {
+            return GetFunctionFieldColor(item.PropertyName);
+        }
+
+        string? hex = GetPropertyValue(_settings.Appearance.CustomFileListColors, item.PropertyName);
         if (FileListColorResolver.ParseHexColor(hex) is Color c)
         {
             return c;
         }
+
         var defaultColors = FileListColorResolver.ResolvePresetColors(_colorThemeCombo.Text, _settings.Appearance.CustomFileListColorPresets);
-        return propertyName switch
+        return item.PropertyName switch
         {
             nameof(CustomFileListColorSettings.Background) => defaultColors.Background,
             nameof(CustomFileListColorSettings.NormalFile) => defaultColors.NormalFile,
@@ -2407,14 +2658,45 @@ public class SettingsForm : Form
         };
     }
 
-    private string? GetPropertyValue(CustomFileListColorSettings target, string propertyName)
+    private Color GetFunctionFieldColor(string propertyName)
+    {
+        FunctionPreviewPalette palette = ResolveDefaultFunctionPreviewPalette(BuildColorTabPreviewSettings());
+        return propertyName switch
+        {
+            nameof(AppearanceSettings.CustomFunctionBarBackColor) =>
+                UiThemeResolver.TryParseColor(_settings.Appearance.CustomFunctionBarBackColor) ?? palette.ButtonBackColor,
+            nameof(AppearanceSettings.CustomFunctionBarForeColor) =>
+                UiThemeResolver.TryParseColor(_settings.Appearance.CustomFunctionBarForeColor) ?? palette.ButtonForeColor,
+            _ => palette.ButtonBackColor
+        };
+    }
+
+    private static string? GetPropertyValue(CustomFileListColorSettings target, string propertyName)
     {
         return target.GetType().GetProperty(propertyName)?.GetValue(target) as string;
     }
 
-    private void SetPropertyValue(CustomFileListColorSettings target, string propertyName, string? value)
+    private static void SetPropertyValue(CustomFileListColorSettings target, string propertyName, string? value)
     {
         target.GetType().GetProperty(propertyName)?.SetValue(target, value);
+    }
+
+    private void SetCurrentFieldColor(ColorFieldItem item, Color color)
+    {
+        if (item.IsFunctionColor)
+        {
+            if (item.PropertyName == nameof(AppearanceSettings.CustomFunctionBarBackColor))
+            {
+                _settings.Appearance.CustomFunctionBarBackColor = UiThemeResolver.ToHexString(color);
+            }
+            else if (item.PropertyName == nameof(AppearanceSettings.CustomFunctionBarForeColor))
+            {
+                _settings.Appearance.CustomFunctionBarForeColor = UiThemeResolver.ToHexString(color);
+            }
+            return;
+        }
+
+        SetPropertyValue(_settings.Appearance.CustomFileListColors, item.PropertyName, FileListColorResolver.ToHexColor(color));
     }
 
     private void ReloadPresetsCombo(string? selectPresetKey = null)
@@ -2437,7 +2719,7 @@ public class SettingsForm : Form
             _colorThemeCombo.Items.Add(FileListColorResolver.MakeUserPresetKey(preset.Name));
         }
 
-        string target = selectPresetKey ?? _settings.Appearance.ColorTheme;
+        string target = FileListColorResolver.CanonicalizePresetKey(selectPresetKey ?? _settings.Appearance.ColorTheme);
         int idx = _colorThemeCombo.FindStringExact(target);
         if (idx >= 0)
         {
@@ -2457,12 +2739,19 @@ public class SettingsForm : Form
         _deleteColorPresetButton.Enabled = FileListColorResolver.TryGetUserPresetName(current, out _);
     }
 
+    private void ApplyDefaultFunctionColorsFromCurrentTheme()
+    {
+        FunctionPreviewPalette palette = ResolveDefaultFunctionPreviewPalette(BuildColorTabPreviewSettings());
+        _settings.Appearance.CustomFunctionBarBackColor = UiThemeResolver.ToHexString(palette.ButtonBackColor);
+        _settings.Appearance.CustomFunctionBarForeColor = UiThemeResolver.ToHexString(palette.ButtonForeColor);
+    }
+
     private void ApplySelectedColorPresetToEditor(bool forceRefresh = true)
     {
         if (_suppressColorUiEvents || _colorThemeCombo == null) return;
 
         string selectedPreset = _colorThemeCombo.Text;
-        _settings.Appearance.ColorTheme = selectedPreset;
+        _settings.Appearance.ColorTheme = FileListColorResolver.CanonicalizePresetKey(selectedPreset);
         _fileListCustomColorsEnabledForSave = false;
 
         var resolved = FileListColorResolver.ResolvePresetColors(selectedPreset, _settings.Appearance.CustomFileListColorPresets);
@@ -2476,6 +2765,7 @@ public class SettingsForm : Form
         _settings.Appearance.CustomFileListColors.Marked = FileListColorResolver.ToHexColor(resolved.Marked);
         _settings.Appearance.CustomFileListColors.SelectedBackground = FileListColorResolver.ToHexColor(resolved.SelectedBackground);
         _settings.Appearance.CustomFileListColors.SelectedForeground = FileListColorResolver.ToHexColor(resolved.SelectedForeground);
+        ApplyDefaultFunctionColorsFromCurrentTheme();
 
         UpdateDeleteButtonState();
         UpdateColorTabUiFromModel();
@@ -2510,7 +2800,7 @@ public class SettingsForm : Form
         }
         if (_fileListColorFieldListBox.SelectedIndex < 0) return;
         var item = ColorFieldItems[_fileListColorFieldListBox.SelectedIndex];
-        Color color = GetCurrentFieldColor(item.PropertyName);
+        Color color = GetCurrentFieldColor(item);
 
         _updatingColorFromUi = true;
         _fileListColorHexTextBox.Text = FileListColorResolver.ToHexColor(color);
@@ -2539,7 +2829,7 @@ public class SettingsForm : Form
         _fileListColorCurrentPreviewPanel.BackColor = color.Value;
         _updatingColorFromUi = false;
 
-        SetPropertyValue(_settings.Appearance.CustomFileListColors, item.PropertyName, FileListColorResolver.ToHexColor(color.Value));
+        SetCurrentFieldColor(item, color.Value);
         _fileListCustomColorsEnabledForSave = true;
         _fileListColorFieldListBox.Invalidate();
         UpdatePreview();
@@ -2563,7 +2853,7 @@ public class SettingsForm : Form
         _fileListColorCurrentPreviewPanel.BackColor = color;
         _updatingColorFromUi = false;
 
-        SetPropertyValue(_settings.Appearance.CustomFileListColors, item.PropertyName, FileListColorResolver.ToHexColor(color));
+        SetCurrentFieldColor(item, color);
         _fileListCustomColorsEnabledForSave = true;
         _fileListColorFieldListBox.Invalidate();
         UpdatePreview();
@@ -2577,7 +2867,7 @@ public class SettingsForm : Form
         }
         if (_fileListColorFieldListBox.SelectedIndex < 0) return;
         var item = ColorFieldItems[_fileListColorFieldListBox.SelectedIndex];
-        Color curColor = GetCurrentFieldColor(item.PropertyName);
+        Color curColor = GetCurrentFieldColor(item);
 
         using var cd = new ColorDialog
         {
@@ -2595,7 +2885,7 @@ public class SettingsForm : Form
             _fileListColorCurrentPreviewPanel.BackColor = cd.Color;
             _updatingColorFromUi = false;
 
-            SetPropertyValue(_settings.Appearance.CustomFileListColors, item.PropertyName, FileListColorResolver.ToHexColor(cd.Color));
+            SetCurrentFieldColor(item, cd.Color);
             _fileListCustomColorsEnabledForSave = true;
             _fileListColorFieldListBox.Invalidate();
             UpdatePreview();
@@ -2627,7 +2917,7 @@ public class SettingsForm : Form
         {
             targetName = dlg.NewPresetName;
 
-            if (FileListColorResolver.BuiltInPresetKeys.Contains(targetName, StringComparer.OrdinalIgnoreCase))
+            if (FileListColorResolver.IsBuiltInPreset(targetName))
             {
                 MessageBox.Show(this, "組み込みプリセット名は使用できません。別名を指定してください。", "エラー", MessageBoxButtons.OK, MessageBoxIcon.Error);
                 return;
@@ -2648,12 +2938,7 @@ public class SettingsForm : Form
 
         if (isOverwrite)
         {
-            var confirm = MessageBox.Show(
-                this,
-                $"既存のユーザープリセット '{targetName}' を上書きしますか？",
-                "プリセット上書きの確認",
-                MessageBoxButtons.YesNo,
-                MessageBoxIcon.Question);
+            var confirm = ShowColorPresetOverwriteConfirmationDialog(targetName);
 
             if (confirm != DialogResult.Yes) return;
 
@@ -2689,6 +2974,100 @@ public class SettingsForm : Form
         ApplySelectedColorPresetToEditor(forceRefresh: true);
     }
 
+    private DialogResult ShowColorPresetOverwriteConfirmationDialog(string targetName)
+    {
+        using (var form = new Form())
+        {
+            form.Text = "プリセット上書きの確認";
+            form.FormBorderStyle = FormBorderStyle.FixedDialog;
+            form.MaximizeBox = false;
+            form.MinimizeBox = false;
+            form.ShowInTaskbar = false;
+            form.StartPosition = FormStartPosition.CenterParent;
+            form.ClientSize = new Size(400, 140);
+
+            var label = new Label
+            {
+                Text = $"既存のユーザープリセット '{targetName}' を上書きしますか？",
+                Location = new Point(15, 20),
+                Size = new Size(370, 50),
+                TextAlign = ContentAlignment.MiddleLeft
+            };
+
+            var btnYes = new Button
+            {
+                Text = "はい(&Y)",
+                DialogResult = DialogResult.Yes,
+                Location = new Point(190, 90),
+                Size = new Size(90, 30)
+            };
+
+            var btnNo = new Button
+            {
+                Text = "いいえ(&N)",
+                DialogResult = DialogResult.No,
+                Location = new Point(290, 90),
+                Size = new Size(90, 30)
+            };
+
+            form.Controls.Add(label);
+            form.Controls.Add(btnYes);
+            form.Controls.Add(btnNo);
+
+            form.AcceptButton = btnYes;
+            form.CancelButton = btnNo;
+
+            return form.ShowDialog(this);
+        }
+    }
+
+    private DialogResult ShowColorPresetDeleteConfirmationDialog(string userName)
+    {
+        using (var form = new Form())
+        {
+            form.Text = "プリセット削除の確認";
+            form.FormBorderStyle = FormBorderStyle.FixedDialog;
+            form.MaximizeBox = false;
+            form.MinimizeBox = false;
+            form.ShowInTaskbar = false;
+            form.StartPosition = FormStartPosition.CenterParent;
+            form.ClientSize = new Size(400, 140);
+
+            var label = new Label
+            {
+                Text = $"プリセット '{userName}' を削除しますか？",
+                Location = new Point(15, 20),
+                Size = new Size(370, 50),
+                TextAlign = ContentAlignment.MiddleLeft
+            };
+
+            var btnYes = new Button
+            {
+                Text = "はい(&Y)",
+                DialogResult = DialogResult.Yes,
+                Location = new Point(190, 90),
+                Size = new Size(90, 30)
+            };
+
+            var btnNo = new Button
+            {
+                Text = "いいえ(&N)",
+                DialogResult = DialogResult.No,
+                Location = new Point(290, 90),
+                Size = new Size(90, 30)
+            };
+
+            form.Controls.Add(label);
+            form.Controls.Add(btnYes);
+            form.Controls.Add(btnNo);
+
+            form.AcceptButton = btnYes;
+            form.CancelButton = btnNo;
+
+            return form.ShowDialog(this);
+        }
+    }
+
     private void DeletePresetButton_Click(object? sender, EventArgs e)
     {
         if (_suppressColorUiEvents)
@@ -2698,12 +3077,7 @@ public class SettingsForm : Form
         string current = _colorThemeCombo.Text;
         if (!FileListColorResolver.TryGetUserPresetName(current, out string? userName) || userName == null) return;
 
-        var confirm = MessageBox.Show(
-            this,
-            $"プリセット '{userName}' を削除しますか？",
-            "プリセット削除の確認",
-            MessageBoxButtons.YesNo,
-            MessageBoxIcon.Question);
+        var confirm = ShowColorPresetDeleteConfirmationDialog(userName);
 
         if (confirm != DialogResult.Yes) return;
 
@@ -2729,6 +3103,7 @@ public class SettingsForm : Form
         _settings.Appearance.CustomFileListColors.Marked = FileListColorResolver.ToHexColor(resolved.Marked);
         _settings.Appearance.CustomFileListColors.SelectedBackground = FileListColorResolver.ToHexColor(resolved.SelectedBackground);
         _settings.Appearance.CustomFileListColors.SelectedForeground = FileListColorResolver.ToHexColor(resolved.SelectedForeground);
+        ApplyDefaultFunctionColorsFromCurrentTheme();
 
         UpdateColorTabUiFromModel();
         UpdatePreview();
@@ -2752,6 +3127,7 @@ public class SettingsForm : Form
         _settings.Appearance.CustomFileListColors.Marked = FileListColorResolver.ToHexColor(resolved.Marked);
         _settings.Appearance.CustomFileListColors.SelectedBackground = FileListColorResolver.ToHexColor(resolved.SelectedBackground);
         _settings.Appearance.CustomFileListColors.SelectedForeground = FileListColorResolver.ToHexColor(resolved.SelectedForeground);
+        ApplyDefaultFunctionColorsFromCurrentTheme();
         _fileListCustomColorsEnabledForSave = false;
 
         UpdateColorTabUiFromModel();
@@ -2765,14 +3141,28 @@ public class SettingsForm : Form
             return;
         }
 
-        var dummySettings = _settings.Clone();
-        dummySettings.Appearance.UseCustomFileListColors = _fileListCustomColorsEnabledForSave;
-        dummySettings.Appearance.EnableSemanticColorAssist = _enableColorAssistCheckBox.Checked;
-        dummySettings.Appearance.ColorTheme = _colorThemeCombo.Text;
+        AppSettings dummySettings = BuildColorTabPreviewSettings();
 
         var resolved = FileListColorResolver.ResolveColors(dummySettings);
         _fileListColorPreviewPanel.BackColor = resolved.Background;
         _fileListColorPreviewPanel.Invalidate();
+
+        if (_functionBarPreviewPanel != null)
+        {
+            FunctionPreviewPalette palette = ResolveFunctionPreviewPalette();
+            _functionBarPreviewPanel.BackColor = palette.PanelBackColor;
+            foreach (Control sample in _functionBarPreviewPanel.Controls)
+            {
+                sample.BackColor = palette.ButtonBackColor;
+                sample.ForeColor = palette.ButtonForeColor;
+                if (sample is Button button)
+                {
+                    button.FlatAppearance.BorderColor = palette.ButtonBorderColor;
+                }
+                sample.Invalidate();
+            }
+            _functionBarPreviewPanel.Invalidate();
+        }
 
         UpdateWarningLabel(resolved);
     }
@@ -2821,7 +3211,7 @@ public class SettingsForm : Form
         var dummySettings = _settings.Clone();
         dummySettings.Appearance.UseCustomFileListColors = _fileListCustomColorsEnabledForSave;
         dummySettings.Appearance.EnableSemanticColorAssist = _enableColorAssistCheckBox.Checked;
-        dummySettings.Appearance.ColorTheme = _colorThemeCombo.Text;
+        dummySettings.Appearance.ColorTheme = FileListColorResolver.CanonicalizePresetKey(_colorThemeCombo.Text);
 
         var resolved = FileListColorResolver.ResolveColors(dummySettings);
 
@@ -3037,259 +3427,7 @@ public class SettingsForm : Form
         }
     }
 
-    private void SetCustomColorRowEnabled(bool enabled)
-    {
-        _customUiThemeEditButton.Enabled = enabled;
-
-        _customFilerBackPreview.Enabled = enabled;
-        _customFilerForePreview.Enabled = enabled;
-        _customViewerBackPreview.Enabled = enabled;
-        _customViewerForePreview.Enabled = enabled;
-    }
-
-    private void ShowUiThemeColorSettingsDialog()
-    {
-        using var dialog = new UiThemeColorSettingsDialog(
-            GetPreviewColor(_customFilerBackPreview, _settings.Appearance.CustomFilerBackColor),
-            GetPreviewColor(_customFilerForePreview, _settings.Appearance.CustomFilerForeColor),
-            GetPreviewColor(_customViewerBackPreview, _settings.Appearance.CustomViewerBackColor),
-            GetPreviewColor(_customViewerForePreview, _settings.Appearance.CustomViewerForeColor));
-
-        if (dialog.ShowDialog(this) != DialogResult.OK)
-        {
-            return;
-        }
-
-        _customFilerBackPreview.BackColor = dialog.FilerBackColor;
-        _customFilerForePreview.BackColor = dialog.FilerForeColor;
-        _customViewerBackPreview.BackColor = dialog.ViewerBackColor;
-        _customViewerForePreview.BackColor = dialog.ViewerForeColor;
-
-        UpdatePreview();
-    }
-
-    private sealed class UiThemeColorSettingsDialog : Form
-    {
-        public Color FilerBackColor { get; private set; }
-        public Color FilerForeColor { get; private set; }
-        public Color ViewerBackColor { get; private set; }
-        public Color ViewerForeColor { get; private set; }
-
-        private readonly Panel _filerBackPreview;
-        private readonly TextBox _filerBackHex;
-        private readonly NumericUpDown _filerBackR;
-        private readonly NumericUpDown _filerBackG;
-        private readonly NumericUpDown _filerBackB;
-
-        private readonly Panel _filerForePreview;
-        private readonly TextBox _filerForeHex;
-        private readonly NumericUpDown _filerForeR;
-        private readonly NumericUpDown _filerForeG;
-        private readonly NumericUpDown _filerForeB;
-
-        private readonly Panel _viewerBackPreview;
-        private readonly TextBox _viewerBackHex;
-        private readonly NumericUpDown _viewerBackR;
-        private readonly NumericUpDown _viewerBackG;
-        private readonly NumericUpDown _viewerBackB;
-
-        private readonly Panel _viewerForePreview;
-        private readonly TextBox _viewerForeHex;
-        private readonly NumericUpDown _viewerForeR;
-        private readonly NumericUpDown _viewerForeG;
-        private readonly NumericUpDown _viewerForeB;
-
-        private bool _updating;
-
-        public UiThemeColorSettingsDialog(Color filerBack, Color filerFore, Color viewerBack, Color viewerFore)
-        {
-            FilerBackColor = filerBack;
-            FilerForeColor = filerFore;
-            ViewerBackColor = viewerBack;
-            ViewerForeColor = viewerFore;
-
-            Text = "UI基調色の調整";
-            Size = new Size(712, 260);
-            FormBorderStyle = FormBorderStyle.FixedDialog;
-            MaximizeBox = false;
-            MinimizeBox = false;
-            StartPosition = FormStartPosition.CenterParent;
-
-            int y = 20;
-            int rowH = 34;
-
-            CreateRow("UI背景", y, filerBack, out _filerBackPreview, out _filerBackHex, out _filerBackR, out _filerBackG, out _filerBackB);
-            y += rowH;
-            CreateRow("UI文字", y, filerFore, out _filerForePreview, out _filerForeHex, out _filerForeR, out _filerForeG, out _filerForeB);
-            y += rowH;
-            CreateRow("ビューア背景", y, viewerBack, out _viewerBackPreview, out _viewerBackHex, out _viewerBackR, out _viewerBackG, out _viewerBackB);
-            y += rowH;
-            CreateRow("ビューア文字", y, viewerFore, out _viewerForePreview, out _viewerForeHex, out _viewerForeR, out _viewerForeG, out _viewerForeB);
-            y += rowH + 10;
-
-            var btnOk = new Button
-            {
-                Text = "OK",
-                DialogResult = DialogResult.OK,
-                Location = new Point(524, y),
-                Size = new Size(84, 28)
-            };
-            btnOk.Click += (s, e) =>
-            {
-                FilerBackColor = _filerBackPreview.BackColor;
-                FilerForeColor = _filerForePreview.BackColor;
-                ViewerBackColor = _viewerBackPreview.BackColor;
-                ViewerForeColor = _viewerForePreview.BackColor;
-            };
-
-            var btnCancel = new Button
-            {
-                Text = "キャンセル",
-                DialogResult = DialogResult.Cancel,
-                Location = new Point(616, y),
-                Size = new Size(84, 28)
-            };
-
-            Controls.Add(btnOk);
-            Controls.Add(btnCancel);
-            AcceptButton = btnOk;
-            CancelButton = btnCancel;
-        }
-
-        private void CreateRow(string labelText, int y, Color initColor,
-            out Panel preview, out TextBox hexBox,
-            out NumericUpDown rBox, out NumericUpDown gBox, out NumericUpDown bBox)
-        {
-            var lbl = new Label
-            {
-                Text = labelText,
-                Location = new Point(12, y + 4),
-                Size = new Size(108, 20),
-                TextAlign = ContentAlignment.MiddleLeft
-            };
-            Controls.Add(lbl);
-
-            preview = new Panel
-            {
-                Location = new Point(126, y),
-                Size = new Size(36, 22),
-                BackColor = initColor,
-                BorderStyle = BorderStyle.FixedSingle
-            };
-            Controls.Add(preview);
-
-            var lblHex = new Label
-            {
-                Text = "HEX",
-                Location = new Point(170, y + 4),
-                Size = new Size(44, 20),
-                TextAlign = ContentAlignment.MiddleRight
-            };
-            Controls.Add(lblHex);
-
-            hexBox = new TextBox
-            {
-                Location = new Point(218, y),
-                Size = new Size(86, 23),
-                Text = UiThemeResolver.ToHexString(initColor)
-            };
-            Controls.Add(hexBox);
-
-            var lblR = new Label { Text = "R", Location = new Point(320, y + 4), Size = new Size(16, 20), TextAlign = ContentAlignment.MiddleRight };
-            rBox = new NumericUpDown { Location = new Point(340, y), Size = new Size(52, 23), Minimum = 0, Maximum = 255, Value = initColor.R };
-            Controls.Add(lblR);
-            Controls.Add(rBox);
-
-            var lblG = new Label { Text = "G", Location = new Point(402, y + 4), Size = new Size(16, 20), TextAlign = ContentAlignment.MiddleRight };
-            gBox = new NumericUpDown { Location = new Point(422, y), Size = new Size(52, 23), Minimum = 0, Maximum = 255, Value = initColor.G };
-            Controls.Add(lblG);
-            Controls.Add(gBox);
-
-            var lblB = new Label { Text = "B", Location = new Point(484, y + 4), Size = new Size(16, 20), TextAlign = ContentAlignment.MiddleRight };
-            bBox = new NumericUpDown { Location = new Point(504, y), Size = new Size(52, 23), Minimum = 0, Maximum = 255, Value = initColor.B };
-            Controls.Add(lblB);
-            Controls.Add(bBox);
-
-            var btnPick = new Button
-            {
-                Text = "色選択...",
-                Location = new Point(590, y - 1),
-                Size = new Size(94, 25)
-            };
-            Controls.Add(btnPick);
-
-            var localPreview = preview;
-            var localHex = hexBox;
-            var localR = rBox;
-            var localG = gBox;
-            var localB = bBox;
-
-            localHex.TextChanged += (s, e) =>
-            {
-                if (_updating) return;
-                string hexText = localHex.Text;
-                if (UiThemeResolver.TryParseColor(hexText) is Color color)
-                {
-                    _updating = true;
-                    try
-                    {
-                        localR.Value = color.R;
-                        localG.Value = color.G;
-                        localB.Value = color.B;
-                        localPreview.BackColor = color;
-                    }
-                    finally
-                    {
-                        _updating = false;
-                    }
-                }
-            };
-
-            Action rgbChanged = () =>
-            {
-                if (_updating) return;
-                Color color = Color.FromArgb((int)localR.Value, (int)localG.Value, (int)localB.Value);
-                _updating = true;
-                try
-                {
-                    localHex.Text = UiThemeResolver.ToHexString(color);
-                    localPreview.BackColor = color;
-                }
-                finally
-                {
-                    _updating = false;
-                }
-            };
-
-            localR.ValueChanged += (s, e) => rgbChanged();
-            localG.ValueChanged += (s, e) => rgbChanged();
-            localB.ValueChanged += (s, e) => rgbChanged();
-
-            btnPick.Click += (s, e) =>
-            {
-                using var dlg = new ColorDialog { Color = localPreview.BackColor, FullOpen = true };
-                if (dlg.ShowDialog(this) == DialogResult.OK)
-                {
-                    _updating = true;
-                    try
-                    {
-                        Color color = dlg.Color;
-                        localPreview.BackColor = color;
-                        localHex.Text = UiThemeResolver.ToHexString(color);
-                        localR.Value = color.R;
-                        localG.Value = color.G;
-                        localB.Value = color.B;
-                    }
-                    finally
-                    {
-                        _updating = false;
-                    }
-                }
-            };
-        }
-    }
-
-    private sealed record ColorFieldItem(string DisplayName, string PropertyName);
+    private sealed record ColorFieldItem(string DisplayName, string PropertyName, bool IsFunctionColor = false);
     private static readonly ColorFieldItem[] ColorFieldItems = new[]
     {
         new ColorFieldItem("背景色", nameof(CustomFileListColorSettings.Background)),
@@ -3300,6 +3438,8 @@ public class SettingsForm : Form
         new ColorFieldItem("System文字色", nameof(CustomFileListColorSettings.System)),
         new ColorFieldItem("マーク記号色", nameof(CustomFileListColorSettings.Marked)),
         new ColorFieldItem("選択行背景色", nameof(CustomFileListColorSettings.SelectedBackground)),
-        new ColorFieldItem("選択行文字色", nameof(CustomFileListColorSettings.SelectedForeground))
+        new ColorFieldItem("選択行文字色", nameof(CustomFileListColorSettings.SelectedForeground)),
+        new ColorFieldItem("ファンクション背景色", nameof(AppearanceSettings.CustomFunctionBarBackColor), true),
+        new ColorFieldItem("ファンクション文字色", nameof(AppearanceSettings.CustomFunctionBarForeColor), true)
     };
 }

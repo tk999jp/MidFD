@@ -8,10 +8,14 @@ namespace MidFD.Services;
 
 public static class DragArchiveService
 {
+    private const string DragArchivePrefix = "MidFD-drag-";
+    private static readonly TimeSpan DragArchiveRetention = TimeSpan.FromMinutes(30);
+
     public sealed class DragArchiveInfo
     {
         public string BaseDirectory { get; init; } = "";
         public string ArchivePath { get; init; } = "";
+        public int ItemCount { get; init; }
     }
 
     private class ManifestEntry
@@ -20,6 +24,21 @@ public static class DragArchiveService
         public string Type { get; set; } = ""; // "File" or "Directory"
         public long Size { get; set; }
         public DateTime LastWriteTimeUtc { get; set; }
+    }
+
+    public static string GetDragArchiveTempDirectory()
+    {
+        return Path.Combine(Path.GetTempPath(), "MidFD", "DragArchive");
+    }
+
+    public static void CleanupDragArchivesOnStartup(string tempDir)
+    {
+        CleanupDragArchives(tempDir, DragArchiveRetention);
+    }
+
+    public static void CleanupDragArchivesBeforeCreation(string tempDir)
+    {
+        CleanupDragArchives(tempDir, DragArchiveRetention);
     }
 
     public static DragArchiveInfo GetOrCreateInfoZip(string tempDir, IReadOnlyList<string> sourcePaths, bool includeManifest)
@@ -31,9 +50,6 @@ public static class DragArchiveService
         }
 
         Directory.CreateDirectory(fullOutputDir);
-
-        // クリーンアップ (古い一時ZIPおよび残骸の .tmp)
-        CleanupOldArchives(fullOutputDir);
 
         // 1. マニフェストの収集とハッシュ計算
         var manifest = new List<ManifestEntry>();
@@ -61,7 +77,8 @@ public static class DragArchiveService
                     return new DragArchiveInfo
                     {
                         BaseDirectory = normalizedBaseDirectory,
-                        ArchivePath = zipPath
+                        ArchivePath = zipPath,
+                        ItemCount = sourcePaths.Count
                     };
                 }
             }
@@ -117,14 +134,29 @@ public static class DragArchiveService
             // 作成成功後に正式名称へ移動
             if (File.Exists(zipPath))
             {
-                File.Delete(zipPath);
+                try
+                {
+                    File.Delete(zipPath);
+                }
+                catch (Exception ex) when (IsAccessDeniedLike(ex))
+                {
+                    throw CreateAccessDeniedException(zipPath, ex);
+                }
             }
-            File.Move(tempZipPath, zipPath);
+            try
+            {
+                File.Move(tempZipPath, zipPath);
+            }
+            catch (Exception ex) when (IsAccessDeniedLike(ex))
+            {
+                throw CreateAccessDeniedException(zipPath, ex);
+            }
             LogService.Info($"[DragArchive] Created new ZIP archive: {zipPath}");
             return new DragArchiveInfo
             {
                 BaseDirectory = normalizedBaseDirectory,
-                ArchivePath = zipPath
+                ArchivePath = zipPath,
+                ItemCount = sourcePaths.Count
             };
         }
         catch (Exception)
@@ -153,6 +185,11 @@ public static class DragArchiveService
         foreach (string sourcePath in sourcePaths)
         {
             string normalizedSourcePath = Path.GetFullPath(sourcePath);
+            if (Directory.Exists(normalizedSourcePath) && IsDriveRootDirectory(normalizedSourcePath))
+            {
+                throw new InvalidOperationException($"ドライブ直下はドラッグ用ZIPの対象にできません。\n対象: {sourcePath}");
+            }
+
             string? candidateBase = Directory.Exists(normalizedSourcePath)
                 ? Path.GetDirectoryName(normalizedSourcePath)
                 : Path.GetDirectoryName(normalizedSourcePath);
@@ -181,8 +218,8 @@ public static class DragArchiveService
 
     private static string GetCommonDirectory(string left, string right)
     {
-        string normalizedLeft = Path.GetFullPath(left).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
-        string normalizedRight = Path.GetFullPath(right).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+        string normalizedLeft = Path.GetFullPath(left);
+        string normalizedRight = Path.GetFullPath(right);
 
         string leftRoot = Path.GetPathRoot(normalizedLeft) ?? "";
         string rightRoot = Path.GetPathRoot(normalizedRight) ?? "";
@@ -249,7 +286,15 @@ public static class DragArchiveService
             });
         }
 
-        var files = Directory.GetFileSystemEntries(dirPath);
+        string[] files;
+        try
+        {
+            files = Directory.GetFileSystemEntries(dirPath);
+        }
+        catch (Exception ex) when (IsAccessDeniedLike(ex))
+        {
+            throw CreateAccessDeniedException(dirPath, ex);
+        }
         foreach (var file in files)
         {
             if (ReparsePointHelper.IsReparsePoint(file))
@@ -270,17 +315,24 @@ public static class DragArchiveService
 
     private static void CollectFileManifest(string filePath, string baseDirectory, HashSet<string> entries, List<ManifestEntry> manifest)
     {
-        string relativePath = GetSafeRelativeEntryPath(baseDirectory, filePath, false);
-        if (entries.Add(relativePath))
+        try
         {
-            var fi = new FileInfo(filePath);
-            manifest.Add(new ManifestEntry
+            string relativePath = GetSafeRelativeEntryPath(baseDirectory, filePath, false);
+            if (entries.Add(relativePath))
             {
-                RelativePath = relativePath,
-                Type = "File",
-                Size = fi.Length,
-                LastWriteTimeUtc = fi.LastWriteTimeUtc
-            });
+                var fi = new FileInfo(filePath);
+                manifest.Add(new ManifestEntry
+                {
+                    RelativePath = relativePath,
+                    Type = "File",
+                    Size = fi.Length,
+                    LastWriteTimeUtc = fi.LastWriteTimeUtc
+                });
+            }
+        }
+        catch (Exception ex) when (IsAccessDeniedLike(ex))
+        {
+            throw CreateAccessDeniedException(filePath, ex);
         }
     }
 
@@ -295,7 +347,15 @@ public static class DragArchiveService
 
         archive.CreateEntry(relativeDir);
 
-        var files = Directory.GetFileSystemEntries(dirPath);
+        string[] files;
+        try
+        {
+            files = Directory.GetFileSystemEntries(dirPath);
+        }
+        catch (Exception ex) when (IsAccessDeniedLike(ex))
+        {
+            throw CreateAccessDeniedException(dirPath, ex);
+        }
         foreach (var file in files)
         {
             if (Directory.Exists(file))
@@ -311,13 +371,20 @@ public static class DragArchiveService
 
     private static void AddFile(ZipArchive archive, string filePath, string baseDirectory, HashSet<string> entries)
     {
-        string relativePath = GetSafeRelativeEntryPath(baseDirectory, filePath, false);
-        if (!entries.Add(relativePath))
+        try
         {
-            throw new InvalidOperationException($"同名のエントリが既に存在します: {relativePath}");
-        }
+            string relativePath = GetSafeRelativeEntryPath(baseDirectory, filePath, false);
+            if (!entries.Add(relativePath))
+            {
+                throw new InvalidOperationException($"同名のエントリが既に存在します: {relativePath}");
+            }
 
-        archive.CreateEntryFromFile(filePath, relativePath, CompressionLevel.Optimal);
+            archive.CreateEntryFromFile(filePath, relativePath, CompressionLevel.Optimal);
+        }
+        catch (Exception ex) when (IsAccessDeniedLike(ex))
+        {
+            throw CreateAccessDeniedException(filePath, ex);
+        }
     }
 
     private static string GetSafeRelativeEntryPath(string baseDirectory, string targetPath, bool isDirectory)
@@ -339,6 +406,34 @@ public static class DragArchiveService
         }
 
         return isDirectory ? relativePath.TrimEnd('/') + "/" : relativePath;
+    }
+
+    private static bool IsDriveRootDirectory(string path)
+    {
+        string normalizedPath = Path.GetFullPath(path);
+        string? root = Path.GetPathRoot(normalizedPath);
+        return !string.IsNullOrWhiteSpace(root)
+            && string.Equals(
+                normalizedPath.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar),
+                root.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar),
+                StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool IsAccessDeniedLike(Exception ex)
+    {
+        if (ex is UnauthorizedAccessException)
+        {
+            return true;
+        }
+
+        return ex is IOException io && ((io.HResult & 0xFFFF) == 5 || (io.HResult & 0xFFFF) == 32);
+    }
+
+    private static InvalidOperationException CreateAccessDeniedException(string targetPath, Exception ex)
+    {
+        return new InvalidOperationException(
+            $"ファイルを読み取れません。使用中、またはアクセス権限がない可能性があります。\n対象: {targetPath}",
+            ex);
     }
 
     private static string ComputeManifestHash(string baseDirectory, IReadOnlyList<ManifestEntry> manifest, bool includeManifest)
@@ -392,35 +487,35 @@ public static class DragArchiveService
         writer.Flush();
     }
 
-    private static void CleanupOldArchives(string tempDir)
+    private static void CleanupDragArchives(string tempDir, TimeSpan? minimumAge)
     {
         try
         {
             if (!Directory.Exists(tempDir)) return;
-            string[] patterns = { "MidFD-drag-*.zip", "MidFD-drag-*.zip.tmp" };
-            foreach (var pattern in patterns)
+            foreach (var file in Directory.GetFiles(tempDir, $"{DragArchivePrefix}*.zip"))
             {
-                var files = Directory.GetFiles(tempDir, pattern);
-                foreach (var file in files)
+                try
                 {
-                    var writeTime = File.GetLastWriteTime(file);
-                    if (DateTime.Now - writeTime > TimeSpan.FromDays(7))
+                    if (minimumAge.HasValue)
                     {
-                        try
+                        var writeTime = File.GetLastWriteTime(file);
+                        if (DateTime.Now - writeTime < minimumAge.Value)
                         {
-                            File.Delete(file);
-                        }
-                        catch
-                        {
-                            // スキップ
+                            continue;
                         }
                     }
+
+                    File.Delete(file);
+                }
+                catch
+                {
+                    // 取得/削除できないものは静かに残す
                 }
             }
         }
         catch (Exception ex)
         {
-            LogService.Error($"Failed to cleanup old drag archives: {ex.Message}");
+            LogService.Warn($"[DragArchive] Cleanup skipped: {ex.Message}");
         }
     }
 }

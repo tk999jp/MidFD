@@ -1,4 +1,6 @@
+using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Text.Json;
 using MidFD.Services;
 using MidFD.Helpers;
@@ -563,4 +565,5 @@ public static class SettingsManager
             return new SettingsLoadMetadata();
         }
     }
+
 }

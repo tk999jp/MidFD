@@ -1,5 +1,5 @@
-﻿using System.Drawing;
-using System.Text.RegularExpressions;
+using System.Drawing;
+using System.Text;
 using System.Windows.Forms;
 using MidFD.Models;
 
@@ -7,34 +7,42 @@ namespace MidFD.Dialogs;
 
 public sealed class HashResultDialog : Form
 {
+    private const int CompactClientHeight = 420;
+    private const int ExpandedClientHeight = 600;
+    private const int LogTextBoxHeight = 150;
+
     private readonly string _targetSummary;
     private readonly SevenZipHashAlgorithm _algorithm;
     private readonly string _output;
+    private readonly IReadOnlyList<HashDisplayItem> _hashItems;
 
-    private TextBox _outputTextBox = null!;
+    private readonly ListView _hashListView;
+    private readonly TextBox _outputTextBox;
+    private readonly Button _toggleLogButton;
+    private readonly Button _copyCsvButton;
+    private readonly ContextMenuStrip _hashListContextMenu;
+    private readonly ToolStripMenuItem _copyHashMenuItem;
+    private readonly Control? _bottomActionRow;
+    private readonly int _logTop;
 
     public HashResultDialog(string targetSummary, SevenZipHashAlgorithm algorithm, string output)
     {
         _targetSummary = targetSummary;
         _algorithm = algorithm;
         _output = output;
+        _hashItems = ExtractHashItems();
 
-        InitializeComponent();
-    }
-
-    private void InitializeComponent()
-    {
-        this.Text = "CRC/SHA 計算結果";
-        this.FormBorderStyle = FormBorderStyle.Sizable;
-        this.StartPosition = FormStartPosition.CenterParent;
-        this.MinimizeBox = false;
-        this.MaximizeBox = true;
-        this.ClientSize = new Size(600, 480);
-        this.MinimumSize = new Size(400, 300);
-        this.AutoScaleMode = AutoScaleMode.Font;
+        Text = "CRC/SHA 計算結果";
+        FormBorderStyle = FormBorderStyle.Sizable;
+        StartPosition = FormStartPosition.CenterParent;
+        MinimizeBox = false;
+        MaximizeBox = true;
+        ClientSize = new Size(720, CompactClientHeight);
+        MinimumSize = new Size(520, 320);
+        AutoScaleMode = AutoScaleMode.Font;
 
         int currentTop = 16;
-        int contentWidth = this.ClientSize.Width - 32;
+        int contentWidth = ClientSize.Width - 32;
 
         var targetLabel = new Label
         {
@@ -46,7 +54,7 @@ public sealed class HashResultDialog : Form
             AutoSize = false
         };
         targetLabel.Height = FileOperationDialogLayoutHelper.MeasureLabelHeight(targetLabel, targetLabel.Width, 24);
-        this.Controls.Add(targetLabel);
+        Controls.Add(targetLabel);
         currentTop = targetLabel.Bottom + 4;
 
         var algoLabel = new Label
@@ -59,42 +67,106 @@ public sealed class HashResultDialog : Form
             AutoSize = false,
             Height = 20
         };
-        this.Controls.Add(algoLabel);
+        Controls.Add(algoLabel);
         currentTop = algoLabel.Bottom + 8;
+
+        var listLabel = new Label
+        {
+            Text = "ハッシュ一覧:",
+            Left = 16,
+            Top = currentTop,
+            Width = 120,
+            Height = 20
+        };
+        Controls.Add(listLabel);
+        currentTop = listLabel.Bottom + 4;
+
+        _hashListView = new ListView
+        {
+            Left = 16,
+            Top = currentTop,
+            Width = contentWidth,
+            Height = 170,
+            Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right,
+            View = View.Details,
+            FullRowSelect = true,
+            GridLines = true,
+            HideSelection = false,
+            MultiSelect = false
+        };
+        _hashListView.Columns.Add("対象", 220);
+        _hashListView.Columns.Add("アルゴリズム", 100);
+        _hashListView.Columns.Add("ハッシュ値", Math.Max(260, contentWidth - 324));
+        _hashListView.SelectedIndexChanged += (_, _) => UpdateCopyCommandsState();
+        _hashListView.DoubleClick += (_, _) => CopySelectedHashOrShowInfo();
+        _hashListView.KeyDown += HashListView_KeyDown;
+        _hashListView.MouseUp += HashListView_MouseUp;
+
+        if (_hashItems.Count > 0)
+        {
+            foreach (var item in _hashItems)
+            {
+                var row = new ListViewItem(item.Target);
+                row.SubItems.Add(item.Algorithm);
+                row.SubItems.Add(item.HashValue);
+                _hashListView.Items.Add(row);
+            }
+
+            _hashListView.Items[0].Selected = true;
+            _hashListView.Items[0].Focused = true;
+        }
+        else
+        {
+            var row = new ListViewItem("ハッシュ値を抽出できませんでした");
+            row.SubItems.Add("-");
+            row.SubItems.Add("-");
+            _hashListView.Items.Add(row);
+        }
+
+        Controls.Add(_hashListView);
+        currentTop = _hashListView.Bottom + 8;
+
+        _copyCsvButton = new Button
+        {
+            Text = "全件をCSVコピー",
+            Width = 130,
+            Height = 30,
+            Left = 16,
+            Top = currentTop,
+            Anchor = AnchorStyles.Top | AnchorStyles.Left
+        };
+        _copyCsvButton.Click += (_, _) => CopyAllAsCsvOrShowInfo();
+        Controls.Add(_copyCsvButton);
+
+        _toggleLogButton = new Button
+        {
+            Text = "詳細ログを表示",
+            Width = 120,
+            Height = 30,
+            Left = ClientSize.Width - 136,
+            Top = currentTop,
+            Anchor = AnchorStyles.Top | AnchorStyles.Right
+        };
+        _toggleLogButton.Click += (_, _) => ToggleLogVisibility();
+        Controls.Add(_toggleLogButton);
+        currentTop = _copyCsvButton.Bottom + 8;
+        _logTop = currentTop;
 
         _outputTextBox = new TextBox
         {
             Multiline = true,
             ReadOnly = true,
             ScrollBars = ScrollBars.Both,
-            Font = new Font("Consolas", 9f) ?? new Font(FontFamily.GenericMonospace, 9f),
+            Font = new Font("Consolas", 9f),
             Left = 16,
-            Top = currentTop,
+            Top = _logTop,
             Width = contentWidth,
-            Height = this.ClientSize.Height - currentTop - 70,
-            Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right | AnchorStyles.Bottom,
-            Text = _output.Replace("\r\n", "\n").Replace("\n", Environment.NewLine)
+            Height = LogTextBoxHeight,
+            Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right,
+            Text = _output.Replace("\r\n", "\n").Replace("\n", Environment.NewLine),
+            Visible = false
         };
-        this.Controls.Add(_outputTextBox);
-
-        var copyHashButton = new Button
-        {
-            Text = "ハッシュ値をコピー",
-            Width = 140,
-            Height = 30
-        };
-        copyHashButton.Click += (s, e) =>
-        {
-            string? hashOnly = TryExtractHashes();
-            if (!string.IsNullOrEmpty(hashOnly))
-            {
-                Clipboard.SetText(hashOnly);
-            }
-            else
-            {
-                MessageBox.Show(this, "ハッシュ値を抽出できませんでした。結果全体コピーを使用してください。", "CRC/SHA 計算結果", MessageBoxButtons.OK, MessageBoxIcon.Information);
-            }
-        };
+        Controls.Add(_outputTextBox);
 
         var copyAllButton = new Button
         {
@@ -102,7 +174,7 @@ public sealed class HashResultDialog : Form
             Width = 120,
             Height = 30
         };
-        copyAllButton.Click += (s, e) =>
+        copyAllButton.Click += (_, _) =>
         {
             if (!string.IsNullOrEmpty(_outputTextBox.Text))
             {
@@ -118,26 +190,158 @@ public sealed class HashResultDialog : Form
             DialogResult = DialogResult.OK
         };
 
-        this.Controls.Add(copyHashButton);
-        this.Controls.Add(copyAllButton);
-        this.Controls.Add(closeButton);
+        Controls.Add(copyAllButton);
+        Controls.Add(closeButton);
 
-        FileOperationDialogLayoutHelper.ApplyModernBottomActionRow(
+        _copyHashMenuItem = new ToolStripMenuItem("ハッシュ値をコピー");
+        _copyHashMenuItem.Click += (_, _) => CopySelectedHashOrShowInfo();
+        _hashListContextMenu = new ContextMenuStrip();
+        _hashListContextMenu.Items.Add(_copyHashMenuItem);
+
+        _bottomActionRow = FileOperationDialogLayoutHelper.ApplyModernBottomActionRow(
             this,
-            new[] { copyHashButton, copyAllButton, closeButton },
-            _outputTextBox.Bottom + 12,
+            new[] { copyAllButton, closeButton },
+            currentTop,
             buttonGap: 10,
             contentGap: 16);
 
-        this.AcceptButton = closeButton;
-        this.CancelButton = closeButton;
+        AcceptButton = closeButton;
+        CancelButton = closeButton;
 
-        this.Shown += (s, e) =>
+        Shown += (_, _) =>
         {
             _outputTextBox.SelectionStart = 0;
             _outputTextBox.SelectionLength = 0;
-            closeButton.Focus();
+            _hashListView.Focus();
         };
+
+        UpdateCopyCommandsState();
+    }
+
+    private void ToggleLogVisibility()
+    {
+        ApplyLogVisibility(!_outputTextBox.Visible);
+    }
+
+    private void ApplyLogVisibility(bool visible)
+    {
+        SuspendLayout();
+        try
+        {
+            _outputTextBox.Visible = visible;
+            _toggleLogButton.Text = visible ? "詳細ログを隠す" : "詳細ログを表示";
+
+            if (_bottomActionRow != null)
+            {
+                int contentBottom = _logTop + (visible ? _outputTextBox.Height : 0);
+                ClientSize = new Size(ClientSize.Width, visible ? ExpandedClientHeight : CompactClientHeight);
+                _bottomActionRow.Height = _bottomActionRow.PreferredSize.Height;
+                _bottomActionRow.Top = contentBottom;
+            }
+            else
+            {
+                ClientSize = new Size(ClientSize.Width, visible ? ExpandedClientHeight : CompactClientHeight);
+            }
+        }
+        finally
+        {
+            ResumeLayout(performLayout: true);
+        }
+    }
+
+    private void UpdateCopyCommandsState()
+    {
+        bool canCopyHash = GetSelectedHashItem() != null;
+        bool canCopyCsv = _hashItems.Count > 0;
+        _copyHashMenuItem.Enabled = canCopyHash;
+        _copyCsvButton.Enabled = canCopyCsv;
+    }
+
+    private void HashListView_KeyDown(object? sender, KeyEventArgs e)
+    {
+        if (e.Control && e.Shift && e.KeyCode == Keys.C)
+        {
+            CopyAllAsCsvOrShowInfo();
+            e.SuppressKeyPress = true;
+            e.Handled = true;
+            return;
+        }
+
+        if (e.Control && e.KeyCode == Keys.C)
+        {
+            CopySelectedHashOrShowInfo();
+            e.SuppressKeyPress = true;
+            e.Handled = true;
+        }
+    }
+
+    private void HashListView_MouseUp(object? sender, MouseEventArgs e)
+    {
+        if (e.Button != MouseButtons.Right)
+        {
+            return;
+        }
+
+        ListViewItem? hitItem = _hashListView.GetItemAt(e.X, e.Y);
+        if (hitItem != null)
+        {
+            _hashListView.SelectedIndices.Clear();
+            hitItem.Selected = true;
+            hitItem.Focused = true;
+        }
+
+        UpdateCopyCommandsState();
+        _hashListContextMenu.Show(_hashListView, e.Location);
+    }
+
+    private void CopySelectedHashOrShowInfo()
+    {
+        HashDisplayItem? item = GetSelectedHashItem();
+        if (item != null)
+        {
+            Clipboard.SetText(item.HashValue);
+            return;
+        }
+
+        MessageBox.Show(this, "ハッシュ値を抽出できませんでした。結果全体コピーを使用してください。", "CRC/SHA 計算結果", MessageBoxButtons.OK, MessageBoxIcon.Information);
+    }
+
+    private void CopyAllAsCsvOrShowInfo()
+    {
+        if (_hashItems.Count == 0)
+        {
+            MessageBox.Show(this, "CSV 化できるハッシュ一覧がありません。", "CRC/SHA 計算結果", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
+
+        var sb = new StringBuilder();
+        sb.AppendLine("\"対象\",\"アルゴリズム\",\"ハッシュ値\"");
+        foreach (var item in _hashItems)
+        {
+            sb.Append('"').Append(EscapeCsv(item.Target)).Append("\",")
+                .Append('"').Append(EscapeCsv(item.Algorithm)).Append("\",")
+                .Append('"').Append(EscapeCsv(item.HashValue)).AppendLine("\"");
+        }
+
+        Clipboard.SetText(sb.ToString());
+    }
+
+    private static string EscapeCsv(string value)
+    {
+        return (value ?? string.Empty).Replace("\"", "\"\"");
+    }
+
+    private HashDisplayItem? GetSelectedHashItem()
+    {
+        if (_hashListView.SelectedIndices.Count == 0)
+        {
+            return null;
+        }
+
+        int index = _hashListView.SelectedIndices[0];
+        return index >= 0 && index < _hashItems.Count
+            ? _hashItems[index]
+            : null;
     }
 
     private static string GetAlgorithmLabel(SevenZipHashAlgorithm algorithm)
@@ -148,88 +352,106 @@ public sealed class HashResultDialog : Form
             SevenZipHashAlgorithm.Crc64 => "CRC-64",
             SevenZipHashAlgorithm.Sha1 => "SHA-1",
             SevenZipHashAlgorithm.Sha256 => "SHA-256",
-            SevenZipHashAlgorithm.All => "すべて (*)",
+            SevenZipHashAlgorithm.All => "すべて",
             _ => algorithm.ToString()
         };
     }
 
-    private string? TryExtractHashes()
+    private IReadOnlyList<HashDisplayItem> ExtractHashItems()
     {
         try
         {
-            var lines = _output.Split(new[] { "\r\n", "\r", "\n" }, StringSplitOptions.None);
-            int startLine = -1;
-            int endLine = -1;
-
-            // 7-Zip の出力テーブル（ハイフン行で囲まれた部分）を特定
-            for (int i = 0; i < lines.Length; i++)
+            if (!TryParseRows(out var rows) || rows.Count == 0)
             {
-                if (lines[i].StartsWith("---------"))
-                {
-                    if (startLine == -1) startLine = i + 1;
-                    else { endLine = i; break; }
-                }
+                return Array.Empty<HashDisplayItem>();
             }
 
-            if (startLine == -1 || endLine == -1 || startLine >= endLine) return null;
-
-            // カラム位置を特定（ハイフン行の空白位置から推測）
-            var dashedLine = lines[startLine - 1];
-            var headerLine = lines[startLine - 2];
-            var columns = ParseColumns(headerLine, dashedLine);
-
-            var rows = new List<RowData>();
-            for (int i = startLine; i < endLine; i++)
+            var items = new List<HashDisplayItem>();
+            foreach (var row in rows)
             {
-                var row = ExtractRowData(lines[i], columns);
-                if (row != null) rows.Add(row);
-            }
-
-            if (rows.Count == 0) return null;
-
-            // 整形してコピー
-            if (_algorithm == SevenZipHashAlgorithm.All)
-            {
-                // すべて(*)の場合は「Algo <TAB> Hash <TAB> Name」
-                var result = new List<string>();
-                foreach (var row in rows)
+                foreach (var hash in row.Hashes)
                 {
-                    foreach (var h in row.Hashes)
+                    if (string.IsNullOrWhiteSpace(hash.Value))
                     {
-                        result.Add($"{h.Key}\t{h.Value}\t{row.FileName}");
+                        continue;
                     }
+
+                    items.Add(new HashDisplayItem(
+                        row.FileName,
+                        NormalizeHashLabel(hash.Key),
+                        hash.Value));
                 }
-                return string.Join(Environment.NewLine, result);
             }
-            else if (rows.Count == 1)
-            {
-                // 単一ファイルかつ特定アルゴリズムの場合は「Hash」のみ
-                return rows[0].Hashes.Values.FirstOrDefault() ?? "";
-            }
-            else
-            {
-                // 複数ファイルの場合は「Hash <TAB> Name」
-                var result = new List<string>();
-                foreach (var row in rows)
-                {
-                    result.Add($"{row.Hashes.Values.FirstOrDefault() ?? ""}\t{row.FileName}");
-                }
-                return string.Join(Environment.NewLine, result);
-            }
+
+            return items;
         }
         catch
         {
-            return null;
+            return Array.Empty<HashDisplayItem>();
         }
     }
 
-    private record ColumnInfo(string Name, int Start, int Length);
-    private record RowData(string FileName, Dictionary<string, string> Hashes);
+    private static string NormalizeHashLabel(string value)
+    {
+        return value.ToUpperInvariant() switch
+        {
+            "CRC32" => "CRC-32",
+            "CRC64" => "CRC-64",
+            "SHA1" => "SHA-1",
+            "SHA256" => "SHA-256",
+            _ => value
+        };
+    }
 
-    private List<ColumnInfo> ParseColumns(string headerLine, string dashedLine)
+    private bool TryParseRows(out List<RowData> rows)
+    {
+        rows = new List<RowData>();
+        var lines = _output.Split(new[] { "\r\n", "\r", "\n" }, StringSplitOptions.None);
+        int startLine = -1;
+        int endLine = -1;
+
+        for (int i = 0; i < lines.Length; i++)
+        {
+            if (lines[i].StartsWith("---------"))
+            {
+                if (startLine == -1)
+                {
+                    startLine = i + 1;
+                }
+                else
+                {
+                    endLine = i;
+                    break;
+                }
+            }
+        }
+
+        if (startLine == -1 || endLine == -1 || startLine >= endLine)
+        {
+            return false;
+        }
+
+        var dashedLine = lines[startLine - 1];
+        var headerLine = lines[startLine - 2];
+        var columns = ParseColumns(headerLine, dashedLine);
+
+        for (int i = startLine; i < endLine; i++)
+        {
+            var row = ExtractRowData(lines[i], columns);
+            if (row != null)
+            {
+                rows.Add(row);
+            }
+        }
+
+        return rows.Count > 0;
+    }
+
+    private static List<ColumnInfo> ParseColumns(string headerLine, string dashedLine)
     {
         var columns = new List<ColumnInfo>();
         int currentStart = 0;
+
         for (int i = 0; i < dashedLine.Length; i++)
         {
             if (dashedLine[i] == ' ')
@@ -239,41 +461,56 @@ public sealed class HashResultDialog : Form
                     string name = headerLine.Substring(currentStart, i - currentStart).Trim();
                     columns.Add(new ColumnInfo(name, currentStart, i - currentStart));
                 }
+
                 currentStart = i + 1;
-                // 空白が連続する場合をスキップ
-                while (currentStart < dashedLine.Length && dashedLine[currentStart] == ' ') currentStart++;
+                while (currentStart < dashedLine.Length && dashedLine[currentStart] == ' ')
+                {
+                    currentStart++;
+                }
                 i = currentStart - 1;
             }
         }
+
         if (currentStart < headerLine.Length)
         {
             columns.Add(new ColumnInfo(headerLine.Substring(currentStart).Trim(), currentStart, -1));
         }
+
         return columns;
     }
 
-    private RowData? ExtractRowData(string line, List<ColumnInfo> columns)
+    private static RowData? ExtractRowData(string line, List<ColumnInfo> columns)
     {
         var hashes = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-        string fileName = "";
+        string fileName = string.Empty;
 
         foreach (var col in columns)
         {
-            if (col.Start >= line.Length) continue;
+            if (col.Start >= line.Length)
+            {
+                continue;
+            }
 
-            string value;
-            if (col.Length == -1) value = line.Substring(col.Start).Trim();
-            else value = line.Substring(col.Start, Math.Min(col.Length, line.Length - col.Start)).Trim();
+            string value = col.Length == -1
+                ? line.Substring(col.Start).Trim()
+                : line.Substring(col.Start, Math.Min(col.Length, line.Length - col.Start)).Trim();
 
-            if (col.Name.Equals("Name", StringComparison.OrdinalIgnoreCase)) fileName = value;
+            if (col.Name.Equals("Name", StringComparison.OrdinalIgnoreCase))
+            {
+                fileName = value;
+            }
             else if (!col.Name.Equals("Size", StringComparison.OrdinalIgnoreCase))
             {
-                // カラム名が SHA256, CRC32 などであればハッシュとして扱う
                 hashes[col.Name] = value;
             }
         }
 
-        if (string.IsNullOrEmpty(fileName) || hashes.Count == 0) return null;
-        return new RowData(fileName, hashes);
+        return string.IsNullOrEmpty(fileName) || hashes.Count == 0
+            ? null
+            : new RowData(fileName, hashes);
     }
+
+    private sealed record HashDisplayItem(string Target, string Algorithm, string HashValue);
+    private sealed record ColumnInfo(string Name, int Start, int Length);
+    private sealed record RowData(string FileName, Dictionary<string, string> Hashes);
 }

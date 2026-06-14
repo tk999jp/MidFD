@@ -1,4 +1,4 @@
-﻿using MidFD.Models;
+using MidFD.Models;
 
 namespace MidFD.Services;
 
@@ -462,7 +462,10 @@ public static class QuickAccessService
             .ToList();
     }
 
-    public static IReadOnlyList<QuickAccessEntry> FilterEntries(IEnumerable<QuickAccessEntry> entries, string query)
+    public static IReadOnlyList<QuickAccessEntry> FilterEntries(
+        IEnumerable<QuickAccessEntry> entries,
+        string query,
+        QuickAccessOpenDiagnostics? diagnostics = null)
     {
         string trimmed = query.Trim();
         IReadOnlyList<QuickAccessEntry> source = entries
@@ -479,7 +482,7 @@ public static class QuickAccessService
                 GetEntryCategoryLabel(entry).Contains(trimmed, StringComparison.OrdinalIgnoreCase) ||
                 GetEntryValueLabel(entry).Contains(trimmed, StringComparison.OrdinalIgnoreCase) ||
                 GetEntryKindLabel(entry).Contains(trimmed, StringComparison.OrdinalIgnoreCase) ||
-                GetEntryStatusLabel(entry, (string?)null).Contains(trimmed, StringComparison.OrdinalIgnoreCase))
+                GetEntryStatusLabel(entry, (string?)null, diagnostics).Contains(trimmed, StringComparison.OrdinalIgnoreCase))
             .ToList();
     }
 
@@ -514,14 +517,19 @@ public static class QuickAccessService
         return entry.Path;
     }
 
-    public static string GetEntryTooltipText(QuickAccessEntry entry, string? currentPath)
+    public static string GetEntryTooltipText(
+        QuickAccessEntry entry,
+        string? currentPath,
+        QuickAccessOpenDiagnostics? diagnostics = null,
+        string? precomputedStatus = null)
     {
+        string statusLabel = precomputedStatus ?? GetEntryStatusLabel(entry, currentPath, diagnostics);
         if (entry.Kind == QuickAccessEntryKind.ExternalCommand)
         {
             return $"表示名: {entry.DisplayName}\r\n" +
                    $"実行ファイル: {GetEntryValueLabel(entry)}\r\n" +
                    $"区分: {GetEntryKindLabel(entry)}\r\n" +
-                   $"状態: {GetEntryStatusLabel(entry, currentPath)}\r\n" +
+                   $"状態: {statusLabel}\r\n" +
                    $"対象: {GetExternalCommandTargetLabel(entry.TargetMode)}\r\n" +
                    $"作業: {GetExternalCommandWorkingDirectoryLabel(entry.WorkingDirectoryMode)}\r\n" +
                    $"引数: {(string.IsNullOrWhiteSpace(entry.Arguments) ? "(なし)" : entry.Arguments)}";
@@ -531,7 +539,7 @@ public static class QuickAccessService
                $"カテゴリ: {GetEntryCategoryLabel(entry)}\r\n" +
                $"移動先: {GetEntryValueLabel(entry)}\r\n" +
                $"区分: {GetEntryKindLabel(entry)}\r\n" +
-               $"状態: {GetEntryStatusLabel(entry, currentPath)}";
+               $"状態: {statusLabel}";
     }
 
     public static string GetEntryStatusLabel(QuickAccessEntry entry, QuickAccessCommandContext context)
@@ -546,11 +554,11 @@ public static class QuickAccessService
             : message;
     }
 
-    public static string GetEntryStatusLabel(QuickAccessEntry entry, string? currentPath)
+    public static string GetEntryStatusLabel(QuickAccessEntry entry, string? currentPath, QuickAccessOpenDiagnostics? diagnostics = null)
     {
         if (entry.Kind == QuickAccessEntryKind.ExternalCommand)
         {
-            string availability = GetExternalCommandAvailabilityLabel(entry);
+            string availability = GetExternalCommandAvailabilityLabel(entry, diagnostics);
             return $"{availability} / {GetExternalCommandTargetLabel(entry.TargetMode)}";
         }
 
@@ -558,11 +566,6 @@ public static class QuickAccessService
         if (string.IsNullOrWhiteSpace(candidatePath))
         {
             return string.Empty;
-        }
-
-        if (!Directory.Exists(candidatePath))
-        {
-            return "見つからない";
         }
 
         if (!string.IsNullOrWhiteSpace(currentPath) && PathsEqual(candidatePath, currentPath))
@@ -577,6 +580,43 @@ public static class QuickAccessService
                 : "戻る候補";
         }
 
+        if (NetworkPathResolutionPolicy.IsAuxiliaryResolutionDeferred(candidatePath))
+        {
+            NetworkPathResolutionPolicy.LogDecision(
+                "NetworkPathResolutionDeferral.Skip",
+                "QuickAccessStatus",
+                nameof(GetEntryStatusLabel),
+                candidatePath,
+                usedCached: false,
+                resolvedSync: false,
+                reason: "unc-path");
+            return string.Empty;
+        }
+
+        bool exists = diagnostics?.MeasureDirectoryExists("QuickAccess.ResolvePath", candidatePath, "entry-status")
+            ?? Directory.Exists(candidatePath);
+        bool usedCached = diagnostics?.LastProbeUsedCache ?? false;
+        if (!exists)
+        {
+            NetworkPathResolutionPolicy.LogDecision(
+                "NetworkPathResolutionDeferral.AllowCritical",
+                "QuickAccessStatus",
+                nameof(GetEntryStatusLabel),
+                candidatePath,
+                usedCached: usedCached,
+                resolvedSync: !usedCached,
+                reason: usedCached ? "cached-entry-status" : "local-or-drive-letter");
+            return "見つからない";
+        }
+
+        NetworkPathResolutionPolicy.LogDecision(
+            "NetworkPathResolutionDeferral.AllowCritical",
+            "QuickAccessStatus",
+            nameof(GetEntryStatusLabel),
+            candidatePath,
+            usedCached: usedCached,
+            resolvedSync: !usedCached,
+            reason: usedCached ? "cached-entry-status" : "local-or-drive-letter");
         return "移動可";
     }
 
@@ -678,7 +718,7 @@ public static class QuickAccessService
         return true;
     }
 
-    private static string GetExternalCommandAvailabilityLabel(QuickAccessEntry entry)
+    private static string GetExternalCommandAvailabilityLabel(QuickAccessEntry entry, QuickAccessOpenDiagnostics? diagnostics = null)
     {
         string executablePath = NormalizePath(entry.ExecutablePath, null) ?? string.Empty;
         if (string.IsNullOrWhiteSpace(executablePath))
@@ -686,7 +726,31 @@ public static class QuickAccessService
             return "未設定";
         }
 
-        return File.Exists(executablePath) ? "実行可" : "見つからない";
+        if (NetworkPathResolutionPolicy.IsAuxiliaryResolutionDeferred(executablePath))
+        {
+            NetworkPathResolutionPolicy.LogDecision(
+                "NetworkPathResolutionDeferral.Skip",
+                "QuickAccessStatus",
+                nameof(GetExternalCommandAvailabilityLabel),
+                executablePath,
+                usedCached: false,
+                resolvedSync: false,
+                reason: "unc-executable");
+            return string.Empty;
+        }
+
+        bool exists = diagnostics?.MeasureFileExists("QuickAccess.ResolveShellInfo", executablePath, "command-executable")
+            ?? File.Exists(executablePath);
+        bool usedCached = diagnostics?.LastProbeUsedCache ?? false;
+        NetworkPathResolutionPolicy.LogDecision(
+            "NetworkPathResolutionDeferral.AllowCritical",
+            "QuickAccessStatus",
+            nameof(GetExternalCommandAvailabilityLabel),
+            executablePath,
+            usedCached: usedCached,
+            resolvedSync: !usedCached,
+            reason: usedCached ? "cached-command-executable" : "local-or-drive-letter");
+        return exists ? "実行可" : "見つからない";
     }
 
     public static IReadOnlyList<QuickAccessEntry> BuildHistoryEntries(IEnumerable<string> backHistory, IEnumerable<string> forwardHistory)
@@ -823,6 +887,10 @@ public static class QuickAccessService
         }
 
         string candidate = path.Trim();
+        if (candidate.Length == 2 && candidate[1] == ':' && char.IsLetter(candidate[0]))
+        {
+            candidate = candidate + Path.DirectorySeparatorChar;
+        }
         try
         {
             if (!Path.IsPathRooted(candidate) && !string.IsNullOrWhiteSpace(currentPath))

@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Drawing;
 using System.Text;
@@ -77,7 +77,22 @@ public sealed class LargeFilePreviewControl : UserControl
     private CharacterSelectionPoint? _characterSelectionCaret;
 
     private Encoding _encoding = Encoding.UTF8;
-    private Font _font = new Font("Consolas", 10F);
+    private Font _font = MidFD.Helpers.FontResolver.CreateFont(MidFD.Helpers.FontResolver.ResolveMonospaceFontFamily(), 10F);
+
+    [System.Diagnostics.CodeAnalysis.AllowNull]
+    public override Font Font
+    {
+        get => _font;
+        set
+        {
+            if (value != null && _font != value)
+            {
+                _font = (Font)value.Clone();
+                base.Font = _font;
+                this.Invalidate();
+            }
+        }
+    }
     private Color _lineNumberColor = Color.FromArgb(80, 80, 80);
     private Color _textColor = Color.FromArgb(200, 200, 200);
 
@@ -460,23 +475,9 @@ public sealed class LargeFilePreviewControl : UserControl
         Focus();
 
         bool isShift = (Control.ModifierKeys & Keys.Shift) == Keys.Shift;
-        
-        // Shift+Click: 既存Anchorがある場合のみ拡張する
-        if (isShift && _characterSelectionAnchor.HasValue)
+        if (isShift && TryBeginShiftCharacterSelection(e.Location))
         {
-            var selectionPoint = GetCharacterSelectionPointFromMouse(e.Location);
-            if (selectionPoint.HasValue)
-            {
-                ClearLineSelectionCore(raiseEvent: false);
-                _selectionAnchorLine = null;
-                _isSelecting = false;
-                _isCharacterSelecting = false; // Shift+Click は単発確定とする
-                _characterSelectionCaret = selectionPoint.Value;
-                _lastCharacterSelectionMousePoint = e.Location;
-                Invalidate();
-                SelectionChanged?.Invoke(this, EventArgs.Empty);
-                return;
-            }
+            return;
         }
 
         // 通常の MouseDown (Shiftなし、または有効な既存Anchorがない場合)
@@ -711,6 +712,22 @@ public sealed class LargeFilePreviewControl : UserControl
         {
             return;
         }
+
+        Invalidate();
+        SelectionChanged?.Invoke(this, EventArgs.Empty);
+    }
+
+    public void SelectAll()
+    {
+        if (_state == null || _state.TotalLines <= 0)
+        {
+            return;
+        }
+
+        int lastLine = _state.TotalLines - 1;
+        _characterSelectionAnchor = new CharacterSelectionPoint(0, 0);
+        _characterSelectionCaret = new CharacterSelectionPoint(lastLine, int.MaxValue);
+        _isCharacterSelecting = true;
 
         Invalidate();
         SelectionChanged?.Invoke(this, EventArgs.Empty);
@@ -1094,6 +1111,33 @@ public sealed class LargeFilePreviewControl : UserControl
         {
             _characterSelectionAutoScrollTimer.Stop();
         }
+    }
+
+    internal bool TryBeginShiftCharacterSelection(Point point)
+    {
+        CharacterSelectionPoint? selectionPoint = GetCharacterSelectionPointFromMouse(point, clampToVisible: true);
+        if (!selectionPoint.HasValue)
+        {
+            return false;
+        }
+
+        CharacterSelectionPoint anchor = _characterSelectionAnchor
+            ?? _characterSelectionCaret
+            ?? selectionPoint.Value;
+
+        ClearLineSelectionCore(raiseEvent: false);
+        _selectionAnchorLine = null;
+        _isSelecting = false;
+        _isCharacterSelecting = true;
+        Capture = true;
+        _characterSelectionAnchor = anchor;
+        _characterSelectionCaret = selectionPoint.Value;
+        _lastCharacterSelectionMousePoint = point;
+        StopCharacterSelectionAutoScroll();
+
+        Invalidate();
+        SelectionChanged?.Invoke(this, EventArgs.Empty);
+        return true;
     }
 
     private void CharacterSelectionAutoScrollTimer_Tick(object? sender, EventArgs e)

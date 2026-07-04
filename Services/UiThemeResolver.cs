@@ -10,7 +10,7 @@ internal static class UiThemeResolver
 {
     public static IReadOnlyList<string> PresetNames { get; } = new[]
     {
-        "MidFD Default",
+        "MidFD標準",
         "Terminal Green",
         "Amber",
         "Mono Dark",
@@ -23,12 +23,10 @@ internal static class UiThemeResolver
 
     /// <summary>
     /// 一覧色プリセット名から UI テーマプリセット名へマップする。
-    /// ClassicCyan は MidFD Default（黒+シアン基調）へ解決する。
-    /// 青ベタ背景（Classic Blue）は ClassicCyan の連動先にしない。
     /// </summary>
     public static string MapFromDisplayColor(string? displayColorPreset)
     {
-        if (displayColorPreset == null) return "MidFD Default";
+        if (displayColorPreset == null) return "MidFD標準";
         if (displayColorPreset.IndexOf("Light", StringComparison.OrdinalIgnoreCase) >= 0) return "Light";
         if (displayColorPreset.IndexOf("Mono Dark", StringComparison.OrdinalIgnoreCase) >= 0) return "Mono Dark";
         if (displayColorPreset.IndexOf("Cyber", StringComparison.OrdinalIgnoreCase) >= 0) return "Cyber";
@@ -36,8 +34,7 @@ internal static class UiThemeResolver
         if (displayColorPreset.IndexOf("Sepia", StringComparison.OrdinalIgnoreCase) >= 0) return "Sepia";
         if (displayColorPreset.IndexOf("Green", StringComparison.OrdinalIgnoreCase) >= 0) return "Terminal Green";
         if (displayColorPreset.IndexOf("Amber", StringComparison.OrdinalIgnoreCase) >= 0) return "Amber";
-        // ClassicCyan / MidFD Classic Cyan などは MidFD Default（黒+シアン）へ
-        return "MidFD Default";
+        return "MidFD標準";
     }
 
     /// <summary>
@@ -61,7 +58,7 @@ internal static class UiThemeResolver
         var listColors = FileListColorResolver.ResolveColors(tempSettings);
         string canonicalPreset = FileListColorResolver.CanonicalizePresetKey(appearance.ColorTheme);
 
-        if (string.Equals(canonicalPreset, "ClassicCyan", StringComparison.OrdinalIgnoreCase))
+        if (string.Equals(canonicalPreset, "MidFdStandard", StringComparison.OrdinalIgnoreCase))
         {
             baseColors = new UiThemeColors
             {
@@ -102,7 +99,7 @@ internal static class UiThemeResolver
             ViewerStatusBackColor = baseColors.ViewerStatusBackColor,
             ViewerStatusForeColor = baseColors.ViewerStatusForeColor,
             BorderColor = baseColors.BorderColor,
-            SeparatorColor = baseColors.SeparatorColor
+            SeparatorColor = listColors.NormalFile
         };
 
         // 手動指定色が有効な場合、ファイラー/ビューア色を上書きする
@@ -262,7 +259,6 @@ internal static class UiThemeResolver
                 BorderColor = Color.FromArgb(152, 124, 88),
                 SeparatorColor = Color.FromArgb(96, 74, 48)
             },
-            // Classic Blue: 青背景/レトロブルー系（旧MidFD Classic Cyan相当）
             "Classic Blue" => new UiThemeColors
             {
                 ChromeBackColor = Color.FromArgb(0, 0, 96),
@@ -295,8 +291,7 @@ internal static class UiThemeResolver
                 BorderColor = Color.FromArgb(220, 220, 220),
                 SeparatorColor = Color.FromArgb(200, 200, 200)
             },
-            // "MidFD Default" またはデフォルト: 黒+シアン基調（従来MidFD寄り）
-            // ClassicCyan連動時もここへ解決される
+            // "MidFD標準" またはデフォルト: 黒+シアン基調（従来MidFD寄り）
             _ => new UiThemeColors
             {
                 ChromeBackColor = Color.FromArgb(16, 20, 28),

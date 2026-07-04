@@ -1,4 +1,4 @@
-﻿using System.IO;
+using System.IO;
 using System.Text;
 
 namespace MidFD.Services;
@@ -17,9 +17,21 @@ public sealed class LargeTextEncodingDetectionResult
 public static class PreviewService
 {
     internal const int LargeTextThresholdBytes = 2 * 1024 * 1024; // 2MB
-    private static readonly HashSet<string> VideoExtensions = new(StringComparer.OrdinalIgnoreCase)
+    private static readonly HashSet<string> MarkdownExtensions = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ".md", ".markdown"
+    };
+    private static readonly HashSet<string> SqliteExtensions = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ".db", ".sqlite", ".sqlite3"
+    };
+    private static readonly HashSet<string> VideoFileExtensions = new(StringComparer.OrdinalIgnoreCase)
     {
         ".mp4", ".m4v", ".mov", ".avi", ".wmv", ".mpg", ".mpeg", ".webm", ".mkv"
+    };
+    private static readonly HashSet<string> AudioExtensions = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ".mp3", ".wav", ".flac", ".m4a", ".aac", ".ogg", ".opus", ".wma"
     };
     private static readonly HashSet<string> BinaryFastPathExtensions = new(StringComparer.OrdinalIgnoreCase)
     {
@@ -40,9 +52,19 @@ public static class PreviewService
             return PreviewKind.Image;
         }
 
-        if (IsSupportedVideoExtension(path))
+        if (IsSupportedMediaExtension(path))
         {
             return PreviewKind.Video;
+        }
+
+        if (IsMarkdownExtension(path))
+        {
+            return PreviewKind.Markdown;
+        }
+
+        if (IsSqliteExtension(path))
+        {
+            return PreviewKind.Sqlite;
         }
 
         if (IsBinaryFastPathExtension(path))
@@ -85,9 +107,19 @@ public static class PreviewService
             return PreviewKind.Image;
         }
 
-        if (IsSupportedVideoExtension(path))
+        if (IsSupportedMediaExtension(path))
         {
             return PreviewKind.Video;
+        }
+
+        if (IsMarkdownExtension(path))
+        {
+            return PreviewKind.Markdown;
+        }
+
+        if (IsSqliteExtension(path))
+        {
+            return PreviewKind.Sqlite;
         }
 
         if (IsBinaryFastPathExtension(path))
@@ -106,7 +138,30 @@ public static class PreviewService
     public static bool IsSupportedVideoExtension(string path)
     {
         string ext = Path.GetExtension(path);
-        return VideoExtensions.Contains(ext);
+        return VideoFileExtensions.Contains(ext);
+    }
+
+    public static bool IsSupportedMediaExtension(string path)
+    {
+        return IsSupportedVideoExtension(path) || IsSupportedAudioExtension(path);
+    }
+
+    public static bool IsSupportedAudioExtension(string path)
+    {
+        string ext = Path.GetExtension(path);
+        return AudioExtensions.Contains(ext);
+    }
+
+    public static bool IsMarkdownExtension(string path)
+    {
+        string ext = Path.GetExtension(path);
+        return MarkdownExtensions.Contains(ext);
+    }
+
+    public static bool IsSqliteExtension(string path)
+    {
+        string ext = Path.GetExtension(path);
+        return SqliteExtensions.Contains(ext);
     }
 
     private static bool IsBinaryFastPathExtension(string path)

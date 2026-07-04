@@ -11,6 +11,18 @@ static class Program
         // 早期に例外フックを登録
         RegisterStartupExceptionHooks();
 
+        if (HasStorageProfileDiagnosticsRequest(args))
+        {
+            Configuration.Storage.StorageProfileActivation activation = Configuration.Storage.StorageProfileActivationResolver.ResolveDefault(args);
+            string? diagnosticsPath = TryGetStorageProfileDiagnosticsPath(args);
+            string writtenPath = Configuration.Storage.StorageProfileDiagnosticsService.RunToFile(activation, diagnosticsPath);
+            if (!string.IsNullOrWhiteSpace(diagnosticsPath))
+            {
+                Console.WriteLine(writtenPath);
+            }
+            return;
+        }
+
         if (args.Any(arg => string.Equals(arg, "--shell-delete-probe", StringComparison.OrdinalIgnoreCase)))
         {
             int cancelAfter = TryGetShellDeleteProbeCancelAfter(args);
@@ -22,6 +34,7 @@ static class Program
 
         // To customize application configuration such as set high DPI settings or default font,
         // see https://aka.ms/applicationconfiguration.
+        Configuration.Storage.StorageProfileActivationContext.Initialize(args);
         ApplicationConfiguration.Initialize();
         System.Text.Encoding.RegisterProvider(System.Text.CodePagesEncodingProvider.Instance);
 
@@ -133,6 +146,33 @@ static class Program
         return null;
     }
 
+    private static string? TryGetStorageProfileDiagnosticsPath(string[] args)
+    {
+        for (int i = 0; i < args.Length; i++)
+        {
+            string arg = args[i];
+            if (string.Equals(arg, "--storage-profile-diagnostics-file", StringComparison.OrdinalIgnoreCase))
+            {
+                return i + 1 < args.Length ? args[i + 1] : string.Empty;
+            }
+
+            const string prefix = "--storage-profile-diagnostics-file=";
+            if (arg.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+            {
+                return arg[prefix.Length..];
+            }
+        }
+
+        return null;
+    }
+
+    private static bool HasStorageProfileDiagnosticsRequest(string[] args)
+    {
+        return args.Any(arg =>
+            string.Equals(arg, "--storage-profile-diagnostics", StringComparison.OrdinalIgnoreCase) ||
+            arg.StartsWith("--storage-profile-diagnostics-file", StringComparison.OrdinalIgnoreCase));
+    }
+
     private static bool TryResolveStartupProfileOverride(string[] args, out string? startupProfileOverride)
     {
         startupProfileOverride = TryGetProfileArgument(args);
@@ -171,6 +211,7 @@ static class Program
             settings.SevenZip.ExePath = NormalizeOptionalPath(dialog.SevenZipPath);
             settings.Preview.VideoToolDirectory = NormalizeOptionalPath(dialog.VideoToolDirectory);
             settings.ExternalTools.ExternalEditorPath = NormalizeOptionalPath(dialog.ExternalEditorPath);
+            ApplyStartupRestorePreset(settings.Session, dialog.RestoreStartupState);
             Configuration.SettingsManager.Save(settings);
             startupProfileOverride = Services.FeatureProfileService.ToSettingValue(dialog.SelectedProfile);
             return true;
@@ -190,5 +231,17 @@ static class Program
         }
 
         return value.Trim();
+    }
+
+    private static void ApplyStartupRestorePreset(Configuration.SessionSettings session, bool enabled)
+    {
+        session ??= new Configuration.SessionSettings();
+        session.RestoreStartupState = enabled;
+        session.RestoreTabsOnStartup = enabled;
+        session.RestoreLastPath = enabled;
+        session.RestoreDisplayState = enabled;
+        session.RestoreWindowBounds = enabled;
+        session.RestoreColumnCount = enabled;
+        session.RestoreSort = enabled;
     }
 }

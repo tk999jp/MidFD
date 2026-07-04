@@ -5,6 +5,8 @@ using MidFD.Helpers;
 using MidFD.Models;
 using MidFD.Services;
 
+using System.ComponentModel;
+
 namespace MidFD.Dialogs;
 
 public sealed class InputAssignmentDialog : Form
@@ -46,6 +48,8 @@ public sealed class InputAssignmentDialog : Form
 
     public InputSettings ResultSettings => _settingsDraft.Clone();
 
+    [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
+    [Browsable(false)]
     public string SelectedProfileValue
     {
         get => ResolveProfileValue();
@@ -58,6 +62,8 @@ public sealed class InputAssignmentDialog : Form
             }
         }
     }
+
+    public event EventHandler? ProfileChanged;
 
     public InputAssignmentDialog(InputSettings currentSettings, CommandRegistry registry)
     {
@@ -97,6 +103,7 @@ public sealed class InputAssignmentDialog : Form
         {
             _settingsDraft.FunctionKeyProfile = ResolveProfileValue();
             RefreshAllViews();
+            ProfileChanged?.Invoke(this, EventArgs.Empty);
         };
         profilePanel.Controls.Add(_profileCombo);
 
@@ -186,8 +193,11 @@ public sealed class InputAssignmentDialog : Form
             ReadOnly = false,
             ToolTipText = "セル上で直接編集します。空欄で既定に戻します。"
         };
-        labelColumn.CellTemplate.Style.BackColor = Color.White;
-        labelColumn.CellTemplate.Style.ForeColor = Color.Black;
+        if (labelColumn.CellTemplate is not null)
+        {
+            labelColumn.CellTemplate.Style.BackColor = Color.White;
+            labelColumn.CellTemplate.Style.ForeColor = Color.Black;
+        }
         _functionGrid.Columns.Add(labelColumn);
         _functionGrid.Columns.Add(CreateCommandComboColumn("Command", "機能名", 290, includeDefault: true, includeUnassigned: true));
         _functionGrid.Columns.Add(new DataGridViewTextBoxColumn
@@ -457,13 +467,14 @@ public sealed class InputAssignmentDialog : Form
     private static string GetCommandCategoryForDisplay(CommandDefinition command)
     {
         string id = command.Id;
-        if (id.Equals("file.copy", StringComparison.OrdinalIgnoreCase) ||
-            id.Equals("file.move", StringComparison.OrdinalIgnoreCase) ||
-            id.Equals("file.rename", StringComparison.OrdinalIgnoreCase) ||
-            id.Equals("file.delete", StringComparison.OrdinalIgnoreCase) ||
+        if (id.Equals(CommandIds.FileCopy, StringComparison.OrdinalIgnoreCase) ||
+            id.Equals(CommandIds.FileMove, StringComparison.OrdinalIgnoreCase) ||
+            id.Equals(CommandIds.FileRename, StringComparison.OrdinalIgnoreCase) ||
+            id.Equals(CommandIds.FileDelete, StringComparison.OrdinalIgnoreCase) ||
             id.Equals(CommandIds.BrowserExecute, StringComparison.OrdinalIgnoreCase) ||
             id.Equals(CommandIds.BrowserChangeAttributes, StringComparison.OrdinalIgnoreCase) ||
             id.Equals(CommandIds.BrowserCreateDirectory, StringComparison.OrdinalIgnoreCase) ||
+            id.Equals(CommandIds.BrowserCreateFile, StringComparison.OrdinalIgnoreCase) ||
             id.Equals(CommandIds.BrowserCopyFullPath, StringComparison.OrdinalIgnoreCase) ||
             id.Equals(CommandIds.ClipboardPaste, StringComparison.OrdinalIgnoreCase) ||
             id.Equals(CommandIds.EditUndo, StringComparison.OrdinalIgnoreCase) ||
@@ -486,6 +497,12 @@ public sealed class InputAssignmentDialog : Form
             id.Equals(CommandIds.BrowserCursorBottom, StringComparison.OrdinalIgnoreCase) ||
             id.Equals(CommandIds.BrowserTabNext, StringComparison.OrdinalIgnoreCase) ||
             id.Equals(CommandIds.BrowserTabPrevious, StringComparison.OrdinalIgnoreCase) ||
+            id.Equals(CommandIds.BrowserTabCategoryAdd, StringComparison.OrdinalIgnoreCase) ||
+            id.Equals(CommandIds.BrowserTabCategoryRename, StringComparison.OrdinalIgnoreCase) ||
+            id.Equals(CommandIds.BrowserTabCategoryDelete, StringComparison.OrdinalIgnoreCase) ||
+            id.Equals(CommandIds.BrowserTabCategoryMoveLeft, StringComparison.OrdinalIgnoreCase) ||
+            id.Equals(CommandIds.BrowserTabCategoryMoveRight, StringComparison.OrdinalIgnoreCase) ||
+            id.Equals(CommandIds.BrowserPathEntryOpen, StringComparison.OrdinalIgnoreCase) ||
             id.Equals(CommandIds.BrowserTabCategoryNext, StringComparison.OrdinalIgnoreCase) ||
             id.Equals(CommandIds.BrowserTabCategoryPrevious, StringComparison.OrdinalIgnoreCase) ||
             id.Equals(CommandIds.BrowserTabClose, StringComparison.OrdinalIgnoreCase) ||
@@ -511,6 +528,7 @@ public sealed class InputAssignmentDialog : Form
         if (id.Equals(CommandIds.BrowserOpenExplorer, StringComparison.OrdinalIgnoreCase) ||
             id.Equals(CommandIds.BrowserOpenShell, StringComparison.OrdinalIgnoreCase) ||
             id.Equals(CommandIds.BrowserOpenExternalEditor, StringComparison.OrdinalIgnoreCase) ||
+            id.Equals(CommandIds.BrowserOpenCommandPrompt, StringComparison.OrdinalIgnoreCase) ||
             id.Equals(CommandIds.BrowserQuickAccess, StringComparison.OrdinalIgnoreCase) ||
             id.Equals(CommandIds.BrowserLogdisk, StringComparison.OrdinalIgnoreCase) ||
             id.Equals(CommandIds.BrowserPreview, StringComparison.OrdinalIgnoreCase) ||
@@ -551,7 +569,7 @@ public sealed class InputAssignmentDialog : Form
     private static int GetCommandDisplayOrder(CommandDefinition command)
     {
         string id = command.Id;
-        if (id.Equals("file.copy", StringComparison.OrdinalIgnoreCase))
+        if (id.Equals(CommandIds.FileCopy, StringComparison.OrdinalIgnoreCase))
         {
             return 0;
         }
@@ -561,17 +579,17 @@ public sealed class InputAssignmentDialog : Form
             return 1;
         }
 
-        if (id.Equals("file.move", StringComparison.OrdinalIgnoreCase))
+        if (id.Equals(CommandIds.FileMove, StringComparison.OrdinalIgnoreCase))
         {
             return 2;
         }
 
-        if (id.Equals("file.rename", StringComparison.OrdinalIgnoreCase))
+        if (id.Equals(CommandIds.FileRename, StringComparison.OrdinalIgnoreCase))
         {
             return 3;
         }
 
-        if (id.Equals("file.delete", StringComparison.OrdinalIgnoreCase))
+        if (id.Equals(CommandIds.FileDelete, StringComparison.OrdinalIgnoreCase))
         {
             return 4;
         }
@@ -616,14 +634,54 @@ public sealed class InputAssignmentDialog : Form
             return 60;
         }
 
-        if (id.Equals(CommandIds.BrowserPreview, StringComparison.OrdinalIgnoreCase))
+        if (id.Equals(CommandIds.BrowserCreateFile, StringComparison.OrdinalIgnoreCase))
         {
             return 61;
         }
 
-        if (id.Equals(CommandIds.ArchivePack, StringComparison.OrdinalIgnoreCase))
+        if (id.Equals(CommandIds.BrowserPreview, StringComparison.OrdinalIgnoreCase))
         {
             return 62;
+        }
+
+        if (id.Equals(CommandIds.BrowserPathEntryOpen, StringComparison.OrdinalIgnoreCase))
+        {
+            return 63;
+        }
+
+        if (id.Equals(CommandIds.BrowserOpenCommandPrompt, StringComparison.OrdinalIgnoreCase))
+        {
+            return 64;
+        }
+
+        if (id.Equals(CommandIds.BrowserTabCategoryAdd, StringComparison.OrdinalIgnoreCase))
+        {
+            return 65;
+        }
+
+        if (id.Equals(CommandIds.BrowserTabCategoryRename, StringComparison.OrdinalIgnoreCase))
+        {
+            return 66;
+        }
+
+        if (id.Equals(CommandIds.BrowserTabCategoryDelete, StringComparison.OrdinalIgnoreCase))
+        {
+            return 67;
+        }
+
+        if (id.Equals(CommandIds.BrowserTabCategoryMoveLeft, StringComparison.OrdinalIgnoreCase))
+        {
+            return 68;
+        }
+
+        if (id.Equals(CommandIds.BrowserTabCategoryMoveRight, StringComparison.OrdinalIgnoreCase))
+        {
+            return 69;
+        }
+
+        if (id.Equals(CommandIds.ArchivePack, StringComparison.OrdinalIgnoreCase))
+        {
+            return 70;
         }
 
         return 100;

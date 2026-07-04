@@ -43,6 +43,7 @@ public static class VideoPlaybackLaunchService
         {
             if (!string.Equals(Path.GetFileName(ffplayPath), "ffplay.exe", StringComparison.OrdinalIgnoreCase))
             {
+                LogService.Warn($"[VideoPlayback] Tool resolution failed: Specified path is not ffplay.exe. Path='{ffplayPath}'");
                 return new VideoPlaybackLaunchResult
                 {
                     Success = false,
@@ -57,6 +58,7 @@ public static class VideoPlaybackLaunchService
             }
 
             string workingDirectory = Path.GetDirectoryName(ffplayPath) ?? string.Empty;
+            LogService.Info($"[VideoPlayback.External.Start] video='{videoPath}' ffplay='{ffplayPath}' volume={clampedVolume} startSeconds={clampedStartSeconds} workingDir='{workingDirectory}' UseShellExecute=false CreateNoWindow=false");
             try
             {
                 List<string> primaryArgs =
@@ -78,8 +80,11 @@ public static class VideoPlaybackLaunchService
                 FfplayLaunchAttempt primaryAttempt = TryLaunchFfplay(ffplayPath, workingDirectory, primaryArgs);
                 if (primaryAttempt.Started && !primaryAttempt.ExitedImmediately)
                 {
+                    LogService.Info($"[VideoPlayback.External.Started] Primary attempt success. pid={primaryAttempt.ProcessId} exitedWithinProbe={primaryAttempt.ExitedImmediately}");
                     return BuildSuccessResult(primaryAttempt, ffplayPath, workingDirectory, toolResolution, clampedVolume, clampedStartSeconds);
                 }
+
+                LogService.Warn($"[VideoPlayback.External.Fallback] Primary attempt failed or exited immediately (started={primaryAttempt.Started}, exited={primaryAttempt.ExitedImmediately}, exitCode={primaryAttempt.ExitCode}). Trying fallback arguments.");
 
                 // D&D 相当の最小引数で再試行して、起動オプション差分を吸収する。
                 string[] fallbackArgs =
@@ -89,10 +94,12 @@ public static class VideoPlaybackLaunchService
                 FfplayLaunchAttempt fallbackAttempt = TryLaunchFfplay(ffplayPath, workingDirectory, fallbackArgs);
                 if (fallbackAttempt.Started && !fallbackAttempt.ExitedImmediately)
                 {
+                    LogService.Info($"[VideoPlayback.External.Started] Fallback attempt success. pid={fallbackAttempt.ProcessId} exitedWithinProbe={fallbackAttempt.ExitedImmediately}");
                     return BuildSuccessResult(fallbackAttempt, ffplayPath, workingDirectory, toolResolution, clampedVolume, clampedStartSeconds);
                 }
 
                 FfplayLaunchAttempt failedAttempt = fallbackAttempt.Started ? fallbackAttempt : primaryAttempt;
+                LogService.Error($"[VideoPlayback.External.Failed] All launch attempts failed. Started={failedAttempt.Started} exitedImmediately={failedAttempt.ExitedImmediately} exitCode={failedAttempt.ExitCode}");
                 return new VideoPlaybackLaunchResult
                 {
                     Success = false,
@@ -113,6 +120,7 @@ public static class VideoPlaybackLaunchService
             }
             catch (Exception ex)
             {
+                LogService.Error($"[VideoPlayback.External.Error] Exception during ffplay start: {ex.Message}", ex);
                 return new VideoPlaybackLaunchResult
                 {
                     Success = false,
@@ -129,6 +137,7 @@ public static class VideoPlaybackLaunchService
             }
         }
 
+        LogService.Info($"[VideoPlayback.External.DefaultAppFallback.Start] ffplay.exe not resolved. Attempting default app shell execute for video='{videoPath}'");
         try
         {
             var shellStart = new ProcessStartInfo
@@ -137,6 +146,7 @@ public static class VideoPlaybackLaunchService
                 UseShellExecute = true
             };
             Process.Start(shellStart);
+            LogService.Info("[VideoPlayback.External.DefaultAppFallback.Success] Default app process started.");
             return new VideoPlaybackLaunchResult
             {
                 Success = true,
@@ -150,6 +160,7 @@ public static class VideoPlaybackLaunchService
         }
         catch (Exception ex)
         {
+            LogService.Error($"[VideoPlayback.External.DefaultAppFallback.Error] Failed to launch video via default app: {ex.Message}", ex);
             return new VideoPlaybackLaunchResult
             {
                 Success = false,
@@ -191,7 +202,7 @@ public static class VideoPlaybackLaunchService
         {
             FileName = ffplayPath,
             UseShellExecute = false,
-            CreateNoWindow = true,
+            CreateNoWindow = false,
             WindowStyle = ProcessWindowStyle.Normal,
             WorkingDirectory = workingDirectory,
             RedirectStandardError = false,

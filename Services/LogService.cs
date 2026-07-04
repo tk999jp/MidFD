@@ -2,6 +2,7 @@
 using System.IO;
 using System.Text;
 using MidFD.Configuration;
+using MidFD.Configuration.Storage;
 
 namespace MidFD.Services
 {
@@ -11,7 +12,8 @@ namespace MidFD.Services
     /// </summary>
     public static class LogService
     {
-        private static readonly string LogDirectory = Path.Combine(AppContext.BaseDirectory, "logs");
+        private static readonly AppStoragePaths StoragePaths = LegacyStoragePathProvider.CreateDefault().GetPaths();
+        private static readonly string LogDirectory = StoragePaths.LogDirectory;
         private static readonly string LogFilePath = Path.Combine(LogDirectory, "app.log");
         private static readonly object LockObj = new object();
         private static bool _isEnabled = false;
@@ -19,6 +21,9 @@ namespace MidFD.Services
         private static long _maxFileSizeBytes = 5 * 1024 * 1024;
         private static int _retentionDays = 14;
         private static DateTime _lastPruneUtc = DateTime.MinValue;
+
+        internal static string CurrentLogDirectory => LogDirectory;
+        internal static string CurrentLogFilePath => LogFilePath;
 
         public static void ApplySettings(LoggingSettings? settings)
         {

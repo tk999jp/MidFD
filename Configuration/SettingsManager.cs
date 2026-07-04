@@ -2,6 +2,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Text.Json;
+using MidFD.Configuration.Storage;
 using MidFD.Services;
 using MidFD.Helpers;
 
@@ -16,18 +17,30 @@ public static class SettingsManager
     }
 
     private static readonly string SettingsFilePath;
-    private static readonly JsonSerializerOptions JsonOptions = new JsonSerializerOptions
-    {
-        WriteIndented = true,
-        PropertyNameCaseInsensitive = true
-    };
+    private static readonly string SettingsDbPath;
+    private static readonly SettingsSqliteStore SettingsStore;
+    private static readonly StorageProfileActivation StorageActivation;
 
     static SettingsManager()
     {
-        // アプリケーションの実行ディレクトリに settings.json を配置する (ポータブル指向)
-        string exeDir = AppDomain.CurrentDomain.BaseDirectory;
-        SettingsFilePath = Path.Combine(exeDir, "settings.json");
+        StorageActivation = StorageProfileActivationContext.Current;
+        IStoragePathProvider provider = StorageProfileProviderFactory.CreateForActivation(StorageActivation);
+        AppStoragePaths paths = provider.GetPaths();
+        if (StorageActivation.IsInstalled)
+        {
+            InstalledSettingsMigrationService.EnsureInitialSettingsMigration(
+                StorageProfileProviderFactory.CreatePortable().GetPaths(),
+                paths);
+        }
+
+        SettingsFilePath = paths.SettingsJsonPath;
+        SettingsDbPath = paths.SettingsDbPath;
+        SettingsStore = new SettingsSqliteStore(SettingsDbPath, SettingsFilePath);
     }
+
+    internal static string CurrentSettingsFilePath => SettingsFilePath;
+    internal static string CurrentSettingsDbPath => SettingsDbPath;
+    internal static StorageProfileActivation CurrentStorageProfileActivation => StorageActivation;
 
     public static AppSettings Load()
     {
@@ -36,18 +49,11 @@ public static class SettingsManager
 
     public static AppSettings Load(out SettingsLoadMetadata metadata)
     {
-        if (!File.Exists(SettingsFilePath))
-        {
-            metadata = new SettingsLoadMetadata();
-            return new AppSettings();
-        }
-
         try
         {
-            string json = File.ReadAllText(SettingsFilePath);
-            metadata = ExtractLoadMetadata(json);
-            var settings = JsonSerializer.Deserialize<AppSettings>(json, JsonOptions);
-            AppSettings loadedSettings = settings ?? new AppSettings();
+            SettingsSqliteStore.SettingsLoadResult loadResult = SettingsStore.Load();
+            metadata = loadResult.Metadata;
+            AppSettings loadedSettings = loadResult.Settings ?? new AppSettings();
             MaterializeBrowserTabRestoreState(loadedSettings);
             bool videoStillMigrated = ApplyVideoStillInitialSecondsMigration(loadedSettings);
             bool loggingMigrated = ApplyLoggingDefaultOffMigration(loadedSettings);
@@ -72,14 +78,7 @@ public static class SettingsManager
         try
         {
             AppSettings persistableSettings = BuildPersistableSettings(settings);
-            string? settingsDirectory = Path.GetDirectoryName(SettingsFilePath);
-            if (!string.IsNullOrWhiteSpace(settingsDirectory))
-            {
-                Directory.CreateDirectory(settingsDirectory);
-            }
-
-            string json = JsonSerializer.Serialize(persistableSettings, JsonOptions);
-            File.WriteAllText(SettingsFilePath, json);
+            SettingsStore.Save(persistableSettings);
         }
         catch (Exception ex)
         {
@@ -93,18 +92,11 @@ public static class SettingsManager
         AppSettings persistableSettings = settings.Clone();
         persistableSettings.Session ??= new SessionSettings();
         persistableSettings.BrowserTabs ??= new BrowserTabSettings();
-        if (!persistableSettings.Session.RestoreTabsOnStartup)
-        {
-            persistableSettings.Session.ClearBrowserTabRestoreState();
-            persistableSettings.BrowserTabs.Categories = new List<BrowserTabCategoryDefinition>();
-        }
-        else
-        {
-            // Workspace SQLite 移行後も、BrowserTabRestoreSnapshot は互換 fallback として保存する。
-            persistableSettings.Session.BrowserTabRestoreSnapshot = BuildBrowserTabRestoreSnapshotForPersist(persistableSettings);
-            persistableSettings.Session.ClearBrowserTabRestoreLegacyMirror();
-            persistableSettings.BrowserTabs.Categories = new List<BrowserTabCategoryDefinition>();
-        }
+        // Workspace restore の ON/OFF に関わらず、保存済みの workspace snapshot は維持する。
+        // 親 OFF は起動時の復元可否だけを切り替え、保存データは dormant のまま残す。
+        persistableSettings.Session.BrowserTabRestoreSnapshot = BuildBrowserTabRestoreSnapshotForPersist(persistableSettings);
+        persistableSettings.Session.ClearBrowserTabRestoreLegacyMirror();
+        persistableSettings.BrowserTabs.Categories = new List<BrowserTabCategoryDefinition>();
 
         NormalizeAllTabHistories(persistableSettings);
         return persistableSettings;
@@ -519,7 +511,7 @@ public static class SettingsManager
         return normalizedIds.FirstOrDefault() ?? BrowserTabSettings.DefaultCategoryId;
     }
 
-    private static SettingsLoadMetadata ExtractLoadMetadata(string json)
+    internal static SettingsLoadMetadata ExtractLoadMetadata(string json)
     {
         try
         {

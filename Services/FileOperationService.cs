@@ -1,4 +1,3 @@
-﻿using System.IO;
 using System.IO;
 using System.Runtime.InteropServices;
 using MidFD.Models;
@@ -111,6 +110,11 @@ public static class FileOperationService
     public static void Move(string sourcePath, string destPath, bool overwrite = false, bool suppressLogging = false)
     {
         if (!suppressLogging) LogService.Info($"[FileOp] Move start: {sourcePath} -> {destPath} (overwrite={overwrite})");
+        if (!overwrite && PathExists(destPath))
+        {
+            throw new IOException($"移動先に同名項目が残っています: {destPath}");
+        }
+
         try
         {
             if (Directory.Exists(sourcePath))

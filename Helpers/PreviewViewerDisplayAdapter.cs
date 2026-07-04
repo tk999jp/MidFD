@@ -1,4 +1,4 @@
-﻿namespace MidFD.Helpers;
+namespace MidFD.Helpers;
 
 /// <summary>
 /// Preview popup と内蔵 viewer の表示適用だけを担当する薄い adapter。
@@ -76,6 +76,7 @@ public sealed class PreviewViewerDisplayAdapter
         ClearViewerImage();
         _viewerTextBox.Text = text;
         _viewerTextBox.Visible = true;
+        _viewerTextBox.BringToFront();
         _viewerTextBox.Focus();
     }
 

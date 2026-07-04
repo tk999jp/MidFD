@@ -9,6 +9,11 @@ namespace MidFD.Helpers;
 /// </summary>
 public sealed class BrowserInputRouter
 {
+    public static bool IsBrowserInputFocused(Control? browserPanel)
+    {
+        return browserPanel != null && (browserPanel.Focused || browserPanel.ContainsFocus);
+    }
+
     public sealed class CmdKeyContext
     {
         public bool IsBrowserMode { get; init; }

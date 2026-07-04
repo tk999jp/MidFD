@@ -97,6 +97,262 @@ namespace MidFD.Helpers
             return result;
         }
 
+        public static ZoneWidths CalculateMeasuredZoneWidths(
+            int availableWidth,
+            Font font,
+            string pageText,
+            string totalText,
+            string usedText,
+            string freeText,
+            Label? pageLabel,
+            Label? totalLabel,
+            Label? usedLabel,
+            Label? freeLabel,
+            int safetyGap)
+        {
+            int p1 = MeasureRow2SegmentWidth(font, pageText, pageLabel) + safetyGap;
+            int p2 = MeasureRow2SegmentWidth(font, totalText, totalLabel) + safetyGap;
+            int p3 = MeasureRow2SegmentWidth(font, usedText, usedLabel) + safetyGap;
+            int p4 = MeasureRow2SegmentWidth(font, freeText, freeLabel) + safetyGap;
+
+            int totalMin = p1 + p2 + p3 + p4;
+            var result = new ZoneWidths();
+
+            if (availableWidth > totalMin)
+            {
+                int extra = availableWidth - totalMin;
+                double w1 = 1.0, w2 = 1.6, w3 = 1.6, w4 = 1.8;
+                double totalWeight = w1 + w2 + w3 + w4;
+
+                result.Zone1 = p1 + (int)(extra * w1 / totalWeight);
+                result.Zone2 = p2 + (int)(extra * w2 / totalWeight);
+                result.Zone3 = p3 + (int)(extra * w3 / totalWeight);
+                result.Zone4 = p4 + (int)(extra * w4 / totalWeight);
+            }
+            else
+            {
+                double scale = totalMin > 0 ? (double)availableWidth / totalMin : 1d;
+                result.Zone1 = Math.Max(1, (int)Math.Floor(p1 * scale));
+                result.Zone2 = Math.Max(1, (int)Math.Floor(p2 * scale));
+                result.Zone3 = Math.Max(1, (int)Math.Floor(p3 * scale));
+                result.Zone4 = Math.Max(1, Math.Max(availableWidth - result.Zone1 - result.Zone2 - result.Zone3, 1));
+            }
+
+            int requiredMinFormWidth = totalMin + 40;
+            result.MinimumFormWidth = Math.Clamp(requiredMinFormWidth, 400, 1200);
+            return result;
+        }
+
+        public static int MeasureTextWidth(string text, Font font)
+        {
+            if (string.IsNullOrEmpty(text))
+            {
+                return 0;
+            }
+
+            return TextRenderer.MeasureText(
+                text,
+                font,
+                Size.Empty,
+                TextFormatFlags.NoPadding | TextFormatFlags.SingleLine
+            ).Width;
+        }
+
+        public static int MeasureControlTextWidth(string text, Font font)
+        {
+            if (string.IsNullOrEmpty(text))
+            {
+                return 0;
+            }
+
+            return TextRenderer.MeasureText(
+                text,
+                font,
+                Size.Empty,
+                TextFormatFlags.SingleLine
+            ).Width;
+        }
+
+        public static int MeasureDisplayWidth(string text, Font font)
+        {
+            return Math.Max(
+                MeasureTextWidth(text, font),
+                MeasureControlTextWidth(text, font));
+        }
+
+        public static int MeasureRow2SegmentWidth(Font font, string text, Label? label)
+        {
+            if (string.IsNullOrEmpty(text))
+            {
+                return 0;
+            }
+
+            int width = MeasureDisplayWidth(text, font);
+            if (label != null)
+            {
+                width += label.Padding.Horizontal;
+            }
+
+            return width;
+        }
+
+        public static string ExtractMarkSizeText(string? sortText)
+        {
+            if (string.IsNullOrWhiteSpace(sortText))
+            {
+                return string.Empty;
+            }
+
+            const string marker = "MarkSize:";
+            int markerIndex = sortText.IndexOf(marker, StringComparison.OrdinalIgnoreCase);
+            if (markerIndex < 0)
+            {
+                return string.Empty;
+            }
+
+            return sortText[(markerIndex + marker.Length)..].Trim();
+        }
+
+        public static int MeasureLabelReservedWidth(Label? label, string text, int extraPadding)
+        {
+            Font font = label?.Font ?? SystemFonts.DefaultFont;
+            return MeasureLabelReservedWidth(label, text, font, extraPadding);
+        }
+
+        public static int MeasureLabelReservedWidth(Label? label, string text, Font font, int extraPadding)
+        {
+            if (label == null || string.IsNullOrEmpty(text))
+            {
+                return 0;
+            }
+
+            int measuredWidth = Math.Max(
+                MeasureTextWidth(text, font),
+                MeasureControlTextWidth(text, font));
+            return measuredWidth + label.Padding.Horizontal + extraPadding;
+        }
+
+        public static string FitTextWithEllipsis(string text, Font font, int maxWidth, string ellipsis = "...")
+        {
+            if (string.IsNullOrEmpty(text) || maxWidth <= 0)
+            {
+                return string.Empty;
+            }
+
+            if (MeasureTextWidth(text, font) <= maxWidth)
+            {
+                return text;
+            }
+
+            int ellipsisWidth = MeasureTextWidth(ellipsis, font);
+            if (ellipsisWidth >= maxWidth)
+            {
+                return ellipsis;
+            }
+
+            int low = 0;
+            int high = text.Length;
+            while (low < high)
+            {
+                int mid = (low + high + 1) / 2;
+                string candidate = text.Substring(0, mid) + ellipsis;
+                if (MeasureTextWidth(candidate, font) <= maxWidth)
+                {
+                    low = mid;
+                }
+                else
+                {
+                    high = mid - 1;
+                }
+            }
+
+            return text.Substring(0, low) + ellipsis;
+        }
+
+        public static string FitFileNameWithSizePreservingExtension(
+            string fileName,
+            string sizeText,
+            Font font,
+            int maxWidth)
+        {
+            if (string.IsNullOrWhiteSpace(fileName) || maxWidth <= 0)
+            {
+                return string.Empty;
+            }
+
+            string sizeSuffix = string.IsNullOrWhiteSpace(sizeText)
+                ? string.Empty
+                : $" [{sizeText}]";
+            string full = fileName + sizeSuffix;
+            if (MeasureTextWidth(full, font) <= maxWidth)
+            {
+                return full;
+            }
+
+            string extension = System.IO.Path.GetExtension(fileName);
+            string baseName = fileName;
+            if (!string.IsNullOrEmpty(extension) &&
+                fileName.Length > extension.Length)
+            {
+                baseName = fileName[..^extension.Length];
+            }
+            else
+            {
+                extension = string.Empty;
+            }
+
+            string protectedSuffix = extension + sizeSuffix;
+            int protectedSuffixWidth = MeasureTextWidth(protectedSuffix, font);
+            int baseMaxWidth = maxWidth - protectedSuffixWidth;
+            const string ellipsis = "…";
+            int ellipsisWidth = MeasureTextWidth(ellipsis, font);
+            if (baseMaxWidth <= ellipsisWidth)
+            {
+                string fallback = ellipsis + protectedSuffix;
+                if (MeasureTextWidth(fallback, font) <= maxWidth)
+                {
+                    return fallback;
+                }
+
+                return FitTextWithEllipsis(full, font, maxWidth, ellipsis);
+            }
+
+            string shortenedBase = FitTextWithEllipsis(baseName, font, baseMaxWidth, ellipsis);
+            return shortenedBase + protectedSuffix;
+        }
+
+        public static string FitDirectoryNameHeaderText(
+            string displayName,
+            Font font,
+            int maxWidth)
+        {
+            return FitTextWithEllipsis(displayName, font, maxWidth);
+        }
+
+        public static string FitMarkSummaryCompact(
+            int markCount,
+            string markSizeText,
+            Font font,
+            int maxWidth)
+        {
+            string[] candidates =
+            {
+                $"Mark: {markCount} MarkSize: {markSizeText}",
+                $"Mark: {markCount} {markSizeText}",
+                $"M:{markCount} {markSizeText}",
+                $"M:{markCount}",
+            };
+            foreach (string candidate in candidates)
+            {
+                if (MeasureTextWidth(candidate, font) <= maxWidth)
+                {
+                    return candidate;
+                }
+            }
+
+            return candidates[^1];
+        }
+
         /// <summary>
         /// フォントとパディングに基づき、実測値としての行高を算出する。
         /// </summary>

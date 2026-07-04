@@ -95,8 +95,10 @@ public static class TreeDialog
             if (e.Node.Nodes.ContainsKey(DummyNodeKey))
             {
                 e.Node.Nodes.Clear();
-                string path = (string)e.Node.Tag;
-                LoadSubDirectories(e.Node, path);
+                if (e.Node.Tag is string path)
+                {
+                    LoadSubDirectories(e.Node, path);
+                }
             }
         };
 

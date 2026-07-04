@@ -17,10 +17,11 @@ using System.Media;
 using MidFD.Models;
 using MidFD.Helpers;
 using MidFD.Commands;
+using MidFD.Presentation;
 using MidFD.Services.TrashManifestStore;
 using MidFD.Services.Workspace;
 namespace MidFD;
-public partial class MainForm : Form
+public partial class MainForm : Form, ICommandPaletteLayerHost
 {
     // Shell guarded delete is fast for small batches, but progress/cancel timing depends on Shell callbacks.
     // Use the MidFD-controlled path for larger batches so cancel stops before the next item and progress is truthful.
@@ -37,28 +38,6 @@ public partial class MainForm : Form
     private const int CurrentDirectoryRefreshDebounceMilliseconds = 300;
     private const int CurrentDirectoryRefreshRetryDelayMilliseconds = 100;
     private const int ExternalDirectoryRefreshBulkThreshold = 64;
-    private const int WM_SIZE = 0x0005;
-    private const int WM_ACTIVATE = 0x0006;
-    private const int WM_SHOWWINDOW = 0x0018;
-    private const int WM_ACTIVATEAPP = 0x001C;
-    private const int WM_GETMINMAXINFO = 0x0024;
-    private const int WM_WINDOWPOSCHANGING = 0x0046;
-    private const int WM_WINDOWPOSCHANGED = 0x0047;
-    private const int WM_SYSKEYDOWN = 0x0104;
-    private const int WM_SYSKEYUP = 0x0105;
-    private const int WM_SYSCOMMAND = 0x0112;
-    private const int SC_SIZE = 0xF000;
-    private const int SC_MOVE = 0xF010;
-    private const int SC_MINIMIZE = 0xF020;
-    private const int SC_MAXIMIZE = 0xF030;
-    private const int SC_CLOSE = 0xF060;
-    private const int SC_RESTORE = 0xF120;
-    private const int SC_KEYMENU = 0xF100;
-    private const int SW_HIDE = 0;
-    private const int SW_SHOWNORMAL = 1;
-    private const int SW_SHOWMINIMIZED = 2;
-    private const int SW_SHOWMAXIMIZED = 3;
-    private const int SW_RESTORE = 9;
     private const int MinimumNormalWindowWidth = 980;
     private const int MinimumNormalWindowHeight = 480;
     private const int MinimumUsableClientAreaHeight = 120;
@@ -83,65 +62,6 @@ public partial class MainForm : Form
         int ClockMeasuredWidth,
         string ClockText,
         string FreeText);
-    private Rectangle? _lastKnownGoodNormalBounds;
-    private bool _isApplyingWindowBoundsRecovery;
-    private Rectangle? _normalBoundsBeforeMinimize;
-    private DateTime _lastRestoreUtc = DateTime.MinValue;
-    private bool _isInRestorePlacementWatch;
-    private Rectangle? _restoreBaselineNormalBounds;
-    private bool _restorePlacementRepairScheduled;
-    private int _restorePlacementRepairCount;
-    private Rectangle? _pendingRestoreRepairBounds;
-    [StructLayout(LayoutKind.Sequential)]
-    private struct WINDOWPOS
-    {
-        public IntPtr hwnd;
-        public IntPtr hwndInsertAfter;
-        public int x;
-        public int y;
-        public int cx;
-        public int cy;
-        public int flags;
-    }
-    [DllImport("user32.dll")]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    private static extern bool GetWindowPlacement(IntPtr hWnd, ref WINDOWPLACEMENT lpwndpl);
-    [DllImport("user32.dll")]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    private static extern bool SetWindowPlacement(IntPtr hWnd, [In] ref WINDOWPLACEMENT lpwndpl);
-    private struct WINDOWPLACEMENT
-    {
-        public int length;
-        public int flags;
-        public int showCmd;
-        public POINT ptMinPosition;
-        public POINT ptMaxPosition;
-        public RECT rcNormalPosition;
-    }
-    private struct RECT
-    {
-        public int left;
-        public int top;
-        public int right;
-        public int bottom;
-        public override string ToString() => $"({left},{top},{right},{bottom}) {right - left}x{bottom - top}";
-    }
-#pragma warning disable CS0649 // Win32 API 構造体のフィールドへの代入警告を抑制
-    private struct POINT
-    {
-        public int x;
-        public int y;
-        public override string ToString() => $"({x},{y})";
-    }
-    private struct MinMaxInfo
-    {
-        public POINT ptReserved;
-        public POINT ptMaxSize;
-        public POINT ptMaxPosition;
-        public POINT ptMinTrackSize;
-        public POINT ptMaxTrackSize;
-    }
-#pragma warning restore CS0649
     private static readonly HashSet<string> _executeTargetExtensions = new(StringComparer.OrdinalIgnoreCase)
     {
         ".exe", ".com", ".lnk"
@@ -172,11 +92,8 @@ public partial class MainForm : Form
     // Diagnostic logging: unique ID for each selection change
     private static long _selectionIdCounter = 0;
     private FeatureGateService _featureGate = new(FeatureProfile.Full);
-    private CancellationTokenSource? _previewCts;
-    private CancellationTokenSource? _fileOpCts; // Phase 3-fileop-async1: コピー等の非同期操作用
-    private long _fileOperationCancelRequestedTimestamp;
-    private string? _activeFileOperationName;
-    private int _fileOperationStatusVersion;
+    private readonly Coordinators.PreviewRequestCoordinator _previewRequestCoordinator = new();
+    private readonly Models.FileOperationUiState _fileOpUiState = new();
     private FileOperationItemProgressState? _fileOperationItemProgressState;
     private FileOperationProgressDialog? _fileOperationProgressDialog;
     private FileOperationProgressFallbackForm? _shellDeleteProgressFallback;
@@ -186,8 +103,7 @@ public partial class MainForm : Form
     private bool _isBrowserAutoPreviewSuppressed;
     private string? _lastBrowserAutoPreviewSuppressedMessage;
     private string? _lastPreviewRequestedPath;
-    private bool _previewRequestInFlight;
-    private int _previewRequestId = 0;
+    // _previewRequestInFlight and _previewRequestId moved to PreviewRequestCoordinator
     private int _activePreviewRequestId = 0; // 最新UI反映待ちのリクエストID
     private readonly PreviewPopupForm _previewPopup; // プレビューPopupウィンドウ
     private readonly List<ImageViewerForm> _imageViewers = new(); // 起動中の画像ビューア
@@ -247,6 +163,7 @@ public partial class MainForm : Form
     private Point _dragStartPoint = Point.Empty;
     private int _dragCandidateIndex = -1;
     private bool _dragArchiveHandoffRequested = false;
+    private BrowserIncomingDragDecision? _currentIncomingDragDecision;
     private bool _isClipboardBusy = false;
     private bool _isFileOperationUndoRedoBusy = false;
     private readonly NotificationService _notificationService;
@@ -258,30 +175,6 @@ public partial class MainForm : Form
         string StatusText,
         bool IsLaunchable,
         ExternalToolCommandDefinition Tool);
-    private readonly record struct CommandHintOverlayMetrics(
-        int Padding,
-        int TitleHeight,
-        int TitleGap,
-        int ExplanationHeight,
-        int ContextLineHeight,
-        int ContextLineSpacing,
-        int ContextGap,
-        int HeaderHeight,
-        int RowHeight,
-        int FooterHeight,
-        int MinimumVisibleRows)
-    {
-        public int RowsTopOffset =>
-            Padding +
-            TitleHeight +
-            TitleGap +
-            ExplanationHeight +
-            ContextGap +
-            (ContextLineHeight * 2) +
-            ContextLineSpacing +
-            HeaderHeight +
-            4;
-    }
     private static readonly HashSet<char> ReservedExternalToolAltSlots = new() { 'F', 'V', 'G', 'T', 'H' };
     private ToolStripButton? _btnMenuBack;
     private ToolStripButton? _btnMenuForward;
@@ -307,10 +200,8 @@ public partial class MainForm : Form
     private readonly List<ToolStripItem> _browserOnlyMenuItems = new();
     private readonly List<ToolStripItem> _busyAwareMenuItems = new();
     private readonly Dictionary<ToolStripItem, CommandStateCoordinator.MenuItemStateRule> _menuItemRules = new();
-    private readonly List<BrowserTabState> _browserTabs = new();
-    private readonly List<BrowserTabCategoryDefinition> _browserTabCategories = new();
-    private int _activeBrowserTabIndex = -1;
-    private string _activeBrowserTabCategoryId = BrowserTabSettings.DefaultCategoryId;
+    private readonly Models.BrowserTabViewState _browserTabViewState = new();
+    private readonly Models.BrowserCategoryViewState _categoryViewState = new();
     private bool _suppressBrowserTabSelectionChanged;
     private bool _isSwitchingBrowserTab;
     private Panel? _browserTabHostPanel;
@@ -328,6 +219,7 @@ public partial class MainForm : Form
     private ToolStripMenuItem? _reloadCurrentDirectoryMenuItem;
     private ToolStripMenuItem? _clearTabFilterLockMenuItem;
     private ContextMenuStrip? _browserTabContextMenu;
+    private readonly Coordinators.BrowserTabUiCoordinator _browserTabUiCoordinator = new();
     private ToolStripMenuItem? _toggleBrowserTabLockContextMenuItem;
     private ToolStripMenuItem? _toggleBrowserTabReadOnlyContextMenuItem;
     private ToolStripMenuItem? _openBrowserTabFilterLockContextMenuItem;
@@ -336,7 +228,6 @@ public partial class MainForm : Form
     private ToolStripMenuItem? _closeRightBrowserTabsContextMenuItem;
     private ToolStripMenuItem? _closeLeftBrowserTabsContextMenuItem;
     private ToolStripMenuItem? _closeOtherBrowserTabsContextMenuItem;
-    private int _browserTabContextIndex = -1;
     private ContextMenuStrip? _browserTabCategoryContextMenu;
     private ToolStripMenuItem? _addBrowserTabCategoryContextMenuItem;
     private ToolStripMenuItem? _moveBrowserTabCategoryLeftContextMenuItem;
@@ -346,19 +237,9 @@ public partial class MainForm : Form
     private ToolStripMenuItem? _manageBrowserTabCategoriesContextMenuItem;
     private FileSystemWatcher? _currentDirectoryWatcher;
     private string? _currentDirectoryWatcherPath;
-    private bool _pendingExternalDirectoryRefresh;
-    private string? _pendingExternalDirectoryRefreshPath;
-    private string _pendingExternalDirectoryRefreshReason = "外部変更";
-    private readonly HashSet<string> _pendingExternalDirectoryRefreshReasons = new(StringComparer.OrdinalIgnoreCase);
-    private int _pendingExternalDirectoryRefreshEventCount;
-    private string? _pendingExternalDirectoryRefreshExceptionType;
-    private string? _pendingExternalDirectoryRefreshExceptionMessage;
-    private bool _pendingExternalDirectoryRefreshDelayScheduled;
-    private bool _pendingExternalDirectoryRefreshDelayCompleted;
-    private bool _isApplyingExternalDirectoryRefresh;
+    private readonly Coordinators.NavigationRefreshCoordinator _navigationRefreshCoordinator = new();
     private readonly PreviewDiagnosticDelayService _previewDiagnosticDelayService = new();
     private bool _currentDirectoryRefreshRetryPending;
-    private string? _browserTabCategoryContextCategoryId;
     private BrowserTabStripCategoryItemKind _browserTabCategoryContextKind = BrowserTabStripCategoryItemKind.Category;
     private DateTime _lastBrowserTabLimitBeepUtc = DateTime.MinValue;
     private List<string>? _pendingEscExitPersistedMarks;
@@ -397,7 +278,7 @@ public partial class MainForm : Form
         InitializeCoreWindowChrome();
         InitializeBrowserFileNameToolTip();
         InitializeFunctionBarToolTip();
-        _notificationService = new NotificationService(this.statusLabel, this.messageTimer);
+        _notificationService = new NotificationService(this.statusLabel, this.messageTimer, ResolveStatusColor);
         _navigationService = new NavigationService();
         LoadSettingsAndApplyProfile();
         InitializePersistenceStores();
@@ -426,8 +307,11 @@ public partial class MainForm : Form
         InitializeComponent();
         this.MinimumSize = new Size(MinimumNormalWindowWidth, MinimumNormalWindowHeight);
         statusStrip.ShowItemToolTips = false;
+        statusStrip.Dock = DockStyle.Bottom;
+        statusStrip.SizingGrip = false;
+        statusStrip.LayoutStyle = ToolStripLayoutStyle.HorizontalStackWithOverflow;
+        statusStrip.RenderMode = ToolStripRenderMode.System;
         NormalizeStatusLabelLayout();
-        statusStrip.Resize += (_, _) => NormalizeStatusLabelLayout();
         try
         {
             string iconPath = Path.Combine(AppContext.BaseDirectory, "Assets", "appicon", "MidFD.ico");
@@ -560,6 +444,13 @@ public partial class MainForm : Form
                 ApplyViewerStatusLine();
             }
         };
+        TextPreviewInteractionHelper.Attach(
+            viewerTextBox,
+            ShowStatusMessage,
+            this,
+            showErrorDialog: true,
+            resolveClickedUrl: ResolveViewerClickedUrl);
+
         messageTimer.Tick += (_, _) =>
         {
             if (_uiMode == UIMode.Viewer)
@@ -570,11 +461,11 @@ public partial class MainForm : Form
     }
     private void InitializeStartupSessionState()
     {
-        if (_settings.Session.RestoreColumnCount)
+        if (SessionRestorePolicy.ShouldRestoreColumnCount(_settings.Session))
         {
             _columnCount = Math.Clamp(_settings.Session.LastColumnCount, 1, 9);
         }
-        if (_settings.Session.RestoreSort)
+        if (SessionRestorePolicy.ShouldRestoreSort(_settings.Session))
         {
             _currentSort = _settings.Session.LastSortKind;
             _sortAscending = _settings.Session.LastSortAscending;
@@ -612,8 +503,7 @@ public partial class MainForm : Form
         {
             startupPath = args[1];
         }
-        else if (!_settings.Session.RestoreTabsOnStartup &&
-            _settings.Session.RestoreLastPath
+        else if (SessionRestorePolicy.ShouldRestoreStartupFolder(_settings.Session)
             && !string.IsNullOrEmpty(_settings.Session.LastPath)
             && Directory.Exists(_settings.Session.LastPath))
         {
@@ -624,7 +514,7 @@ public partial class MainForm : Form
     private void InitializeMainUiSurface()
     {
         // ウィンドウ位置・サイズの復元
-        if (_settings.Session.RestoreWindowBounds)
+        if (SessionRestorePolicy.ShouldRestoreWindowBounds(_settings.Session))
         {
             RestoreWindowSettings();
         }
@@ -640,17 +530,27 @@ public partial class MainForm : Form
     }
     private void RestoreBrowserStartupState(string startupPath)
     {
-        bool restoredTabs = TryRestoreBrowserTabsOnStartup(out int restoredTabCount, out int skippedTabCount, out bool hadSavedTabs);
+        bool workspaceRestoreEnabled = SessionRestorePolicy.ShouldRestoreStartupWorkspace(_settings.Session);
+        int restoredTabCount = 0;
+        int skippedTabCount = 0;
+        bool hadSavedTabs = false;
+        bool restoredTabs = workspaceRestoreEnabled && TryRestoreBrowserTabsOnStartup(out restoredTabCount, out skippedTabCount, out hadSavedTabs);
+        if (!workspaceRestoreEnabled)
+        {
+            restoredTabCount = 0;
+            skippedTabCount = 0;
+            hadSavedTabs = false;
+        }
         if (!restoredTabs)
         {
             LoadDirectory(startupPath);
             InitializeInitialBrowserTab();
         }
-        if (!_settings.Session.RestoreTabsOnStartup)
+        if (!workspaceRestoreEnabled)
         {
             LogService.Info("[MarkPersistence] Legacy persisted marks restore skipped because workspace restore is disabled.");
         }
-        else if (restoredTabs && (_restoredBrowserTabsFromWorkspaceStore || _browserTabs.Any(tab => tab.MarkedPaths.Count > 0)))
+        else if (restoredTabs && (_restoredBrowserTabsFromWorkspaceStore || _browserTabViewState.Tabs.Any(tab => tab.MarkedPaths.Count > 0)))
         {
             LogService.Info("[MarkPersistence] Legacy persisted marks restore skipped because workspace/per-tab marks are authoritative.");
         }
@@ -665,7 +565,7 @@ public partial class MainForm : Form
                 ? $"前回のタブ {restoredTabCount} 件を復元しました（{skippedTabCount} 件は見つからず除外）。"
                 : $"前回のタブ {restoredTabCount} 件を復元しました。");
         }
-        else if (_settings.Session.RestoreTabsOnStartup && hadSavedTabs)
+        else if (workspaceRestoreEnabled && hadSavedTabs)
         {
             ShowStatusMessage("前回のタブは見つからないため、通常の開始状態で開きました。");
         }
@@ -682,6 +582,8 @@ public partial class MainForm : Form
         // Phase 3-fix2a: 外部 → MidFD Drag-in (Copy限定)
         this.browserPanel.AllowDrop = true;
         this.browserPanel.DragEnter += BrowserPanel_DragEnter;
+        this.browserPanel.DragOver += BrowserPanel_DragOver;
+        this.browserPanel.DragLeave += BrowserPanel_DragLeave;
         this.browserPanel.DragDrop += BrowserPanel_DragDrop;
         // Phase 3-fix2b: MidFD → 外部 Drag-out (Copy限定)
         this.browserPanel.MouseDown += BrowserPanel_MouseDown;
@@ -900,7 +802,7 @@ public partial class MainForm : Form
         // Apply pending ESC‑exit marks before persisting workspace state
         ApplyPendingEscExitMarksForWorkspaceSave();
         _settings.Session.LastPath = _navigationService.CurrentPath;
-        if (!_settings.Session.RestoreTabsOnStartup)
+        if (!SessionRestorePolicy.ShouldRestoreStartupWorkspace(_settings.Session))
         {
             SavePersistedMarksToSettings();
         }
@@ -921,10 +823,10 @@ private void ApplyPendingEscExitMarksForWorkspaceSave()
 {
     if (!_isClosingFromEscExitPath) return;
     if (_pendingEscExitPersistedMarks == null || _pendingEscExitPersistedMarks.Count == 0) return;
-    if (!_settings.Session.RestoreTabsOnStartup) return;
-    if (_activeBrowserTabIndex < 0 || _activeBrowserTabIndex >= _browserTabs.Count) return;
+    if (!SessionRestorePolicy.ShouldRestoreStartupWorkspace(_settings.Session)) return;
+    if (_browserTabViewState.ActiveTabIndex < 0 || _browserTabViewState.ActiveTabIndex >= _browserTabViewState.Count) return;
 
-    var activeTab = _browserTabs[_activeBrowserTabIndex];
+    var activeTab = _browserTabViewState.Tabs[_browserTabViewState.ActiveTabIndex];
     var existing = activeTab.MarkedPaths?.ToHashSet(StringComparer.OrdinalIgnoreCase) ?? new HashSet<string>(StringComparer.OrdinalIgnoreCase);
     foreach (var path in _pendingEscExitPersistedMarks)
     {
@@ -1042,2164 +944,6 @@ private void SavePersistedMarksToSettings()
         }
     }
     // replace: InitializeBrowserTabControl
-private void InitializeBrowserTabControl()
-{
-    _browserTabHostPanel = new Panel
-    {
-        Dock = DockStyle.Top,
-        Height = GetBrowserTabStripHostHeight(),
-        BackColor = MidFDColors.ListNormalBack,
-        Margin = Padding.Empty,
-        Name = "browserTabHostPanel",
-        Padding = Padding.Empty
-    };
-    _browserTabHostPanel.Resize += (s, e) => LayoutBrowserTabControlWithinHost();
-    _browserTabStrip = new BrowserTabStrip
-    {
-        Height = GetBrowserTabStripHostHeight(),
-        Font = new Font("Consolas", 9F, FontStyle.Regular, GraphicsUnit.Point),
-        Name = "browserTabStrip",
-        BackColor = MidFDColors.ListNormalBack,
-        ForeColor = MidFDColors.ListNormalFore,
-        TabStop = false,
-        PreferredTabWidth = 140,
-        ActiveTabBackColor = MidFDColors.ListSelectedBack,
-        InactiveTabBackColor = MidFDColors.ListNormalBack,
-        TabBorderColor = MidFDColors.BorderLine,
-        ActiveTabTextColor = FileListColorResolver.NormalizeCoreTheme(_settings.Appearance?.ColorTheme) == "Light" ? Color.Black : Color.Yellow,
-        InactiveTabTextColor = MidFDColors.ListNormalFore,
-        ShowCategoryRow = ShouldShowBrowserTabCategoryRow()
-    };
-    _browserTabStrip.Anchor = AnchorStyles.Top | AnchorStyles.Left;
-    _browserTabStrip.CategoryClicked += BrowserTabStrip_CategoryClicked;
-    _browserTabStrip.AddTabClicked += BrowserTabStrip_AddTabClicked;
-    _browserTabStrip.SelectedIndexChanged += BrowserTabStrip_SelectedIndexChanged;
-    _browserTabStrip.TabReordered += BrowserTabStrip_TabReordered;
-    _browserTabStrip.CategoryReordered += BrowserTabStrip_CategoryReordered;
-    _browserTabStrip.TabDoubleClicked += BrowserTabStrip_TabDoubleClicked;
-    _browserTabStrip.TabRightClicked += BrowserTabStrip_TabRightClicked;
-    _browserTabStrip.TabListDropDownOpening += BrowserTabStrip_TabListDropDownOpening;
-    _browserTabHostPanel.Controls.Add(_browserTabStrip);
-    outerHostPanel.Controls.Add(_browserTabHostPanel);
-    outerHostPanel.Controls.SetChildIndex(_browserTabHostPanel, 1);
-    LayoutBrowserTabControlWithinHost();
-}
-    private bool ShouldShowBrowserTabCategoryRow()
-    {
-        return _settings.Appearance?.ShowBrowserTabCategoryRow ?? true;
-    }
-    private int GetBrowserTabStripHostHeight()
-    {
-        return ShouldShowBrowserTabCategoryRow()
-            ? BrowserTabStripMultiRowHeight
-            : BrowserTabStripSingleRowHeight;
-    }
-    private void ApplyBrowserTabStripDisplaySettings()
-    {
-        int targetHeight = GetBrowserTabStripHostHeight();
-        if (_browserTabHostPanel != null)
-        {
-            _browserTabHostPanel.Height = targetHeight;
-        }
-        if (_browserTabStrip != null)
-        {
-            _browserTabStrip.ShowCategoryRow = ShouldShowBrowserTabCategoryRow();
-            _browserTabStrip.Height = targetHeight;
-        }
-        LayoutBrowserTabControlWithinHost();
-    }
-    private void InitializeInitialBrowserTab()
-    {
-        var initialState = BuildBrowserTabStateFromCurrentUi();
-        _browserTabs.Clear();
-        _browserTabs.Add(initialState);
-        _activeBrowserTabIndex = 0;
-        RefreshBrowserTabHeaders();
-        if (_browserTabStrip != null && _browserTabs.Count > 0)
-        {
-            _suppressBrowserTabSelectionChanged = true;
-            _browserTabStrip.SelectedIndex = 0;
-            _suppressBrowserTabSelectionChanged = false;
-        }
-    }
-    private void EnsureBrowserTabCategoryConfiguration()
-    {
-        _settings.BrowserTabs ??= new BrowserTabSettings();
-        _settings.Session ??= new SessionSettings();
-        _browserTabCategories.Clear();
-        var normalizedIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        foreach (BrowserTabCategoryDefinition category in _settings.BrowserTabs.Categories ?? Enumerable.Empty<BrowserTabCategoryDefinition>())
-        {
-            string normalizedId = NormalizeBrowserTabCategoryId(category.Id);
-            if (!normalizedIds.Add(normalizedId))
-            {
-                continue;
-            }
-            _browserTabCategories.Add(new BrowserTabCategoryDefinition
-            {
-                Id = normalizedId,
-                DisplayName = string.IsNullOrWhiteSpace(category.DisplayName) ? "既定" : category.DisplayName.Trim()
-            });
-        }
-        if (_browserTabCategories.Count == 0)
-        {
-            _browserTabCategories.Add(CreateDefaultBrowserTabCategoryDefinition());
-        }
-        _settings.BrowserTabs.Categories = _browserTabCategories
-            .Select(static category => category.Clone())
-            .ToList();
-        _settings.Session.ActiveBrowserTabCategoryId = ResolveExistingBrowserTabCategoryId(_settings.Session.ActiveBrowserTabCategoryId);
-    }
-    private void SyncActiveBrowserTabCategoryFromSession()
-    {
-        EnsureBrowserTabCategoryConfiguration();
-        string sessionCategoryId = _settings.Session.BrowserTabRestoreSnapshot?.ActiveCategoryId
-            ?? _settings.Session.ActiveBrowserTabCategoryId;
-        _activeBrowserTabCategoryId = ResolveExistingBrowserTabCategoryId(sessionCategoryId);
-    }
-    private string NormalizeBrowserTabCategoryId(string? categoryId)
-    {
-        string trimmed = string.IsNullOrWhiteSpace(categoryId)
-            ? BrowserTabSettings.DefaultCategoryId
-            : categoryId.Trim();
-        return string.Equals(trimmed, BrowserTabSettings.DefaultCategoryId, StringComparison.OrdinalIgnoreCase)
-            ? BrowserTabSettings.DefaultCategoryId
-            : trimmed;
-    }
-    private string ResolveExistingBrowserTabCategoryId(string? categoryId)
-    {
-        string normalizedId = NormalizeBrowserTabCategoryId(categoryId);
-        if (_browserTabCategories.Any(category => string.Equals(category.Id, normalizedId, StringComparison.OrdinalIgnoreCase)))
-        {
-            return normalizedId;
-        }
-        return _browserTabCategories.FirstOrDefault()?.Id ?? BrowserTabSettings.DefaultCategoryId;
-    }
-    private static BrowserTabCategoryDefinition CreateDefaultBrowserTabCategoryDefinition()
-    {
-        return new BrowserTabCategoryDefinition
-        {
-            Id = BrowserTabSettings.DefaultCategoryId,
-            DisplayName = "既定"
-        };
-    }
-    private BrowserTabCategoryDefinition EnsureAtLeastOneBrowserTabCategoryAfterDeletion()
-    {
-        if (_browserTabCategories.Count > 0)
-        {
-            return _browserTabCategories[0];
-        }
-        string displayName = GenerateNextBrowserTabCategoryDisplayName();
-        var generatedCategory = new BrowserTabCategoryDefinition
-        {
-            Id = CreateUniqueBrowserTabCategoryId(displayName),
-            DisplayName = displayName
-        };
-        _browserTabCategories.Add(generatedCategory);
-        return generatedCategory;
-    }
-    private sealed class BrowserTabRuntimeStateSnapshot
-    {
-        public List<BrowserTabCategoryDefinition> CategoryDefinitions { get; init; } = new();
-        public BrowserTabRestoreSnapshot RestoreSnapshot { get; init; } = new();
-        public string ActiveCategoryId { get; init; } = BrowserTabSettings.DefaultCategoryId;
-    }
-    private void SyncBrowserTabCategoryDefinitionsToSettings()
-    {
-        _settings.BrowserTabs ??= new BrowserTabSettings();
-        _settings.BrowserTabs.Categories = _browserTabCategories
-            .Select(static category => category.Clone())
-            .ToList();
-    }
-    private BrowserTabRuntimeStateSnapshot CaptureBrowserTabRuntimeStateSnapshot()
-    {
-        CaptureActiveBrowserTabState();
-        StoreActiveBrowserTabCategorySessionState(updateCompatibilityMirror: false);
-        return new BrowserTabRuntimeStateSnapshot
-        {
-            CategoryDefinitions = _browserTabCategories
-                .Select(static category => category.Clone())
-                .ToList(),
-            RestoreSnapshot = EnsureBrowserTabRestoreSnapshot().Clone(),
-            ActiveCategoryId = ResolveExistingBrowserTabCategoryId(_activeBrowserTabCategoryId)
-        };
-    }
-    private static List<BrowserTabCategorySessionState> BuildCategorySessionStatesFromSnapshot(BrowserTabRestoreSnapshot snapshot)
-    {
-        return snapshot.Categories
-            .Where(static category => category != null && !string.IsNullOrWhiteSpace(category.Id))
-            .Select(static category => new BrowserTabCategorySessionState
-            {
-                CategoryId = category.Id,
-                ActiveTabIndex = category.ActiveTabIndex,
-                OpenTabs = category.OpenTabs.Select(static tab => tab.Clone()).ToList()
-            })
-            .ToList();
-    }
-    private void RestoreBrowserTabRuntimeStateSnapshot(BrowserTabRuntimeStateSnapshot runtimeState)
-    {
-        _settings.BrowserTabs ??= new BrowserTabSettings();
-        _settings.Session ??= new SessionSettings();
-        _settings.BrowserTabs.Categories = runtimeState.CategoryDefinitions
-            .Select(static category => category.Clone())
-            .ToList();
-        _settings.Session.BrowserTabRestoreSnapshot = runtimeState.RestoreSnapshot.Clone();
-        EnsureBrowserTabCategoryConfiguration();
-        _activeBrowserTabCategoryId = ResolveExistingBrowserTabCategoryId(runtimeState.ActiveCategoryId);
-        _settings.Session.ActiveBrowserTabCategoryId = _activeBrowserTabCategoryId;
-        _settings.Session.BrowserTabCategories = BuildCategorySessionStatesFromSnapshot(_settings.Session.BrowserTabRestoreSnapshot);
-        BrowserTabRestoreCategoryState? activeCategoryState = FindBrowserTabRestoreCategoryState(_activeBrowserTabCategoryId);
-        _settings.Session.OpenTabs = activeCategoryState?.OpenTabs.Select(static tab => tab.Clone()).ToList()
-            ?? new List<BrowserTabSessionState>();
-        _settings.Session.ActiveTabIndex = activeCategoryState?.ActiveTabIndex ?? 0;
-        List<BrowserTabState> targetTabs = LoadBrowserTabsForCategory(_activeBrowserTabCategoryId);
-        int targetIndex = Math.Clamp(
-            ResolveBrowserTabCategoryActiveIndex(_activeBrowserTabCategoryId, targetTabs.Count),
-            0,
-            Math.Max(0, targetTabs.Count - 1));
-        _browserTabs.Clear();
-        _browserTabs.AddRange(targetTabs);
-        _browserTabContextIndex = -1;
-        RefreshBrowserTabHeaders();
-        if (_browserTabs.Count > 0)
-        {
-            _activeBrowserTabIndex = -1;
-            SwitchBrowserTab(targetIndex);
-        }
-        else
-        {
-            _activeBrowserTabIndex = -1;
-        }
-        RefreshBrowserTabHeaders();
-        _browserTabStrip?.Invalidate();
-        _browserTabHostPanel?.Invalidate();
-    }
-    private static List<BrowserTabCategoryDefinition> BuildBrowserTabCategoryDefinitionsFromSnapshot(BrowserTabRestoreSnapshot snapshot)
-    {
-        return snapshot.Categories
-            .Where(static category => category != null && !string.IsNullOrWhiteSpace(category.Id))
-            .Select(static category => new BrowserTabCategoryDefinition
-            {
-                Id = category.Id,
-                DisplayName = string.IsNullOrWhiteSpace(category.DisplayName) ? "既定" : category.DisplayName
-            })
-            .ToList();
-    }
-    private static BrowserTabRuntimeStateSnapshot CreateBrowserTabRuntimeStateSnapshot(WorkspaceState workspaceState)
-    {
-        BrowserTabRestoreSnapshot snapshot = workspaceState.RestoreSnapshot.Clone();
-        return new BrowserTabRuntimeStateSnapshot
-        {
-            CategoryDefinitions = BuildBrowserTabCategoryDefinitionsFromSnapshot(snapshot),
-            RestoreSnapshot = snapshot,
-            ActiveCategoryId = string.IsNullOrWhiteSpace(snapshot.ActiveCategoryId)
-                ? BrowserTabSettings.DefaultCategoryId
-                : snapshot.ActiveCategoryId
-        };
-    }
-    private WorkspaceState CaptureWorkspaceSnapshotState()
-    {
-        BrowserTabRuntimeStateSnapshot runtimeState = CaptureBrowserTabRuntimeStateSnapshot();
-        return new WorkspaceState
-        {
-            RestoreSnapshot = runtimeState.RestoreSnapshot.Clone(),
-            SavedAtUtc = DateTime.UtcNow
-        };
-    }
-    private BrowserTabRestoreSnapshot EnsureBrowserTabRestoreSnapshot()
-    {
-        _settings.Session ??= new SessionSettings();
-        BrowserTabRestoreSnapshot snapshot = (_settings.Session.BrowserTabRestoreSnapshot ?? new BrowserTabRestoreSnapshot()).Clone();
-        var existingStates = snapshot.Categories
-            .Where(static category => category != null)
-            .GroupBy(category => NormalizeBrowserTabCategoryId(category.Id), StringComparer.OrdinalIgnoreCase)
-            .ToDictionary(
-                static group => group.Key,
-                static group => group.First().Clone(),
-                StringComparer.OrdinalIgnoreCase);
-        var normalizedSnapshot = new BrowserTabRestoreSnapshot
-        {
-            ActiveCategoryId = ResolveExistingBrowserTabCategoryId(snapshot.ActiveCategoryId)
-        };
-        foreach (BrowserTabCategoryDefinition category in _browserTabCategories)
-        {
-            string categoryId = NormalizeBrowserTabCategoryId(category.Id);
-            existingStates.TryGetValue(categoryId, out BrowserTabRestoreCategoryState? existingState);
-            normalizedSnapshot.Categories.Add(new BrowserTabRestoreCategoryState
-            {
-                Id = categoryId,
-                DisplayName = string.IsNullOrWhiteSpace(category.DisplayName) ? "既定" : category.DisplayName.Trim(),
-                ActiveTabIndex = existingState?.ActiveTabIndex ?? 0,
-                OpenTabs = existingState?.OpenTabs.Select(static tab => tab.Clone()).ToList() ?? new List<BrowserTabSessionState>()
-            });
-        }
-        if (normalizedSnapshot.Categories.Count == 0)
-        {
-            normalizedSnapshot.Categories.Add(new BrowserTabRestoreCategoryState
-            {
-                Id = BrowserTabSettings.DefaultCategoryId,
-                DisplayName = "既定"
-            });
-        }
-        normalizedSnapshot.ActiveCategoryId = ResolveExistingBrowserTabCategoryId(normalizedSnapshot.ActiveCategoryId);
-        _settings.Session.BrowserTabRestoreSnapshot = normalizedSnapshot;
-        return normalizedSnapshot;
-    }
-    private BrowserTabRestoreCategoryState? FindBrowserTabRestoreCategoryState(string categoryId)
-    {
-        BrowserTabRestoreSnapshot snapshot = EnsureBrowserTabRestoreSnapshot();
-        string resolvedCategoryId = ResolveExistingBrowserTabCategoryId(categoryId);
-        return snapshot.Categories.FirstOrDefault(
-            category => string.Equals(category.Id, resolvedCategoryId, StringComparison.OrdinalIgnoreCase));
-    }
-    private string CreateUniqueBrowserTabCategoryId(string displayName)
-    {
-        string baseId = Regex.Replace(displayName.Trim().ToLowerInvariant(), @"[^a-z0-9]+", "-").Trim('-');
-        if (string.IsNullOrWhiteSpace(baseId))
-        {
-            baseId = "category";
-        }
-        if (string.Equals(baseId, BrowserTabSettings.DefaultCategoryId, StringComparison.OrdinalIgnoreCase))
-        {
-            baseId = "category";
-        }
-        string candidate = baseId;
-        int suffix = 2;
-        while (_browserTabCategories.Any(category => string.Equals(category.Id, candidate, StringComparison.OrdinalIgnoreCase)))
-        {
-            candidate = $"{baseId}-{suffix}";
-            suffix++;
-        }
-        return candidate;
-    }
-    private void SaveBrowserTabsToSettings()
-    {
-        EnsureBrowserTabCategoryConfiguration();
-        _settings.Session ??= new SessionSettings();
-        if (!_settings.Session.RestoreTabsOnStartup)
-        {
-            _settings.Session.ClearBrowserTabRestoreState();
-            LogService.Info("[BrowserTabs] Save cleared because tab restore is disabled.");
-            return;
-        }
-        StoreActiveBrowserTabCategorySessionState(updateCompatibilityMirror: false);
-        string activeCategoryId = ResolveExistingBrowserTabCategoryId(_activeBrowserTabCategoryId);
-        BrowserTabRestoreCategoryState? activeCategoryState = FindBrowserTabRestoreCategoryState(activeCategoryId);
-        int activeTabIndex = activeCategoryState?.ActiveTabIndex ?? 0;
-        int tabCount = activeCategoryState?.OpenTabs?.Count ?? 0;
-        LogService.Info($"[BrowserTabs] Saved Category={activeCategoryId} Tabs={tabCount} ActiveIndex={activeTabIndex}");
-    }
-    private void SaveWorkspaceStateStore()
-    {
-        if (_workspaceStateStore == null)
-        {
-            return;
-        }
-        try
-        {
-            if (!_settings.Session.RestoreTabsOnStartup)
-            {
-                _workspaceStateStore.Clear();
-                LogService.Info("[WorkspaceStore] Cleared because workspace restore is disabled.");
-                return;
-            }
-            BrowserTabRestoreSnapshot snapshot = EnsureBrowserTabRestoreSnapshot().Clone();
-            _workspaceStateStore.Save(WorkspaceStateMigrationService.FromSessionSnapshot(snapshot));
-            LogService.Info($"[WorkspaceStore] Saved categories={snapshot.Categories.Count} active={snapshot.ActiveCategoryId}");
-        }
-        catch (Exception ex)
-        {
-            LogService.Error("Workspace state save failed. Session snapshot fallback remains available.", ex);
-        }
-    }
-    private bool TryLoadWorkspaceStateStore(out BrowserTabRestoreSnapshot? snapshot)
-    {
-        snapshot = null;
-        if (_workspaceStateStore == null)
-        {
-            return false;
-        }
-        try
-        {
-            WorkspaceState? workspaceState = _workspaceStateStore.Load();
-            if (workspaceState?.RestoreSnapshot?.Categories is not { Count: > 0 })
-            {
-                LogService.Info("[WorkspaceStore] No workspace restore state found.");
-                return false;
-            }
-            snapshot = workspaceState.RestoreSnapshot.Clone();
-            LogService.Info($"[WorkspaceStore] Loaded categories={snapshot.Categories.Count} active={snapshot.ActiveCategoryId}");
-            return true;
-        }
-        catch (Exception ex)
-        {
-            LogService.Error("Workspace state load failed. Falling back to SessionSettings snapshot.", ex);
-            return false;
-        }
-    }
-    private void ApplyWorkspaceRestoreSnapshotToSettings(BrowserTabRestoreSnapshot snapshot)
-    {
-        _settings.BrowserTabs ??= new BrowserTabSettings();
-        _settings.Session ??= new SessionSettings();
-        _settings.Session.BrowserTabRestoreSnapshot = snapshot.Clone();
-        _settings.BrowserTabs.Categories = snapshot.Categories
-            .Select(static category => new BrowserTabCategoryDefinition
-            {
-                Id = string.IsNullOrWhiteSpace(category.Id) ? BrowserTabSettings.DefaultCategoryId : category.Id,
-                DisplayName = string.IsNullOrWhiteSpace(category.DisplayName) ? "既定" : category.DisplayName
-            })
-            .ToList();
-        _settings.Session.BrowserTabCategories = BuildCategorySessionStatesFromSnapshot(snapshot);
-        _settings.Session.ActiveBrowserTabCategoryId = string.IsNullOrWhiteSpace(snapshot.ActiveCategoryId)
-            ? BrowserTabSettings.DefaultCategoryId
-            : snapshot.ActiveCategoryId;
-        BrowserTabRestoreCategoryState? activeCategory = snapshot.Categories.FirstOrDefault(
-            category => string.Equals(category.Id, _settings.Session.ActiveBrowserTabCategoryId, StringComparison.OrdinalIgnoreCase))
-            ?? snapshot.Categories.FirstOrDefault();
-        _settings.Session.OpenTabs = activeCategory?.OpenTabs.Select(static tab => tab.Clone()).ToList()
-            ?? new List<BrowserTabSessionState>();
-        _settings.Session.ActiveTabIndex = activeCategory?.ActiveTabIndex ?? 0;
-    }
-    private List<BrowserTabSessionState> SerializeBrowserTabsForSession(IReadOnlyList<BrowserTabState> sourceTabs, out int activeTabIndex)
-    {
-        IReadOnlyList<BrowserTabState> limitedTabs = sourceTabs;
-        int maxTabCount = GetMaxBrowserTabsPerCategory();
-        if (limitedTabs.Count > maxTabCount)
-        {
-            LogService.Warn($"[BrowserTabs] Save source exceeded max tabs. Source={limitedTabs.Count} Max={maxTabCount}");
-            limitedTabs = limitedTabs.Take(maxTabCount).ToList();
-            ShowStatusMessage($"タブ数が上限を超えたため、{maxTabCount} 個まで保存しました。");
-        }
-        List<BrowserTabSessionState> serializedTabs = limitedTabs
-            .Where(static tab => !string.IsNullOrWhiteSpace(tab.CurrentPath))
-            .Select(CreateBrowserTabSessionState)
-            .ToList();
-        activeTabIndex = serializedTabs.Count == 0
-            ? 0
-            : Math.Clamp(_activeBrowserTabIndex, 0, serializedTabs.Count - 1);
-        return serializedTabs;
-    }
-    private void StoreActiveBrowserTabCategorySessionState(bool updateCompatibilityMirror)
-    {
-        EnsureBrowserTabCategoryConfiguration();
-        _settings.Session ??= new SessionSettings();
-        string activeCategoryId = ResolveExistingBrowserTabCategoryId(_activeBrowserTabCategoryId);
-        List<BrowserTabSessionState> serializedTabs = SerializeBrowserTabsForSession(_browserTabs, out int activeTabIndex);
-        BrowserTabRestoreSnapshot snapshot = EnsureBrowserTabRestoreSnapshot();
-        snapshot.ActiveCategoryId = activeCategoryId;
-        BrowserTabRestoreCategoryState? categoryState = snapshot.Categories.FirstOrDefault(
-            category => string.Equals(category.Id, activeCategoryId, StringComparison.OrdinalIgnoreCase));
-        if (categoryState == null)
-        {
-            categoryState = new BrowserTabRestoreCategoryState
-            {
-                Id = activeCategoryId,
-                DisplayName = _browserTabCategories
-                    .FirstOrDefault(category => string.Equals(category.Id, activeCategoryId, StringComparison.OrdinalIgnoreCase))
-                    ?.DisplayName ?? activeCategoryId
-            };
-            snapshot.Categories.Add(categoryState);
-        }
-        categoryState.DisplayName = _browserTabCategories
-            .FirstOrDefault(category => string.Equals(category.Id, activeCategoryId, StringComparison.OrdinalIgnoreCase))
-            ?.DisplayName ?? categoryState.DisplayName;
-        categoryState.ActiveTabIndex = activeTabIndex;
-        categoryState.OpenTabs = serializedTabs.Select(static tab => tab.Clone()).ToList();
-        _settings.Session.BrowserTabRestoreSnapshot = snapshot;
-        if (updateCompatibilityMirror)
-        {
-            _settings.Session.ActiveBrowserTabCategoryId = activeCategoryId;
-            _settings.Session.BrowserTabCategories = UpsertBrowserTabCategorySessionState(
-                _settings.Session.BrowserTabCategories,
-                new BrowserTabCategorySessionState
-                {
-                    CategoryId = activeCategoryId,
-                    OpenTabs = serializedTabs.Select(static tab => tab.Clone()).ToList(),
-                    ActiveTabIndex = activeTabIndex
-                });
-            _settings.Session.OpenTabs = serializedTabs.Select(static tab => tab.Clone()).ToList();
-            _settings.Session.ActiveTabIndex = activeTabIndex;
-        }
-        LogService.Info(
-            $"[BrowserTabCategory] Store Category={activeCategoryId} Tabs={serializedTabs.Count} ActiveIndex={activeTabIndex} " +
-            $"MirrorUpdated={updateCompatibilityMirror}");
-    }
-    private static List<BrowserTabCategorySessionState> UpsertBrowserTabCategorySessionState(
-        IEnumerable<BrowserTabCategorySessionState>? existingStates,
-        BrowserTabCategorySessionState updatedState)
-    {
-        var mergedStates = new List<BrowserTabCategorySessionState>();
-        bool replaced = false;
-        foreach (BrowserTabCategorySessionState state in existingStates ?? Enumerable.Empty<BrowserTabCategorySessionState>())
-        {
-            if (state == null || string.IsNullOrWhiteSpace(state.CategoryId))
-            {
-                continue;
-            }
-            if (string.Equals(state.CategoryId, updatedState.CategoryId, StringComparison.OrdinalIgnoreCase))
-            {
-                mergedStates.Add(updatedState.Clone());
-                replaced = true;
-            }
-            else
-            {
-                mergedStates.Add(state.Clone());
-            }
-        }
-        if (!replaced)
-        {
-            mergedStates.Add(updatedState.Clone());
-        }
-        return mergedStates;
-    }
-    private static BrowserTabSessionState CreateBrowserTabSessionState(BrowserTabState tabState)
-    {
-        NavigationService.NavigationSnapshot navigation = tabState.Navigation ?? new NavigationService.NavigationSnapshot();
-        return new BrowserTabSessionState
-        {
-            TabId = tabState.Id == Guid.Empty ? Guid.NewGuid() : tabState.Id,
-            CurrentPath = tabState.CurrentPath,
-            IsLocked = tabState.IsLocked,
-            StartupPath = tabState.StartupPath,
-            IsReadOnly = tabState.IsReadOnly,
-            FilterLock = tabState.FilterLock?.Clone() ?? new TabFilterLockState(),
-            MarkedPaths = CreatePersistableMarkedPaths(tabState.MarkedPaths, out _),
-            BackHistory = navigation.BackHistory.ToList(),
-            ForwardHistory = navigation.ForwardHistory.ToList(),
-            LastVisitedPathByDrive = navigation.LastVisitedPathByDrive.ToDictionary(
-                static pair => pair.Key.ToString(),
-                static pair => pair.Value,
-                StringComparer.OrdinalIgnoreCase),
-            FocusTargetName = tabState.FocusTargetName,
-            CursorIndex = tabState.CursorIndex,
-            ColumnCount = tabState.ColumnCount,
-            SortKind = tabState.SortKind,
-            SortAscending = tabState.SortAscending
-        };
-    }
-    private bool TryRestoreBrowserTabsOnStartup(out int restoredTabCount, out int skippedTabCount, out bool hadSavedTabs)
-    {
-        restoredTabCount = 0;
-        skippedTabCount = 0;
-        hadSavedTabs = false;
-        try
-        {
-            EnsureBrowserTabCategoryConfiguration();
-            _settings.Session ??= new SessionSettings();
-            if (!_settings.Session.RestoreTabsOnStartup)
-            {
-                LogService.Info("[BrowserTabs] Restore skipped because tab restore is disabled.");
-                _restoredBrowserTabsFromWorkspaceStore = false;
-                return false;
-            }
-            bool workspaceStoreLoaded = TryLoadWorkspaceStateStore(out BrowserTabRestoreSnapshot? workspaceSnapshot);
-            _restoredBrowserTabsFromWorkspaceStore = workspaceStoreLoaded;
-            if (workspaceSnapshot != null)
-            {
-                ApplyWorkspaceRestoreSnapshotToSettings(workspaceSnapshot);
-            }
-            EnsureBrowserTabCategoryConfiguration();
-            BrowserTabRestoreSnapshot snapshot = EnsureBrowserTabRestoreSnapshot();
-            string restoredCategoryId = ResolveExistingBrowserTabCategoryId(snapshot.ActiveCategoryId);
-            List<BrowserTabSessionState> savedTabs = GetBrowserTabSessionStatesForRestore(ref restoredCategoryId);
-            hadSavedTabs = savedTabs.Count > 0;
-            if (!hadSavedTabs)
-            {
-                LogService.Info("[BrowserTabs] Restore skipped because no saved tabs were found.");
-                return false;
-            }
-            int maxTabCount = GetMaxBrowserTabsPerCategory();
-            if (savedTabs.Count > maxTabCount)
-            {
-                LogService.Warn($"[BrowserTabs] Restore source exceeded max tabs. Source={savedTabs.Count} Max={maxTabCount}");
-                savedTabs = savedTabs.Take(maxTabCount).ToList();
-                ShowStatusMessage($"保存タブが上限を超えたため、{maxTabCount} 個まで復元しました。");
-            }
-            var restoredTabs = new List<BrowserTabState>();
-            foreach (BrowserTabSessionState sessionTab in savedTabs)
-            {
-                if (!TryCreateBrowserTabStateFromSession(sessionTab, out BrowserTabState? restoredTab))
-                {
-                    skippedTabCount++;
-                    continue;
-                }
-                restoredTabs.Add(restoredTab!);
-            }
-            if (restoredTabs.Count == 0)
-            {
-                LogService.Info($"[BrowserTabs] Restore skipped because all saved tabs were unavailable. Missing={skippedTabCount}");
-                return false;
-            }
-            _browserTabs.Clear();
-            _browserTabs.AddRange(restoredTabs);
-            restoredTabCount = restoredTabs.Count;
-            _activeBrowserTabCategoryId = restoredCategoryId;
-            _settings.Session.ActiveBrowserTabCategoryId = restoredCategoryId;
-            int targetIndex = ResolveBrowserTabCategoryActiveIndex(restoredCategoryId, restoredTabs.Count);
-            _activeBrowserTabIndex = targetIndex;
-            RefreshBrowserTabHeaders();
-            _activeBrowserTabIndex = -1;
-            SwitchBrowserTab(targetIndex);
-            LogService.Info($"[BrowserTabs] Restored Category={restoredCategoryId} Tabs={restoredTabCount} Missing={skippedTabCount} ActiveIndex={targetIndex}");
-            if (!workspaceStoreLoaded)
-            {
-                SaveWorkspaceStateStore();
-            }
-            return true;
-        }
-        catch (Exception ex)
-        {
-            LogService.Error("Unexpected error during startup browser tabs restoration. Falling back to default startup.", ex);
-            restoredTabCount = 0;
-            skippedTabCount = 0;
-            hadSavedTabs = false;
-            return false;
-        }
-    }
-    private List<BrowserTabSessionState> GetBrowserTabSessionStatesForRestore(ref string restoredCategoryId)
-    {
-        string requestedCategoryId = restoredCategoryId;
-        BrowserTabRestoreSnapshot snapshot = EnsureBrowserTabRestoreSnapshot();
-        List<BrowserTabRestoreCategoryState> categoryStates = snapshot.Categories
-            .Where(static state => state != null && !string.IsNullOrWhiteSpace(state.Id))
-            .Select(static state => state.Clone())
-            .ToList();
-        BrowserTabRestoreCategoryState? activeCategoryState = categoryStates.FirstOrDefault(
-            state => string.Equals(state.Id, requestedCategoryId, StringComparison.OrdinalIgnoreCase));
-        if (activeCategoryState == null)
-        {
-            activeCategoryState = categoryStates.FirstOrDefault(state => state.OpenTabs.Count > 0)
-                ?? categoryStates.FirstOrDefault();
-        }
-        if (activeCategoryState != null && activeCategoryState.OpenTabs.Count > 0)
-        {
-            restoredCategoryId = ResolveExistingBrowserTabCategoryId(activeCategoryState.Id);
-            return activeCategoryState.OpenTabs.Select(static tab => tab.Clone()).ToList();
-        }
-        restoredCategoryId = BrowserTabSettings.DefaultCategoryId;
-        return new List<BrowserTabSessionState>();
-    }
-    private int ResolveBrowserTabCategoryActiveIndex(string categoryId, int restoredTabCount)
-    {
-        if (restoredTabCount <= 0)
-        {
-            return 0;
-        }
-        BrowserTabRestoreCategoryState? categoryState = FindBrowserTabRestoreCategoryState(categoryId);
-        if (categoryState != null && categoryState.OpenTabs.Count > 0)
-        {
-            return Math.Clamp(categoryState.ActiveTabIndex, 0, restoredTabCount - 1);
-        }
-        return 0;
-    }
-    private int GetActiveBrowserTabCategoryIndex()
-    {
-        if (_browserTabCategories.Count == 0)
-        {
-            return -1;
-        }
-        int categoryIndex = _browserTabCategories.FindIndex(
-            category => string.Equals(category.Id, _activeBrowserTabCategoryId, StringComparison.OrdinalIgnoreCase));
-        return categoryIndex >= 0 ? categoryIndex : 0;
-    }
-    private List<BrowserTabState> LoadBrowserTabsForCategory(string categoryId)
-    {
-        EnsureBrowserTabCategoryConfiguration();
-        _settings.Session ??= new SessionSettings();
-        BrowserTabRestoreCategoryState? categoryState = FindBrowserTabRestoreCategoryState(categoryId);
-        var restoredTabs = new List<BrowserTabState>();
-        int sessionTabCount = categoryState?.OpenTabs?.Count ?? 0;
-        foreach (BrowserTabSessionState sessionTab in categoryState?.OpenTabs ?? Enumerable.Empty<BrowserTabSessionState>())
-        {
-            if (TryCreateBrowserTabStateFromSession(sessionTab, out BrowserTabState? restoredTab))
-            {
-                restoredTabs.Add(restoredTab!);
-            }
-        }
-        bool usedFallback = false;
-        string fallbackReason = "None";
-        if (restoredTabs.Count == 0)
-        {
-            BrowserTabState fallbackState = CreateInitialBrowserTabStateForCategory(categoryId);
-            restoredTabs.Add(fallbackState);
-            usedFallback = true;
-            fallbackReason = sessionTabCount == 0 ? "InitializeCategory" : "RestoreUnavailable";
-        }
-        LogService.Info(
-            $"[BrowserTabCategory] Load Category={categoryId} SessionTabs={sessionTabCount} RestoredTabs={restoredTabs.Count} " +
-            $"UsedFallback={usedFallback} FallbackReason={fallbackReason} CurrentUiPath={_navigationService.CurrentPath}");
-        return restoredTabs;
-    }
-    private BrowserTabState CreateInitialBrowserTabStateForCategory(string categoryId)
-    {
-        string initialPath = _navigationService.CurrentPath;
-        if (string.IsNullOrWhiteSpace(initialPath) || !Directory.Exists(initialPath))
-        {
-            initialPath = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
-        }
-        if (string.IsNullOrWhiteSpace(initialPath) || !Directory.Exists(initialPath))
-        {
-            initialPath = AppContext.BaseDirectory;
-        }
-        string resolvedCategoryId = ResolveExistingBrowserTabCategoryId(categoryId);
-        LogService.Info(
-            $"[BrowserTabCategory] InitializeCategory Category={resolvedCategoryId} InitialPath={initialPath} " +
-            $"CurrentUiPath={_navigationService.CurrentPath}");
-        return new BrowserTabState
-        {
-            Title = GetBrowserTabTitle(initialPath),
-            CurrentPath = initialPath,
-            IsLocked = false,
-            Navigation = new NavigationService.NavigationSnapshot
-            {
-                CurrentPath = initialPath,
-                BackHistory = Array.Empty<string>(),
-                ForwardHistory = Array.Empty<string>(),
-                LastVisitedPathByDrive = new Dictionary<char, string>()
-            },
-            FocusTargetName = null,
-            CursorIndex = 0,
-            ColumnCount = Math.Clamp(_columnCount, 1, 9),
-            SortKind = _currentSort,
-            SortAscending = _sortAscending
-        };
-    }
-    private void SwitchBrowserTabCategory(string categoryId)
-    {
-        EnsureBrowserModeBeforeWorkspaceNavigation();
-        string targetCategoryId = ResolveExistingBrowserTabCategoryId(categoryId);
-        LogService.Info(
-            $"[BrowserTabCategory] Switch Requested={categoryId} Resolved={targetCategoryId} ActiveBefore={_activeBrowserTabCategoryId} " +
-            $"TabsBefore={_browserTabs.Count} ActiveIndexBefore={_activeBrowserTabIndex}");
-        if (string.Equals(targetCategoryId, _activeBrowserTabCategoryId, StringComparison.OrdinalIgnoreCase))
-        {
-            ClearBrowserTabCategoryContextState();
-            RefreshBrowserTabHeaders();
-            UpdateMenuStripState();
-            _browserTabStrip?.Invalidate();
-            _browserTabHostPanel?.Invalidate();
-            browserPanel.Focus();
-            LogService.Info($"[BrowserTabCategory] Switch skipped because target category was already active: {targetCategoryId}");
-            return;
-        }
-        CaptureActiveBrowserTabState();
-        StoreActiveBrowserTabCategorySessionState(updateCompatibilityMirror: false);
-        List<BrowserTabState> targetTabs = LoadBrowserTabsForCategory(targetCategoryId);
-        int targetIndex = Math.Clamp(ResolveBrowserTabCategoryActiveIndex(targetCategoryId, targetTabs.Count), 0, Math.Max(0, targetTabs.Count - 1));
-        LogService.Info($"[BrowserTabCategory] Switch loaded Category={targetCategoryId} Tabs={targetTabs.Count} TargetIndex={targetIndex}");
-        _browserTabs.Clear();
-        _browserTabs.AddRange(targetTabs);
-        _activeBrowserTabCategoryId = targetCategoryId;
-        ClearBrowserTabContextState();
-        ClearBrowserTabCategoryContextState();
-        RefreshBrowserTabHeaders();
-        if (_browserTabs.Count > 0)
-        {
-            _activeBrowserTabIndex = -1;
-            SwitchBrowserTab(targetIndex);
-        }
-        else
-        {
-            _activeBrowserTabIndex = -1;
-        }
-        RefreshBrowserTabHeaders();
-        UpdateMenuStripState();
-        _browserTabStrip?.Invalidate();
-        _browserTabHostPanel?.Invalidate();
-        StoreActiveBrowserTabCategorySessionState(updateCompatibilityMirror: false);
-        browserPanel.Focus();
-        LogService.Info(
-            $"[BrowserTabCategory] Switch applied ActiveAfter={_activeBrowserTabCategoryId} TabsAfter={_browserTabs.Count} " +
-            $"ActiveIndexAfter={_activeBrowserTabIndex}");
-        ShowStatusMessage($"カテゴリを切り替えました: {_browserTabCategories[GetActiveBrowserTabCategoryIndex()].DisplayName}");
-    }
-    private void SelectAdjacentBrowserTabCategory(int delta)
-    {
-        if (GuardClipboardBusy())
-        {
-            return;
-        }
-        if (!ShouldShowBrowserTabCategoryRow())
-        {
-            return;
-        }
-        EnsureBrowserTabCategoryConfiguration();
-        if (_browserTabCategories.Count <= 1)
-        {
-            return;
-        }
-        int currentIndex = GetActiveBrowserTabCategoryIndex();
-        if (currentIndex < 0)
-        {
-            currentIndex = 0;
-        }
-        int nextIndex = (currentIndex + delta + _browserTabCategories.Count) % _browserTabCategories.Count;
-        if (nextIndex == currentIndex)
-        {
-            return;
-        }
-        LogService.Info(
-            $"[BrowserTabCategory] SelectAdjacent Delta={delta} CurrentIndex={currentIndex} NextIndex={nextIndex} " +
-            $"CategoryCount={_browserTabCategories.Count} ActiveCategory={_activeBrowserTabCategoryId}");
-        SwitchBrowserTabCategory(_browserTabCategories[nextIndex].Id);
-    }
-    private bool TryResolveBrowserTabRestorePath(BrowserTabSessionState sessionTab, out string restorePath)
-    {
-        restorePath = string.Empty;
-        string currentPath = sessionTab.CurrentPath ?? string.Empty;
-        string startupPath = sessionTab.StartupPath ?? string.Empty;
-        if (sessionTab.IsLocked && !string.IsNullOrWhiteSpace(startupPath) && Directory.Exists(startupPath))
-        {
-            // ロックタブでも、現在パスがロックルート配下なら現在パスを優先して復元する
-            if (!string.IsNullOrWhiteSpace(currentPath) && Directory.Exists(currentPath) &&
-                IsPathUnderBrowserTabStartupPath(currentPath, new BrowserTabState { StartupPath = startupPath }))
-            {
-                restorePath = currentPath;
-            }
-            else
-            {
-                restorePath = startupPath;
-            }
-            return true;
-        }
-        if (Directory.Exists(currentPath))
-        {
-            restorePath = currentPath;
-            if (sessionTab.IsLocked && !string.IsNullOrWhiteSpace(startupPath))
-            {
-                LogService.Warn($"[BrowserTabs] Locked startup path missing. StartupPath={startupPath} Fallback={restorePath}");
-                ShowStatusMessage("固定タブの起動元が見つからないため、最後の場所を開きました。");
-            }
-            return true;
-        }
-        if (sessionTab.IsLocked && TryFindExistingParentDirectory(startupPath, out string parentPath))
-        {
-            restorePath = parentPath;
-            LogService.Warn($"[BrowserTabs] Locked startup/current path missing. StartupPath={startupPath} CurrentPath={currentPath} Fallback={restorePath}");
-            ShowStatusMessage("固定タブの起動元が見つからないため、親フォルダを開きました。");
-            return true;
-        }
-        if (sessionTab.IsLocked)
-        {
-            restorePath = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
-            if (string.IsNullOrWhiteSpace(restorePath) || !Directory.Exists(restorePath))
-            {
-                restorePath = AppContext.BaseDirectory;
-            }
-            LogService.Warn($"[BrowserTabs] Locked tab restore fallback used. StartupPath={startupPath} CurrentPath={currentPath} Fallback={restorePath}");
-            ShowStatusMessage("固定タブの起動元が見つからないため、代替フォルダを開きました。");
-            return Directory.Exists(restorePath);
-        }
-        return false;
-    }
-    private static bool TryFindExistingParentDirectory(string? path, out string parentPath)
-    {
-        parentPath = string.Empty;
-        if (string.IsNullOrWhiteSpace(path))
-        {
-            return false;
-        }
-        string? candidate = path;
-        while (!string.IsNullOrWhiteSpace(candidate))
-        {
-            candidate = Path.GetDirectoryName(candidate.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
-            if (!string.IsNullOrWhiteSpace(candidate) && Directory.Exists(candidate))
-            {
-                parentPath = candidate;
-                return true;
-            }
-        }
-        return false;
-    }
-    private bool TryCreateBrowserTabStateFromSession(BrowserTabSessionState sessionTab, out BrowserTabState? restoredTab)
-    {
-        restoredTab = null;
-        if (sessionTab == null || !TryResolveBrowserTabRestorePath(sessionTab, out string restorePath))
-        {
-            return false;
-        }
-        var backHistory = (sessionTab.BackHistory ?? new List<string>())
-            .Where(static path => !string.IsNullOrWhiteSpace(path) && Directory.Exists(path))
-            .ToList();
-        var forwardHistory = (sessionTab.ForwardHistory ?? new List<string>())
-            .Where(static path => !string.IsNullOrWhiteSpace(path) && Directory.Exists(path))
-            .ToList();
-        var lastVisitedByDrive = new Dictionary<char, string>();
-        foreach ((string driveKey, string path) in sessionTab.LastVisitedPathByDrive ?? new Dictionary<string, string>())
-        {
-            if (string.IsNullOrWhiteSpace(driveKey) || driveKey.Length != 1 || string.IsNullOrWhiteSpace(path) || !Directory.Exists(path))
-            {
-                continue;
-            }
-            lastVisitedByDrive[driveKey[0]] = path;
-        }
-        restoredTab = new BrowserTabState
-        {
-            Id = sessionTab.TabId == Guid.Empty ? Guid.NewGuid() : sessionTab.TabId,
-            Title = GetBrowserTabTitle(restorePath),
-            CurrentPath = restorePath,
-            IsLocked = sessionTab.IsLocked,
-            StartupPath = sessionTab.StartupPath ?? string.Empty,
-            IsReadOnly = sessionTab.IsReadOnly,
-            FilterLock = sessionTab.FilterLock?.Clone() ?? new TabFilterLockState(),
-            MarkedPaths = CreatePersistableMarkedPaths(sessionTab.MarkedPaths, out int skippedMarkCount),
-            Navigation = new NavigationService.NavigationSnapshot
-            {
-                CurrentPath = restorePath,
-                BackHistory = backHistory,
-                ForwardHistory = forwardHistory,
-                LastVisitedPathByDrive = lastVisitedByDrive
-            },
-            FocusTargetName = sessionTab.FocusTargetName,
-            CursorIndex = Math.Max(0, sessionTab.CursorIndex),
-            ColumnCount = Math.Clamp(sessionTab.ColumnCount, 1, 9),
-            SortKind = sessionTab.SortKind,
-            SortAscending = sessionTab.SortAscending
-        };
-        if (skippedMarkCount > 0)
-        {
-            LogService.Info($"[BrowserTabs] Pruned stale restored marks. TabId={restoredTab.Id} Missing={skippedMarkCount}");
-        }
-        return true;
-    }
-    private void BrowserTabStrip_SelectedIndexChanged(object? sender, EventArgs e)
-    {
-        if (_suppressBrowserTabSelectionChanged || _browserTabStrip == null)
-        {
-            return;
-        }
-        int newIndex = _browserTabStrip.SelectedIndex;
-        if (newIndex >= 0 && newIndex < _browserTabs.Count)
-        {
-            SwitchBrowserTab(newIndex);
-        }
-    }
-    private void BrowserTabStrip_CategoryClicked(object? sender, BrowserTabStripCategoryEventArgs e)
-    {
-        if (e.Button == MouseButtons.Right)
-        {
-            ShowBrowserTabCategoryContextMenu(e);
-            return;
-        }
-        if (e.Button != MouseButtons.Left)
-        {
-            return;
-        }
-        if (e.Kind == BrowserTabStripCategoryItemKind.ManageEntry)
-        {
-            AddGeneratedBrowserTabCategory();
-            return;
-        }
-        SwitchBrowserTabCategory(e.CategoryId);
-    }
-    private void BrowserTabStrip_AddTabClicked(object? sender, EventArgs e)
-    {
-        AddBrowserTabFromEntry();
-    }
-    private IReadOnlyList<BrowserTabCategoryDefinition> GetBrowserTabCategoryDefinitionsForDialog()
-    {
-        return _browserTabCategories
-            .Select(static category => category.Clone())
-            .ToList();
-    }
-    private void OpenBrowserTabCategoryManager()
-    {
-        EnsureBrowserTabCategoryConfiguration();
-        using var dialog = new CategoryManageDialog(
-            GetBrowserTabCategoryDefinitionsForDialog,
-            PromptAndAddBrowserTabCategory,
-            RenameBrowserTabCategory,
-            DeleteBrowserTabCategory,
-            DeleteBrowserTabCategories);
-        dialog.ShowDialog(this);
-        RefreshBrowserTabHeaders();
-        browserPanel.Focus();
-    }
-    private string GenerateNextBrowserTabCategoryDisplayName()
-    {
-        for (int i = 1; ; i++)
-        {
-            string candidate = $"カテゴリ{i}";
-            if (!_browserTabCategories.Any(category => string.Equals(category.DisplayName, candidate, StringComparison.OrdinalIgnoreCase)))
-            {
-                return candidate;
-            }
-        }
-    }
-    private string? AddGeneratedBrowserTabCategory()
-    {
-        return AddBrowserTabCategoryCore(GenerateNextBrowserTabCategoryDisplayName());
-    }
-    private string? PromptAndAddBrowserTabCategory()
-    {
-        string? displayName = SimpleInputDialog.ShowNullable("新しいカテゴリ名を入力してください。", "カテゴリ追加", "");
-        if (string.IsNullOrWhiteSpace(displayName))
-        {
-            return null;
-        }
-        return AddBrowserTabCategoryCore(displayName);
-    }
-    private string? AddBrowserTabCategoryCore(string displayName)
-    {
-        string trimmedName = displayName.Trim();
-        if (_browserTabCategories.Any(category => string.Equals(category.DisplayName, trimmedName, StringComparison.OrdinalIgnoreCase)))
-        {
-            MessageBox.Show("同じ表示名のカテゴリがすでにあります。", "カテゴリ追加", MessageBoxButtons.OK, MessageBoxIcon.Information);
-            return null;
-        }
-        string newCategoryId = CreateUniqueBrowserTabCategoryId(trimmedName);
-        _browserTabCategories.Add(new BrowserTabCategoryDefinition
-        {
-            Id = newCategoryId,
-            DisplayName = trimmedName
-        });
-        SyncBrowserTabCategoryDefinitionsToSettings();
-        EnsureBrowserTabRestoreSnapshot();
-        SwitchBrowserTabCategory(newCategoryId);
-        SettingsManager.Save(_settings);
-        ShowStatusMessage($"カテゴリを追加しました: {trimmedName}");
-        return trimmedName;
-    }
-    private BrowserTabCategoryDefinition? FindBrowserTabCategoryDefinition(string? categoryId)
-    {
-        if (string.IsNullOrWhiteSpace(categoryId))
-        {
-            return null;
-        }
-        return _browserTabCategories.FirstOrDefault(
-            category => string.Equals(category.Id, categoryId, StringComparison.OrdinalIgnoreCase));
-    }
-    private void EnsureBrowserTabCategoryContextMenu()
-    {
-        if (_browserTabCategoryContextMenu != null)
-        {
-            return;
-        }
-        _browserTabCategoryContextMenu = new ContextMenuStrip();
-        _browserTabCategoryContextMenu.Closed += (_, _) => ClearBrowserTabCategoryContextState();
-        _addBrowserTabCategoryContextMenuItem = new ToolStripMenuItem("カテゴリ追加");
-        _addBrowserTabCategoryContextMenuItem.ShortcutKeyDisplayString = "Ctrl+Shift+N";
-        _addBrowserTabCategoryContextMenuItem.Click += (_, _) => AddGeneratedBrowserTabCategory();
-        _moveBrowserTabCategoryLeftContextMenuItem = new ToolStripMenuItem("左へ移動");
-        _moveBrowserTabCategoryLeftContextMenuItem.ShortcutKeyDisplayString = "Ctrl+Alt+Left";
-        _moveBrowserTabCategoryLeftContextMenuItem.Click += (_, _) => MoveBrowserTabCategoryFromContext(-1);
-        _moveBrowserTabCategoryRightContextMenuItem = new ToolStripMenuItem("右へ移動");
-        _moveBrowserTabCategoryRightContextMenuItem.ShortcutKeyDisplayString = "Ctrl+Alt+Right";
-        _moveBrowserTabCategoryRightContextMenuItem.Click += (_, _) => MoveBrowserTabCategoryFromContext(+1);
-        _renameBrowserTabCategoryContextMenuItem = new ToolStripMenuItem("名前変更");
-        _renameBrowserTabCategoryContextMenuItem.Click += (_, _) => RenameBrowserTabCategoryFromContext();
-        _deleteBrowserTabCategoryContextMenuItem = new ToolStripMenuItem("削除");
-        _deleteBrowserTabCategoryContextMenuItem.Click += (_, _) => DeleteBrowserTabCategoryFromContext();
-        _manageBrowserTabCategoriesContextMenuItem = new ToolStripMenuItem("カテゴリ管理...");
-        _manageBrowserTabCategoriesContextMenuItem.Click += (_, _) => OpenBrowserTabCategoryManager();
-        _browserTabCategoryContextMenu.Items.AddRange(
-        [
-            _addBrowserTabCategoryContextMenuItem,
-            new ToolStripSeparator(),
-            _moveBrowserTabCategoryLeftContextMenuItem,
-            _moveBrowserTabCategoryRightContextMenuItem,
-            _renameBrowserTabCategoryContextMenuItem,
-            _deleteBrowserTabCategoryContextMenuItem,
-            new ToolStripSeparator(),
-            _manageBrowserTabCategoriesContextMenuItem
-        ]);
-    }
-    private void ShowBrowserTabCategoryContextMenu(BrowserTabStripCategoryEventArgs e)
-    {
-        if (_browserTabStrip == null)
-        {
-            return;
-        }
-        EnsureBrowserTabCategoryConfiguration();
-        EnsureBrowserTabCategoryContextMenu();
-        _browserTabCategoryContextCategoryId = e.Kind == BrowserTabStripCategoryItemKind.ManageEntry ? null : e.CategoryId;
-        _browserTabCategoryContextKind = e.Kind;
-        BrowserTabCategoryDefinition? targetCategory = FindBrowserTabCategoryDefinition(_browserTabCategoryContextCategoryId);
-        int targetIndex = targetCategory == null
-            ? -1
-            : _browserTabCategories.FindIndex(category => string.Equals(category.Id, targetCategory.Id, StringComparison.OrdinalIgnoreCase));
-        bool canMoveLeft = targetIndex > 0;
-        bool canMoveRight = targetIndex >= 0 && targetIndex < _browserTabCategories.Count - 1;
-        bool hasTargetCategory = targetCategory != null;
-        if (_moveBrowserTabCategoryLeftContextMenuItem != null)
-        {
-            _moveBrowserTabCategoryLeftContextMenuItem.Visible = hasTargetCategory;
-            _moveBrowserTabCategoryLeftContextMenuItem.Enabled = canMoveLeft;
-        }
-        if (_moveBrowserTabCategoryRightContextMenuItem != null)
-        {
-            _moveBrowserTabCategoryRightContextMenuItem.Visible = hasTargetCategory;
-            _moveBrowserTabCategoryRightContextMenuItem.Enabled = canMoveRight;
-        }
-        if (_renameBrowserTabCategoryContextMenuItem != null)
-        {
-            _renameBrowserTabCategoryContextMenuItem.Visible = hasTargetCategory;
-            _renameBrowserTabCategoryContextMenuItem.Enabled = hasTargetCategory;
-        }
-        if (_deleteBrowserTabCategoryContextMenuItem != null)
-        {
-            _deleteBrowserTabCategoryContextMenuItem.Visible = hasTargetCategory;
-            _deleteBrowserTabCategoryContextMenuItem.Enabled = hasTargetCategory;
-        }
-        if (_browserTabCategoryContextMenu != null && _browserTabCategoryContextMenu.Items.Count >= 7)
-        {
-            _browserTabCategoryContextMenu.Items[1].Visible = hasTargetCategory;
-            _browserTabCategoryContextMenu.Items[6].Visible = hasTargetCategory;
-        }
-        _browserTabCategoryContextMenu?.Show(_browserTabStrip, e.Location);
-    }
-    private void MoveBrowserTabCategoryFromContext(int delta)
-    {
-        if (!string.IsNullOrWhiteSpace(_browserTabCategoryContextCategoryId))
-        {
-            MoveBrowserTabCategory(_browserTabCategoryContextCategoryId, delta);
-        }
-    }
-    private void RenameBrowserTabCategoryFromContext()
-    {
-        BrowserTabCategoryDefinition? target = FindBrowserTabCategoryDefinition(_browserTabCategoryContextCategoryId);
-        if (target != null)
-        {
-            RenameBrowserTabCategory(target);
-        }
-    }
-    private void DeleteBrowserTabCategoryFromContext()
-    {
-        BrowserTabCategoryDefinition? target = FindBrowserTabCategoryDefinition(_browserTabCategoryContextCategoryId);
-        if (target != null)
-        {
-            DeleteBrowserTabCategory(target);
-        }
-    }
-    private string? MoveBrowserTabCategory(string categoryId, int delta)
-    {
-        if (delta == 0)
-        {
-            return null;
-        }
-        int currentIndex = _browserTabCategories.FindIndex(category => string.Equals(category.Id, categoryId, StringComparison.OrdinalIgnoreCase));
-        if (currentIndex < 0)
-        {
-            return null;
-        }
-        int targetIndex = currentIndex + delta;
-        if (targetIndex < 0 || targetIndex >= _browserTabCategories.Count)
-        {
-            return null;
-        }
-        CaptureActiveBrowserTabState();
-        StoreActiveBrowserTabCategorySessionState(updateCompatibilityMirror: false);
-        BrowserTabCategoryDefinition movedCategory = _browserTabCategories[currentIndex];
-        _browserTabCategories.RemoveAt(currentIndex);
-        _browserTabCategories.Insert(targetIndex, movedCategory);
-        SyncBrowserTabCategoryDefinitionsToSettings();
-        EnsureBrowserTabRestoreSnapshot();
-        RefreshBrowserTabHeaders();
-        StoreActiveBrowserTabCategorySessionState(updateCompatibilityMirror: false);
-        SettingsManager.Save(_settings);
-        string direction = delta < 0 ? "左" : "右";
-        ShowStatusMessage($"カテゴリを{direction}へ移動しました: {movedCategory.DisplayName}");
-        browserPanel.Focus();
-        return movedCategory.DisplayName;
-    }
-    private string? RenameBrowserTabCategory(BrowserTabCategoryDefinition category)
-    {
-        BrowserTabCategoryDefinition? target = _browserTabCategories.FirstOrDefault(
-            existing => string.Equals(existing.Id, category.Id, StringComparison.OrdinalIgnoreCase));
-        if (target == null)
-        {
-            return null;
-        }
-        string? renamed = SimpleInputDialog.ShowNullable("カテゴリ名を入力してください。", "カテゴリ名変更", target.DisplayName);
-        if (string.IsNullOrWhiteSpace(renamed))
-        {
-            return null;
-        }
-        string trimmedName = renamed.Trim();
-        if (_browserTabCategories.Any(existing =>
-                !string.Equals(existing.Id, target.Id, StringComparison.OrdinalIgnoreCase) &&
-                string.Equals(existing.DisplayName, trimmedName, StringComparison.OrdinalIgnoreCase)))
-        {
-            MessageBox.Show("同じ表示名のカテゴリがすでにあります。", "カテゴリ名変更", MessageBoxButtons.OK, MessageBoxIcon.Information);
-            return null;
-        }
-        target.DisplayName = trimmedName;
-        SyncBrowserTabCategoryDefinitionsToSettings();
-        EnsureBrowserTabRestoreSnapshot();
-        SettingsManager.Save(_settings);
-        RefreshBrowserTabHeaders();
-        ShowStatusMessage($"カテゴリ名を更新しました: {trimmedName}");
-        return trimmedName;
-    }
-    private string? DeleteBrowserTabCategory(BrowserTabCategoryDefinition category)
-    {
-        BrowserTabCategoryDefinition? target = _browserTabCategories.FirstOrDefault(
-            existing => string.Equals(existing.Id, category.Id, StringComparison.OrdinalIgnoreCase));
-        if (target == null)
-        {
-            return null;
-        }
-        DialogResult confirm = MessageBox.Show(
-            $"カテゴリ '{target.DisplayName}' を削除します。よろしいですか？",
-            "カテゴリ削除",
-            MessageBoxButtons.OKCancel,
-            MessageBoxIcon.Warning,
-            MessageBoxDefaultButton.Button2);
-        if (confirm != DialogResult.OK)
-        {
-            return null;
-        }
-        return DeleteBrowserTabCategoriesCore([target], $"カテゴリを削除しました: {target.DisplayName}");
-    }
-    private string? DeleteBrowserTabCategories(IReadOnlyList<BrowserTabCategoryDefinition> categories)
-    {
-        List<BrowserTabCategoryDefinition> targets = categories
-            .Where(category => category != null)
-            .Select(category =>
-                _browserTabCategories.FirstOrDefault(existing => string.Equals(existing.Id, category.Id, StringComparison.OrdinalIgnoreCase)))
-            .Where(static category => category != null)
-            .Select(static category => category!)
-            .GroupBy(category => category.Id, StringComparer.OrdinalIgnoreCase)
-            .Select(static group => group.First())
-            .ToList();
-        if (targets.Count == 0)
-        {
-            return null;
-        }
-        if (targets.Count == 1)
-        {
-            return DeleteBrowserTabCategory(targets[0]);
-        }
-        string summary = string.Join("、", targets.Select(target => target.DisplayName));
-        DialogResult confirm = MessageBox.Show(
-            $"マークした {targets.Count} 件のカテゴリを削除します。よろしいですか？{Environment.NewLine}{summary}",
-            "カテゴリ一括削除",
-            MessageBoxButtons.OKCancel,
-            MessageBoxIcon.Warning,
-            MessageBoxDefaultButton.Button2);
-        if (confirm != DialogResult.OK)
-        {
-            return null;
-        }
-        return DeleteBrowserTabCategoriesCore(targets, $"カテゴリを削除しました: {targets.Count} 件");
-    }
-    private string? DeleteBrowserTabCategoriesCore(IReadOnlyList<BrowserTabCategoryDefinition> targets, string successMessage)
-    {
-        CaptureActiveBrowserTabState();
-        StoreActiveBrowserTabCategorySessionState(updateCompatibilityMirror: false);
-        HashSet<string> targetIds = targets
-            .Select(target => target.Id)
-            .ToHashSet(StringComparer.OrdinalIgnoreCase);
-        _browserTabCategories.RemoveAll(existing => targetIds.Contains(existing.Id));
-        BrowserTabCategoryDefinition? recoveredCategory = null;
-        if (_browserTabCategories.Count == 0)
-        {
-            recoveredCategory = EnsureAtLeastOneBrowserTabCategoryAfterDeletion();
-        }
-        SyncBrowserTabCategoryDefinitionsToSettings();
-        EnsureBrowserTabRestoreSnapshot();
-        if (targetIds.Contains(_activeBrowserTabCategoryId) || recoveredCategory != null)
-        {
-            string fallbackCategoryId = recoveredCategory?.Id
-                ?? ResolveExistingBrowserTabCategoryId(_activeBrowserTabCategoryId);
-            List<BrowserTabState> targetTabs = LoadBrowserTabsForCategory(fallbackCategoryId);
-            int targetIndex = Math.Clamp(ResolveBrowserTabCategoryActiveIndex(fallbackCategoryId, targetTabs.Count), 0, Math.Max(0, targetTabs.Count - 1));
-            _browserTabs.Clear();
-            _browserTabs.AddRange(targetTabs);
-            _activeBrowserTabCategoryId = fallbackCategoryId;
-            _browserTabContextIndex = -1;
-            RefreshBrowserTabHeaders();
-            if (_browserTabs.Count > 0)
-            {
-                _activeBrowserTabIndex = -1;
-                SwitchBrowserTab(targetIndex);
-            }
-            else
-            {
-                _activeBrowserTabIndex = -1;
-            }
-            StoreActiveBrowserTabCategorySessionState(updateCompatibilityMirror: false);
-        }
-        else
-        {
-            RefreshBrowserTabHeaders();
-        }
-        SettingsManager.Save(_settings);
-        ShowStatusMessage(successMessage);
-        return successMessage;
-    }
-    private void LayoutBrowserTabControlWithinHost()
-    {
-        if (_browserTabStrip == null || _browserTabHostPanel == null)
-        {
-            return;
-        }
-        int hostWidth = Math.Max(0, _browserTabHostPanel.ClientSize.Width);
-        _browserTabStrip.Bounds = new Rectangle(
-            0,
-            0,
-            Math.Max(1, hostWidth),
-            Math.Max(1, _browserTabHostPanel.ClientSize.Height));
-    }
-    private BrowserTabState BuildBrowserTabStateFromCurrentUi()
-    {
-        string currentPath = _navigationService.CurrentPath;
-        BrowserTabState? activeState = _activeBrowserTabIndex >= 0 && _activeBrowserTabIndex < _browserTabs.Count
-            ? _browserTabs[_activeBrowserTabIndex]
-            : null;
-        bool isLocked = activeState?.IsLocked ?? false;
-        return new BrowserTabState
-        {
-            Title = GetBrowserTabTitle(currentPath),
-            CurrentPath = currentPath,
-            IsLocked = isLocked,
-            StartupPath = activeState?.StartupPath ?? string.Empty,
-            IsReadOnly = activeState?.IsReadOnly ?? false,
-            FilterLock = activeState?.FilterLock?.Clone() ?? new TabFilterLockState(),
-            MarkedPaths = CreatePersistableMarkedPaths(_markedFiles.Snapshot(), out _),
-            Navigation = _navigationService.CaptureState(),
-            FocusTargetName = GetCurrentBrowserItem() is ListViewItem item ? GetItemFullName(item) : null,
-            CursorIndex = _browserCursorIndex,
-            ColumnCount = _columnCount,
-            SortKind = _currentSort,
-            SortAscending = _sortAscending
-        };
-    }
-    private void CaptureActiveBrowserTabState(bool captureMarks = true)
-    {
-        if (_activeBrowserTabIndex < 0 || _activeBrowserTabIndex >= _browserTabs.Count)
-        {
-            return;
-        }
-        BrowserTabState currentState = _browserTabs[_activeBrowserTabIndex];
-        BrowserTabState latestState = BuildBrowserTabStateFromCurrentUi();
-        currentState.Title = latestState.Title;
-        currentState.CurrentPath = latestState.CurrentPath;
-        currentState.Navigation = latestState.Navigation;
-        currentState.FocusTargetName = latestState.FocusTargetName;
-        currentState.CursorIndex = latestState.CursorIndex;
-        currentState.ColumnCount = latestState.ColumnCount;
-        currentState.SortKind = latestState.SortKind;
-        currentState.SortAscending = latestState.SortAscending;
-        currentState.IsLocked = latestState.IsLocked;
-        // StartupPath の不変性を保護 (ロック中の場合は既存の StartupPath を優先)
-        if (!currentState.IsLocked || string.IsNullOrWhiteSpace(currentState.StartupPath))
-        {
-            currentState.StartupPath = latestState.StartupPath;
-        }
-        currentState.IsReadOnly = latestState.IsReadOnly;
-        currentState.FilterLock = latestState.FilterLock.Clone();
-        if (captureMarks)
-        {
-            currentState.MarkedPaths = latestState.MarkedPaths;
-        }
-        RefreshBrowserTabHeaders();
-    }
-    private void RestoreMarksForBrowserTab(BrowserTabState state)
-    {
-        List<string> restoredMarks = CreatePersistableMarkedPaths(state.MarkedPaths, out int skippedCount);
-        if (skippedCount > 0)
-        {
-            LogService.Info($"[BrowserTabs] Pruned stale per-tab marks. TabId={state.Id} Missing={skippedCount}");
-        }
-        state.MarkedPaths = restoredMarks;
-        RestoreMarks(restoredMarks, invalidateRedo: false);
-        RefreshMarkUi();
-    }
-    private void RefreshBrowserTabHeaders()
-    {
-        if (_browserTabStrip == null)
-        {
-            return;
-        }
-        _suppressBrowserTabSelectionChanged = true;
-        try
-        {
-            ApplyBrowserTabStripDisplaySettings();
-            bool showCategoryRow = ShouldShowBrowserTabCategoryRow();
-            int activeCategoryIndex = GetActiveBrowserTabCategoryIndex();
-            var stripCategories = _browserTabCategories
-                .Select(category => new BrowserTabStripCategoryItem(
-                    category.Id,
-                    string.IsNullOrWhiteSpace(category.DisplayName) ? "既定" : category.DisplayName,
-                    BuildBrowserTabCategoryToolTip(category)))
-                .ToList();
-            if (showCategoryRow)
-            {
-                stripCategories.Add(new BrowserTabStripCategoryItem(
-                    BrowserTabStrip.ManageCategoriesEntryId,
-                    "+",
-                    "新しいカテゴリを追加します。",
-                    BrowserTabStripCategoryItemKind.ManageEntry));
-            }
-            var stripTabs = _browserTabs
-                .Select((state, i) => new BrowserTabStripItem(
-                    BuildBrowserTabHeaderText(state, i),
-                    BuildBrowserTabToolTip(state)))
-                .ToList();
-            string snapshotKey = BuildBrowserTabHeaderSnapshotKey(
-                showCategoryRow,
-                activeCategoryIndex,
-                _activeBrowserTabIndex,
-                stripCategories,
-                stripTabs);
-            if (string.Equals(_lastBrowserTabHeaderSnapshotKey, snapshotKey, StringComparison.Ordinal))
-            {
-                return;
-            }
-            _lastBrowserTabHeaderSnapshotKey = snapshotKey;
-            LogService.Info(
-                $"[BrowserTabCategory] RefreshHeaders ActiveCategory={_activeBrowserTabCategoryId} BrowserTabs={_browserTabs.Count} " +
-                $"ActiveIndex={_activeBrowserTabIndex} StripCategories={stripCategories.Count} StripTabs={stripTabs.Count} " +
-                $"ShowCategoryRow={showCategoryRow}");
-            _browserTabStrip.SetCategories(stripCategories, activeCategoryIndex);
-            _browserTabStrip.SetTabs(stripTabs);
-            if (_activeBrowserTabIndex >= 0 && _activeBrowserTabIndex < _browserTabs.Count)
-            {
-                _browserTabStrip.SelectedIndex = _activeBrowserTabIndex;
-            }
-            LayoutBrowserTabControlWithinHost();
-        }
-        finally
-        {
-            _suppressBrowserTabSelectionChanged = false;
-        }
-    }
-    private static string BuildBrowserTabHeaderSnapshotKey(
-        bool showCategoryRow,
-        int activeCategoryIndex,
-        int activeTabIndex,
-        IReadOnlyList<BrowserTabStripCategoryItem> categories,
-        IReadOnlyList<BrowserTabStripItem> tabs)
-    {
-        var sb = new StringBuilder();
-        AppendSnapshotField(sb, showCategoryRow ? "1" : "0");
-        AppendSnapshotField(sb, activeCategoryIndex.ToString(System.Globalization.CultureInfo.InvariantCulture));
-        AppendSnapshotField(sb, activeTabIndex.ToString(System.Globalization.CultureInfo.InvariantCulture));
-        AppendSnapshotField(sb, categories.Count.ToString(System.Globalization.CultureInfo.InvariantCulture));
-        foreach (BrowserTabStripCategoryItem category in categories)
-        {
-            AppendSnapshotField(sb, category.CategoryId);
-            AppendSnapshotField(sb, category.Text);
-            AppendSnapshotField(sb, category.ToolTipText ?? string.Empty);
-            AppendSnapshotField(sb, category.Kind.ToString());
-        }
-        AppendSnapshotField(sb, tabs.Count.ToString(System.Globalization.CultureInfo.InvariantCulture));
-        foreach (BrowserTabStripItem tab in tabs)
-        {
-            AppendSnapshotField(sb, tab.Text);
-            AppendSnapshotField(sb, tab.ToolTipText ?? string.Empty);
-        }
-        return sb.ToString();
-    }
-    private static void AppendSnapshotField(StringBuilder sb, string value)
-    {
-        sb.Append(value.Length);
-        sb.Append(':');
-        sb.Append(value);
-        sb.Append('|');
-    }
-    private string BuildBrowserTabCategoryToolTip(BrowserTabCategoryDefinition category)
-    {
-        string name = string.IsNullOrWhiteSpace(category.DisplayName) ? "既定" : category.DisplayName.Trim();
-        return string.Equals(category.Id, BrowserTabSettings.DefaultCategoryId, StringComparison.OrdinalIgnoreCase)
-            ? $"カテゴリ: {name}"
-            : $"カテゴリ: {name}{Environment.NewLine}ID: {category.Id}";
-    }
-    private string GetBrowserTabTitle(string? path)
-    {
-        if (string.IsNullOrWhiteSpace(path))
-        {
-            return "新しいタブ";
-        }
-        string normalizedPath;
-        try
-        {
-            normalizedPath = Path.GetFullPath(path);
-        }
-        catch
-        {
-            normalizedPath = path;
-        }
-        string? aliasDisplayName = QuickAccessService.FindAliasDisplayName(_quickAccessStore, normalizedPath);
-        if (!string.IsNullOrWhiteSpace(aliasDisplayName))
-        {
-            return aliasDisplayName;
-        }
-        string? root = null;
-        try
-        {
-            root = Path.GetPathRoot(normalizedPath);
-        }
-        catch
-        {
-            root = null;
-        }
-        if (!string.IsNullOrWhiteSpace(root))
-        {
-            string normalizedRoot = EnsureTrailingDirectorySeparator(root);
-            string trimmedPath = normalizedPath.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
-            string trimmedRoot = normalizedRoot.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
-            if (string.Equals(trimmedPath, trimmedRoot, StringComparison.OrdinalIgnoreCase))
-            {
-                return normalizedRoot;
-            }
-            string relative = trimmedPath.StartsWith(normalizedRoot, StringComparison.OrdinalIgnoreCase)
-                ? trimmedPath.Substring(normalizedRoot.Length)
-                : trimmedPath;
-            string[] segments = relative
-                .Split(new[] { Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar }, StringSplitOptions.RemoveEmptyEntries);
-            if (segments.Length == 0)
-            {
-                return normalizedRoot;
-            }
-            if (segments.Length == 1)
-            {
-                return $"{normalizedRoot}{segments[0]}{Path.DirectorySeparatorChar}";
-            }
-            return $"{normalizedRoot}…{Path.DirectorySeparatorChar}{segments[^1]}{Path.DirectorySeparatorChar}";
-        }
-        string fallback = normalizedPath.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
-        string name = Path.GetFileName(fallback);
-        return !string.IsNullOrWhiteSpace(name) ? name : path;
-    }
-    private static string EnsureTrailingDirectorySeparator(string path)
-    {
-        if (string.IsNullOrEmpty(path))
-        {
-            return path;
-        }
-        char lastChar = path[^1];
-        if (lastChar == Path.DirectorySeparatorChar || lastChar == Path.AltDirectorySeparatorChar)
-        {
-            return path;
-        }
-        return path + Path.DirectorySeparatorChar;
-    }
-    private bool CreateNewBrowserTab(string? initialPath = null, bool showStatusMessage = true)
-    {
-        if (GuardClipboardBusy())
-        {
-            return false;
-        }
-        int maxTabCount = GetMaxBrowserTabsPerCategory();
-        if (_browserTabs.Count >= maxTabCount)
-        {
-            ShowStatusMessage($"タブは最大{maxTabCount}個までです。");
-            _browserTabStrip?.FlashLimitReached();
-            TryPlayBrowserTabLimitBeep();
-            return false;
-        }
-        CaptureActiveBrowserTabState();
-        BrowserTabState newState = BuildBrowserTabStateFromCurrentUi();
-        newState.IsLocked = false;
-        newState.StartupPath = string.Empty;
-        newState.IsReadOnly = false;
-        newState.MarkedPaths = new List<string>();
-        if (!string.IsNullOrWhiteSpace(initialPath) && Directory.Exists(initialPath))
-        {
-            newState.CurrentPath = initialPath;
-            newState.Navigation = new NavigationService.NavigationSnapshot
-            {
-                CurrentPath = initialPath,
-                BackHistory = Array.Empty<string>(),
-                ForwardHistory = Array.Empty<string>(),
-                LastVisitedPathByDrive = new Dictionary<char, string>()
-            };
-            newState.FocusTargetName = null;
-            newState.CursorIndex = 0;
-            newState.Title = GetBrowserTabTitle(initialPath);
-        }
-        _browserTabs.Add(newState);
-        int newIndex = _browserTabs.Count - 1;
-        RefreshBrowserTabHeaders();
-        _activeBrowserTabIndex = -1;
-        SwitchBrowserTab(newIndex);
-        if (showStatusMessage)
-        {
-            ShowStatusMessage("新しいタブを作成しました。");
-        }
-        return true;
-    }
-    private string BuildBrowserTabHeaderText(BrowserTabState state, int index)
-    {
-        string title = string.IsNullOrWhiteSpace(state.Title) ? $"Tab {index + 1}" : state.Title;
-        string lockedPrefix = state.IsLocked ? "■ " : string.Empty;
-        string readOnlyPrefix = state.IsReadOnly ? "[RO] " : string.Empty;
-        return $"{lockedPrefix}{readOnlyPrefix}{title}";
-    }
-    private string BuildBrowserTabToolTip(BrowserTabState state)
-    {
-        var lines = new List<string>();
-        lines.Add(state.IsLocked ? "状態: 固定タブ" : "状態: 通常タブ");
-        lines.Add(state.IsReadOnly ? "ReadOnly: 有効" : "ReadOnly: 無効");
-        string title = string.IsNullOrWhiteSpace(state.Title) ? "新しいタブ" : state.Title;
-        lines.Add($"見出し: {title}");
-        if (!string.IsNullOrWhiteSpace(state.CurrentPath))
-        {
-            lines.Add($"場所: {state.CurrentPath}");
-        }
-        if (state.IsLocked && !string.IsNullOrWhiteSpace(state.StartupPath))
-        {
-            lines.Add($"起動元: {state.StartupPath}");
-        }
-        return string.Join(Environment.NewLine, lines.Where(static line => !string.IsNullOrWhiteSpace(line)));
-    }
-    private void RefreshAllBrowserTabTitles()
-    {
-        foreach (BrowserTabState state in _browserTabs)
-        {
-            state.Title = GetBrowserTabTitle(state.CurrentPath);
-        }
-        RefreshBrowserTabHeaders();
-    }
-    private bool IsActiveBrowserTabLocked()
-    {
-        return _activeBrowserTabIndex >= 0
-            && _activeBrowserTabIndex < _browserTabs.Count
-            && _browserTabs[_activeBrowserTabIndex].IsLocked;
-    }
-    private int GetMaxBrowserTabsPerCategory()
-    {
-        int configuredMax = _settings.BrowserTabs?.MaxTabsPerCategory ?? BrowserTabSettings.DefaultMaxTabsPerCategory;
-        return Math.Clamp(configuredMax, 1, BrowserTabSettings.SafetyMaxTabsPerCategory);
-    }
-    private bool IsActiveBrowserTabReadOnly()
-    {
-        return _activeBrowserTabIndex >= 0
-            && _activeBrowserTabIndex < _browserTabs.Count
-            && _browserTabs[_activeBrowserTabIndex].IsReadOnly;
-    }
-    private bool GuardReadOnlyBrowserTab(string? operationName = null)
-    {
-        if (!IsActiveBrowserTabReadOnly())
-        {
-            return false;
-        }
-        string message = string.IsNullOrWhiteSpace(operationName)
-            ? ReadOnlyBrowserTabBlockedMessage
-            : $"このタブは ReadOnly のため、{operationName}は実行できません。";
-        ShowStatusMessage(message, 2000);
-        return true;
-    }
-    private void ToggleActiveBrowserTabLock()
-    {
-        ToggleBrowserTabLock(_activeBrowserTabIndex);
-    }
-    private void ToggleActiveBrowserTabReadOnly()
-    {
-        ToggleBrowserTabReadOnly(_activeBrowserTabIndex);
-    }
-    private TabFilterLockState GetActiveTabFilterLock()
-    {
-        if (_activeBrowserTabIndex < 0 || _activeBrowserTabIndex >= _browserTabs.Count)
-        {
-            return TabFilterLockState.Disabled();
-        }
-        return _browserTabs[_activeBrowserTabIndex].FilterLock;
-    }
-    private bool HasActiveTabFilterLock()
-    {
-        var lockState = GetActiveTabFilterLock();
-        return lockState.Enabled && lockState.HasAnyCondition;
-    }
-    private void OpenActiveTabFilterLockDialog()
-    {
-        OpenTabFilterLockDialog(_activeBrowserTabIndex);
-    }
-    private void OpenTabFilterLockDialog(int tabIndex)
-    {
-        if (tabIndex < 0 || tabIndex >= _browserTabs.Count) return;
-        var tab = _browserTabs[tabIndex];
-        using var dialog = new TabFilterLockDialog(tab.FilterLock);
-        if (dialog.ShowDialog(this) == DialogResult.OK)
-        {
-            tab.FilterLock = dialog.ResultState;
-            if (tabIndex == _activeBrowserTabIndex)
-            {
-                ExecuteCurrentDirectoryReloadCommand();
-            }
-            else
-            {
-                _browserTabStrip?.Invalidate();
-            }
-        }
-    }
-    private void ClearActiveTabFilterLock()
-    {
-        ClearTabFilterLock(_activeBrowserTabIndex);
-    }
-    private void ClearTabFilterLock(int tabIndex)
-    {
-        if (tabIndex < 0 || tabIndex >= _browserTabs.Count) return;
-        var tab = _browserTabs[tabIndex];
-        tab.FilterLock = TabFilterLockState.Disabled();
-        if (tabIndex == _activeBrowserTabIndex)
-        {
-            ExecuteCurrentDirectoryReloadCommand();
-        }
-        else
-        {
-            _browserTabStrip?.Invalidate();
-        }
-    }
-    private void ToggleBrowserTabLock(int tabIndex, bool showStatusMessage = true)
-    {
-        if (tabIndex < 0 || tabIndex >= _browserTabs.Count)
-        {
-            return;
-        }
-        if (_activeBrowserTabIndex != tabIndex)
-        {
-            SwitchBrowserTab(tabIndex);
-        }
-        BrowserTabState state = _browserTabs[tabIndex];
-        state.IsLocked = !state.IsLocked;
-        if (state.IsLocked)
-        {
-            if (string.IsNullOrWhiteSpace(state.StartupPath))
-            {
-                string rawPath = Directory.Exists(_navigationService.CurrentPath)
-                    ? _navigationService.CurrentPath
-                    : state.CurrentPath;
-                state.StartupPath = _navigationService.NormalizeDestinationDirectory(rawPath);
-            }
-        }
-        else
-        {
-            state.StartupPath = string.Empty;
-        }
-        RefreshBrowserTabHeaders();
-        if (showStatusMessage)
-        {
-            ShowStatusMessage(state.IsLocked
-                ? "現在のタブを固定しました。"
-                : "現在のタブ固定を解除しました。");
-        }
-    }
-    private void ToggleBrowserTabReadOnly(int tabIndex, bool showStatusMessage = true)
-    {
-        if (tabIndex < 0 || tabIndex >= _browserTabs.Count)
-        {
-            return;
-        }
-        if (_activeBrowserTabIndex != tabIndex)
-        {
-            SwitchBrowserTab(tabIndex);
-        }
-        BrowserTabState state = _browserTabs[tabIndex];
-        state.IsReadOnly = !state.IsReadOnly;
-        RefreshBrowserTabHeaders();
-        if (showStatusMessage)
-        {
-            ShowStatusMessage(state.IsReadOnly
-                ? "現在のタブを ReadOnly にしました。"
-                : "現在のタブの ReadOnly を解除しました。");
-        }
-    }
-    private bool PrepareUnlockedTabForLocationChange(string? targetPath = null)
-    {
-        if (!IsActiveBrowserTabLocked())
-        {
-            return true;
-        }
-        if (!string.IsNullOrWhiteSpace(targetPath) && QuickAccessService.PathsEqual(targetPath, _navigationService.CurrentPath))
-        {
-            return true;
-        }
-        if (!string.IsNullOrWhiteSpace(targetPath)
-            && _activeBrowserTabIndex >= 0
-            && _activeBrowserTabIndex < _browserTabs.Count
-            && IsPathUnderBrowserTabStartupPath(targetPath, _browserTabs[_activeBrowserTabIndex]))
-        {
-            return true;
-        }
-        if (!CreateNewBrowserTab(showStatusMessage: false))
-        {
-            return false;
-        }
-        ShowStatusMessage("固定タブから派生タブを作成しました。");
-        return true;
-    }
-    private static bool IsPathUnderBrowserTabStartupPath(string targetPath, BrowserTabState state)
-    {
-        string startupPath = state.StartupPath;
-        if (string.IsNullOrWhiteSpace(startupPath) || !Directory.Exists(startupPath))
-        {
-            startupPath = state.CurrentPath;
-        }
-        if (string.IsNullOrWhiteSpace(startupPath))
-        {
-            return false;
-        }
-        try
-        {
-            string normalizedStartup = EnsureTrailingDirectorySeparator(Path.GetFullPath(startupPath));
-            string normalizedTarget = Path.GetFullPath(targetPath);
-            return normalizedTarget.StartsWith(normalizedStartup, StringComparison.OrdinalIgnoreCase)
-                || string.Equals(
-                    normalizedTarget.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar),
-                    normalizedStartup.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar),
-                    StringComparison.OrdinalIgnoreCase);
-        }
-        catch
-        {
-            return false;
-        }
-    }
-    private void TryPlayBrowserTabLimitBeep()
-    {
-        DateTime nowUtc = DateTime.UtcNow;
-        if ((nowUtc - _lastBrowserTabLimitBeepUtc).TotalMilliseconds < 1200)
-        {
-            return;
-        }
-        _lastBrowserTabLimitBeepUtc = nowUtc;
-        try
-        {
-            SystemSounds.Beep.Play();
-        }
-        catch
-        {
-            // 既定音が使えない環境では無音で続行する
-        }
-    }
-    private bool TryCloseBrowserTab(int tabIndex, bool showStatusMessage = true)
-    {
-        if (GuardClipboardBusy())
-        {
-            return false;
-        }
-        if (tabIndex < 0 || tabIndex >= _browserTabs.Count)
-        {
-            return false;
-        }
-        if (_browserTabs[tabIndex].IsLocked)
-        {
-            if (showStatusMessage)
-            {
-                ShowStatusMessage("固定タブは閉じられません。先に固定を解除してください。");
-            }
-            return false;
-        }
-        if (_browserTabs.Count <= 1)
-        {
-            if (showStatusMessage)
-            {
-                ShowStatusMessage("最後のタブは閉じられません。");
-            }
-            return false;
-        }
-        if (_activeBrowserTabIndex != tabIndex)
-        {
-            SwitchBrowserTab(tabIndex);
-        }
-        int closingIndex = tabIndex;
-        PushClosedBrowserTabSnapshot(closingIndex);
-        _browserTabs.RemoveAt(closingIndex);
-        int targetIndex = Math.Clamp(closingIndex - 1, 0, _browserTabs.Count - 1);
-        RefreshBrowserTabHeaders();
-        _activeBrowserTabIndex = -1;
-        SwitchBrowserTab(targetIndex);
-        if (showStatusMessage)
-        {
-            ShowStatusMessage("タブを閉じました。");
-        }
-        return true;
-    }
-    private void CloseCurrentBrowserTab()
-    {
-        TryCloseBrowserTab(_activeBrowserTabIndex);
-    }
-    private bool CloseBrowserTabRange(IReadOnlyList<int> tabIndices, int preferredTabIndex, string successMessage, string nothingToCloseMessage)
-    {
-        if (GuardClipboardBusy())
-        {
-            return false;
-        }
-        if (preferredTabIndex < 0 || preferredTabIndex >= _browserTabs.Count)
-        {
-            return false;
-        }
-        var closableIndices = tabIndices
-            .Distinct()
-            .Where(index => index >= 0 && index < _browserTabs.Count && !_browserTabs[index].IsLocked)
-            .OrderByDescending(index => index)
-            .ToList();
-        if (closableIndices.Count == 0)
-        {
-            ShowStatusMessage(nothingToCloseMessage);
-            return false;
-        }
-        BrowserTabState preferredTab = _browserTabs[preferredTabIndex];
-        if (_activeBrowserTabIndex != preferredTabIndex)
-        {
-            SwitchBrowserTab(preferredTabIndex);
-        }
-        foreach (int index in closableIndices)
-        {
-            _browserTabs.RemoveAt(index);
-        }
-        RefreshBrowserTabHeaders();
-        int targetIndex = _browserTabs.IndexOf(preferredTab);
-        if (targetIndex < 0)
-        {
-            targetIndex = Math.Clamp(preferredTabIndex, 0, _browserTabs.Count - 1);
-        }
-        _activeBrowserTabIndex = -1;
-        SwitchBrowserTab(targetIndex);
-        ShowStatusMessage(successMessage);
-        return true;
-    }
-    private void CloseBrowserTabsToRight(int tabIndex)
-    {
-        var tabIndices = Enumerable.Range(tabIndex + 1, Math.Max(0, _browserTabs.Count - tabIndex - 1)).ToList();
-        CloseBrowserTabRange(tabIndices, tabIndex, "右側のタブを閉じました。", "閉じられる右側タブはありません。");
-    }
-    private void CloseBrowserTabsToLeft(int tabIndex)
-    {
-        var tabIndices = Enumerable.Range(0, Math.Max(0, tabIndex)).ToList();
-        CloseBrowserTabRange(tabIndices, tabIndex, "左側のタブを閉じました。", "閉じられる左側タブはありません。");
-    }
-    private void CloseOtherBrowserTabs(int tabIndex)
-    {
-        var tabIndices = Enumerable.Range(0, _browserTabs.Count)
-            .Where(index => index != tabIndex)
-            .ToList();
-        CloseBrowserTabRange(tabIndices, tabIndex, "このタブ以外を閉じました。", "閉じられる他タブはありません。");
-    }
-    private int CountClosableBrowserTabs(Func<int, bool> predicate)
-    {
-        int count = 0;
-        for (int i = 0; i < _browserTabs.Count; i++)
-        {
-            if (predicate(i) && !_browserTabs[i].IsLocked)
-            {
-                count++;
-            }
-        }
-        return count;
-    }
-    private void BrowserTabStrip_TabDoubleClicked(object? sender, BrowserTabStripMouseEventArgs e)
-    {
-        ToggleBrowserTabLock(e.TabIndex);
-    }
-    private void BrowserTabStrip_TabRightClicked(object? sender, BrowserTabStripMouseEventArgs e)
-    {
-        if (_browserTabStrip == null || e.TabIndex < 0 || e.TabIndex >= _browserTabs.Count)
-        {
-            return;
-        }
-        _browserTabContextIndex = e.TabIndex;
-        if (_activeBrowserTabIndex != e.TabIndex)
-        {
-            SwitchBrowserTab(e.TabIndex);
-        }
-        EnsureBrowserTabContextMenu();
-        UpdateBrowserTabContextMenuItems(e.TabIndex);
-        _browserTabContextMenu?.Show(_browserTabStrip, e.Location);
-    }
-    private void EnsureBrowserTabContextMenu()
-    {
-        if (_browserTabContextMenu != null)
-        {
-            return;
-        }
-        _browserTabContextMenu = new ContextMenuStrip();
-        _browserTabContextMenu.Closed += (_, _) => ClearBrowserTabContextState();
-        _toggleBrowserTabLockContextMenuItem = new ToolStripMenuItem();
-        _toggleBrowserTabLockContextMenuItem.Click += (_, _) =>
-        {
-            if (_browserTabContextIndex < 0)
-            {
-                return;
-            }
-            ToggleBrowserTabLock(_browserTabContextIndex);
-        };
-        _toggleBrowserTabReadOnlyContextMenuItem = new ToolStripMenuItem();
-        _toggleBrowserTabReadOnlyContextMenuItem.Click += (_, _) =>
-        {
-            if (_browserTabContextIndex < 0)
-            {
-                return;
-            }
-            ToggleBrowserTabReadOnly(_browserTabContextIndex);
-        };
-        _openBrowserTabFilterLockContextMenuItem = new ToolStripMenuItem("フィルタロック...(&L)");
-        _openBrowserTabFilterLockContextMenuItem.Click += (_, _) =>
-        {
-            if (_browserTabContextIndex < 0) return;
-            OpenTabFilterLockDialog(_browserTabContextIndex);
-        };
-        _clearBrowserTabFilterLockContextMenuItem = new ToolStripMenuItem("フィルタロックを解除(&U)");
-        _clearBrowserTabFilterLockContextMenuItem.Click += (_, _) =>
-        {
-            if (_browserTabContextIndex < 0) return;
-            ClearTabFilterLock(_browserTabContextIndex);
-        };
-        _closeBrowserTabContextMenuItem = new ToolStripMenuItem("このタブを閉じる");
-        _closeBrowserTabContextMenuItem.Click += (_, _) =>
-        {
-            if (_browserTabContextIndex < 0)
-            {
-                return;
-            }
-            TryCloseBrowserTab(_browserTabContextIndex);
-        };
-        _closeRightBrowserTabsContextMenuItem = new ToolStripMenuItem("右側の全てのタブを閉じる");
-        _closeRightBrowserTabsContextMenuItem.Click += (_, _) =>
-        {
-            if (_browserTabContextIndex < 0)
-            {
-                return;
-            }
-            CloseBrowserTabsToRight(_browserTabContextIndex);
-        };
-        _closeLeftBrowserTabsContextMenuItem = new ToolStripMenuItem("左側の全てのタブを閉じる");
-        _closeLeftBrowserTabsContextMenuItem.Click += (_, _) =>
-        {
-            if (_browserTabContextIndex < 0)
-            {
-                return;
-            }
-            CloseBrowserTabsToLeft(_browserTabContextIndex);
-        };
-        _closeOtherBrowserTabsContextMenuItem = new ToolStripMenuItem("このタブ以外を閉じる");
-        _closeOtherBrowserTabsContextMenuItem.Click += (_, _) =>
-        {
-            if (_browserTabContextIndex < 0)
-            {
-                return;
-            }
-            CloseOtherBrowserTabs(_browserTabContextIndex);
-        };
-        _browserTabContextMenu.Items.Add(_toggleBrowserTabLockContextMenuItem);
-        _browserTabContextMenu.Items.Add(_toggleBrowserTabReadOnlyContextMenuItem);
-        _browserTabContextMenu.Items.Add(new ToolStripSeparator());
-        _browserTabContextMenu.Items.Add(_openBrowserTabFilterLockContextMenuItem);
-        _browserTabContextMenu.Items.Add(_clearBrowserTabFilterLockContextMenuItem);
-        _browserTabContextMenu.Items.Add(new ToolStripSeparator());
-        _browserTabContextMenu.Items.Add(_closeBrowserTabContextMenuItem);
-        _browserTabContextMenu.Items.Add(_closeRightBrowserTabsContextMenuItem);
-        _browserTabContextMenu.Items.Add(_closeLeftBrowserTabsContextMenuItem);
-        _browserTabContextMenu.Items.Add(_closeOtherBrowserTabsContextMenuItem);
-    }
-    private void UpdateBrowserTabContextMenuItems(int tabIndex)
-    {
-        if (tabIndex < 0 || tabIndex >= _browserTabs.Count)
-        {
-            return;
-        }
-        BrowserTabState state = _browserTabs[tabIndex];
-        if (_toggleBrowserTabLockContextMenuItem != null)
-        {
-            _toggleBrowserTabLockContextMenuItem.Text = state.IsLocked
-                ? "このタブの固定を解除"
-                : "このタブを固定";
-        }
-        if (_toggleBrowserTabReadOnlyContextMenuItem != null)
-        {
-            _toggleBrowserTabReadOnlyContextMenuItem.Text = state.IsReadOnly
-                ? "このタブの ReadOnly を解除"
-                : "このタブを ReadOnly にする";
-        }
-        if (_clearBrowserTabFilterLockContextMenuItem != null)
-        {
-            _clearBrowserTabFilterLockContextMenuItem.Enabled = state.FilterLock.Enabled && state.FilterLock.HasAnyCondition;
-        }
-        if (_closeBrowserTabContextMenuItem != null)
-        {
-            _closeBrowserTabContextMenuItem.Text = state.IsLocked
-                ? "このタブを閉じる（固定中は不可）"
-                : "このタブを閉じる";
-        }
-        if (_closeRightBrowserTabsContextMenuItem != null)
-        {
-            _closeRightBrowserTabsContextMenuItem.Enabled = CountClosableBrowserTabs(index => index > tabIndex) > 0;
-        }
-        if (_closeLeftBrowserTabsContextMenuItem != null)
-        {
-            _closeLeftBrowserTabsContextMenuItem.Enabled = CountClosableBrowserTabs(index => index < tabIndex) > 0;
-        }
-        if (_closeOtherBrowserTabsContextMenuItem != null)
-        {
-            _closeOtherBrowserTabsContextMenuItem.Enabled = CountClosableBrowserTabs(index => index != tabIndex) > 0;
-        }
-    }
-    private void SwitchBrowserTab(int newIndex)
-    {
-        HideBrowserFileNameToolTip();
-        EnsureBrowserModeBeforeWorkspaceNavigation();
-        if (_isSwitchingBrowserTab || newIndex < 0 || newIndex >= _browserTabs.Count)
-        {
-            return;
-        }
-        if (newIndex == _activeBrowserTabIndex)
-        {
-            browserPanel.Focus();
-            return;
-        }
-        CaptureActiveBrowserTabState();
-        _isSwitchingBrowserTab = true;
-        try
-        {
-            _activeBrowserTabIndex = newIndex;
-            BrowserTabState state = _browserTabs[newIndex];
-            _columnCount = Math.Clamp(state.ColumnCount, 1, 9);
-            _currentSort = state.SortKind;
-            _sortAscending = state.SortAscending;
-            _navigationService.RestoreState(state.Navigation);
-            string targetPath = state.CurrentPath;
-            if (string.IsNullOrWhiteSpace(targetPath) || !Directory.Exists(targetPath))
-            {
-                targetPath = Directory.Exists(_navigationService.CurrentPath)
-                    ? _navigationService.CurrentPath
-                    : Environment.CurrentDirectory;
-            }
-            if (!ExecuteDirectoryNavigationRequest(
-                _browserNavigationCoordinator.CreateDirectoryNavigationRequest(
-                    targetPath,
-                    state.FocusTargetName,
-                    isHistoryNavigation: true,
-                    suppressRecent: true)))
-            {
-                return;
-            }
-            RestoreMarksForBrowserTab(state);
-            RefreshBrowserTabHeaders();
-            browserPanel.Focus();
-        }
-        finally
-        {
-            _isSwitchingBrowserTab = false;
-        }
-    }
-    private void SelectAdjacentBrowserTab(int delta)
-    {
-        if (GuardClipboardBusy())
-        {
-            return;
-        }
-        if (_browserTabs.Count <= 1)
-        {
-            return;
-        }
-        int nextIndex = (_activeBrowserTabIndex + delta + _browserTabs.Count) % _browserTabs.Count;
-        SwitchBrowserTab(nextIndex);
-    }
-    private string? GetActiveBrowserTabLockRootPath()
-    {
-        if (_activeBrowserTabIndex < 0 || _activeBrowserTabIndex >= _browserTabs.Count)
-        {
-            return null;
-        }
-        BrowserTabState state = _browserTabs[_activeBrowserTabIndex];
-        if (!state.IsLocked || string.IsNullOrWhiteSpace(state.StartupPath))
-        {
-            return null;
-        }
-        return state.StartupPath;
-    }
     private static Rectangle NormalizeWindowBoundsToVisibleArea(Rectangle desiredBounds, Size minimumVisibleSize)
     {
         int minimumWidth = Math.Max(1, minimumVisibleSize.Width);
@@ -3261,12 +1005,15 @@ private void InitializeBrowserTabControl()
     }
     private static string FormatBoundsForLog(Rectangle bounds)
     {
-        return $"({bounds.Left},{bounds.Top},{bounds.Width},{bounds.Height})";
+        return WindowPlacementBoundsHelper.FormatBoundsForLog(bounds);
     }
     // ウィンドウ復元時の境界崩れを検出・補正する補助処理
     private static bool IsSaneNormalBounds(Rectangle bounds)
     {
-        return bounds.Width >= MinimumNormalWindowWidth && bounds.Height >= MinimumNormalWindowHeight;
+        return WindowPlacementBoundsHelper.IsSaneNormalBounds(
+            bounds,
+            MinimumNormalWindowWidth,
+            MinimumNormalWindowHeight);
     }
     private bool HasUsableClientArea()
     {
@@ -3278,201 +1025,6 @@ private void InitializeBrowserTabControl()
         {
             return viewerPanel != null && viewerPanel.Height >= MinimumUsableClientAreaHeight;
         }
-    }
-    private static bool IsCollapsedWindowBounds(Rectangle bounds)
-    {
-        return !IsSaneNormalBounds(bounds);
-    }
-    private static Rectangle ToRectangle(RECT rect)
-    {
-        return Rectangle.FromLTRB(rect.left, rect.top, rect.right, rect.bottom);
-    }
-    private static RECT FromRectangle(Rectangle rect)
-    {
-        return new RECT { left = rect.Left, top = rect.Top, right = rect.Right, bottom = rect.Bottom };
-    }
-    private void LogWindowPlacementSnapshot(string context)
-    {
-        var wp = new WINDOWPLACEMENT();
-        wp.length = Marshal.SizeOf(wp);
-        if (GetWindowPlacement(this.Handle, ref wp))
-        {
-            Rectangle normal = ToRectangle(wp.rcNormalPosition);
-            LogService.Info($"[WindowRestoreFloorHit] {context} State={this.WindowState} PlacementNormal={FormatBoundsForLog(normal)} Bounds={FormatBoundsForLog(this.Bounds)} Watch={_isInRestorePlacementWatch}");
-        }
-    }
-    private bool IsCollapsedWindowPlacementNormal(WINDOWPLACEMENT placement)
-    {
-        return IsCollapsedWindowBounds(ToRectangle(placement.rcNormalPosition));
-    }
-    private bool IsRestoreFloorHitCorruption(Rectangle candidate)
-    {
-        // 復元監視中のみ、高さが 480px 付近（floor-hit）なら汚染とみなす
-        // 手動リサイズ開始（SC_SIZE）時に監視は終了するため、通常操作への干渉は抑制される。
-        if (_isInRestorePlacementWatch)
-        {
-            if (candidate.Height > 0 && candidate.Height <= MinimumNormalWindowHeight + 4)
-            {
-                return true;
-            }
-        }
-        // 1秒過ぎたら監視終了（フェイルセーフ）
-        if (_isInRestorePlacementWatch && (DateTime.UtcNow - _lastRestoreUtc).TotalMilliseconds >= 1000)
-        {
-            _isInRestorePlacementWatch = false;
-            LogService.Info($"[WindowRestoreFloorHit] End restore watch Reason=Timeout Bounds={FormatBoundsForLog(this.Bounds)}");
-        }
-        return false;
-    }
-    private Rectangle? _lastRecoveredCollapsedBounds;
-    private DateTime _lastRecoveryUtc;
-    private bool ShouldSuppressDuplicateCollapsedRecovery(Rectangle collapsedBounds)
-    {
-        if (_lastRecoveredCollapsedBounds == null) return false;
-        // タブ復元直後は collapsed bounds になりやすいため、1000ms 経過時点で再評価して補正する。
-        if (collapsedBounds == _lastRecoveredCollapsedBounds.Value &&
-            (DateTime.UtcNow - _lastRecoveryUtc).TotalMilliseconds < 1000)
-        {
-            return true;
-        }
-        return false;
-    }
-    private void TryCaptureCurrentNormalBounds()
-    {
-        if (_isApplyingWindowBoundsRecovery) return;
-        if (this.WindowState != FormWindowState.Normal) return;
-        var currentBounds = this.Bounds;
-        if (!IsSaneNormalBounds(currentBounds) || !HasUsableClientArea()) return;
-        if (IsRestoreFloorHitCorruption(currentBounds))
-        {
-            LogService.Info($"[WindowRestoreFloorHit] Skip Capture CurrentNormalBounds due to floor-hit corruption: {FormatBoundsForLog(currentBounds)}");
-            return;
-        }
-        _lastKnownGoodNormalBounds = currentBounds;
-        // Record as baseline if it's "truly sane" (clearly above the floor)
-        // This ensures Win+M has a reliable target to restore to.
-        if (currentBounds.Height > MinimumNormalWindowHeight + 40)
-        {
-            _restoreBaselineNormalBounds = currentBounds;
-        }
-    }
-    private void ScheduleRestorePlacementRepair(Rectangle repairBounds, string trigger)
-    {
-        if (_restorePlacementRepairScheduled)
-        {
-            LogService.Info($"[WindowRestoreRepairLoop] Repair scheduled skipped because already scheduled. Trigger={trigger}");
-            return;
-        }
-        if (_restorePlacementRepairCount >= 2)
-        {
-            LogService.Warn($"[WindowRestoreRepairLoop] Repair suppressed because limit reached. Trigger={trigger}");
-            return;
-        }
-        LogService.Info($"[WindowRestoreRepairLoop] Detected floor-hit; schedule repair. Trigger={trigger} Target={FormatBoundsForLog(repairBounds)}");
-        _restorePlacementRepairScheduled = true;
-        _pendingRestoreRepairBounds = repairBounds;
-        BeginInvoke(new Action(async () =>
-        {
-            await Task.Delay(100);
-            ApplyScheduledRestorePlacementRepair(trigger);
-        }));
-    }
-    private void ApplyScheduledRestorePlacementRepair(string trigger)
-    {
-        if (!_restorePlacementRepairScheduled || _pendingRestoreRepairBounds == null) return;
-        try
-        {
-            _isApplyingWindowBoundsRecovery = true;
-            _restorePlacementRepairCount++;
-            Rectangle recoveryBounds = _pendingRestoreRepairBounds.Value;
-            LogService.Info($"[WindowRestoreRepairLoop] Repair applied count={_restorePlacementRepairCount} Bounds={FormatBoundsForLog(recoveryBounds)} Trigger={trigger}");
-            var wp = new WINDOWPLACEMENT();
-            wp.length = Marshal.SizeOf(wp);
-            if (GetWindowPlacement(this.Handle, ref wp))
-            {
-                int beforeShowCmd = wp.showCmd;
-                bool beforeVisible = this.Visible;
-                FormWindowState beforeState = this.WindowState;
-                wp.rcNormalPosition = FromRectangle(recoveryBounds);
-                wp.showCmd = SW_SHOWNORMAL;
-                SetWindowPlacement(this.Handle, ref wp);
-                var wpAfter = new WINDOWPLACEMENT();
-                wpAfter.length = Marshal.SizeOf(wpAfter);
-                GetWindowPlacement(this.Handle, ref wpAfter);
-                LogService.Info($"[WindowRestoreShowCmd] BeforeRepair Visible={beforeVisible} WindowState={beforeState} PlacementShowCmd={beforeShowCmd} | AfterRepair Visible={this.Visible} WindowState={this.WindowState} PlacementShowCmd={wpAfter.showCmd}");
-            }
-            if (!this.Visible)
-            {
-                this.Show();
-            }
-            this.WindowState = FormWindowState.Normal;
-            this.SetBounds(recoveryBounds.X, recoveryBounds.Y, recoveryBounds.Width, recoveryBounds.Height);
-            _lastKnownGoodNormalBounds = recoveryBounds;
-            _lastRecoveredCollapsedBounds = this.Bounds;
-            _lastRecoveryUtc = DateTime.UtcNow;
-            if (_isInRestorePlacementWatch && IsSaneNormalBounds(this.Bounds) && this.Bounds.Height > MinimumNormalWindowHeight + 40)
-            {
-                _isInRestorePlacementWatch = false;
-                LogService.Info($"[WindowRestoreFloorHit] End restore watch Reason=RepairSuccess Bounds={FormatBoundsForLog(this.Bounds)}");
-            }
-        }
-        finally
-        {
-            _restorePlacementRepairScheduled = false;
-            _pendingRestoreRepairBounds = null;
-            BeginInvoke(new Action(async () =>
-            {
-                await Task.Delay(50);
-                _isApplyingWindowBoundsRecovery = false;
-                LogService.Info("[WindowRestoreRepairLoop] Repair guard released");
-            }));
-        }
-    }
-    private void RecoverCollapsedWindowBounds(string trigger)
-    {
-        if (_isApplyingWindowBoundsRecovery || _restorePlacementRepairScheduled) return;
-        var currentBounds = this.Bounds;
-        if (ShouldSuppressDuplicateCollapsedRecovery(currentBounds))
-        {
-            LogService.Info($"[WindowVisibility] SuppressDuplicateCollapsedRecovery Trigger={trigger} CollapsedBounds={FormatBoundsForLog(currentBounds)}");
-            return;
-        }
-        Rectangle recoveryBounds;
-        string fallbackSource;
-        // Priority: PreMinimize -> RestoreBaseline -> LastKnownGood -> Settings -> Default
-        if (_normalBoundsBeforeMinimize is { } preMin && IsSaneNormalBounds(preMin))
-        {
-            recoveryBounds = preMin;
-            fallbackSource = "PreMinimize";
-        }
-        else if (_restoreBaselineNormalBounds is { } baseline && IsSaneNormalBounds(baseline))
-        {
-            recoveryBounds = baseline;
-            fallbackSource = "RestoreBaseline";
-        }
-        else if (_lastKnownGoodNormalBounds is { } lastGood && IsSaneNormalBounds(lastGood))
-        {
-            recoveryBounds = lastGood;
-            fallbackSource = "LastKnownGood";
-        }
-        else if (IsSaneNormalBounds(new Rectangle(_settings.Window.X, _settings.Window.Y, _settings.Window.Width, _settings.Window.Height)))
-        {
-            recoveryBounds = new Rectangle(_settings.Window.X, _settings.Window.Y, _settings.Window.Width, _settings.Window.Height);
-            fallbackSource = "Settings";
-        }
-        else
-        {
-            var primaryArea = Screen.PrimaryScreen?.WorkingArea ?? Screen.AllScreens[0].WorkingArea;
-            recoveryBounds = new Rectangle(primaryArea.X + 100, primaryArea.Y + 100, 1024, 768);
-            fallbackSource = "DefaultSafe";
-        }
-        string logMsg = "[WindowVisibility] RecoverCollapsedWindowBounds Scheduled " +
-            "Trigger=" + trigger + " " +
-            "CollapsedBounds=" + FormatBoundsForLog(currentBounds) + " " +
-            "RecoveryBounds=" + FormatBoundsForLog(recoveryBounds) + " " +
-            "Source=" + fallbackSource;
-        LogService.Info(logMsg);
-        ScheduleRestorePlacementRepair(recoveryBounds, trigger);
     }
     private void SavePreviewSettings()
     {
@@ -3573,34 +1125,10 @@ private void InitializeBrowserTabControl()
     }
     private Rectangle GetCommandHintOverlayBounds()
     {
-        CommandHintOverlayMetrics metrics = GetCommandHintOverlayMetrics();
-        int width = Math.Min(860, Math.Max(620, browserPanel.ClientSize.Width - 72));
-        int availableHeight = Math.Max(0, browserPanel.ClientSize.Height - 32);
-        int desiredRows = Math.Max(metrics.MinimumVisibleRows, Math.Min(8, Math.Max(1, _commandHintRows.Count)));
-        int desiredHeight = metrics.RowsTopOffset + (desiredRows * metrics.RowHeight) + metrics.Padding;
-        if (_commandHintRows.Count > desiredRows)
-        {
-            desiredHeight += metrics.FooterHeight;
-        }
-        int minimumHeight = metrics.RowsTopOffset + (metrics.MinimumVisibleRows * metrics.RowHeight) + metrics.Padding;
-        int height = Math.Min(440, Math.Max(minimumHeight, Math.Min(availableHeight, desiredHeight)));
-        int left = Math.Max(12, browserPanel.ClientSize.Width - width - 12);
-        return new Rectangle(left, 12, width, height);
-    }
-    private static CommandHintOverlayMetrics GetCommandHintOverlayMetrics()
-    {
-        return new CommandHintOverlayMetrics(
-            Padding: 14,
-            TitleHeight: 20,
-            TitleGap: 4,
-            ExplanationHeight: 24,
-            ContextLineHeight: 18,
-            ContextLineSpacing: 2,
-            ContextGap: 6,
-            HeaderHeight: 18,
-            RowHeight: 22,
-            FooterHeight: 20,
-            MinimumVisibleRows: 2);
+        return CommandHintOverlayLayout.GetBounds(
+            browserPanel.ClientSize,
+            _commandHintRows.Count,
+            CommandHintOverlayLayout.DefaultMetrics);
     }
     private void DrawCommandHintOverlay(Graphics g)
     {
@@ -3614,7 +1142,7 @@ private void InitializeBrowserTabControl()
             return;
         }
         Size panelSize = browserPanel.ClientSize;
-        CommandHintOverlayMetrics metrics = GetCommandHintOverlayMetrics();
+        CommandHintOverlayLayout.Metrics metrics = CommandHintOverlayLayout.DefaultMetrics;
         if (_lastLoggedCommandHintRowCount != _commandHintRows.Count ||
             _lastLoggedCommandHintBounds != overlayRect ||
             _lastLoggedCommandHintPanelSize != panelSize)
@@ -3962,123 +1490,26 @@ private void InitializeBrowserTabControl()
     }
     private void BuildFavoritesMenu(ToolStripMenuItem favoritesMenu, IReadOnlyList<QuickAccessEntry> entries)
     {
-        favoritesMenu.DropDownItems.Clear();
-
-        IReadOnlyList<QuickAccessEntry> favoriteEntries = entries
-            .Where(entry => entry != null && !string.IsNullOrWhiteSpace(entry.Path))
-            .ToList();
-        IReadOnlyList<QuickAccessEntry> categorizedEntries = favoriteEntries
-            .Where(entry => !string.IsNullOrWhiteSpace(QuickAccessService.NormalizeCategoryName(entry.CategoryName)))
-            .ToList();
-
-        if (categorizedEntries.Count == 0)
-        {
-            AddFavoritesMenuEntries(favoritesMenu.DropDownItems, favoriteEntries);
-        }
-        else
-        {
-            foreach (IGrouping<string?, QuickAccessEntry> categoryGroup in categorizedEntries
-                         .GroupBy(entry => QuickAccessService.NormalizeCategoryName(entry.CategoryName), StringComparer.OrdinalIgnoreCase))
-            {
-                string categoryName = categoryGroup.Key ?? string.Empty;
-                if (string.IsNullOrWhiteSpace(categoryName))
-                {
-                    continue;
-                }
-
-                var categoryMenu = new MidFD.Controls.TightCascadeToolStripMenuItem(categoryName) { Tag = "FavoriteCategory" };
-                AddFavoritesMenuEntries(categoryMenu.DropDownItems, categoryGroup.ToList());
-                favoritesMenu.DropDownItems.Add(categoryMenu);
-            }
-
-            IReadOnlyList<QuickAccessEntry> uncategorizedEntries = favoriteEntries
-                .Where(entry => string.IsNullOrWhiteSpace(QuickAccessService.NormalizeCategoryName(entry.CategoryName)))
-                .ToList();
-            if (uncategorizedEntries.Count > 0)
-            {
-                if (favoritesMenu.DropDownItems.Count > 0)
-                {
-                    favoritesMenu.DropDownItems.Add(new ToolStripSeparator());
-                }
-
-                AddFavoritesMenuEntries(favoritesMenu.DropDownItems, uncategorizedEntries);
-            }
-        }
-
-        if (favoritesMenu.DropDownItems.Count > 0)
-        {
-            favoritesMenu.DropDownItems.Add(new ToolStripSeparator());
-        }
-
-        favoritesMenu.DropDownItems.Add(CreateAddCurrentLocationFavoriteMenuItem());
-        favoritesMenu.DropDownItems.Add(CreateOpenQuickAccessMenuItem());
-
+        Action<ToolStripDropDownItem, Color, Color>? applyTheme = null;
+        Color themeBackColor = Color.Empty;
+        Color themeForeColor = Color.Empty;
         if (_settings.Appearance != null)
         {
             var uiThemeColors = UiThemeResolver.Resolve(_settings.Appearance);
-            ApplyDropDownTheme(favoritesMenu, uiThemeColors.ChromeBackColor, uiThemeColors.ChromeForeColor);
-        }
-    }
-
-    private void AddFavoritesMenuEntries(ToolStripItemCollection targetItems, IReadOnlyList<QuickAccessEntry> entries)
-    {
-        HashSet<string> duplicateDisplayNames = entries
-            .Select(entry => ResolveFavoritesMenuDisplayName(entry))
-            .Where(displayName => !string.IsNullOrWhiteSpace(displayName))
-            .GroupBy(displayName => displayName, StringComparer.OrdinalIgnoreCase)
-            .Where(group => group.Count() > 1)
-            .Select(group => group.Key)
-            .ToHashSet(StringComparer.OrdinalIgnoreCase);
-
-        foreach (QuickAccessEntry entry in entries)
-        {
-            string path = entry.Path.Trim();
-            string displayName = ResolveFavoritesMenuDisplayName(entry);
-            if (duplicateDisplayNames.Contains(displayName))
-            {
-                displayName = $"{displayName} ({path})";
-            }
-
-            var item = new ToolStripMenuItem(displayName)
-            {
-                ToolTipText = path,
-                Tag = "FavoriteItem"
-            };
-            item.Click += (s, e) => NavigateToPathSafe(path);
-            targetItems.Add(item);
-        }
-    }
-
-    private ToolStripMenuItem CreateAddCurrentLocationFavoriteMenuItem()
-    {
-        var item = new ToolStripMenuItem("現在地をお気に入りに追加") { Tag = "FavoriteActionItem" };
-        item.Click += (s, e) => AddCurrentLocationToFavorites();
-        return item;
-    }
-
-    private ToolStripMenuItem CreateOpenQuickAccessMenuItem()
-    {
-        var item = new ToolStripMenuItem("QuickAccessを開く/編集...") { Tag = "FavoriteActionItem" };
-        item.Click += (s, e) => ExecuteQuickAccess();
-        return item;
-    }
-
-    private string ResolveFavoritesMenuDisplayName(QuickAccessEntry entry)
-    {
-        string displayName = entry.DisplayName?.Trim() ?? string.Empty;
-        if (!string.IsNullOrWhiteSpace(displayName))
-        {
-            return displayName;
+            themeBackColor = uiThemeColors.ChromeBackColor;
+            themeForeColor = uiThemeColors.ChromeForeColor;
+            applyTheme = ApplyDropDownTheme;
         }
 
-        displayName = QuickAccessService.CreateDisplayName(entry.Path);
-        if (!string.IsNullOrWhiteSpace(displayName))
-        {
-            return displayName;
-        }
-
-        string path = entry.Path?.Trim() ?? string.Empty;
-        return !string.IsNullOrWhiteSpace(path) ? path : string.Empty;
+        FavoritesMenuPresenter.Build(
+            favoritesMenu,
+            entries,
+            NavigateToPathSafe,
+            AddCurrentLocationToFavorites,
+            ExecuteQuickAccess,
+            applyTheme,
+            themeBackColor,
+            themeForeColor);
     }
 
     private void AddCurrentLocationToFavorites()
@@ -4213,226 +1644,19 @@ private void InitializeBrowserTabControl()
     {
         return SystemFonts.MenuFont ?? mainMenuStrip?.Font ?? this.Font;
     }
-    private sealed class MenuIntegratedNavigationColorTable : ProfessionalColorTable
-    {
-        private readonly bool _isLightPalette;
-
-        public MenuIntegratedNavigationColorTable(bool isLightPalette)
-        {
-            _isLightPalette = isLightPalette;
-        }
-
-        public override Color MenuItemSelected => Color.FromArgb(40, 128, 128, 128);
-        public override Color MenuItemSelectedGradientBegin => Color.FromArgb(40, 128, 128, 128);
-        public override Color MenuItemSelectedGradientEnd => Color.FromArgb(40, 128, 128, 128);
-        public override Color MenuItemBorder => Color.FromArgb(80, 128, 128, 128);
-        public override Color MenuBorder => Color.FromArgb(80, 128, 128, 128);
-        public override Color ToolStripDropDownBackground => _isLightPalette ? Color.FromArgb(248, 248, 248) : Color.WhiteSmoke;
-    }
-
-    private sealed class MenuIntegratedNavigationRenderer : ToolStripProfessionalRenderer
-    {
-        private readonly bool _isLightPalette;
-        private readonly Color _commandTextColor;
-        private readonly Color _commandAccentColor;
-
-        public MenuIntegratedNavigationRenderer(bool isLightPalette, Color commandTextColor) : base(new MenuIntegratedNavigationColorTable(isLightPalette))
-        {
-            _isLightPalette = isLightPalette;
-            _commandTextColor = commandTextColor;
-            _commandAccentColor = isLightPalette
-                ? Color.FromArgb(180, 180, 180)
-                : Color.FromArgb(commandTextColor.R, commandTextColor.G, commandTextColor.B);
-        }
-
-        protected override void OnRenderButtonBackground(ToolStripItemRenderEventArgs e)
-        {
-            if (e.Item is not ToolStripButton btn)
-            {
-                base.OnRenderButtonBackground(e);
-                return;
-            }
-
-            var g = e.Graphics;
-            var rect = new Rectangle(Point.Empty, btn.Size);
-
-            if (btn.Selected || btn.Pressed)
-            {
-                Color fillColor = _isLightPalette ? Color.FromArgb(224, 224, 224) : Color.FromArgb(0, 64, 64);
-                Color borderColor = _isLightPalette ? Color.FromArgb(180, 180, 180) : _commandAccentColor;
-                using (var brush = new SolidBrush(fillColor))
-                {
-                    g.FillRectangle(brush, rect);
-                }
-                using (var pen = new Pen(borderColor))
-                {
-                    g.DrawRectangle(pen, rect.X, rect.Y, rect.Width - 1, rect.Height - 1);
-                }
-            }
-        }
-
-        protected override void OnRenderMenuItemBackground(ToolStripItemRenderEventArgs e)
-        {
-            if (e.Item is not ToolStripMenuItem item)
-            {
-                base.OnRenderMenuItemBackground(e);
-                return;
-            }
-
-            var g = e.Graphics;
-            var rect = new Rectangle(Point.Empty, item.Size);
-
-            if (item.IsOnDropDown)
-            {
-                if (item.Selected || item.Pressed)
-                {
-                    using (var brush = new SolidBrush(Color.FromArgb(220, 235, 252)))
-                    {
-                        g.FillRectangle(brush, rect);
-                    }
-                    using (var pen = new Pen(Color.FromArgb(180, 200, 240)))
-                    {
-                        g.DrawRectangle(pen, rect.X, rect.Y, rect.Width - 1, rect.Height - 1);
-                    }
-                }
-            }
-            else
-            {
-                if (item.Selected || item.Pressed)
-                {
-                    Color fillColor = _isLightPalette ? Color.FromArgb(224, 224, 224) : Color.FromArgb(0, 64, 64);
-                    Color borderColor = _isLightPalette ? Color.FromArgb(180, 180, 180) : _commandAccentColor;
-                    using (var brush = new SolidBrush(fillColor))
-                    {
-                        g.FillRectangle(brush, rect);
-                    }
-                    using (var pen = new Pen(borderColor))
-                    {
-                        g.DrawRectangle(pen, rect.X, rect.Y, rect.Width - 1, rect.Height - 1);
-                    }
-                }
-            }
-        }
-
-        protected override void OnRenderItemText(ToolStripItemTextRenderEventArgs e)
-        {
-            if (e.Item is ToolStripMenuItem item)
-            {
-                if (item.IsOnDropDown)
-                {
-                    e.TextColor = item.Enabled ? Color.Black : Color.Gray;
-                }
-                else
-                {
-                    e.TextColor = item.Enabled
-                        ? (_isLightPalette ? Color.FromArgb(32, 32, 32) : _commandTextColor)
-                        : Color.Gray;
-                }
-            }
-            else if (e.Item is ToolStripButton btn)
-            {
-                e.TextColor = btn.Enabled
-                    ? (_isLightPalette ? Color.FromArgb(32, 32, 32) : _commandTextColor)
-                    : Color.Gray;
-            }
-            base.OnRenderItemText(e);
-        }
-
-        protected override void OnRenderSeparator(ToolStripSeparatorRenderEventArgs e)
-        {
-            if (e.Vertical)
-            {
-                base.OnRenderSeparator(e);
-                return;
-            }
-
-            var g = e.Graphics;
-            var rect = new Rectangle(Point.Empty, e.Item.Size);
-
-            using (var brush = new SolidBrush(Color.WhiteSmoke))
-            {
-                g.FillRectangle(brush, rect);
-            }
-            int y = rect.Height / 2;
-            using (var pen = new Pen(Color.FromArgb(200, 200, 200)))
-            {
-                g.DrawLine(pen, 6, y, rect.Width - 6, y);
-            }
-        }
-
-        protected override void OnRenderToolStripBorder(ToolStripRenderEventArgs e)
-        {
-            if (e.ToolStrip is MenuStrip)
-            {
-                return;
-            }
-            base.OnRenderToolStripBorder(e);
-        }
-    }
-
     private void ApplyMenuStripRenderer(bool isLightPalette, Color commandTextColor)
     {
-        if (mainMenuStrip == null)
-        {
-            return;
-        }
-
-        mainMenuStrip.Renderer = new MenuIntegratedNavigationRenderer(isLightPalette, commandTextColor);
+        MenuStripPresentationHelper.ApplyRenderer(mainMenuStrip, isLightPalette, commandTextColor);
     }
 
-    private static (int Height, Padding Padding) CalculateMenuStripMetrics(Font menuFont)
-    {
-        return (28, new Padding(4, 1, 0, 1));
-    }
-    private static Padding CalculateRootMenuItemPadding(Font menuFont)
-    {
-        return new Padding(6, 4, 6, 4);
-    }
-    private static Padding CalculateDropDownItemPadding(Font menuFont)
-    {
-        int horizontal = Math.Max(8, (int)Math.Round(menuFont.SizeInPoints * 0.55f));
-        int vertical = Math.Max(2, (int)Math.Round(menuFont.SizeInPoints / 10f));
-        return new Padding(horizontal, vertical, horizontal, vertical);
-    }
-    private static Padding CalculateDropDownInnerPadding(Font menuFont)
-    {
-        int horizontal = Math.Max(1, (int)Math.Round(menuFont.SizeInPoints / 18f));
-        return new Padding(horizontal, 1, horizontal, 1);
-    }
     private void SynchronizeMenuStripFontAndLayout(Font menuFont)
-        {
-            if (mainMenuStrip == null)
-        {
-            return;
-        }
+    {
         var menuThemeColors = UiThemeResolver.Resolve(UiThemeResolver.MapFromDisplayColor(_settings.Appearance?.ColorTheme));
-        mainMenuStrip.Renderer = new MenuIntegratedNavigationRenderer(
+        MenuStripPresentationHelper.SynchronizeFontAndLayout(
+            mainMenuStrip,
+            menuFont,
             FileListColorResolver.NormalizeCoreTheme(_settings.Appearance?.ColorTheme, _settings) == "Light",
             menuThemeColors.ChromeForeColor);
-        mainMenuStrip.SuspendLayout();
-        try
-        {
-            var metrics = CalculateMenuStripMetrics(menuFont);
-            mainMenuStrip.AutoSize = false;
-            mainMenuStrip.Font = menuFont;
-            mainMenuStrip.Padding = metrics.Padding;
-            mainMenuStrip.Height = 28;
-            foreach (ToolStripItem item in mainMenuStrip.Items)
-            {
-                item.Font = menuFont;
-                if (item is ToolStripMenuItem rootItem)
-                {
-                    ApplyRootMenuVisualMetrics(rootItem, menuFont);
-                    ApplyToolStripItemFontAndLayout(rootItem, menuFont);
-                }
-            }
-        }
-        finally
-        {
-            mainMenuStrip.ResumeLayout(true);
-            mainMenuStrip.PerformLayout();
-            mainMenuStrip.Invalidate();
-        }
     }
     private void RefreshMenuStripRuntimeLayout(string context, bool defer)
     {
@@ -4509,95 +1733,6 @@ private void InitializeBrowserTabControl()
                 return $"{item.Text}:OwnerScreenTop={ownerScreenTop},OwnerScreenBottom={ownerScreenBottom},DropDownScreenTop={dropDownScreenTop},Delta={delta}";
             }));
         LogService.Info($"[MenuStripLayout] {context} Font={menuFont} Height={mainMenuStrip.Height} Padding={padding} Metrics={rootMetrics}");
-    }
-    private static void ConfigureGlobalDropDownProperties(ToolStripDropDownItem item, Font? menuFont)
-    {
-        if (item.DropDown is ToolStripDropDownMenu menu)
-        {
-            menu.DropShadowEnabled = false;
-
-            if (item.Name == "favoritesMenu" || item.Tag?.ToString() == "FavoriteCategory")
-            {
-                menu.ShowImageMargin = false;
-                menu.ShowCheckMargin = false;
-                menu.Padding = new Padding(2, 1, 2, 1);
-            }
-            else
-            {
-                menu.ShowImageMargin = false;
-                if (menuFont != null)
-                {
-                    menu.Padding = CalculateDropDownInnerPadding(menuFont);
-                }
-                else
-                {
-                    menu.Padding = new Padding(2, 1, 2, 1);
-                }
-            }
-            menu.Margin = Padding.Empty;
-        }
-    }
-
-    private static void ApplyRootMenuVisualMetrics(ToolStripMenuItem item, Font menuFont)
-    {
-        item.Margin = Padding.Empty;
-        item.Padding = CalculateRootMenuItemPadding(menuFont);
-        item.TextAlign = ContentAlignment.MiddleCenter;
-        ConfigureGlobalDropDownProperties(item, menuFont);
-    }
-    private static bool IsFavoriteMenuItem(ToolStripItem item)
-    {
-        if (item == null) return false;
-        if (item.Name == "favoritesMenu") return true;
-        string? tag = item.Tag?.ToString();
-        return tag == "FavoriteCategory" || tag == "FavoriteItem" || tag == "FavoriteActionItem";
-    }
-    private static void ApplyToolStripItemFontAndLayout(ToolStripItem item, Font menuFont)
-    {
-        item.Font = menuFont;
-        if (item is not ToolStripDropDownItem dropDownItem)
-        {
-            return;
-        }
-        dropDownItem.DropDown.SuspendLayout();
-        try
-        {
-            dropDownItem.DropDown.Font = menuFont;
-
-            ConfigureGlobalDropDownProperties(dropDownItem, menuFont);
-
-            foreach (ToolStripItem childItem in dropDownItem.DropDownItems)
-            {
-                ApplyDropDownItemVisualMetrics(childItem, menuFont);
-                ApplyToolStripItemFontAndLayout(childItem, menuFont);
-            }
-        }
-        finally
-        {
-            dropDownItem.DropDown.ResumeLayout(true);
-            dropDownItem.DropDown.PerformLayout();
-            dropDownItem.DropDown.Invalidate();
-        }
-    }
-    private static void ApplyDropDownItemVisualMetrics(ToolStripItem item, Font menuFont)
-    {
-        if (item is ToolStripSeparator)
-        {
-            return;
-        }
-        item.Margin = Padding.Empty;
-        if (item is ToolStripMenuItem menuItem)
-        {
-            if (IsFavoriteMenuItem(menuItem))
-            {
-                menuItem.Padding = new Padding(4, 2, 4, 2);
-            }
-            else
-            {
-                menuItem.Padding = CalculateDropDownItemPadding(menuFont);
-            }
-            menuItem.TextAlign = ContentAlignment.MiddleLeft;
-        }
     }
     private ToolStripMenuItem CreateMenuItem(
         string text,
@@ -4685,11 +1820,11 @@ private void InitializeBrowserTabControl()
     }
     private void ClearBrowserTabContextState()
     {
-        _browserTabContextIndex = -1;
+        _browserTabViewState.ContextTabIndex = -1;
     }
     private void ClearBrowserTabCategoryContextState()
     {
-        _browserTabCategoryContextCategoryId = null;
+        _categoryViewState.ContextCategoryId = null;
         _browserTabCategoryContextKind = BrowserTabStripCategoryItemKind.Category;
     }
     private void DismissTransientContextMenus()
@@ -4928,7 +2063,7 @@ private void InitializeBrowserTabControl()
             "H: PowerShell (現在ディレクトリ) / Shift+H: コマンドプロンプト / X: Execダイアログ\n" +
             $"ダブルクリック: 既定動作で開く\n{GetFunctionAwareShortcutHint(FunctionKeyAction.Copy, "C")}: コピー\nM: 移動\n" +
             $"{GetFunctionAwareShortcutHint(FunctionKeyAction.Rename, "R")}: 名前変更\nQ: QuickAccess（移動ハブ: 登録先 / 別名 / 最近 / 履歴）\n" +
-            "Ctrl+M: マーク一覧 / スロット\nCtrl+T: 新しいタブ\nCtrl+L / タブダブルクリック / タブ右クリック: 現在のタブ固定を切替\n" +
+            "Ctrl+M: マーク一覧 / スロット\nCtrl+T: 新しいタブ\nCtrl+L / Pathクリック: パス入力\nタブダブルクリック / タブ右クリック: 現在のタブ固定を切替\n" +
             "Ctrl+Right / Ctrl+Tab: 次のタブ\nCtrl+Left / Ctrl+Shift+Tab: 前のタブ\nCtrl+W: タブを閉じる（固定タブは閉じない）\n" +
             "Alt: Browser の直起動一覧\nAlt+英数字: 外部ツール namespace の直起動\nAlt+F1〜F12: Function layer\n" +
             "O: 設定";
@@ -4954,7 +2089,7 @@ private void InitializeBrowserTabControl()
         HideCommandHintOverlay();
         if (mode == UIMode.Browser)
         {
-            _previewCts?.Cancel(); // プレビュー読み込み中なら中断
+            _previewRequestCoordinator.Cancel(); // プレビュー読み込み中なら中断
         }
         _uiMode = mode;
         var lifecyclePlan = _viewerPreviewCoordinator.CreateViewerModeLifecyclePlan(
@@ -4975,15 +2110,7 @@ private void InitializeBrowserTabControl()
             if (_notificationService != null)
             {
                 NormalizeStatusLabelLayout();
-                if (FunctionKeyProfileService.ResolveProfile(CurrentFunctionKeyProfileValue) == FunctionKeyProfile.FDCompatible)
-                {
-                    const string browserStatus = "Z:Open  X:Check  A:Attr  E:Edit  F:Filter  S:Sort  L:Logd  V:View  H:Shell";
-                    _notificationService.SetPersistent(browserStatus);
-                }
-                else
-                {
-                    _notificationService.SetPersistent("Ready.");
-                }
+                RefreshBrowserStatusSummary();
                 NormalizeStatusLabelLayout();
             }
             else
@@ -5014,1922 +2141,11 @@ private void InitializeBrowserTabControl()
             }
         }
     }
-    private PreviewKind GetCurrentSelectionPreviewKind()
-    {
-        var item = GetCurrentBrowserItem();
-        string? fullPath = item?.Tag as string;
-        if (string.IsNullOrEmpty(fullPath) || !File.Exists(fullPath))
-        {
-            return PreviewKind.None;
-        }
-        return GetEffectivePreviewKind(fullPath);
-    }
-    private PreviewKind GetEffectivePreviewKind(string path, PreviewKind rawKind)
-    {
-        var result = PreviewRoutingService.Route(path, rawKind, _settings.Preview?.VideoToolDirectory);
-        return result.EffectiveKind;
-    }
-    private PreviewKind GetEffectivePreviewKind(string path)
-    {
-        var result = PreviewRoutingService.Route(path, _settings.Preview?.VideoToolDirectory);
-        return result.EffectiveKind;
-    }
-    private void ApplyViewerChromeState()
-    {
-        bool compactViewer = _uiMode == UIMode.Viewer
-            && (_currentViewerKind == PreviewKind.Text || _currentViewerKind == PreviewKind.Binary || _currentViewerKind == PreviewKind.LargeText);
-        titleHeaderPanel.Visible = !compactViewer;
-        headerPanel.Visible = !compactViewer;
-        sepBeforeTopPanel.Visible = !compactViewer; // Restore: Boundary between Page row and Path row
-        topPanel.Visible = !compactViewer;
-        ApplyFunctionBarVisibilityForCurrentContext();
-        // LargeText 用コントロールの表示制御
-        if (_largeFileControl != null)
-        {
-            _largeFileControl.Visible = (_uiMode == UIMode.Viewer && _currentViewerKind == PreviewKind.LargeText);
-        }
-    }
-    private readonly record struct FunctionBarSlotViewModel(
-        int Slot, // 1-indexed (1-12)
-        bool IsShiftLayer,
-        string? CommandId,
-        string ShortLabel,
-        string? KeyHint,
-        string? HotKeyChar,
-        string DisplayLabel,
-        bool IsEnabled,
-        string ToolTipText,
-        string LayoutLabel,
-        bool IsSlotVisible
-    );
-
-
-
-    private void ExecuteViewerFind()
-    {
-        if (_currentViewerKind == PreviewKind.LargeText && _largeFileState != null)
-        {
-            ExecuteLargeFileFind();
-            return;
-        }
-        if (!viewerTextBox.Visible) return;
-        string? query = SimpleInputDialog.ShowNullable("検索:", "Viewer 検索 (Ctrl+F)", _viewerSearchKeyword);
-        if (query == null) return; // キャンセル時は現状維持
-        _viewerSearchKeyword = query;
-        ApplyViewerStatusLine(); // ステータスに反映
-        if (string.IsNullOrWhiteSpace(query))
-        {
-            ShowStatusMessage("検索キーワードをクリアしました。");
-            return;
-        }
-        // 初回検索: 現在位置の次から前方へ
-        int start = viewerTextBox.SelectionStart + viewerTextBox.SelectionLength;
-        _ = InnerExecuteViewerSearch(query, start, backward: false);
-    }
-    private void ExecuteViewerFindNext(bool backward)
-    {
-        if (_currentViewerKind == PreviewKind.LargeText && _largeFileState != null)
-        {
-            ExecuteLargeFileFindNext(backward);
-            return;
-        }
-        if (!viewerTextBox.Visible) return;
-        if (string.IsNullOrWhiteSpace(_viewerSearchKeyword))
-        {
-            ShowStatusMessage("検索キーワードが未設定です。新規検索ダイアログを開きます...");
-            ExecuteViewerFind();
-            return;
-        }
-        int start;
-        if (backward)
-        {
-            // 前方向: 現在の選択開始位置より前から探す
-            start = viewerTextBox.SelectionStart;
-        }
-        else
-        {
-            // 次方向: 現在の選択終了位置から探す
-            start = viewerTextBox.SelectionStart + viewerTextBox.SelectionLength;
-        }
-        _ = InnerExecuteViewerSearch(_viewerSearchKeyword, start, backward);
-    }
-    private async Task InnerExecuteViewerSearch(string query, int start, bool backward, bool isWrapAround = false, int chunkCrossoverCount = 0)
-    {
-        if (_currentViewerKind == PreviewKind.LargeText && _largeFileState != null)
-        {
-            await ExecuteLargeFileSearchAsync(query, backward, isWrapAround);
-            return;
-        }
-        RichTextBoxFinds options = backward ? RichTextBoxFinds.Reverse : RichTextBoxFinds.None;
-        int result = viewerTextBox.Find(query, start, options);
-        if (result < 0 && !isWrapAround)
-        {
-            if (backward)
-            {
-                result = viewerTextBox.Find(query, viewerTextBox.TextLength, options);
-                if (result >= 0) ShowStatusMessage("末尾から再検索しました");
-            }
-            else
-            {
-                result = viewerTextBox.Find(query, 0, options);
-                if (result >= 0) ShowStatusMessage("先頭から再検索しました");
-            }
-        }
-        if (result >= 0)
-        {
-            viewerTextBox.Focus();
-        }
-        else
-        {
-            ShowStatusMessage($"一致する文字列が見つかりません: \"{query}\"");
-        }
-    }
-    private async Task ExecuteLargeFileSearchAsync(string query, bool backward, bool isWrapAround)
-    {
-        if (_largeFileState == null) return;
-        var state = _largeFileState;
-        string normalizedQuery = query?.Trim() ?? string.Empty;
-        if (string.IsNullOrWhiteSpace(normalizedQuery))
-        {
-            ClearLargeFileSearchHit(state);
-            ShowStatusMessage("検索キーワードが未設定です。");
-            return;
-        }
-        int requestId = ++state.SearchRequestId;
-        state.LastSearchText = normalizedQuery;
-        state.LastSearchBackward = backward;
-        _viewerSearchKeyword = normalizedQuery;
-        ApplyViewerStatusLine();
-        ShowStatusMessage($"検索中: {normalizedQuery}");
-        var token = _previewCts?.Token ?? CancellationToken.None;
-        var encoding = GetCurrentViewerEncoding();
-        var (startLine, startColumn) = GetLargeFileSearchStartPosition(state, normalizedQuery, backward, isWrapAround);
-        try
-        {
-            var hit = await Services.LargeFileLineReaderService.SearchTextAsync(
-                state,
-                normalizedQuery,
-                startLine,
-                startColumn,
-                backward,
-                encoding,
-                token);
-            if (!IsLargeFileSearchRequestActive(state, requestId))
-            {
-                return;
-            }
-            if (hit.HasValue)
-            {
-                await ApplyLargeFileSearchHitAsync(state, requestId, normalizedQuery, hit.Value.Line, hit.Value.Column, hit.Value.Length, backward, isWrapAround);
-                return;
-            }
-            if (!isWrapAround)
-            {
-                ShowStatusMessage(backward ? "先頭まで検索しました。末尾から再検索します..." : "末尾まで検索しました。先頭から再検索します...");
-                await ExecuteLargeFileSearchAsync(normalizedQuery, backward, true);
-                return;
-            }
-            ClearLargeFileSearchHit(state);
-            ShowStatusMessage($"一致する文字列が見つかりません: \"{normalizedQuery}\"");
-        }
-        catch (OperationCanceledException)
-        {
-        }
-    }
-    private void EnsureStatusBarVisible()
-    {
-        if (statusStrip == null || statusStrip.IsDisposed)
-        {
-            return;
-        }
-        statusStrip.Visible = true;
-        statusLabel.Visible = true;
-    }
-    private void ExecuteLargeFileFind()
-    {
-        if (_largeFileState == null)
-        {
-            return;
-        }
-        string initialQuery = string.IsNullOrWhiteSpace(_largeFileState.LastSearchText)
-            ? _viewerSearchKeyword
-            : _largeFileState.LastSearchText;
-        string? query = SimpleInputDialog.ShowNullable("検索:", "LargeText 検索 (Ctrl+F)", initialQuery);
-        if (query == null)
-        {
-            return;
-        }
-        string normalizedQuery = query.Trim();
-        bool continueFromActiveHit = !string.IsNullOrWhiteSpace(normalizedQuery)
-            && string.Equals(_largeFileState.LastSearchText, normalizedQuery, StringComparison.OrdinalIgnoreCase)
-            && _largeFileState.ActiveSearchHitLine.HasValue;
-        _viewerSearchKeyword = normalizedQuery;
-        _largeFileState.LastSearchText = normalizedQuery;
-        ApplyViewerStatusLine();
-        if (string.IsNullOrWhiteSpace(normalizedQuery))
-        {
-            ClearLargeFileSearchHit(_largeFileState);
-            ShowStatusMessage("検索キーワードをクリアしました。");
-            return;
-        }
-        if (!continueFromActiveHit)
-        {
-            _largeFileState.ActiveSearchHitLine = null;
-            _largeFileState.ActiveSearchHitColumn = 0;
-            _largeFileState.ActiveSearchHitLength = 0;
-        }
-        _ = ExecuteLargeFileSearchAsync(normalizedQuery, backward: false, isWrapAround: false);
-    }
-    private void ExecuteLargeFileFindNext(bool backward)
-    {
-        if (_largeFileState == null)
-        {
-            return;
-        }
-        if (string.IsNullOrWhiteSpace(_largeFileState.LastSearchText))
-        {
-            ShowStatusMessage("検索キーワードが未設定です。新規検索ダイアログを開きます...");
-            ExecuteLargeFileFind();
-            return;
-        }
-        _ = ExecuteLargeFileSearchAsync(_largeFileState.LastSearchText, backward, false);
-    }
-    private (int StartLine, int StartColumn) GetLargeFileSearchStartPosition(LargeFilePreviewState state, string query, bool backward, bool isWrapAround)
-    {
-        if (isWrapAround)
-        {
-            return backward
-                ? (Math.Max(0, state.TotalLines - 1), int.MaxValue)
-                : (0, 0);
-        }
-        if (state.ActiveSearchHitLine.HasValue
-            && string.Equals(state.LastSearchText, query, StringComparison.OrdinalIgnoreCase))
-        {
-            if (backward)
-            {
-                return (
-                    state.ActiveSearchHitLine.Value,
-                    Math.Max(-1, state.ActiveSearchHitColumn - 1));
-            }
-            return (
-                state.ActiveSearchHitLine.Value,
-                state.ActiveSearchHitColumn + Math.Max(1, state.ActiveSearchHitLength));
-        }
-        return backward
-            ? (Math.Max(0, state.FirstVisibleLine), int.MaxValue)
-            : (Math.Max(0, state.FirstVisibleLine), 0);
-    }
-    private async Task ApplyLargeFileSearchHitAsync(
-        LargeFilePreviewState state,
-        int requestId,
-        string query,
-        int hitLine,
-        int hitColumn,
-        int hitLength,
-        bool backward,
-        bool isWrapAround)
-    {
-        if (!IsLargeFileSearchRequestActive(state, requestId))
-        {
-            return;
-        }
-        state.ActiveSearchHitLine = hitLine;
-        state.ActiveSearchHitColumn = hitColumn;
-        state.ActiveSearchHitLength = hitLength;
-        _largeFileControl.SetActiveSearchHit(hitLine, hitColumn, hitLength);
-        int targetFirstLine = Math.Max(0, hitLine - Math.Max(1, _largeFileControl.VisibleLineCount / 2));
-        await NavigateLargeFilePreviewAsync(targetFirstLine, "SearchHit");
-        if (!IsLargeFileSearchRequestActive(state, requestId))
-        {
-            return;
-        }
-        _largeFileControl.SetActiveSearchHit(hitLine, hitColumn, hitLength);
-        ApplyViewerStatusLine();
-        string wrapPrefix = isWrapAround
-            ? (backward ? "末尾から再検索しました。 " : "先頭から再検索しました。 ")
-            : string.Empty;
-        ShowStatusMessage($"{wrapPrefix}{query}: {hitLine + 1:N0} 行目");
-    }
-    private bool IsLargeFileSearchRequestActive(LargeFilePreviewState state, int requestId)
-    {
-        return ReferenceEquals(_largeFileState, state)
-            && state.SearchRequestId == requestId
-            && _uiMode == UIMode.Viewer
-            && _currentViewerKind == PreviewKind.LargeText
-            && string.Equals(_currentPreviewTarget, state.FilePath, StringComparison.OrdinalIgnoreCase);
-    }
-    private void ClearLargeFileSearchHit(LargeFilePreviewState state)
-    {
-        state.ActiveSearchHitLine = null;
-        state.ActiveSearchHitColumn = 0;
-        state.ActiveSearchHitLength = 0;
-        _largeFileControl.ClearActiveSearchHit();
-        ApplyViewerStatusLine();
-    }
-    private sealed class FunctionBarColorPalette
-    {
-        public required Color BackColor { get; init; }
-        public required Color BorderColor { get; init; }
-        public required Color EnabledBackColor { get; init; }
-        public required Color EnabledTextColor { get; init; }
-        public required Color DisabledBackColor { get; init; }
-        public required Color DisabledTextColor { get; init; }
-        public required Color DisabledBorderColor { get; init; }
-        public required Color HotKeyBackColor { get; init; }
-        public required Color HotKeyTextColor { get; init; }
-        public required Color HoverBackColor { get; init; }
-        public required Color PressedBackColor { get; init; }
-    }
-
-    private static Color BlendColors(Color colorA, Color colorB, double amount)
-    {
-        amount = Math.Max(0.0, Math.Min(1.0, amount));
-        byte r = (byte)(colorA.R * (1.0 - amount) + colorB.R * amount);
-        byte g = (byte)(colorA.G * (1.0 - amount) + colorB.G * amount);
-        byte b = (byte)(colorA.B * (1.0 - amount) + colorB.B * amount);
-        return Color.FromArgb(r, g, b);
-    }
-
-    private static double GetRelativeLuminance(Color c)
-    {
-        double r = c.R / 255.0;
-        double g = c.G / 255.0;
-        double b = c.B / 255.0;
-
-        r = (r <= 0.03928) ? r / 12.92 : Math.Pow((r + 0.055) / 1.055, 2.4);
-        g = (g <= 0.03928) ? g / 12.92 : Math.Pow((g + 0.055) / 1.055, 2.4);
-        b = (b <= 0.03928) ? b / 12.92 : Math.Pow((b + 0.055) / 1.055, 2.4);
-
-        return 0.2126 * r + 0.7152 * g + 0.0722 * b;
-    }
-
-    private static double GetContrastRatio(Color colorA, Color colorB)
-    {
-        double l1 = GetRelativeLuminance(colorA);
-        double l2 = GetRelativeLuminance(colorB);
-        double bright = Math.Max(l1, l2);
-        double dark = Math.Min(l1, l2);
-        return (bright + 0.05) / (dark + 0.05);
-    }
-
-    private static Color PickReadableTextColor(Color backColor, Color darkCandidate, Color lightCandidate)
-    {
-        double darkContrast = GetContrastRatio(backColor, darkCandidate);
-        double lightContrast = GetContrastRatio(backColor, lightCandidate);
-        return darkContrast >= lightContrast ? darkCandidate : lightCandidate;
-    }
-
-    private (Color EnabledBack, Color EnabledFore, Color Border, Color HotKeyBack, Color HoverBack, Color PressedBack) ResolveDarkStandardFunctionThemeColors(
-        string presetKey,
-        FileListColorResolver.ResolvedColors resolved)
-    {
-        presetKey = FileListColorResolver.CanonicalizePresetKey(presetKey);
-
-        if (string.Equals(presetKey, "Slate", StringComparison.OrdinalIgnoreCase))
-        {
-            Color enabledBack = BlendColors(resolved.Background, resolved.Directory, 0.42);
-            Color enabledFore = PickReadableTextColor(enabledBack, resolved.NormalFile, Color.White);
-            return (
-                enabledBack,
-                enabledFore,
-                resolved.Directory,
-                BlendColors(enabledBack, Color.White, 0.08),
-                BlendColors(enabledBack, Color.White, 0.16),
-                BlendColors(enabledBack, Color.Black, 0.18));
-        }
-
-        if (string.Equals(presetKey, "Violet", StringComparison.OrdinalIgnoreCase))
-        {
-            Color enabledBack = BlendColors(resolved.Background, resolved.Directory, 0.44);
-            Color enabledFore = PickReadableTextColor(enabledBack, resolved.NormalFile, Color.White);
-            return (
-                enabledBack,
-                enabledFore,
-                resolved.Directory,
-                BlendColors(enabledBack, Color.White, 0.08),
-                BlendColors(enabledBack, Color.White, 0.16),
-                BlendColors(enabledBack, Color.Black, 0.18));
-        }
-
-        if (string.Equals(presetKey, "Sepia", StringComparison.OrdinalIgnoreCase))
-        {
-            Color enabledBack = BlendColors(resolved.Background, resolved.Directory, 0.46);
-            Color enabledFore = PickReadableTextColor(enabledBack, resolved.NormalFile, Color.White);
-            return (
-                enabledBack,
-                enabledFore,
-                resolved.Directory,
-                BlendColors(enabledBack, Color.White, 0.06),
-                BlendColors(enabledBack, Color.White, 0.16),
-                BlendColors(enabledBack, Color.Black, 0.18));
-        }
-
-        if (string.Equals(presetKey, "Mono Dark", StringComparison.OrdinalIgnoreCase))
-        {
-            Color enabledBack = BlendColors(resolved.Background, resolved.Directory, 0.40);
-            Color enabledFore = PickReadableTextColor(enabledBack, resolved.NormalFile, Color.White);
-            return (
-                enabledBack,
-                enabledFore,
-                resolved.Directory,
-                BlendColors(enabledBack, Color.White, 0.06),
-                BlendColors(enabledBack, Color.White, 0.14),
-                BlendColors(enabledBack, Color.Black, 0.18));
-        }
-
-        if (string.Equals(presetKey, "Cyber", StringComparison.OrdinalIgnoreCase))
-        {
-            Color enabledBack = BlendColors(resolved.Background, resolved.Directory, 0.52);
-            Color enabledFore = PickReadableTextColor(enabledBack, resolved.NormalFile, Color.White);
-            return (
-                enabledBack,
-                enabledFore,
-                resolved.Directory,
-                BlendColors(enabledBack, resolved.System, 0.28),
-                BlendColors(enabledBack, Color.White, 0.20),
-                BlendColors(enabledBack, Color.Black, 0.18));
-        }
-
-        if (string.Equals(presetKey, "Green", StringComparison.OrdinalIgnoreCase))
-        {
-            Color enabledBack = BlendColors(resolved.Background, resolved.Directory, 0.36);
-            Color enabledFore = PickReadableTextColor(enabledBack, resolved.NormalFile, Color.White);
-            return (
-                enabledBack,
-                enabledFore,
-                resolved.Directory,
-                BlendColors(enabledBack, Color.White, 0.08),
-                BlendColors(enabledBack, Color.White, 0.18),
-                BlendColors(enabledBack, Color.Black, 0.18));
-        }
-
-        if (string.Equals(presetKey, "Amber", StringComparison.OrdinalIgnoreCase))
-        {
-            Color enabledBack = BlendColors(resolved.Background, resolved.Directory, 0.38);
-            Color enabledFore = PickReadableTextColor(enabledBack, resolved.NormalFile, Color.White);
-            return (
-                enabledBack,
-                enabledFore,
-                resolved.Directory,
-                BlendColors(enabledBack, Color.White, 0.06),
-                BlendColors(enabledBack, Color.White, 0.16),
-                BlendColors(enabledBack, Color.Black, 0.18));
-        }
-
-        return (
-            Color.FromArgb(60, 120, 180),
-            Color.FromArgb(220, 238, 255),
-            Color.FromArgb(70, 100, 120),
-            Color.FromArgb(70, 140, 110),
-            Color.FromArgb(70, 132, 192),
-            Color.FromArgb(46, 92, 140));
-    }
-
-    private FunctionBarColorPalette GetFunctionBarColors(bool isWinFdCompatible)
-    {
-        var resolved = _resolvedColors ?? FileListColorResolver.ResolveColors(_settings);
-        string themeNormalized = FileListColorResolver.NormalizeCoreTheme(_settings.Appearance.ColorTheme, _settings);
-        bool isLightTheme = themeNormalized == "Light";
-
-        // 現在のテーマを象徴する Directory (フォルダ色: ClassicCyan=シアン, Green=緑, Amber=黄/黄金など) を主調色として使用
-        Color accentColor = resolved.Directory;
-        Color? customBackColor = UiThemeResolver.TryParseColor(_settings.Appearance?.CustomFunctionBarBackColor);
-        Color? customForeColor = UiThemeResolver.TryParseColor(_settings.Appearance?.CustomFunctionBarForeColor);
-        bool hasCustomFunctionBarColors = customBackColor.HasValue || customForeColor.HasValue;
-
-        if (hasCustomFunctionBarColors)
-        {
-            Color enabledBack = customBackColor ?? (isLightTheme ? Color.FromArgb(228, 228, 228) : Color.FromArgb(60, 120, 180));
-            Color barBack = resolved.Background;
-            Color barFore = customForeColor ?? (isLightTheme ? Color.FromArgb(32, 32, 32) : Color.FromArgb(220, 238, 255));
-            Color disabledBack = BlendColors(barBack, enabledBack, isLightTheme ? 0.12 : 0.50);
-            Color disabledForeBase = PickReadableTextColor(disabledBack, Color.Black, Color.White);
-            Color disabledFore = BlendColors(disabledForeBase, disabledBack, isLightTheme ? 0.20 : 0.35);
-            if (GetContrastRatio(disabledFore, disabledBack) < (isLightTheme ? 3.0 : 3.2))
-            {
-                disabledFore = disabledForeBase;
-            }
-
-            return new FunctionBarColorPalette
-            {
-                BackColor = barBack,
-                BorderColor = isLightTheme ? Color.FromArgb(200, 200, 200) : Color.FromArgb(70, 100, 120),
-                EnabledBackColor = enabledBack,
-                EnabledTextColor = barFore,
-                DisabledBackColor = disabledBack,
-                DisabledTextColor = disabledFore,
-                DisabledBorderColor = BlendColors(barBack, enabledBack, isLightTheme ? 0.06 : 0.03),
-                HotKeyBackColor = BlendColors(enabledBack, Color.Yellow, isLightTheme ? 0.30 : 0.18),
-                HotKeyTextColor = barFore,
-                HoverBackColor = BlendColors(enabledBack, Color.White, isLightTheme ? 0.28 : 0.18),
-                PressedBackColor = BlendColors(enabledBack, Color.Black, isLightTheme ? 0.10 : 0.20)
-            };
-        }
-
-        if (isWinFdCompatible)
-        {
-            if (isLightTheme)
-            {
-                Color barBack = Color.FromArgb(235, 235, 235);
-                Color enabledBack = BlendColors(Color.White, accentColor, 0.25);
-
-                // フォルダ色が極端に暗い場合は輝度を確保し、明るく美しいボタン背景色を保証
-                if (FileListColorResolver.GetRelativeLuminance(enabledBack) < 0.6)
-                {
-                    enabledBack = Color.FromArgb(200, 240, 240); // デフォルトの美しいライト水色
-                }
-
-                // 無効状態 (Disabled) 配色をテーマ派生で構成 (Light系)
-                Color disabledBack = BlendColors(barBack, enabledBack, 0.08); // 背景寄りの非常に淡いブレンド
-
-                // コントラスト優先で可読テキストを決定
-                Color disabledForeBase = PickReadableTextColor(disabledBack, Color.Black, Color.White);
-                Color disabledFore = BlendColors(disabledForeBase, disabledBack, 0.20); // 弱強調のために少し背景に寄せる
-                if (GetContrastRatio(disabledFore, disabledBack) < 4.5)
-                {
-                    disabledFore = disabledForeBase;
-                }
-
-                Color disabledBorder = BlendColors(barBack, enabledBack, 0.04); // 主張しすぎない極薄境界線
-
-                return new FunctionBarColorPalette
-                {
-                    BackColor = barBack,
-                    BorderColor = Color.FromArgb(200, 200, 200),
-                    EnabledBackColor = enabledBack,
-                    EnabledTextColor = Color.Black,
-                    DisabledBackColor = disabledBack,
-                    DisabledTextColor = disabledFore,
-                    DisabledBorderColor = disabledBorder,
-                    HotKeyBackColor = Color.Yellow,
-                    HotKeyTextColor = Color.Black,
-                    HoverBackColor = BlendColors(enabledBack, Color.White, 0.45),
-                    PressedBackColor = BlendColors(enabledBack, Color.Black, 0.15)
-                };
-            }
-            else
-            {
-                Color barBack = resolved.Background;
-
-                // フォルダ色を有効ボタンの背景色とする
-                Color enabledBack = accentColor;
-
-                // フォルダ色が暗すぎる場合は明るいボタン色にするため輝度を確保
-                if (FileListColorResolver.GetRelativeLuminance(enabledBack) < 0.25)
-                {
-                    enabledBack = BlendColors(enabledBack, Color.White, 0.5);
-                }
-
-                // 無効状態 (Disabled) 配色をテーマ派生で構成 (Dark系: 50%ブレンドで明るく認識しやすい無効背景)
-                Color disabledBack = BlendColors(barBack, enabledBack, 0.5); // ユーザー様調整の50%ブレンドを確実に維持
-
-                // コントラスト最優先で無効背景に対して最も可読性の高い文字色 (黒 or 白) を選出
-                Color disabledForeBase = PickReadableTextColor(disabledBack, Color.Black, Color.White);
-
-                // 無効状態としての「薄い灰色系・弱強調」を出すため、背景色と多めにブレンド
-                Color disabledFore = BlendColors(disabledForeBase, disabledBack, 0.45);
-                if (GetContrastRatio(disabledFore, disabledBack) < 3.0)
-                {
-                    disabledFore = BlendColors(disabledForeBase, disabledBack, 0.25);
-                }
-
-                Color frameBack = BlendColors(barBack, enabledBack, 0.18);
-                Color disabledBorder = BlendColors(barBack, enabledBack, 0.03); // 3%ブレンドで超極薄境界線
-
-                return new FunctionBarColorPalette
-                {
-                    BackColor = frameBack,
-                    BorderColor = enabledBack,
-                    EnabledBackColor = enabledBack,
-                    EnabledTextColor = Color.Black, // WinFDの伝統である極めて高い判読性の確保
-                    DisabledBackColor = disabledBack,
-                    DisabledTextColor = disabledFore,
-                    DisabledBorderColor = BlendColors(barBack, enabledBack, 0.18),
-                    HotKeyBackColor = Color.Yellow,
-                    HotKeyTextColor = Color.Black,
-                    HoverBackColor = BlendColors(enabledBack, Color.White, 0.25),
-                    PressedBackColor = BlendColors(enabledBack, Color.Black, 0.2)
-                };
-            }
-        }
-        else
-        {
-            Color barBack = resolved.Background;
-            if (isLightTheme)
-            {
-                Color lightEnabledBack = Color.FromArgb(228, 228, 228);
-                Color lightDisabledBack = Color.FromArgb(236, 236, 236);
-                Color lightDisabledTextBase = PickReadableTextColor(lightDisabledBack, Color.Black, Color.White);
-                Color lightDisabledText = BlendColors(lightDisabledTextBase, lightDisabledBack, 0.25);
-                if (GetContrastRatio(lightDisabledText, lightDisabledBack) < 3.2)
-                {
-                    lightDisabledText = lightDisabledTextBase;
-                }
-
-                return new FunctionBarColorPalette
-                {
-                    BackColor = barBack,
-                    BorderColor = Color.FromArgb(198, 198, 198),
-                    EnabledBackColor = lightEnabledBack,
-                    EnabledTextColor = Color.FromArgb(32, 32, 32),
-                    DisabledBackColor = lightDisabledBack,
-                    DisabledTextColor = lightDisabledText,
-                    DisabledBorderColor = Color.FromArgb(210, 210, 210),
-                    HotKeyBackColor = Color.FromArgb(246, 242, 220),
-                    HotKeyTextColor = Color.FromArgb(32, 32, 32),
-                    HoverBackColor = Color.FromArgb(220, 220, 220),
-                    PressedBackColor = Color.FromArgb(210, 210, 210)
-                };
-            }
-
-            Color enabledBack = Color.FromArgb(60, 120, 180);
-            Color enabledFore = Color.FromArgb(220, 238, 255);
-            Color borderColor = Color.FromArgb(70, 100, 120);
-            Color hotKeyBack = Color.FromArgb(70, 140, 110);
-            Color hoverBack = Color.FromArgb(70, 132, 192);
-            Color pressedBack = Color.FromArgb(46, 92, 140);
-            (enabledBack, enabledFore, borderColor, hotKeyBack, hoverBack, pressedBack) = ResolveDarkStandardFunctionThemeColors(_settings.Appearance?.ColorTheme ?? "ClassicCyan", resolved);
-            Color disabledBack = BlendColors(barBack, enabledBack, 0.5);
-            Color disabledTextBase = PickReadableTextColor(disabledBack, Color.Black, Color.White);
-            Color disabledText = BlendColors(disabledTextBase, disabledBack, 0.35);
-            if (GetContrastRatio(disabledText, disabledBack) < 3.2)
-            {
-                disabledText = disabledTextBase;
-            }
-
-            return new FunctionBarColorPalette
-            {
-                BackColor = barBack,
-                BorderColor = borderColor,
-                EnabledBackColor = enabledBack,
-                EnabledTextColor = enabledFore,
-                DisabledBackColor = disabledBack,
-                DisabledTextColor = disabledText,
-                DisabledBorderColor = Color.FromArgb(45, 58, 68),
-
-                HotKeyBackColor = hotKeyBack,
-                HotKeyTextColor = enabledFore,
-
-                HoverBackColor = hoverBack,
-                PressedBackColor = pressedBack
-            };
-        }
-    }
-
-    private struct WinFdCompatibleLabelInfo
-    {
-        public string DisplayText;
-        public int HotKeyCharIndex;
-    }
-
-    private WinFdCompatibleLabelInfo ResolveWinFdCompatibleLabelInfo(int keyNumber)
-    {
-        string displayText = FunctionKeyProfileService.ResolveFdCompatibleFunctionBarShortLabel(
-            keyNumber,
-            _isFunctionBarShiftLayerActive,
-            _isFunctionBarCtrlLayerActive,
-            _isFunctionBarAltLayerActive);
-        if (string.IsNullOrWhiteSpace(displayText))
-        {
-            return new WinFdCompatibleLabelInfo { DisplayText = "", HotKeyCharIndex = -1 };
-        }
-
-        int hotKeyCharIndex = (_isFunctionBarCtrlLayerActive || (_isFunctionBarAltLayerActive && _isFunctionBarShiftLayerActive) || (_isFunctionBarCtrlLayerActive && _isFunctionBarShiftLayerActive) || (_isFunctionBarCtrlLayerActive && _isFunctionBarAltLayerActive))
-            ? -1
-            : (_isFunctionBarAltLayerActive
-                ? keyNumber switch
-                {
-                    1 => 0,
-                    2 => 0,
-                    3 => 0,
-                    5 => 0,
-                    _ => -1
-                }
-                : _isFunctionBarShiftLayerActive
-                    ? keyNumber switch
-                    {
-                        1 => 0,
-                        2 => 0,
-                        3 => 0,
-                        4 => 0,
-                        5 => 0,
-                        6 => 0,
-                        7 => 0,
-                        8 => 0,
-                        9 => 0,
-                        10 => 0,
-                        11 => 0,
-                        _ => -1
-                    }
-                    : keyNumber switch
-                    {
-                        2 => 1,
-                        3 => 0,
-                        4 => 0,
-                        5 => 0,
-                        6 => 0,
-                        7 => 0,
-                        8 => 0,
-                        9 => 0,
-                        10 => 0,
-                        _ => -1
-                    });
-
-        return new WinFdCompatibleLabelInfo
-        {
-            DisplayText = displayText,
-            HotKeyCharIndex = hotKeyCharIndex
-        };
-    }
-
-    private static string? ResolveHotKeyCharacter(string? hotKeyHint)
-    {
-        if (string.IsNullOrWhiteSpace(hotKeyHint))
-        {
-            return null;
-        }
-
-        string trimmed = hotKeyHint.Trim();
-        if (trimmed.Length != 1)
-        {
-            return null;
-        }
-
-        char ch = trimmed[0];
-        if (ch >= 'A' && ch <= 'Z')
-        {
-            return char.ToUpperInvariant(ch).ToString();
-        }
-        if (ch >= 'a' && ch <= 'z')
-        {
-            return char.ToUpperInvariant(ch).ToString();
-        }
-
-        return null;
-    }
-
-    private static bool TryBuildHotKeySegments(string labelText, string? hotKeyCharacter, out int hotKeyIndex, out string prefix, out string hotKey, out string suffix)
-    {
-        hotKeyIndex = -1;
-        prefix = string.Empty;
-        hotKey = string.Empty;
-        suffix = string.Empty;
-
-        if (string.IsNullOrWhiteSpace(labelText) || string.IsNullOrWhiteSpace(hotKeyCharacter))
-        {
-            return false;
-        }
-
-        string normalizedHotKey = hotKeyCharacter.Trim();
-        if (normalizedHotKey.Length != 1)
-        {
-            return false;
-        }
-
-        char hotKeyChar = normalizedHotKey[0];
-        for (int i = 0; i < labelText.Length; i++)
-        {
-            char labelChar = labelText[i];
-            if (char.ToUpperInvariant(labelChar) == char.ToUpperInvariant(hotKeyChar))
-            {
-                hotKeyIndex = i;
-                prefix = labelText[..i];
-                hotKey = char.ToUpperInvariant(labelChar).ToString();
-                suffix = labelText[(i + 1)..];
-                return true;
-            }
-        }
-
-        return false;
-    }
-
-    private string GetFunctionBarLayerBadgeText(bool isShift, bool isCtrl, bool isAlt)
-    {
-        if (isCtrl) return "Ctrl";
-        if (isAlt) return "Alt";
-        if (isShift) return "Shift";
-        return "";
-    }
-
-    private int GetFunctionBarLayerBadgeWidth(bool isShift, bool isCtrl, bool isAlt, Font font)
-    {
-        string text = GetFunctionBarLayerBadgeText(isShift, isCtrl, isAlt);
-        if (string.IsNullOrEmpty(text))
-        {
-            return 0;
-        }
-        int panelWidth = functionBarPanel?.ClientSize.Width ?? 1024;
-        if (panelWidth <= 0) panelWidth = 1024;
-        float scale = GetFunctionBarEffectiveScale(font, panelWidth);
-        return (int)Math.Round(48 * scale);
-    }
-
-    private System.Drawing.Drawing2D.GraphicsPath CreateRoundedRectanglePath(Rectangle rect, int radius)
-    {
-        var path = new System.Drawing.Drawing2D.GraphicsPath();
-        int d = radius * 2;
-        path.AddArc(rect.X, rect.Y, d, d, 180, 90);
-        path.AddArc(rect.Right - d, rect.Y, d, d, 270, 90);
-        path.AddArc(rect.Right - d, rect.Bottom - d, d, d, 0, 90);
-        path.AddArc(rect.X, rect.Bottom - d, d, d, 90, 90);
-        path.CloseFigure();
-        return path;
-    }
-
-    private void DrawFunctionBarLayerBadge(Graphics g, Rectangle panelBounds, Rectangle[]? rects, Font font, FunctionBarColorPalette palette, bool isShift, bool isCtrl, bool isAlt)
-    {
-        string text = GetFunctionBarLayerBadgeText(isShift, isCtrl, isAlt);
-        if (string.IsNullOrEmpty(text)) return;
-
-        int badgeW = GetFunctionBarLayerBadgeWidth(isShift, isCtrl, isAlt, font);
-        int badgeY;
-        int badgeH;
-        if (rects != null && rects.Length > 0)
-        {
-            badgeY = rects[0].Y;
-            badgeH = rects[0].Height;
-        }
-        else
-        {
-            int slotHeight = GetFunctionBarSlotHeight(g, font);
-            badgeY = Math.Max(panelBounds.Top, panelBounds.Bottom - slotHeight - 2);
-            badgeH = slotHeight;
-        }
-        const int paddingX = 4;
-        var badgeRect = new Rectangle(panelBounds.X + paddingX, badgeY, badgeW - (paddingX * 2), badgeH);
-
-        // 1番目のスロットと重ならないようにガード
-        if (rects != null && rects.Length > 0)
-        {
-            int maxX = rects[0].Left - 4;
-            if (badgeRect.Right > maxX)
-            {
-                if (maxX - badgeRect.Left < 20) return; // 描画スペースが極小の場合は描画しない
-                badgeRect.Width = maxX - badgeRect.Left;
-            }
-        }
-
-        Color backColor = Color.FromArgb(24, 38, 57);
-        Color borderColor = Color.FromArgb(0, 192, 222);
-        Color textColor = Color.FromArgb(220, 245, 255);
-
-        using (var path = CreateRoundedRectanglePath(badgeRect, 3))
-        {
-            using (var bgBrush = new SolidBrush(backColor))
-            {
-                g.FillPath(bgBrush, path);
-            }
-            using (var borderPen = new Pen(borderColor, 1.2f))
-            {
-                g.DrawPath(borderPen, path);
-            }
-        }
-
-        int panelWidth = functionBarPanel?.ClientSize.Width ?? 1024;
-        if (panelWidth <= 0) panelWidth = 1024;
-        float scale = GetFunctionBarEffectiveScale(font, panelWidth);
-        using var badgeFont = new Font(font.FontFamily, Math.Clamp(8.5F * scale, 8.0F, 18.0F), FontStyle.Bold);
-        TextRenderer.DrawText(
-            g,
-            text,
-            badgeFont,
-            badgeRect,
-            textColor,
-            TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding
-        );
-    }
-
-    private void DrawFunctionBarButtonText(
-        Graphics graphics,
-        Rectangle labelRect,
-        string labelText,
-        string? hotKeyCharacter,
-        Font font,
-        FunctionBarColorPalette palette,
-        bool isEnabled,
-        bool isPressed)
-    {
-        if (string.IsNullOrWhiteSpace(labelText))
-        {
-            return;
-        }
-
-        string normalizedLabel = InputSettings.NormalizeFunctionBarLabelText(labelText);
-        if (isEnabled && TryBuildHotKeySegments(normalizedLabel, hotKeyCharacter, out _, out string prefix, out string hotKey, out string suffix))
-        {
-            Size prefixSize = string.IsNullOrEmpty(prefix)
-                ? Size.Empty
-                : TextRenderer.MeasureText(graphics, prefix, font, Size.Empty, TextFormatFlags.NoPadding);
-            Size hotKeySize = TextRenderer.MeasureText(graphics, hotKey, font, Size.Empty, TextFormatFlags.NoPadding);
-            Size suffixSize = string.IsNullOrEmpty(suffix)
-                ? Size.Empty
-                : TextRenderer.MeasureText(graphics, suffix, font, Size.Empty, TextFormatFlags.NoPadding);
-                int totalWidth = prefixSize.Width + hotKeySize.Width + suffixSize.Width;
-                if (totalWidth <= labelRect.Width)
-                {
-                    int startX = labelRect.X + Math.Max(0, (labelRect.Width - totalWidth) / 2);
-                    if (startX > labelRect.X)
-                    {
-                        startX -= 1;
-                    }
-                    int measuredHeight = TextRenderer.MeasureText(graphics, normalizedLabel, font, Size.Empty, TextFormatFlags.NoPadding).Height;
-                    int contentHeight = Math.Min(labelRect.Height, Math.Max(measuredHeight, hotKeySize.Height));
-                    int textY = labelRect.Y + Math.Max(0, (labelRect.Height - contentHeight) / 2);
-                if (isPressed)
-                {
-                    textY = Math.Min(labelRect.Bottom - contentHeight, textY + 1);
-                }
-
-                Rectangle prefixRect = new Rectangle(startX, textY, prefixSize.Width, contentHeight);
-                Rectangle hotKeyRect = new Rectangle(startX + prefixSize.Width, textY, hotKeySize.Width, contentHeight);
-                Rectangle suffixRect = new Rectangle(startX + prefixSize.Width + hotKeySize.Width, textY, suffixSize.Width, contentHeight);
-
-                if (hotKeyRect.Width > 0)
-                {
-                    Rectangle highlightRect = Rectangle.Intersect(hotKeyRect, labelRect);
-                    using var highlightBrush = new SolidBrush(palette.HotKeyBackColor);
-                    graphics.FillRectangle(highlightBrush, highlightRect);
-                }
-
-                Color normalText = isEnabled ? palette.EnabledTextColor : palette.DisabledTextColor;
-                TextRenderer.DrawText(graphics, prefix, font, prefixRect, normalText, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding);
-                TextRenderer.DrawText(graphics, hotKey, font, hotKeyRect, palette.HotKeyTextColor, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding);
-                TextRenderer.DrawText(graphics, suffix, font, suffixRect, normalText, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding);
-                return;
-            }
-        }
-
-        Color textColor = isEnabled ? palette.EnabledTextColor : palette.DisabledTextColor;
-        Rectangle textRect = labelRect;
-        if (isPressed)
-        {
-            textRect.Offset(0, 1);
-        }
-        TextRenderer.DrawText(graphics, normalizedLabel, font, textRect, textColor,
-            TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix | TextFormatFlags.NoPadding);
-    }
-
-    private void DrawFunctionBarButtonFrame(
-        Graphics graphics,
-        Rectangle cellRect,
-        FunctionBarColorPalette palette,
-        bool isEnabled,
-        bool isHovered,
-        bool isPressed,
-        bool emphasizeBorder)
-    {
-        Color cellBg = isEnabled
-            ? isPressed
-                ? palette.PressedBackColor
-                : isHovered
-                    ? palette.HoverBackColor
-                    : palette.EnabledBackColor
-            : palette.DisabledBackColor;
-
-        using (var bgBrush = new SolidBrush(cellBg))
-        {
-            graphics.FillRectangle(bgBrush, cellRect);
-        }
-
-        Color borderCol = isEnabled
-            ? BlendColors(cellBg, palette.BackColor, 0.22)
-            : BlendColors(cellBg, palette.BackColor, 0.14);
-        if (emphasizeBorder && isEnabled)
-        {
-            borderCol = BlendColors(borderCol, palette.BackColor, 0.28);
-        }
-
-        using (var borderPen = new Pen(borderCol))
-        {
-            graphics.DrawRectangle(borderPen, cellRect.X, cellRect.Y, cellRect.Width - 1, cellRect.Height - 1);
-        }
-
-        if (isEnabled)
-        {
-            if (isPressed)
-            {
-                Color innerDarkCol = Color.FromArgb(40, BlendColors(cellBg, palette.BackColor, 0.20));
-                using var innerDarkPen = new Pen(innerDarkCol);
-                graphics.DrawRectangle(innerDarkPen, cellRect.X + 1, cellRect.Y + 1, cellRect.Width - 3, cellRect.Height - 3);
-            }
-            else if (isHovered)
-            {
-                Color innerLightCol = Color.FromArgb(56, BlendColors(cellBg, palette.BackColor, 0.12));
-                using var innerLightPen = new Pen(innerLightCol);
-                graphics.DrawRectangle(innerLightPen, cellRect.X + 1, cellRect.Y + 1, cellRect.Width - 3, cellRect.Height - 3);
-            }
-        }
-    }
-
-    private Rectangle[] CalculateFunctionBarLabelRects(Rectangle bounds, Font font, IReadOnlyList<string> labels)
-    {
-        var rects = new Rectangle[labels.Count];
-        if (labels.Count == 0)
-        {
-            return rects;
-        }
-
-        int labelHeight;
-        int labelWidth;
-        using (var g = CreateGraphics())
-        {
-            labelHeight = GetFunctionBarSlotHeight(g, font);
-            labelWidth = GetFunctionBarSlotWidth(bounds, font, labels.Count, 0);
-        }
-
-        int totalGap = GetFunctionBarLabelGapTotal(labels.Count);
-        int buttonGroupWidth = (labelWidth * labels.Count) + totalGap;
-        int startX = bounds.Left + Math.Max(0, (bounds.Width - buttonGroupWidth) / 2);
-        int labelY = Math.Max(bounds.Top, bounds.Bottom - labelHeight - 2);
-
-        int currentX = startX;
-        for (int i = 0; i < labels.Count; i++)
-        {
-            rects[i] = new Rectangle(currentX, labelY, labelWidth, labelHeight);
-            currentX += labelWidth;
-            if (i < labels.Count - 1)
-            {
-                currentX += (i == 3 || i == 7) ? FunctionBarGroupGap : FunctionBarInnerGap;
-            }
-        }
-
-        return rects;
-    }
-
-    private static int GetFunctionBarLabelGapTotal(int labelCount)
-    {
-        if (labelCount <= 1)
-        {
-            return 0;
-        }
-
-        int totalGap = 0;
-        for (int i = 0; i < labelCount - 1; i++)
-        {
-            totalGap += (i == 3 || i == 7) ? FunctionBarGroupGap : FunctionBarInnerGap;
-        }
-
-        return totalGap;
-    }
-
-    private int GetFunctionBarSlotCellWidth(Font font)
-    {
-        int panelWidth = functionBarPanel?.ClientSize.Width ?? 1024;
-        if (panelWidth <= 0) panelWidth = 1024;
-        float scale = GetFunctionBarEffectiveScale(font, panelWidth);
-        return Math.Clamp((int)Math.Round(font.Size * 1.05F), 6, (int)Math.Round(12 * scale));
-    }
-
-    private int GetFunctionBarSlotHeight(Graphics g, Font font)
-    {
-        int measuredHeight = TextRenderer.MeasureText(
-            g,
-            "Hg",
-            font,
-            Size.Empty,
-            TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix).Height;
-        int panelWidth = functionBarPanel?.ClientSize.Width ?? 1024;
-        if (panelWidth <= 0) panelWidth = 1024;
-        float scale = GetFunctionBarEffectiveScale(font, panelWidth);
-        int baseHeight = Math.Clamp(measuredHeight + 4, 16, (int)Math.Round(24 * scale));
-        if (functionBarPanel != null && functionBarPanel.ClientSize.Height > 0)
-        {
-            int maxAllowed = Math.Max(16, functionBarPanel.ClientSize.Height - 4);
-            return Math.Min(baseHeight, maxAllowed);
-        }
-        return baseHeight;
-    }
-
-    private int GetFunctionBarSlotWidth(Rectangle bounds, Font font, int labelCount, int badgeReserveWidth)
-    {
-        int cellWidth = GetFunctionBarSlotCellWidth(font);
-        int desiredSlotWidth = (cellWidth * FunctionBarFixedCellCount) + (FunctionBarSlotPaddingX * 2);
-        int totalGap = GetFunctionBarLabelGapTotal(labelCount);
-        int availableWidth = Math.Max(0, bounds.Width - badgeReserveWidth - totalGap - (FunctionBarSlotPaddingX * 2));
-        int maxSlotWidthByPanel = labelCount > 0 ? availableWidth / labelCount : 0;
-        if (maxSlotWidthByPanel <= 0)
-        {
-            return FunctionBarSlotMinWidth;
-        }
-
-        int slotWidth = Math.Min(desiredSlotWidth, maxSlotWidthByPanel);
-        slotWidth = Math.Max(slotWidth, FunctionBarSlotMinWidth);
-        return Math.Min(slotWidth, maxSlotWidthByPanel);
-    }
-
-    private Rectangle[] CalculateWinFdFunctionBarLabelRects(Rectangle bounds, Font font)
-    {
-        var labels = new string[12];
-        for (int i = 1; i <= 12; i++)
-        {
-            labels[i - 1] = ResolveWinFdCompatibleLabelInfo(i).DisplayText;
-        }
-
-        return CalculateFunctionBarLabelRects(bounds, font, labels);
-    }
-
-    private static string ExtractFunctionBarDisplayText(string? hiddenText)
-    {
-        if (string.IsNullOrWhiteSpace(hiddenText))
-        {
-            return string.Empty;
-        }
-
-        int separatorIndex = hiddenText.IndexOf(':');
-        string displayText = separatorIndex >= 0
-            ? hiddenText[(separatorIndex + 1)..]
-            : hiddenText;
-        return InputSettings.NormalizeFunctionBarLabelText(displayText);
-    }
-
-    private void DrawWinFdCompatibleFunctionBarItem(
-        Graphics graphics,
-        Rectangle labelRect,
-        int keyNumber,
-        string? customCmdId,
-        string? displayTextOverride,
-        bool isEnabled,
-        bool isHovered,
-        bool isPressed,
-        Font font)
-    {
-        WinFdCompatibleLabelInfo labelInfo;
-        string? hotKeyCharacter = null;
-        if (!string.IsNullOrEmpty(customCmdId))
-        {
-            string shortLabel = ExtractFunctionBarDisplayText(displayTextOverride);
-            if (string.IsNullOrWhiteSpace(shortLabel))
-            {
-                shortLabel = ResolveWinFdCompatibleLabelInfo(keyNumber).DisplayText;
-            }
-            labelInfo = new WinFdCompatibleLabelInfo { DisplayText = shortLabel, HotKeyCharIndex = -1 };
-            hotKeyCharacter = ResolveHotKeyCharacter(FunctionKeyProfileService.ResolveFunctionBarPrimaryKeyHint(
-                customCmdId,
-                _settings.Input.BrowserKeyCommandOverrides,
-                InputSettings.StandardProfileValue));
-        }
-        else
-        {
-            var defaultLabelInfo = ResolveWinFdCompatibleLabelInfo(keyNumber);
-            string displayText = ExtractFunctionBarDisplayText(displayTextOverride);
-            if (!string.IsNullOrWhiteSpace(displayText))
-            {
-                labelInfo = new WinFdCompatibleLabelInfo { DisplayText = displayText, HotKeyCharIndex = defaultLabelInfo.HotKeyCharIndex };
-            }
-            else
-            {
-                labelInfo = defaultLabelInfo;
-            }
-        }
-
-        string labelText = labelInfo.DisplayText;
-        if (string.IsNullOrEmpty(labelText)) return;
-        if (string.IsNullOrWhiteSpace(hotKeyCharacter) && labelInfo.HotKeyCharIndex >= 0 && labelInfo.HotKeyCharIndex < labelText.Length)
-        {
-            hotKeyCharacter = labelText[labelInfo.HotKeyCharIndex].ToString();
-        }
-
-        // パレットの取得
-        var palette = GetFunctionBarColors(isWinFdCompatible: true);
-
-        // 1. 背景色の決定
-        Color bgCol;
-        if (isEnabled)
-        {
-            if (isPressed)
-            {
-                bgCol = palette.PressedBackColor;
-            }
-            else if (isHovered)
-            {
-                bgCol = palette.HoverBackColor;
-            }
-            else
-            {
-                bgCol = palette.EnabledBackColor;
-            }
-        }
-        else
-        {
-            bgCol = palette.DisabledBackColor;
-        }
-
-        using (var bgBrush = new SolidBrush(bgCol))
-        {
-            graphics.FillRectangle(bgBrush, labelRect);
-        }
-
-        // 2. セル境界線描画
-        Color borderCol = isEnabled ? palette.BorderColor : palette.DisabledBorderColor;
-        using (var borderPen = new Pen(borderCol))
-        {
-            graphics.DrawLine(borderPen, labelRect.Left, labelRect.Top, labelRect.Right - 1, labelRect.Top);
-            graphics.DrawLine(borderPen, labelRect.Left, labelRect.Bottom - 1, labelRect.Right - 1, labelRect.Bottom - 1);
-            graphics.DrawLine(borderPen, labelRect.Left, labelRect.Top, labelRect.Left, labelRect.Bottom - 1);
-            graphics.DrawLine(borderPen, labelRect.Right - 1, labelRect.Top, labelRect.Right - 1, labelRect.Bottom - 1);
-        }
-
-        if (isEnabled)
-        {
-            if (isPressed)
-            {
-                Color innerDarkCol = Color.FromArgb(128, BlendColors(palette.EnabledBackColor, Color.Black, 0.45));
-                using var innerDarkPen = new Pen(innerDarkCol);
-                graphics.DrawRectangle(innerDarkPen, labelRect.X + 1, labelRect.Y + 1, labelRect.Width - 2, labelRect.Height - 2);
-            }
-            else if (isHovered)
-            {
-                Color innerLightCol = Color.FromArgb(128, BlendColors(palette.EnabledBackColor, Color.White, 0.65));
-                using var innerLightPen = new Pen(innerLightCol);
-                graphics.DrawRectangle(innerLightPen, labelRect.X + 1, labelRect.Y + 1, labelRect.Width - 2, labelRect.Height - 2);
-            }
-        }
-
-        // 3. テキスト描画領域
-        Size textSize = TextRenderer.MeasureText(graphics, labelText, font, Size.Empty, TextFormatFlags.NoPadding);
-        Rectangle textRect = new Rectangle(labelRect.X + (labelRect.Width - textSize.Width) / 2, labelRect.Y, textSize.Width, labelRect.Height);
-        if (isEnabled && isPressed)
-        {
-            textRect.Offset(0, 1);
-        }
-
-        // 4. バインドキー背景の描画
-        if (isEnabled && !string.IsNullOrWhiteSpace(hotKeyCharacter))
-        {
-            if (TryBuildHotKeySegments(labelText, hotKeyCharacter, out _, out string prefix, out string hotKeyStr, out _))
-            {
-                Size beforeSize = string.IsNullOrEmpty(prefix)
-                    ? Size.Empty
-                    : TextRenderer.MeasureText(graphics, prefix, font, Size.Empty, TextFormatFlags.NoPadding);
-                Size hotKeySize = TextRenderer.MeasureText(graphics, hotKeyStr, font, Size.Empty, TextFormatFlags.NoPadding);
-
-                int textY = textRect.Y + (textRect.Height - textSize.Height) / 2;
-                int hotKeyX = textRect.X + beforeSize.Width;
-
-                using var hotKeyBgBrush = new SolidBrush(palette.HotKeyBackColor);
-                graphics.FillRectangle(hotKeyBgBrush, hotKeyX, textY, hotKeySize.Width, textSize.Height);
-
-                TextRenderer.DrawText(graphics, prefix, font, new Rectangle(textRect.X, textY, beforeSize.Width, textRect.Height), palette.EnabledTextColor, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding);
-                TextRenderer.DrawText(graphics, hotKeyStr, font, new Rectangle(hotKeyX, textY, hotKeySize.Width, textRect.Height), palette.HotKeyTextColor, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding);
-                string suffix = labelText.Substring(prefix.Length + 1);
-                if (!string.IsNullOrEmpty(suffix))
-                {
-                    int suffixX = hotKeyX + hotKeySize.Width;
-                    TextRenderer.DrawText(graphics, suffix, font, new Rectangle(suffixX, textY, textRect.Right - suffixX, textRect.Height), palette.EnabledTextColor, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding);
-                }
-                return;
-            }
-        }
-
-        // 5. テキストの描画
-        Color textColor = isEnabled ? palette.EnabledTextColor : palette.DisabledTextColor;
-        TextRenderer.DrawText(graphics, labelText, font, textRect, textColor,
-            TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding);
-    }
-    private int HitTestFunctionKeyIndex(Point loc, Rectangle clientBounds, Font font)
-    {
-        var profile = FunctionKeyProfileService.ResolveProfile(CurrentFunctionKeyProfileValue);
-        var layoutModels = BuildFunctionBarSlotModels(profile, false, false, false);
-        var labels = layoutModels.Select(model => model.LayoutLabel).ToArray();
-        var rects = CalculateFunctionBarLabelRects(clientBounds, font, labels);
-        for (int i = 0; i < rects.Length; i++)
-        {
-            if (rects[i].Contains(loc))
-            {
-                return i;
-            }
-        }
-        return -1;
-    }
-
-    private void InvalidateFunctionBarItem(int index)
-    {
-        if (index < 0 || index >= 12) return;
-
-        using var layoutFont = _headerPaintFont != null
-            ? new Font(_headerPaintFont.FontFamily, _headerPaintFont.Size, _headerPaintFont.Style)
-            : new Font("Consolas", 10F);
-        using var functionBarFont = CreateFunctionBarRenderFont(layoutFont);
-
-        var profile = FunctionKeyProfileService.ResolveProfile(CurrentFunctionKeyProfileValue);
-        var layoutModels = BuildFunctionBarSlotModels(profile, false, false, false);
-        var labels = layoutModels.Select(model => model.LayoutLabel).ToArray();
-        var rects = CalculateFunctionBarLabelRects(functionBarPanel.ClientRectangle, functionBarFont, labels);
-        if (index < rects.Length)
-        {
-            var r = rects[index];
-            r.Inflate(1, 1);
-            functionBarPanel.Invalidate(r);
-        }
-    }
-    /// <summary>
-    /// Phase 5-ui-visual-fix1.4c: 幅不足時のための承認済み短縮ラベル。
-    /// Browser/Viewer それぞれの規定の省略形。
-    /// </summary>
-    private string GetShortenedLabel(string fullLabelPart)
-    {
-        if (string.IsNullOrEmpty(fullLabelPart)) return fullLabelPart;
-        return fullLabelPart switch
-        {
-            // Browser
-            "help" => "hlp",
-            "exec" => "exc",
-            "copy" => "cpy",
-            "edit" => "edt",
-            "sort" => "srt",
-            "filter" => "flt",
-            "tree" => "tre",
-            "logd" => "log",
-            "unpk" => "unp",
-            "encode" => "enc",
-            "wrap" => "wrp",
-            "ren" => "ren",
-            "top" => "top",
-            "btm" => "btm",
-            // Viewer
-            "l:enc" => "enc",
-            "w:wrap" => "wrp",
-            "^f:find" => "find",
-            "f3:next" => "next",
-            "s+f3:prv" => "prev",
-            "qt(en/es)" => "quit",
-            _ => fullLabelPart
-        };
-    }
-    private void PositionPreviewPopup()
-    {
-        if (!this.IsHandleCreated) return;
-        // ユーザーが手動で移動した後は自動配置で上書きしない
-        // Phase 5-image-preview-fix1: マルチモニター解除等で完全に画面外へ出ている場合は例外的に引き戻す
-        if (_previewPopup.IsManuallyPositioned)
-        {
-            var currentScreen = Screen.FromControl(_previewPopup).WorkingArea;
-            if (!currentScreen.IntersectsWith(_previewPopup.Bounds))
-            {
-                _previewPopup.IsManuallyPositioned = false; // 強制復帰
-            }
-            else
-            {
-                return;
-            }
-        }
-        var screen = Screen.FromControl(this).WorkingArea;
-        int popupW = 400;
-        int popupH = 400;
-        int x = this.Right + 4;
-        int y = this.Top;
-        // 画面右端をはみ出る場合は左側に出す
-        if (x + popupW > screen.Right)
-        {
-            x = this.Left - popupW - 4;
-        }
-        // 画面内に収まるように調整
-        if (x < screen.Left) x = screen.Left;
-        if (y + popupH > screen.Bottom) y = screen.Bottom - popupH;
-        if (y < screen.Top) y = screen.Top;
-        _previewPopup.SetBounds(x, y, popupW, popupH);
-    }
-    private bool LoadDirectory(string targetPath, string? focusTargetName = null, bool isHistoryNavigation = false, bool suppressRecent = false)
-    {
-        HideBrowserFileNameToolTip();
-        try
-        {
-            var request = CreateDirectoryLoadRequest(targetPath, focusTargetName, isHistoryNavigation, suppressRecent);
-            var result = _browserLoadCoordinator.Execute(
-                request,
-                new BrowserLoadCoordinator.ExecutionContext
-                {
-                    ShowStatusMessage = ShowStatusMessage,
-                    DecoratePathItem = ApplyMarkColor
-                });
-            // 成功時 UI 反映のオーケストレーション
-            ApplyDirectoryLoadUi(result);
-            return true;
-        }
-        catch (Exception ex)
-        {
-            return NotifyDirectoryLoadFailure(ex);
-        }
-    }
-    private BrowserLoadCoordinator.DirectoryLoadRequest CreateDirectoryLoadRequest(
-        string targetPath,
-        string? focusTargetName,
-        bool isHistoryNavigation,
-        bool suppressRecent)
-    {
-        string? currentFullName = null;
-        var currentItem = GetCurrentBrowserItem();
-        if (currentItem != null)
-        {
-            currentFullName = GetItemFullName(currentItem);
-        }
-        return new BrowserLoadCoordinator.DirectoryLoadRequest(
-            targetPath,
-            focusTargetName,
-            isHistoryNavigation,
-            suppressRecent,
-            _navigationService.CurrentPath,
-            _browserCursorIndex,
-            currentFullName,
-            _filterPattern,
-            _filterUseRegex,
-            _settings.Appearance?.ShowHiddenFiles ?? false,
-            _currentSort,
-            _sortAscending,
-            GetActiveTabFilterLock(),
-            _settings.Appearance?.DateFormat,
-            _settings.Appearance?.SizeFormat,
-            _settings.Appearance?.ShowDirectoryMarker ?? true);
-    }
-    private void PopulateListView(IReadOnlyList<ListViewItem> items)
-    {
-        fileListView.BeginUpdate();
-        fileListView.Items.Clear();
-        try
-        {
-            if (items.Count > 0)
-            {
-                fileListView.Items.AddRange(items.ToArray());
-            }
-        }
-        finally
-        {
-            fileListView.EndUpdate();
-        }
-    }
-    private void ApplyDirectoryLoadUi(BrowserLoadCoordinator.DirectoryLoadResult result)
-    {
-        DismissTransientContextMenus();
-        bool directoryChanged = !string.Equals(
-            NavigationService.NormalizeDirectoryForCompare(result.PreviousPath),
-            NavigationService.NormalizeDirectoryForCompare(result.NewPath),
-            StringComparison.OrdinalIgnoreCase);
-        if (directoryChanged)
-        {
-            InvalidateRecentMultiMarkIntent();
-            InvalidateMarkSummaryCache();
-        }
-        // 1. 内部状態とパス表示の更新
-        _navigationService.SetCurrentPath(result.NewPath, result.IsHistoryNavigation);
-        // 2. 一覧項目の再構築
-        PopulateListView(result.Items);
-        // 3. 選択状態の復元
-        RestoreSelectionState(result.FocusTargetName, result.LastIndex, result.IsReload);
-        // 4. パネル再描画 (RestoreSelectionState 内で UpdateInfoPanel も呼ばれるためここでは Invalidate のみ)
-        browserPanel.Invalidate();
-        if (!result.SuppressRecent)
-        {
-            RecordQuickAccessRecent(result.PreviousPath, result.NewPath, result.IsReload);
-        }
-        CaptureActiveBrowserTabState(captureMarks: false);
-        UpdateCurrentDirectoryWatcher(result.NewPath, "ApplyDirectoryLoadUi");
-        TryProcessPendingCurrentDirectoryRefresh("ApplyDirectoryLoadUi");
-        UpdateMenuStripState();
-        // Phase: header stream / initial final relayout corrective follow-up
-        // ディレクトリ読み込みとタブ状態確定後の最終レイアウトを保証する
-        UpdateInfoPanel();
-    }
-    private void RecordQuickAccessRecent(string previousPath, string newPath, bool isReload)
-    {
-        if (isReload || string.IsNullOrWhiteSpace(previousPath))
-        {
-            return;
-        }
-        if (QuickAccessService.PathsEqual(previousPath, newPath))
-        {
-            return;
-        }
-        if (QuickAccessService.RecordRecent(_quickAccessStore, newPath))
-        {
-            QuickAccessService.Save(_quickAccessStore);
-        }
-    }
-    private bool NotifyDirectoryLoadFailure(Exception ex)
-    {
-        ShowStatusMessage($"読み込み失敗: {ex.Message}");
-        return false;
-    }
-    private bool TryResolveExistingDirectoryFallback(
-        string? missingPath,
-        out string fallbackPath,
-        out string reason)
-    {
-        fallbackPath = string.Empty;
-        reason = string.Empty;
-        if (string.IsNullOrWhiteSpace(missingPath))
-        {
-            return TryResolveDefaultFallback(out fallbackPath, out reason);
-        }
-        try
-        {
-            // 1. 消失した path の親ディレクトリを順に辿る
-            string? current = null;
-            try
-            {
-                current = Path.GetFullPath(missingPath);
-            }
-            catch
-            {
-                current = missingPath;
-            }
-            while (!string.IsNullOrWhiteSpace(current))
-            {
-                try
-                {
-                    string? parent = Directory.GetParent(current)?.FullName;
-                    if (string.IsNullOrWhiteSpace(parent))
-                    {
-                        break;
-                    }
-                    if (Directory.Exists(parent))
-                    {
-                        fallbackPath = parent;
-                        reason = "親";
-                        return true;
-                    }
-                    current = parent;
-                }
-                catch
-                {
-                    break;
-                }
-            }
-            // 2. ドライブルート
-            try
-            {
-                string? root = Path.GetPathRoot(missingPath);
-                if (!string.IsNullOrWhiteSpace(root) && Directory.Exists(root))
-                {
-                    fallbackPath = root;
-                    reason = "ルート";
-                    return true;
-                }
-            }
-            catch { }
-            // 3. デフォルト fallback
-            return TryResolveDefaultFallback(out fallbackPath, out reason);
-        }
-        catch (Exception ex)
-        {
-            LogService.Error($"[DirectoryRefresh] Fallback resolution failed: {ex.Message}");
-            return TryResolveDefaultFallback(out fallbackPath, out reason);
-        }
-    }
-    private bool TryResolveDefaultFallback(out string fallbackPath, out string reason)
-    {
-        fallbackPath = string.Empty;
-        reason = string.Empty;
-        try
-        {
-            // UserProfile
-            string userProfile = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
-            if (!string.IsNullOrWhiteSpace(userProfile) && Directory.Exists(userProfile))
-            {
-                fallbackPath = userProfile;
-                reason = "ユーザープロファイル";
-                return true;
-            }
-            // AppContext.BaseDirectory
-            string appDir = AppContext.BaseDirectory;
-            if (!string.IsNullOrWhiteSpace(appDir) && Directory.Exists(appDir))
-            {
-                fallbackPath = appDir;
-                reason = "アプリケーション";
-                return true;
-            }
-        }
-        catch { }
-        return false;
-    }
-    private bool ReloadCurrentDirectory(string reason, bool force = false)
-    {
-        string currentPath = _navigationService.CurrentPath;
-        if (string.IsNullOrWhiteSpace(currentPath))
-        {
-            ShowStatusMessage("現在ディレクトリが未確定のため再読込できません。");
-            return false;
-        }
-        if (!force && IsCurrentDirectoryRefreshBlocked())
-        {
-            return false;
-        }
-        if (!Directory.Exists(currentPath))
-        {
-            if (TryResolveExistingDirectoryFallback(currentPath, out string fallbackPath, out string fallbackReason))
-            {
-                LogService.Info($"[DirectoryRefresh] Fallback triggered. missing={currentPath}, fallback={fallbackPath}, reason={fallbackReason}");
-                ShowStatusMessage($"現在のフォルダが見つからないため、{fallbackReason}フォルダへ移動しました。");
-                return LoadDirectory(fallbackPath);
-            }
-            UpdateCurrentDirectoryWatcher(null, "CurrentDirectoryMissing");
-            ShowStatusMessage("現在ディレクトリが見つかりません。");
-            return false;
-        }
-        bool loaded = LoadDirectory(currentPath);
-        if (loaded)
-        {
-            ShowStatusMessage(reason);
-            return true;
-        }
-        if (_currentDirectoryRefreshRetryPending)
-        {
-            return false;
-        }
-        _currentDirectoryRefreshRetryPending = true;
-        _ = Task.Run(async () =>
-        {
-            try
-            {
-                await Task.Delay(CurrentDirectoryRefreshRetryDelayMilliseconds).ConfigureAwait(false);
-                if (IsDisposed || !IsHandleCreated)
-                {
-                    return;
-                }
-                BeginInvoke(new Action(() =>
-                {
-                    _currentDirectoryRefreshRetryPending = false;
-                    if (!string.Equals(
-                        NormalizeDirectoryWatchPath(_navigationService.CurrentPath),
-                        NormalizeDirectoryWatchPath(currentPath),
-                        StringComparison.OrdinalIgnoreCase))
-                    {
-                        return;
-                    }
-                    if (!Directory.Exists(currentPath))
-                    {
-                        UpdateCurrentDirectoryWatcher(null, "RetryDirectoryMissing");
-                        ShowStatusMessage("現在ディレクトリが見つかりません。");
-                        return;
-                    }
-                    if (LoadDirectory(currentPath))
-                    {
-                        ShowStatusMessage(reason);
-                    }
-                }));
-            }
-            catch (ObjectDisposedException)
-            {
-                _currentDirectoryRefreshRetryPending = false;
-            }
-        });
-        return false;
-    }
-    private bool ExecuteCurrentDirectoryReloadCommand()
-    {
-        if (_uiMode != UIMode.Browser)
-        {
-            return false;
-        }
-        if (IsCurrentDirectoryBusy())
-        {
-            ShowStatusMessage("処理中のため再読込できません。");
-            return true;
-        }
-        ClearPendingCurrentDirectoryRefresh();
-        ReloadCurrentDirectory("現在ディレクトリを再読込しました。");
-        return true;
-    }
-    private void QueueCurrentDirectoryRefresh(string watchedDirectoryPath, string reason, Exception? exception = null)
-    {
-        if (IsDisposed)
-        {
-            return;
-        }
-        if (InvokeRequired)
-        {
-            try
-            {
-                BeginInvoke(new Action(() => QueueCurrentDirectoryRefresh(watchedDirectoryPath, reason, exception)));
-            }
-            catch (ObjectDisposedException)
-            {
-            }
-            return;
-        }
-        string normalizedWatchedPath = NormalizeDirectoryWatchPath(watchedDirectoryPath);
-        string normalizedCurrentPath = NormalizeDirectoryWatchPath(_navigationService.CurrentPath);
-        string normalizedWatcherPath = NormalizeDirectoryWatchPath(_currentDirectoryWatcherPath);
-        if (string.IsNullOrWhiteSpace(normalizedWatchedPath) ||
-            !string.Equals(normalizedWatchedPath, normalizedCurrentPath, StringComparison.OrdinalIgnoreCase) ||
-            !string.Equals(normalizedWatchedPath, normalizedWatcherPath, StringComparison.OrdinalIgnoreCase))
-        {
-            return;
-        }
-        _pendingExternalDirectoryRefresh = true;
-        _pendingExternalDirectoryRefreshPath = watchedDirectoryPath;
-        _pendingExternalDirectoryRefreshReason = reason;
-        _pendingExternalDirectoryRefreshReasons.Add(reason);
-        _pendingExternalDirectoryRefreshEventCount++;
-        if (exception != null)
-        {
-            _pendingExternalDirectoryRefreshExceptionType = exception.GetType().Name;
-            _pendingExternalDirectoryRefreshExceptionMessage = exception.Message;
-        }
-        _directoryRefreshDebounceTimer.Stop();
-        _directoryRefreshDebounceTimer.Start();
-    }
-    private void TryProcessPendingCurrentDirectoryRefresh(string source)
-    {
-        if (!_pendingExternalDirectoryRefresh || _isApplyingExternalDirectoryRefresh)
-        {
-            return;
-        }
-        string currentPath = _navigationService.CurrentPath;
-        string pendingPath = _pendingExternalDirectoryRefreshPath ?? string.Empty;
-        if (!string.Equals(
-            NormalizeDirectoryWatchPath(currentPath),
-            NormalizeDirectoryWatchPath(pendingPath),
-            StringComparison.OrdinalIgnoreCase))
-        {
-            ClearPendingCurrentDirectoryRefresh();
-            return;
-        }
-        if (_uiMode != UIMode.Browser || IsCurrentDirectoryBusy())
-        {
-            return;
-        }
-        int externalDelayMs = _previewDiagnosticDelayService.ExternalReloadDelayMs;
-        if (!_pendingExternalDirectoryRefreshDelayScheduled
-            && !_pendingExternalDirectoryRefreshDelayCompleted
-            && _previewDiagnosticDelayService.ShouldDelay(currentPath, externalDelayMs))
-        {
-            _pendingExternalDirectoryRefreshDelayScheduled = true;
-            _ = Task.Run(async () =>
-            {
-                try
-                {
-                    using var cts = new CancellationTokenSource();
-                    await _previewDiagnosticDelayService
-                        .DelayAsync("ExternalChangeReload", currentPath, externalDelayMs, cts.Token)
-                        .ConfigureAwait(false);
-                }
-                catch (OperationCanceledException)
-                {
-                }
-                finally
-                {
-                    if (IsDisposed || !IsHandleCreated)
-                    {
-                        _pendingExternalDirectoryRefreshDelayScheduled = false;
-                    }
-                    else
-                    {
-                        try
-                        {
-                            BeginInvoke(new Action(() =>
-                            {
-                                _pendingExternalDirectoryRefreshDelayScheduled = false;
-                                _pendingExternalDirectoryRefreshDelayCompleted = true;
-                                TryProcessPendingCurrentDirectoryRefresh($"{source}:Delayed");
-                            }));
-                        }
-                        catch (ObjectDisposedException)
-                        {
-                            _pendingExternalDirectoryRefreshDelayScheduled = false;
-                        }
-                    }
-                }
-            });
-            return;
-        }
-        _isApplyingExternalDirectoryRefresh = true;
-        var sw = Stopwatch.StartNew();
-        string statusBefore = statusLabel?.Text ?? "<null>";
-        string reason = BuildExternalDirectoryRefreshReason();
-        string statusMessage = $"外部変更を反映しました: {reason}";
-        string result = "Skipped";
-        string exceptionType = _pendingExternalDirectoryRefreshExceptionType ?? "-";
-        string exceptionMessage = _pendingExternalDirectoryRefreshExceptionMessage ?? "-";
-        try
-        {
-            ClearPendingCurrentDirectoryRefresh();
-            bool loaded = ReloadCurrentDirectory(statusMessage, force: true);
-            result = loaded ? "Success" : "Error";
-        }
-        catch (Exception ex)
-        {
-            result = "Error";
-            exceptionType = ex.GetType().Name;
-            exceptionMessage = ex.Message;
-            LogService.Warn(
-                $"[ExternalChangeReload] source={source} path='{currentPath}' reason='{reason}' result=Error " +
-                $"exceptionType='{exceptionType}' message='{exceptionMessage}'");
-            throw;
-        }
-        finally
-        {
-            string statusAfter = statusLabel?.Text ?? "<null>";
-            LogService.Info(
-                $"[StatusUpdate] source='ExternalChangeReload' before='{statusBefore}' after='{statusAfter}'");
-            LogService.Info(
-                $"[ExternalChangeReload] source={source} path='{currentPath}' reason='{reason}' result={result} " +
-                $"exceptionType='{exceptionType}' message='{exceptionMessage}' elapsedMs={sw.ElapsedMilliseconds}");
-            _isApplyingExternalDirectoryRefresh = false;
-        }
-    }
-    private void ClearPendingCurrentDirectoryRefresh()
-    {
-        _pendingExternalDirectoryRefresh = false;
-        _pendingExternalDirectoryRefreshPath = null;
-        _pendingExternalDirectoryRefreshReason = "外部変更";
-        _pendingExternalDirectoryRefreshReasons.Clear();
-        _pendingExternalDirectoryRefreshEventCount = 0;
-        _pendingExternalDirectoryRefreshExceptionType = null;
-        _pendingExternalDirectoryRefreshExceptionMessage = null;
-        _pendingExternalDirectoryRefreshDelayScheduled = false;
-        _pendingExternalDirectoryRefreshDelayCompleted = false;
-        _directoryRefreshDebounceTimer.Stop();
-    }
-    private string BuildExternalDirectoryRefreshReason()
-    {
-        int eventCount = _pendingExternalDirectoryRefreshEventCount;
-        if (eventCount > ExternalDirectoryRefreshBulkThreshold)
-        {
-            return $"Bulk({eventCount})";
-        }
-        if (_pendingExternalDirectoryRefreshReasons.Count > 0)
-        {
-            return string.Join("+", _pendingExternalDirectoryRefreshReasons.OrderBy(static value => value));
-        }
-        return _pendingExternalDirectoryRefreshReason;
-    }
-    private void UpdateCurrentDirectoryWatcher(string? currentPath, string reason)
-    {
-        if (!_featureGate.IsEnabled(FeatureId.FileSystemWatcherAutoRefresh))
-        {
-            DisposeCurrentDirectoryWatcher();
-            ClearPendingCurrentDirectoryRefresh();
-            return;
-        }
-        string normalizedCurrentPath = NormalizeDirectoryWatchPath(currentPath);
-        string normalizedWatcherPath = NormalizeDirectoryWatchPath(_currentDirectoryWatcherPath);
-        if (!string.IsNullOrWhiteSpace(normalizedCurrentPath) &&
-            string.Equals(normalizedCurrentPath, normalizedWatcherPath, StringComparison.OrdinalIgnoreCase) &&
-            _currentDirectoryWatcher != null)
-        {
-            return;
-        }
-        DisposeCurrentDirectoryWatcher();
-        _currentDirectoryWatcherPath = null;
-        if (string.IsNullOrWhiteSpace(currentPath) || !Directory.Exists(currentPath))
-        {
-            return;
-        }
-        try
-        {
-            var watcher = new FileSystemWatcher(currentPath)
-            {
-                IncludeSubdirectories = false,
-                NotifyFilter = NotifyFilters.FileName |
-                               NotifyFilters.DirectoryName |
-                               NotifyFilters.LastWrite |
-                               NotifyFilters.Size |
-                               NotifyFilters.CreationTime |
-                               NotifyFilters.LastAccess |
-                               NotifyFilters.Attributes,
-                EnableRaisingEvents = false
-            };
-            watcher.Changed += (_, _) => QueueCurrentDirectoryRefresh(currentPath, "Changed");
-            watcher.Created += (_, _) => QueueCurrentDirectoryRefresh(currentPath, "Created");
-            watcher.Deleted += (_, _) => QueueCurrentDirectoryRefresh(currentPath, "Deleted");
-            watcher.Renamed += (_, _) => QueueCurrentDirectoryRefresh(currentPath, "Renamed");
-            watcher.Error += (_, e) => QueueCurrentDirectoryRefresh(currentPath, "Error", e.GetException());
-            watcher.EnableRaisingEvents = true;
-            _currentDirectoryWatcher = watcher;
-            _currentDirectoryWatcherPath = currentPath;
-        }
-        catch (Exception ex)
-        {
-            LogService.Warn($"[DirectoryRefreshWatcher] Watcher init failed. reason={reason}, path={currentPath}, message={ex.Message}");
-            ShowStatusMessage("現在ディレクトリ監視を開始できませんでした。Ctrl+R で再読込してください。");
-        }
-    }
-    private void DisposeCurrentDirectoryWatcher()
-    {
-        if (_currentDirectoryWatcher == null)
-        {
-            return;
-        }
-        try
-        {
-            _currentDirectoryWatcher.EnableRaisingEvents = false;
-            _currentDirectoryWatcher.Dispose();
-        }
-        catch (Exception ex)
-        {
-            LogService.Warn($"[DirectoryRefreshWatcher] Dispose failed. message={ex.Message}");
-        }
-        finally
-        {
-            _currentDirectoryWatcher = null;
-            _currentDirectoryWatcherPath = null;
-        }
-    }
     private bool IsCurrentDirectoryBusy()
     {
         return _isClipboardBusy ||
-            _fileOpCts != null ||
-            !string.IsNullOrWhiteSpace(_activeFileOperationName) ||
+            _fileOpUiState.Cts != null ||
+            !string.IsNullOrWhiteSpace(_fileOpUiState.ActiveOperationName) ||
             _shellDeleteProgressFallback != null ||
             _isFileOperationUndoRedoBusy ||
             _undoRedoProgressFallback != null;
@@ -6964,22 +2180,22 @@ private void InitializeBrowserTabControl()
         if (_isClipboardBusy)
         {
             ShowStatusMessage(message ?? FileOperationPresentationHelper.GetBusyBlockedMessage(
-                _activeFileOperationName,
-                canCancel: _fileOpCts != null,
-                isCancelRequested: _fileOpCts?.IsCancellationRequested ?? false));
+                _fileOpUiState.ActiveOperationName,
+                canCancel: _fileOpUiState.Cts != null,
+                isCancelRequested: _fileOpUiState.Cts?.IsCancellationRequested ?? false));
             return true;
         }
         return false;
     }
     private bool RequestActiveFileOperationCancel(string source)
     {
-        bool requestedBefore = _fileOpCts?.IsCancellationRequested ?? false;
+        bool requestedBefore = _fileOpUiState.Cts?.IsCancellationRequested ?? false;
         LogService.Info(
             $"[CancelRuntime] Request received. source={source}, thread={Environment.CurrentManagedThreadId}, " +
-            $"busy={_isClipboardBusy}, hasCts={_fileOpCts != null}, alreadyRequested={requestedBefore}, " +
-            $"operation={_activeFileOperationName ?? "<unknown>"}, statusVersion={_fileOperationStatusVersion}, " +
+            $"busy={_isClipboardBusy}, hasCts={_fileOpUiState.Cts != null}, alreadyRequested={requestedBefore}, " +
+            $"operation={_fileOpUiState.ActiveOperationName ?? "<unknown>"}, statusVersion={_fileOpUiState.StatusVersion}, " +
             $"progressForm={_shellDeleteProgressFallback != null}");
-        if (_fileOpCts == null)
+        if (_fileOpUiState.Cts == null)
         {
             LogService.Warn($"[CancelRuntime] Request ignored because CTS is null. source={source}");
             return false;
@@ -6988,34 +2204,34 @@ private void InitializeBrowserTabControl()
         {
             LogService.Info(
                 $"[CancelRuntime] MarkCancelRequested before. source={source}, thread={Environment.CurrentManagedThreadId}, " +
-                $"requested={_fileOpCts.IsCancellationRequested}, progressForm={_shellDeleteProgressFallback != null}, progressDialog={_fileOperationProgressDialog != null}");
+                $"requested={_fileOpUiState.Cts.IsCancellationRequested}, progressForm={_shellDeleteProgressFallback != null}, progressDialog={_fileOperationProgressDialog != null}");
             _shellDeleteProgressFallback?.MarkCancelRequested();
             _fileOperationProgressDialog?.MarkCancelRequested();
             LogService.Info(
                 $"[CancelRuntime] MarkCancelRequested after. source={source}, thread={Environment.CurrentManagedThreadId}, " +
-                $"requested={_fileOpCts.IsCancellationRequested}, progressForm={_shellDeleteProgressFallback != null}, progressDialog={_fileOperationProgressDialog != null}");
-            if (!_fileOpCts.IsCancellationRequested)
+                $"requested={_fileOpUiState.Cts.IsCancellationRequested}, progressForm={_shellDeleteProgressFallback != null}, progressDialog={_fileOperationProgressDialog != null}");
+            if (!_fileOpUiState.Cts.IsCancellationRequested)
             {
                 LogService.Warn(
                     $"[CancelRuntime] CTS cancel before. source={source}, thread={Environment.CurrentManagedThreadId}, " +
-                    $"requested={_fileOpCts.IsCancellationRequested}, operation={_activeFileOperationName ?? "<unknown>"}");
-                _fileOperationCancelRequestedTimestamp = Stopwatch.GetTimestamp();
-                _fileOpCts.Cancel();
+                    $"requested={_fileOpUiState.Cts.IsCancellationRequested}, operation={_fileOpUiState.ActiveOperationName ?? "<unknown>"}");
+                _fileOpUiState.CancelRequestedTimestamp = Stopwatch.GetTimestamp();
+                _fileOpUiState.Cts.Cancel();
                 LogService.Warn(
                     $"[CancelRuntime] CTS cancel after. source={source}, thread={Environment.CurrentManagedThreadId}, " +
-                    $"requested={_fileOpCts.IsCancellationRequested}, operation={_activeFileOperationName ?? "<unknown>"}");
-                LogService.Info($"[FileOperationCancel] Cancel requested. source={source}, operation={_activeFileOperationName ?? "<unknown>"}, statusVersion={_fileOperationStatusVersion}");
-                ShowStatusMessage(FileOperationPresentationHelper.GetCancelRequestedMessage(_activeFileOperationName ?? "ファイル操作"));
+                    $"requested={_fileOpUiState.Cts.IsCancellationRequested}, operation={_fileOpUiState.ActiveOperationName ?? "<unknown>"}");
+                LogService.Info($"[FileOperationCancel] Cancel requested. source={source}, operation={_fileOpUiState.ActiveOperationName ?? "<unknown>"}, statusVersion={_fileOpUiState.StatusVersion}");
+                ShowStatusMessage(FileOperationPresentationHelper.GetCancelRequestedMessage(_fileOpUiState.ActiveOperationName ?? "ファイル操作"));
             }
             else
             {
                 ShowStatusMessage(FileOperationPresentationHelper.GetBusyBlockedMessage(
-                    _activeFileOperationName,
+                    _fileOpUiState.ActiveOperationName,
                     canCancel: true,
                     isCancelRequested: true));
             }
             LogService.Info(
-                $"[CancelRuntime] Request completed. source={source}, requested={_fileOpCts.IsCancellationRequested}, " +
+                $"[CancelRuntime] Request completed. source={source}, requested={_fileOpUiState.Cts.IsCancellationRequested}, " +
                 $"thread={Environment.CurrentManagedThreadId}");
         }
         catch (Exception ex)
@@ -7028,8 +2244,8 @@ private void InitializeBrowserTabControl()
     private bool HasActiveFileOperationCancelContext()
     {
         return _isClipboardBusy ||
-            _fileOpCts != null ||
-            !string.IsNullOrWhiteSpace(_activeFileOperationName) ||
+            _fileOpUiState.Cts != null ||
+            !string.IsNullOrWhiteSpace(_fileOpUiState.ActiveOperationName) ||
             _shellDeleteProgressFallback != null ||
             _fileOperationProgressDialog != null ||
             _isFileOperationUndoRedoBusy ||
@@ -7040,21 +2256,21 @@ private void InitializeBrowserTabControl()
         bool hasActiveContext = HasActiveFileOperationCancelContext();
         LogService.Info(
             $"[CancelRuntime] Active operation cancel route check. source={source}, activeContext={hasActiveContext}, " +
-            $"busy={_isClipboardBusy}, hasCts={_fileOpCts != null}, activeOperation={_activeFileOperationName ?? "<none>"}, " +
+            $"busy={_isClipboardBusy}, hasCts={_fileOpUiState.Cts != null}, activeOperation={_fileOpUiState.ActiveOperationName ?? "<none>"}, " +
             $"shellProgress={_shellDeleteProgressFallback != null}, undoRedoProgress={_undoRedoProgressFallback != null}, " +
             $"thread={Environment.CurrentManagedThreadId}");
         if (!hasActiveContext)
         {
             return false;
         }
-        if (_fileOpCts != null)
+        if (_fileOpUiState.Cts != null)
         {
             RequestActiveFileOperationCancel(source);
         }
         else
         {
             ShowStatusMessage(FileOperationPresentationHelper.GetBusyBlockedMessage(
-                _activeFileOperationName,
+                _fileOpUiState.ActiveOperationName,
                 canCancel: false,
                 isCancelRequested: false));
         }
@@ -7098,7 +2314,7 @@ private void InitializeBrowserTabControl()
             var snapshot = _cachedCommandUiSnapshot;
 
             // WinFD互換での通常F4 (file.delete) の特別扱いを CommandID レベルでも保護
-            if (isCompatible && fKey == 4 && customCmdId == "file.delete")
+            if (isCompatible && fKey == 4 && customCmdId == CommandIds.FileDelete)
             {
                 if (snapshot.SelectionKind == CommandStateCoordinator.BrowserSelectionKind.Directory ||
                     snapshot.SelectionKind == CommandStateCoordinator.BrowserSelectionKind.File ||
@@ -7271,16 +2487,16 @@ private void InitializeBrowserTabControl()
                 LogService.Warn(
                     $"[CancelProvenance] MidFD browser ESC exit confirm shown. " +
                     $"activeContext={HasActiveFileOperationCancelContext()}, busy={_isClipboardBusy}, " +
-                    $"hasCts={_fileOpCts != null}, requested={_fileOpCts?.IsCancellationRequested ?? false}, " +
-                    $"activeOperation={_activeFileOperationName ?? "<none>"}, shellProgress={_shellDeleteProgressFallback != null}, " +
+                    $"hasCts={_fileOpUiState.Cts != null}, requested={_fileOpUiState.Cts?.IsCancellationRequested ?? false}, " +
+                    $"activeOperation={_fileOpUiState.ActiveOperationName ?? "<none>"}, shellProgress={_shellDeleteProgressFallback != null}, " +
                     $"undoRedoProgress={_undoRedoProgressFallback != null}, previewVisible={_previewPopupVisible}, " +
                     $"markedCount={_markedFiles.Count}, thread={Environment.CurrentManagedThreadId}");
                 var result = MessageBox.Show("終了しますか？", "確認", MessageBoxButtons.YesNoCancel, MessageBoxIcon.Question);
                 LogService.Warn(
                     $"[CancelProvenance] MidFD browser ESC exit confirm result. result={result}, " +
                     $"activeContext={HasActiveFileOperationCancelContext()}, busy={_isClipboardBusy}, " +
-                    $"hasCts={_fileOpCts != null}, requested={_fileOpCts?.IsCancellationRequested ?? false}, " +
-                    $"activeOperation={_activeFileOperationName ?? "<none>"}, thread={Environment.CurrentManagedThreadId}");
+                    $"hasCts={_fileOpUiState.Cts != null}, requested={_fileOpUiState.Cts?.IsCancellationRequested ?? false}, " +
+                    $"activeOperation={_fileOpUiState.ActiveOperationName ?? "<none>"}, thread={Environment.CurrentManagedThreadId}");
                 if (result == DialogResult.Yes)
                 {
                     _isClosingFromEscExitPath = true;
@@ -7890,10 +3106,10 @@ private void InitializeBrowserTabControl()
         //   RightBlockPadding: 描画余白として確保する最小ピクセル数
         const int RightBlockPadding = 16;
         int sortWidth = !string.IsNullOrWhiteSpace(pathRightText)
-            ? MeasureHeaderLabelReservedWidth(lblSort, pathRightText, RightBlockPadding)
+            ? HeaderLayoutHelper.MeasureLabelReservedWidth(lblSort, pathRightText, RightBlockPadding)
             : 0;
         int metaWidth = !string.IsNullOrWhiteSpace(itemRightText)
-            ? Math.Max(MeasureHeaderLabelReservedWidth(lblFileStatsEx, itemRightText, RightBlockPadding), 180)
+            ? Math.Max(HeaderLayoutHelper.MeasureLabelReservedWidth(lblFileStatsEx, itemRightText, RightBlockPadding), 180)
             : 0;
         lblSort.Width = sortWidth;
         lblFileStatsEx.Width = metaWidth;
@@ -7901,15 +3117,15 @@ private void InitializeBrowserTabControl()
         int pathAvailableWidth = infoRow2Panel.ClientSize.Width - (lblSort.Visible ? lblSort.Width : 0) - 8;
         int nameAvailableWidth = infoRow4Panel.ClientSize.Width - (lblFileStatsEx.Visible ? lblFileStatsEx.Width : 0) - 8;
         // Path行左
-        lblPath.Text = FitTextWithEllipsis(display.Path, lblPath.Font, pathAvailableWidth);
+        lblPath.Text = HeaderLayoutHelper.FitTextWithEllipsis(display.Path, lblPath.Font, pathAvailableWidth);
         // Item行左
         if (display.SelectedItemIsDirectory)
         {
-            lblName.Text = FitDirectoryNameHeaderText(display.RawFileName, lblName.Font, nameAvailableWidth);
+            lblName.Text = HeaderLayoutHelper.FitDirectoryNameHeaderText(display.RawFileName, lblName.Font, nameAvailableWidth);
         }
         else
         {
-            lblName.Text = FitFileNameWithSizePreservingExtension(
+            lblName.Text = HeaderLayoutHelper.FitFileNameWithSizePreservingExtension(
                 display.RawFileName,
                 display.SelectedItemSizeText,
                 lblName.Font,
@@ -7926,6 +3142,7 @@ private void InitializeBrowserTabControl()
         // Row 2 は custom paint のため、テキスト更新後に幅再計算と再描画を明示する
         UpdateHeaderInteractionTooltips();
         RefreshHeaderDisplay();
+        RefreshBrowserStatusSummary();
         LogHeaderRightDiag("UpdateInfoPanel", display.MarkCount, display.MarkSizeText, pathRightText, itemRightText);
         LogFontRouteDiag("UpdateInfoPanel:END");
     }
@@ -8728,17 +3945,27 @@ private void InitializeBrowserTabControl()
                     previousCursorIndex,
                     fileListView.Items.Count,
                     ctrlPressed,
-                    shiftPressed);
+                    shiftPressed,
+                    _markedFiles.Count > 0);
                 _browserCursorIndex = newIndex;
                 SyncBrowserSelection();
                 if (clickDecision.Kind == BrowserMarkClickKind.AddRange)
                 {
                     AddBrowserMouseMarkRange(clickDecision.AnchorIndex, newIndex);
                 }
+                else if (clickDecision.Kind == BrowserMarkClickKind.PromotePendingAndToggleSingle)
+                {
+                    AddBrowserMouseMarkRange(clickDecision.PendingPromotionIndex, clickDecision.PendingPromotionIndex);
+                    ToggleBrowserMouseMarkByIndex(newIndex);
+                }
                 else if (clickDecision.Kind == BrowserMarkClickKind.ToggleSingle)
                 {
                     ToggleBrowserMouseMarkByIndex(newIndex);
                 }
+            }
+            else
+            {
+                _browserMarkInteractionController.ClearPendingPromotionCandidate();
             }
         }
         else if (e.Button == MouseButtons.Right)
@@ -8747,12 +3974,18 @@ private void InitializeBrowserTabControl()
             if (newIndex >= 0 && newIndex < fileListView.Items.Count)
             {
                 var item = fileListView.Items[newIndex];
-                if (_browserCursorIndex != newIndex)
+                var targetResolution = BrowserContextMenuTargetResolver.Resolve(
+                    _markedFiles.Snapshot(),
+                    newIndex,
+                    fileListView.Items.Count,
+                    item.Tag as string,
+                    item.Text == "..");
+                if (_browserCursorIndex != targetResolution.TargetIndex)
                 {
-                    _browserCursorIndex = newIndex;
+                    _browserCursorIndex = targetResolution.TargetIndex;
                     SyncBrowserSelection();
                 }
-                ShowBrowserItemContextMenu(e.Location);
+                ShowBrowserItemContextMenu(e.Location, item, targetResolution);
                 return;
             }
 
@@ -8905,6 +4138,7 @@ private void InitializeBrowserTabControl()
                 catch (Exception ex)
                 {
                     LogService.Error($"OpenWith 実行失敗: {ex.Message}");
+                    MessageBox.Show(this, $"「プログラムから開く」ダイアログを起動できませんでした。\n理由: {ex.Message}", "起動エラー", MessageBoxButtons.OK, MessageBoxIcon.Error);
                 }
             }
         }
@@ -9093,51 +4327,34 @@ private void InitializeBrowserTabControl()
 
     private void BrowserPanel_DragEnter(object? sender, DragEventArgs e)
     {
-        if (_uiMode != UIMode.Browser || IsActiveBrowserTabReadOnly())
-        {
-            e.Effect = DragDropEffects.None;
-            return;
-        }
-        bool hasInternalDragArchiveMarker = HasInternalDragArchiveMarker(e.Data);
-        int fileDropCount = GetFileDropCount(e.Data);
-        LogService.Info($"[DragArchive] DragEnter: internalMarkerPresent={hasInternalDragArchiveMarker}, fileDropCount={fileDropCount}, clipboardBusy={_isClipboardBusy}");
-        if (hasInternalDragArchiveMarker)
-        {
-            e.Effect = DragDropEffects.None;
-            return;
-        }
-        if (e.Data != null && e.Data.GetDataPresent(DataFormats.FileDrop))
-        {
-            // Phase 3-keybind-cleanup1.3: Clipboard処理中は受容しない
-            if (_isClipboardBusy)
-            {
-                e.Effect = DragDropEffects.None;
-                return;
-            }
-            e.Effect = DragDropEffects.Copy;
-        }
-        else if (BrowserImageDropService.HasImageData(e.Data)
-            || BrowserDropUrlResolverService.HasPotentialUrlData(e.Data))
-        {
-            if (_isClipboardBusy)
-            {
-                e.Effect = DragDropEffects.None;
-                return;
-            }
-            e.Effect = DragDropEffects.Copy;
-        }
-        else
-        {
-            e.Effect = DragDropEffects.None;
-        }
+        HandleBrowserPanelDragEnterOrOver(e, "DragEnter");
+    }
+
+    private void BrowserPanel_DragOver(object? sender, DragEventArgs e)
+    {
+        HandleBrowserPanelDragEnterOrOver(e, "DragOver");
+    }
+
+    private void BrowserPanel_DragLeave(object? sender, EventArgs e)
+    {
+        HandleBrowserPanelDragLeave();
     }
     private void BrowserPanel_DragDrop(object? sender, DragEventArgs e)
     {
-        if (_uiMode != UIMode.Browser) return;
+        if (_uiMode != UIMode.Browser)
+        {
+            LogService.Info(DragDropDataObjectDiagnosticHelper.GetDiagnosticLog("DragDrop", _uiMode.ToString(), IsActiveBrowserTabReadOnly(), _isClipboardBusy, false, e.Data, e.Effect, "uiModeNotBrowser"));
+            return;
+        }
+        if (IsActiveBrowserTabReadOnly())
+        {
+            LogService.Info(DragDropDataObjectDiagnosticHelper.GetDiagnosticLog("DragDrop", _uiMode.ToString(), IsActiveBrowserTabReadOnly(), _isClipboardBusy, false, e.Data, e.Effect, "readOnlyBlocked"));
+        }
         if (GuardReadOnlyBrowserTab("ファイル取り込み")) return;
         bool hasInternalDragArchiveMarker = HasInternalDragArchiveMarker(e.Data);
         int fileDropCount = GetFileDropCount(e.Data);
         LogService.Info($"[DragArchive] DragDrop: internalMarkerPresent={hasInternalDragArchiveMarker}, fileDropCount={fileDropCount}, clipboardBusy={_isClipboardBusy}");
+        LogService.Info(DragDropDataObjectDiagnosticHelper.GetDiagnosticLog("DragDrop", _uiMode.ToString(), IsActiveBrowserTabReadOnly(), _isClipboardBusy, hasInternalDragArchiveMarker, e.Data, e.Effect, "dropReceived"));
         if (hasInternalDragArchiveMarker)
         {
             return;
@@ -9148,57 +4365,65 @@ private void InitializeBrowserTabControl()
             return;
         }
         if (string.IsNullOrEmpty(_navigationService.CurrentPath)) return;
-        if (e.Data != null && e.Data.GetDataPresent(DataFormats.FileDrop))
+
+        // Systematically classify and resolve intent using resolver, respecting remembered decision
+        var decision = ResolveIncomingDropDecision(e);
+        if (decision.Intent == BrowserDragDropIntent.None)
         {
-            string[]? files = e.Data.GetData(DataFormats.FileDrop) as string[];
-            if (files == null || files.Length == 0) return;
-            string msg = $"{files.Length} 件の項目を現在のディレクトリにコピーしますか？\n宛先: {_navigationService.CurrentPath}";
-            var result = ShowDragInCopyConfirmationDialog(msg);
-            if (result != DialogResult.Yes)
-            {
-                ShowStatusMessage("コピーはキャンセルされました。");
-                return;
-            }
-            int successCount = 0;
-            foreach (var sourcePath in files)
-            {
-                string fileName = Path.GetFileName(sourcePath);
-                string destPath = Path.Combine(_navigationService.CurrentPath, fileName);
-                bool sourceIsDir = Directory.Exists(sourcePath);
-                bool destExists = File.Exists(destPath) || Directory.Exists(destPath);
-                if (destExists)
-                {
-                    bool destIsDir = Directory.Exists(destPath);
-                    if (sourceIsDir != destIsDir)
-                    {
-                        MessageBox.Show($"型が異なるため上書きできません。\n宛先: {destPath}", "上書きエラー", MessageBoxButtons.OK, MessageBoxIcon.Error);
-                        continue;
-                    }
-                    if (sourceIsDir)
-                    {
-                        MessageBox.Show($"フォルダ同士の上書き（統合）は現在未対応です。\nスキップします: {fileName}", "エラー", MessageBoxButtons.OK, MessageBoxIcon.Information);
-                        continue;
-                    }
-                    var overwriteMsg = FileOperationPresentationHelper.GetOverwriteConfirmationMessage(fileName);
-                    var overwriteResult = MessageBox.Show(overwriteMsg, "確認", MessageBoxButtons.YesNoCancel, MessageBoxIcon.Warning);
-                    if (overwriteResult == DialogResult.Cancel) break;
-                    if (overwriteResult == DialogResult.No) continue;
-                }
-                try
-                {
-                    FileOperationService.Copy(sourcePath, destPath);
-                    successCount++;
-                }
-                catch (Exception ex)
-                {
-                    MessageBox.Show($"コピー失敗: {fileName}\n{ex.Message}", "エラー", MessageBoxButtons.OK, MessageBoxIcon.Error);
-                    break;
-                }
-            }
-            LoadDirectory(_navigationService.CurrentPath);
-            ShowStatusMessage($"{successCount} 件の項目をドロップコピーしました。");
+            ShowStatusMessage("ドロップ不可な操作または状態です。");
             return;
         }
+
+        if (TryHandleBrowserFileDrop(e, decision))
+        {
+            return;
+        }
+
+        if (OutlookAttachmentDropService.IsOutlookAttachmentDrop(e.Data))
+        {
+            var attachmentNames = OutlookAttachmentDropService.GetAttachmentNames(e.Data!);
+            if (attachmentNames.Count > 0)
+            {
+                // Prompts are resolved here for right drag-in. Outlook attachments are copy-only.
+                BrowserDropAction action = BrowserDropAction.Copy;
+                if (decision.Intent == BrowserDragDropIntent.Prompt)
+                {
+                    action = ResolveBrowserDropAction(e, decision);
+                    if (action == BrowserDropAction.Cancel)
+                    {
+                        ShowStatusMessage("ドロップ操作はキャンセルされました。");
+                        return;
+                    }
+                }
+
+                string msg = $"{attachmentNames.Count} 件の添付ファイルを現在のディレクトリにコピーしますか？\n宛先: {_navigationService.CurrentPath}";
+                var result = ShowDragInCopyConfirmationDialog(msg);
+                if (result != DialogResult.Yes)
+                {
+                    ShowStatusMessage("コピーはキャンセルされました。");
+                    return;
+                }
+
+                Func<string, OverwriteConfirmResult> confirmOverwrite = (fileName) =>
+                {
+                    var overwriteMsg = FileOperationPresentationHelper.GetOverwriteConfirmationMessage(fileName);
+                    var overwriteResult = MessageBox.Show(overwriteMsg, "確認", MessageBoxButtons.YesNoCancel, MessageBoxIcon.Warning);
+                    if (overwriteResult == DialogResult.Yes) return OverwriteConfirmResult.Yes;
+                    if (overwriteResult == DialogResult.No) return OverwriteConfirmResult.No;
+                    return OverwriteConfirmResult.Cancel;
+                };
+
+                bool dropSuccess = OutlookAttachmentDropService.ProcessDrop(e.Data!, _navigationService.CurrentPath, confirmOverwrite);
+                if (dropSuccess)
+                {
+                    ShowStatusMessage("仮想ファイルのコピーが完了しました。");
+                    string? focusTarget = attachmentNames.Count > 0 ? attachmentNames[0] : null;
+                    LoadDirectory(_navigationService.CurrentPath, focusTarget);
+                }
+            }
+            return;
+        }
+
         if (BrowserImageDropService.TryGetImage(e.Data, out var image) && image != null)
         {
             try
@@ -9219,6 +4444,7 @@ private void InitializeBrowserTabControl()
             }
             return;
         }
+
         if (BrowserDropUrlResolverService.TryResolveImageUrl(e.Data, out Uri? imageUrl, out string? suggestedFileName)
             && imageUrl is Uri resolvedImageUrl)
         {
@@ -9248,17 +4474,20 @@ private void InitializeBrowserTabControl()
             }
             return;
         }
+
         if (BrowserImageDropService.HasImageData(e.Data))
         {
             LogBrowserImageImportWarn($"Source=BrowserDragUnsupportedImage Data={BrowserImageDropService.DescribeDataObject(e.Data)}");
             ShowStatusMessage("画像ドロップ取り込み失敗: このブラウザの画像ドロップ形式には未対応です。");
             return;
         }
+
         if (BrowserDropUrlResolverService.HasPotentialUrlData(e.Data))
         {
             LogBrowserImageImportWarn($"Source=BrowserDropUrlUnresolved Data={BrowserImageDropService.DescribeDataObject(e.Data)}");
             ShowStatusMessage("画像ドロップ取り込み失敗: 画像URLを特定できませんでした。");
         }
+        RefreshBrowserStatusSummary();
     }
     // ─── Phase 3-fix2b: MidFD → 外部 Drag-out (Copy限定) ───
     private void BrowserPanel_MouseDown(object? sender, MouseEventArgs e)
@@ -9274,9 +4503,8 @@ private void InitializeBrowserTabControl()
                 _isMouseGestureTrailVisible = true;
                 browserPanel.Invalidate();
             }
-            return;
         }
-        if (e.Button != MouseButtons.Left) return;
+        if (e.Button != MouseButtons.Left && e.Button != MouseButtons.Right) return;
         // ドラッグ開始の「候補」座標とインデックスを保持
         _dragStartPoint = e.Location;
         _dragCandidateIndex = CalculateBrowserIndexFromPoint(e.X, e.Y);
@@ -9292,31 +4520,31 @@ private void InitializeBrowserTabControl()
     }
     private void BrowserTabStrip_TabReordered(object? sender, BrowserTabStripReorderEventArgs e)
     {
-        if (e.FromIndex < 0 || e.FromIndex >= _browserTabs.Count || e.ToIndex < 0 || e.ToIndex >= _browserTabs.Count || e.FromIndex == e.ToIndex)
+        if (e.FromIndex < 0 || e.FromIndex >= _browserTabViewState.Count || e.ToIndex < 0 || e.ToIndex >= _browserTabViewState.Count || e.FromIndex == e.ToIndex)
         {
             return;
         }
         CaptureActiveBrowserTabState();
-        BrowserTabState movedTab = _browserTabs[e.FromIndex];
-        BrowserTabState? activeTab = _activeBrowserTabIndex >= 0 && _activeBrowserTabIndex < _browserTabs.Count
-            ? _browserTabs[_activeBrowserTabIndex]
+        BrowserTabState movedTab = _browserTabViewState.Tabs[e.FromIndex];
+        BrowserTabState? activeTab = _browserTabViewState.ActiveTabIndex >= 0 && _browserTabViewState.ActiveTabIndex < _browserTabViewState.Count
+            ? _browserTabViewState.Tabs[_browserTabViewState.ActiveTabIndex]
             : null;
-        BrowserTabState? contextTab = _browserTabContextIndex >= 0 && _browserTabContextIndex < _browserTabs.Count
-            ? _browserTabs[_browserTabContextIndex]
+        BrowserTabState? contextTab = _browserTabViewState.ContextTabIndex >= 0 && _browserTabViewState.ContextTabIndex < _browserTabViewState.Count
+            ? _browserTabViewState.Tabs[_browserTabViewState.ContextTabIndex]
             : null;
-        _browserTabs.RemoveAt(e.FromIndex);
-        _browserTabs.Insert(e.ToIndex, movedTab);
+        _browserTabViewState.RemoveAt(e.FromIndex);
+        _browserTabViewState.Insert(e.ToIndex, movedTab);
         if (activeTab != null)
         {
-            _activeBrowserTabIndex = _browserTabs.IndexOf(activeTab);
+            _browserTabViewState.ActiveTabIndex = _browserTabViewState.IndexOf(activeTab);
         }
         else
         {
-            _activeBrowserTabIndex = Math.Clamp(e.ToIndex, 0, _browserTabs.Count - 1);
+            _browserTabViewState.ActiveTabIndex = Math.Clamp(e.ToIndex, 0, _browserTabViewState.Count - 1);
         }
         if (contextTab != null)
         {
-            _browserTabContextIndex = _browserTabs.IndexOf(contextTab);
+            _browserTabViewState.ContextTabIndex = _browserTabViewState.IndexOf(contextTab);
         }
         RefreshBrowserTabHeaders();
         browserPanel.Focus();
@@ -9324,14 +4552,14 @@ private void InitializeBrowserTabControl()
     }
     private void BrowserTabStrip_CategoryReordered(object? sender, BrowserTabStripReorderEventArgs e)
     {
-        if (e.FromIndex < 0 || e.FromIndex >= _browserTabCategories.Count || e.ToIndex < 0 || e.ToIndex >= _browserTabCategories.Count || e.FromIndex == e.ToIndex)
+        if (e.FromIndex < 0 || e.FromIndex >= _categoryViewState.Count || e.ToIndex < 0 || e.ToIndex >= _categoryViewState.Count || e.FromIndex == e.ToIndex)
         {
             return;
         }
 
-        BrowserTabCategoryDefinition moved = _browserTabCategories[e.FromIndex];
-        _browserTabCategories.RemoveAt(e.FromIndex);
-        _browserTabCategories.Insert(e.ToIndex, moved);
+        BrowserTabCategoryDefinition moved = _categoryViewState.Categories[e.FromIndex];
+        _categoryViewState.RemoveAt(e.FromIndex);
+        _categoryViewState.Insert(e.ToIndex, moved);
 
         SyncBrowserTabCategoryDefinitionsToSettings();
 
@@ -9377,7 +4605,7 @@ private void InitializeBrowserTabControl()
         ContextMenuStrip menu = new();
 
         var categoryDefs = _settings.BrowserTabs.Categories ?? new List<BrowserTabCategoryDefinition>();
-        var activeCategoryId = _activeBrowserTabCategoryId;
+        var activeCategoryId = _categoryViewState.ActiveCategoryId;
 
         foreach (var category in categoryDefs)
         {
@@ -9388,8 +4616,8 @@ private void InitializeBrowserTabControl()
 
             if (category.Id == activeCategoryId)
             {
-                tabsOfCategory = _browserTabs.ToList();
-                selectedTabIndex = _activeBrowserTabIndex;
+                tabsOfCategory = _browserTabViewState.Tabs.ToList();
+                selectedTabIndex = _browserTabViewState.ActiveTabIndex;
                 categoryMenuItem.Checked = true;
             }
             else
@@ -9487,15 +4715,29 @@ private void InitializeBrowserTabControl()
         {
             HideBrowserFileNameToolTip();
         }
+        if ((e.Button != MouseButtons.Left && e.Button != MouseButtons.Right) || _dragStartPoint == Point.Empty || _dragCandidateIndex == -1) return;
+        // 右ドラッグ時はジェスチャーではないこと（＝しきい値を超えてドラッグと判定された場合）を優先し、コンテキストメニューとジェスチャートラッキングをキャンセルする
         if (e.Button == MouseButtons.Right && _mouseGestureRecognizer.IsTracking)
         {
-            _mouseGestureRecognizer.Update(e.Location);
-            AppendMouseGestureTrailPoint(e.Location);
-            browserPanel.Invalidate();
-            ShowMouseGestureInputStatus(_mouseGestureRecognizer.GestureText);
-            return;
+            bool exceededThreshold = Math.Abs(e.X - _dragStartPoint.X) > SystemInformation.DragSize.Width ||
+                                     Math.Abs(e.Y - _dragStartPoint.Y) > SystemInformation.DragSize.Height;
+            if (!exceededThreshold)
+            {
+                // しきい値未満なのでジェスチャー処理を継続
+                _mouseGestureRecognizer.Update(e.Location);
+                AppendMouseGestureTrailPoint(e.Location);
+                browserPanel.Invalidate();
+                ShowMouseGestureInputStatus(_mouseGestureRecognizer.GestureText);
+                return;
+            }
+            else
+            {
+                // ドラッグ開始とみなすため、ジェスチャートラッキングを停止しコンテキストメニューを抑制
+                _mouseGestureRecognizer.End(e.Location);
+                ClearMouseGestureTrail();
+                SuppressNextBrowserContextMenu();
+            }
         }
-        if (e.Button != MouseButtons.Left || _dragStartPoint == Point.Empty || _dragCandidateIndex == -1) return;
         // OS標準のドラッグ開始しきい値判定 (SystemInformation.DragSize)
         bool exceeded = Math.Abs(e.X - _dragStartPoint.X) > SystemInformation.DragSize.Width ||
                         Math.Abs(e.Y - _dragStartPoint.Y) > SystemInformation.DragSize.Height;
@@ -9582,20 +4824,25 @@ private void InitializeBrowserTabControl()
                         data.SetData(DataFormats.FileDrop, new string[] { zipPath });
                         data.SetData(InternalDragArchiveFormat, false, InternalDragArchiveMarkerValue);
 
-                        // 任意: Shell向けにCopy優先を示す Preferred DropEffect (4バイトのバイナリ)
-                        var preferredEffect = (int)DragDropEffects.Copy;
-                        var preferredBytes = BitConverter.GetBytes(preferredEffect);
-                        var preferredStream = new MemoryStream(preferredBytes);
-                        data.SetData("Preferred DropEffect", preferredStream);
+                        bool isRightDrag = (e.Button == MouseButtons.Right);
+                        var decision = BrowserOutgoingDragResolver.Resolve(isRightDrag, Control.ModifierKeys, isDragArchive: true);
+                        if (decision.HasPreferredEffect)
+                        {
+                            var preferredEffect = (int)decision.PreferredEffect;
+                            var preferredBytes = BitConverter.GetBytes(preferredEffect);
+                            var preferredStream = new MemoryStream(preferredBytes);
+                            data.SetData("Preferred DropEffect", preferredStream);
+                        }
 
                         // ログにドラッグ準備情報を出力 (キー状態も追跡)
                         bool zipExists = File.Exists(zipPath);
                         string formatsStr = string.Join(", ", data.GetFormats());
                         var startMods = Control.ModifierKeys;
-                        LogService.Info($"[DragArchive] Sending drag: baseDirectory='{archiveBaseDirectory}', archivePath='{zipPath}', fileDropCount=1, internalMarkerPresent={HasInternalDragArchiveMarker(data)}, exists={zipExists}, formats=[{formatsStr}], modifierKeys={startMods}, allowedEffects=Copy|Move");
+                        LogService.Info($"[DragArchive] Sending drag: baseDirectory='{archiveBaseDirectory}', archivePath='{zipPath}', fileDropCount=1, internalMarkerPresent={HasInternalDragArchiveMarker(data)}, exists={zipExists}, formats=[{formatsStr}], modifierKeys={startMods}, allowedEffects={decision.AllowedEffects}");
 
                         // Copy|Move でネゴシエーションを開始
-                        var resultEffect = browserPanel.DoDragDrop(data, DragDropEffects.Copy | DragDropEffects.Move);
+                        RefreshBrowserStatusSummary(decision.StatusText);
+                        var resultEffect = browserPanel.DoDragDrop(data, decision.AllowedEffects);
                         LogService.Info($"[DragArchive] Drag completed: resultEffect={resultEffect}");
                     }
                     catch (Exception ex)
@@ -9614,7 +4861,18 @@ private void InitializeBrowserTabControl()
                     // ドラッグ開始
                     var data = new DataObject(DataFormats.FileDrop, dragPaths.ToArray());
                     LogService.Info($"[DragArchive] Sending normal FileDrop: fileDropCount={dragPaths.Count}, internalMarkerPresent={HasInternalDragArchiveMarker(data)}");
-                    browserPanel.DoDragDrop(data, DragDropEffects.Copy);
+                    bool isRightDrag = (e.Button == MouseButtons.Right);
+                    var decision = BrowserOutgoingDragResolver.Resolve(isRightDrag, Control.ModifierKeys);
+                    if (decision.HasPreferredEffect)
+                    {
+                        var preferredEffect = (int)decision.PreferredEffect;
+                        var preferredBytes = BitConverter.GetBytes(preferredEffect);
+                        var preferredStream = new MemoryStream(preferredBytes);
+                        data.SetData("Preferred DropEffect", preferredStream);
+                    }
+
+                    RefreshBrowserStatusSummary(decision.StatusText);
+                    browserPanel.DoDragDrop(data, decision.AllowedEffects);
                 }
             }
             // 開始した（または条件に合わず開始できなかった）ので状態をクリア
@@ -9795,14 +5053,14 @@ private void InitializeBrowserTabControl()
     }
     private void PushClosedBrowserTabSnapshot(int tabIndex)
     {
-        if (tabIndex < 0 || tabIndex >= _browserTabs.Count)
+        if (tabIndex < 0 || tabIndex >= _browserTabViewState.Count)
         {
             return;
         }
         _closedBrowserTabs.Add(new ClosedBrowserTabSnapshot
         {
-            CategoryId = _activeBrowserTabCategoryId,
-            TabState = _browserTabs[tabIndex].Clone()
+            CategoryId = _categoryViewState.ActiveCategoryId ?? string.Empty,
+            TabState = _browserTabViewState.Tabs[tabIndex].Clone()
         });
         if (_closedBrowserTabs.Count > ClosedBrowserTabHistoryLimit)
         {
@@ -9817,15 +5075,15 @@ private void InitializeBrowserTabControl()
             return;
         }
         ClosedBrowserTabSnapshot snapshot = _closedBrowserTabs[^1];
-        string targetCategoryId = _browserTabCategories.Any(category => string.Equals(category.Id, snapshot.CategoryId, StringComparison.OrdinalIgnoreCase))
+        string targetCategoryId = _categoryViewState.Categories.Any(category => string.Equals(category.Id, snapshot.CategoryId, StringComparison.OrdinalIgnoreCase))
             ? snapshot.CategoryId
-            : _activeBrowserTabCategoryId;
-        if (!string.Equals(targetCategoryId, _activeBrowserTabCategoryId, StringComparison.OrdinalIgnoreCase))
+            : (_categoryViewState.ActiveCategoryId ?? string.Empty);
+        if (!string.Equals(targetCategoryId, _categoryViewState.ActiveCategoryId, StringComparison.OrdinalIgnoreCase))
         {
             SwitchBrowserTabCategory(targetCategoryId);
         }
         int maxTabCount = GetMaxBrowserTabsPerCategory();
-        if (_browserTabs.Count >= maxTabCount)
+        if (_browserTabViewState.Count >= maxTabCount)
         {
             ShowStatusMessage($"タブは最大{maxTabCount}個までです。");
             _browserTabStrip?.FlashLimitReached();
@@ -9834,10 +5092,10 @@ private void InitializeBrowserTabControl()
         }
         _closedBrowserTabs.RemoveAt(_closedBrowserTabs.Count - 1);
         BrowserTabState restored = snapshot.TabState.Clone();
-        _browserTabs.Add(restored);
+        _browserTabViewState.Add(restored);
         RefreshBrowserTabHeaders();
-        _activeBrowserTabIndex = -1;
-        SwitchBrowserTab(_browserTabs.Count - 1);
+        _browserTabViewState.ActiveTabIndex = -1;
+        SwitchBrowserTab(_browserTabViewState.Count - 1);
         ShowStatusMessage("Gesture: 閉じたタブを復元");
     }
     /// <summary>
@@ -10168,12 +5426,13 @@ private void InitializeBrowserTabControl()
             _ => keyData == (Keys.Control | Keys.Shift | Keys.P)
         };
     }
-    private bool ExecuteCommandFromUi(string commandId, CommandScope scope, string source)
+    private bool ExecuteCommandFromUi(string commandId, CommandScope scope, string source, SelectionResult? selectionSnapshot = null)
     {
         return _commandDispatcher.TryExecute(commandId, new CommandExecutionContext
         {
             Scope = scope,
-            Source = source
+            Source = source,
+            SelectionSnapshot = selectionSnapshot
         });
     }
 
@@ -10242,6 +5501,14 @@ private void InitializeBrowserTabControl()
                 if (_uiMode != UIMode.Browser || IsCurrentDirectoryBusy()) return false;
                 ExecuteCreateDirectory();
                 return true;
+            case CommandIds.BrowserCreateFile:
+                if (_uiMode != UIMode.Browser || IsCurrentDirectoryBusy()) return false;
+                ExecuteCreateFile();
+                return true;
+            case CommandIds.BrowserPathEntryOpen:
+                if (_uiMode != UIMode.Browser || IsCurrentDirectoryBusy()) return false;
+                OpenBrowserPathEntry();
+                return true;
             case CommandIds.BrowserOpenExplorer:
                 if (_uiMode != UIMode.Browser || IsCurrentDirectoryBusy()) return false;
                 ExecuteOpenCurrentPathInExplorer();
@@ -10254,6 +5521,10 @@ private void InitializeBrowserTabControl()
             case CommandIds.BrowserOpenExternalEditor:
                 if (_uiMode != UIMode.Browser || IsCurrentDirectoryBusy()) return false;
                 ExecuteOpenWithEditor();
+                return true;
+            case CommandIds.BrowserOpenCommandPrompt:
+                if (_uiMode != UIMode.Browser || IsCurrentDirectoryBusy()) return false;
+                OpenTerminalInCurrentDirectory(ShellKind.CommandPrompt);
                 return true;
             case CommandIds.BrowserPreview:
                 if (_uiMode != UIMode.Browser || IsCurrentDirectoryBusy()) return false;
@@ -10281,11 +5552,11 @@ private void InitializeBrowserTabControl()
                 return true;
             case CommandIds.ArchivePack:
                 if (_uiMode != UIMode.Browser || IsCurrentDirectoryBusy()) return false;
-                _ = ExecutePack();
+                _ = ExecutePack(selectionSnapshot: context.SelectionSnapshot);
                 return true;
             case CommandIds.ArchiveUnpack:
                 if (_uiMode != UIMode.Browser || IsCurrentDirectoryBusy()) return false;
-                _ = ExecuteUnpack();
+                _ = ExecuteUnpack(context.SelectionSnapshot);
                 return true;
             case CommandIds.BrowserCopyFullPath:
                 if (_uiMode != UIMode.Browser || IsCurrentDirectoryBusy()) return false;
@@ -10311,6 +5582,21 @@ private void InitializeBrowserTabControl()
                 if (_uiMode != UIMode.Browser || IsCurrentDirectoryBusy()) return false;
                 SelectAdjacentBrowserTab(-1);
                 return true;
+            case CommandIds.BrowserTabCategoryAdd:
+                if (_uiMode != UIMode.Browser || IsCurrentDirectoryBusy()) return false;
+                return AddGeneratedBrowserTabCategory() != null;
+            case CommandIds.BrowserTabCategoryRename:
+                if (_uiMode != UIMode.Browser || IsCurrentDirectoryBusy()) return false;
+                return RenameActiveBrowserTabCategory();
+            case CommandIds.BrowserTabCategoryDelete:
+                if (_uiMode != UIMode.Browser || IsCurrentDirectoryBusy()) return false;
+                return DeleteActiveBrowserTabCategory();
+            case CommandIds.BrowserTabCategoryMoveLeft:
+                if (_uiMode != UIMode.Browser || IsCurrentDirectoryBusy()) return false;
+                return MoveActiveBrowserTabCategory(-1);
+            case CommandIds.BrowserTabCategoryMoveRight:
+                if (_uiMode != UIMode.Browser || IsCurrentDirectoryBusy()) return false;
+                return MoveActiveBrowserTabCategory(+1);
             case CommandIds.BrowserTabCategoryNext:
                 if (_uiMode != UIMode.Browser || IsCurrentDirectoryBusy()) return false;
                 SelectAdjacentBrowserTabCategory(+1);
@@ -10331,21 +5617,21 @@ private void InitializeBrowserTabControl()
                 if (_uiMode != UIMode.Browser || IsCurrentDirectoryBusy()) return false;
                 ExecuteClipboardPaste();
                 return true;
-            case "file.copy":
+            case CommandIds.FileCopy:
                 if (_uiMode != UIMode.Browser || IsCurrentDirectoryBusy()) return false;
-                _ = ExecuteCopy();
+                _ = ExecuteCopy(context.SelectionSnapshot);
                 return true;
-            case "file.move":
+            case CommandIds.FileMove:
                 if (_uiMode != UIMode.Browser || IsCurrentDirectoryBusy()) return false;
-                _ = ExecuteMove();
+                _ = ExecuteMove(context.SelectionSnapshot);
                 return true;
-            case "file.rename":
+            case CommandIds.FileRename:
                 if (_uiMode != UIMode.Browser || IsCurrentDirectoryBusy()) return false;
-                ExecuteRename();
+                ExecuteRename(context.SelectionSnapshot);
                 return true;
-            case "file.delete":
+            case CommandIds.FileDelete:
                 if (_uiMode != UIMode.Browser || IsCurrentDirectoryBusy()) return false;
-                _ = ExecuteDelete(permanent: false);
+                _ = ExecuteDelete(permanent: false, context.SelectionSnapshot);
                 return true;
             case CommandIds.EditUndo:
                 if (_uiMode != UIMode.Browser || IsCurrentDirectoryBusy()) return false;
@@ -10388,6 +5674,12 @@ private void InitializeBrowserTabControl()
                 {
                     LogService.Error($"ControlPanel 起動失敗: {ex.Message}");
                 }
+                return true;
+            case CommandIds.BrowserTabFilterLock:
+                OpenActiveTabFilterLockDialog();
+                return true;
+            case CommandIds.BrowserTabLock:
+                ToggleActiveBrowserTabLock();
                 return true;
             case CommandIds.AppOpenSettings:
                 OpenSettingsForm();
@@ -10433,13 +5725,13 @@ private void InitializeBrowserTabControl()
             ShowStatusMessage("Command Palette は Browser モードでのみ使用できます。");
             return;
         }
-        var commands = Services.CommandPaletteService.GetAllCommands(this, _featureGate);
         bool allowUsage = _featureGate.IsEnabled(FeatureId.CommandPaletteUsage);
         var usageState = allowUsage
             ? Services.CommandPaletteUsageStorage.Load()
             : new CommandPaletteUsageState();
+        SelectionResult selectionSnapshot = InvokeResolveSelection();
         using var dialog = new Dialogs.CommandPaletteDialog(
-            commands,
+            (query, expanded) => Services.CommandPaletteService.BuildPresentation(this, _featureGate, usageState, query, expanded, selectionSnapshot),
             usageState,
             allowUsage ? Services.CommandPaletteUsageStorage.Save : _ => { });
         if (dialog.ShowDialog(this) == DialogResult.OK)
@@ -10455,6 +5747,73 @@ private void InitializeBrowserTabControl()
             }
         }
     }
+    internal string InvokeGetCurrentBrowserPath() => _navigationService.CurrentPath;
+    internal QuickAccessStore InvokeGetQuickAccessStoreClone() => _quickAccessStore.Clone();
+    internal IReadOnlyList<string> InvokeGetBackHistorySnapshot() => _navigationService.GetBackHistorySnapshot();
+    internal IReadOnlyList<string> InvokeGetForwardHistorySnapshot() => _navigationService.GetForwardHistorySnapshot();
+    internal MarkSlotStore InvokeGetMarkSlotStoreClone() => _markSlotStore.Clone();
+    internal SelectionResult InvokeResolveSelection() => ResolveSelection();
+    internal void InvokeNavigateToPath(string path) => NavigateToPathSafe(path);
+    internal void InvokeRestoreMarksFromSlot(int slotNumber) => RestoreMarksFromSlot(slotNumber);
+    internal void InvokeShowArchiveContents(string archivePath) => ShowArchiveContentsOrFallback(archivePath);
+    internal Task InvokeExecuteArchiveHashAsync(SevenZipHashAlgorithm algorithm) => ExecuteHashAsync(algorithm);
+    internal BrowserTabRestoreSnapshot InvokeGetBrowserTabRestoreSnapshot() => EnsureBrowserTabRestoreSnapshot().Clone();
+    internal CommandRegistry InvokeGetCommandRegistry() => _commandRegistry;
+    internal string InvokeGetCurrentFunctionKeyProfileValue() => CurrentFunctionKeyProfileValue;
+    internal Dictionary<string, List<string>>? InvokeGetBrowserKeyCommandOverrides() => _settings.Input?.BrowserKeyCommandOverrides;
+    internal bool InvokeExecuteCommandFromUi(string commandId, CommandScope scope, string source, SelectionResult? selectionSnapshot = null) => ExecuteCommandFromUi(commandId, scope, source, selectionSnapshot);
+    internal void InvokeShowCommandList() => ShowCommandList();
+    internal void InvokeShowSystemInformationDialog() => ShowSystemInformationDialog();
+    internal void InvokeOpenControlPanel()
+    {
+        if (_uiMode != UIMode.Browser || IsCurrentDirectoryBusy()) return;
+        if (GuardClipboardBusy()) return;
+        try
+        {
+            System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo("control.exe") { UseShellExecute = true });
+        }
+        catch (Exception ex)
+        {
+            LogService.Error($"ControlPanel 起動失敗: {ex.Message}");
+        }
+    }
+    internal void InvokeActivateBrowserTab(string categoryId, Guid tabId)
+    {
+        if (string.IsNullOrWhiteSpace(categoryId))
+        {
+            return;
+        }
+
+        BrowserTabRestoreSnapshot snapshot = EnsureBrowserTabRestoreSnapshot();
+        BrowserTabRestoreCategoryState? category = snapshot.Categories.FirstOrDefault(item => string.Equals(item.Id, categoryId, StringComparison.OrdinalIgnoreCase));
+        if (category == null)
+        {
+            return;
+        }
+
+        int tabIndex = category.OpenTabs.FindIndex(tab => tab.TabId == tabId);
+        if (tabIndex < 0)
+        {
+            return;
+        }
+
+        if (!string.Equals(_categoryViewState.ActiveCategoryId, category.Id, StringComparison.OrdinalIgnoreCase))
+        {
+            SwitchBrowserTabCategory(category.Id);
+        }
+
+        SwitchBrowserTab(tabIndex);
+    }
+    string ICommandPaletteLayerHost.GetCurrentBrowserPath() => InvokeGetCurrentBrowserPath();
+    QuickAccessStore ICommandPaletteLayerHost.GetQuickAccessStoreClone() => InvokeGetQuickAccessStoreClone();
+    IReadOnlyList<string> ICommandPaletteLayerHost.GetBackHistorySnapshot() => InvokeGetBackHistorySnapshot();
+    IReadOnlyList<string> ICommandPaletteLayerHost.GetForwardHistorySnapshot() => InvokeGetForwardHistorySnapshot();
+    MarkSlotStore ICommandPaletteLayerHost.GetMarkSlotStoreClone() => InvokeGetMarkSlotStoreClone();
+    SelectionResult ICommandPaletteLayerHost.ResolveSelection() => InvokeResolveSelection();
+    void ICommandPaletteLayerHost.NavigateToPath(string path) => InvokeNavigateToPath(path);
+    void ICommandPaletteLayerHost.RestoreMarksFromSlot(int slotNumber) => InvokeRestoreMarksFromSlot(slotNumber);
+    void ICommandPaletteLayerHost.ShowArchiveContents(string archivePath) => InvokeShowArchiveContents(archivePath);
+    Task ICommandPaletteLayerHost.ExecuteArchiveHashAsync(SevenZipHashAlgorithm algorithm) => InvokeExecuteArchiveHashAsync(algorithm);
     // Bridge methods for CommandPalette
     internal void InvokeReloadCurrentDirectory() => ReloadCurrentDirectory("コマンドパレットから再読込しました。");
     internal void InvokeCopyCurrentDirectory() => CopyCurrentDirectoryFromHeader();
@@ -10721,7 +6080,7 @@ private void InitializeBrowserTabControl()
             {
                 LogService.Warn(
                     $"[CancelRuntime] MainForm WM_SYSCOMMAND close. busy={_isClipboardBusy}, " +
-                    $"hasCts={_fileOpCts != null}, requested={_fileOpCts?.IsCancellationRequested ?? false}, " +
+                    $"hasCts={_fileOpUiState.Cts != null}, requested={_fileOpUiState.Cts?.IsCancellationRequested ?? false}, " +
                     $"activeControl={DescribeControl(ActiveControl)}, thread={Environment.CurrentManagedThreadId}");
                 if (TryRouteActiveFileOperationCancel("MainForm.WndProc.SC_CLOSE"))
                 {
@@ -11133,22 +6492,9 @@ private void InitializeBrowserTabControl()
     private int GetCommandHintVisibleRowCount()
     {
         Rectangle overlayRect = GetCommandHintOverlayBounds();
-        CommandHintOverlayMetrics metrics = GetCommandHintOverlayMetrics();
-        int rowTop =
-            overlayRect.Top +
-            metrics.Padding -
-            2 +
-            metrics.TitleHeight +
-            metrics.TitleGap +
-            metrics.ExplanationHeight +
-            2 +
-            metrics.ContextLineHeight +
-            metrics.ContextLineSpacing +
-            metrics.ContextLineHeight +
-            metrics.ContextGap +
-            metrics.HeaderHeight +
-            4;
-        return Math.Max(1, (overlayRect.Bottom - metrics.Padding - rowTop) / metrics.RowHeight);
+        return CommandHintOverlayLayout.GetVisibleRowCount(
+            overlayRect,
+            CommandHintOverlayLayout.DefaultMetrics);
     }
     private static (string Line1, string Line2) BuildExternalToolAltContextLines(ExternalToolExecutionContext context)
     {
@@ -11410,6 +6756,7 @@ private void InitializeBrowserTabControl()
             InvalidateMarkSummaryCache();
             InvalidateRecentMultiMarkIntent();
             ClearPendingEscExitMarkPersistence();
+            _browserMarkInteractionController.SyncMarkState(hasMarks: true);
             SyncActiveBrowserTabMarksFromCurrentSelection();
         }
         return changed;
@@ -11422,6 +6769,7 @@ private void InitializeBrowserTabControl()
             InvalidateMarkSummaryCache();
             InvalidateRecentMultiMarkIntent();
             ClearPendingEscExitMarkPersistence();
+            _browserMarkInteractionController.SyncMarkState(hasMarks: _markedFiles.Count > 0);
             SyncActiveBrowserTabMarksFromCurrentSelection();
         }
         return changed;
@@ -11440,6 +6788,7 @@ private void InitializeBrowserTabControl()
         InvalidateMarkSummaryCache();
         InvalidateRecentMultiMarkIntent();
         ClearPendingEscExitMarkPersistence();
+        _browserMarkInteractionController.SyncMarkState(hasMarks: _markedFiles.Count > 0);
         SyncActiveBrowserTabMarksFromCurrentSelection();
         LogService.Info($"[MoveHotpath] BulkUnmark reason={reason} requested={paths.Count} removed={removedCount}");
     }
@@ -11453,6 +6802,7 @@ private void InitializeBrowserTabControl()
         {
             ClearPendingEscExitMarkPersistence();
         }
+        _browserMarkInteractionController.SyncMarkState(hasMarks: false);
         SyncActiveBrowserTabMarksFromCurrentSelection();
     }
     private void RestoreMarks(IEnumerable<string> paths, bool invalidateRedo = true)
@@ -11461,18 +6811,19 @@ private void InitializeBrowserTabControl()
         InvalidateMarkSummaryCache();
         InvalidateRecentMultiMarkIntent();
         ClearPendingEscExitMarkPersistence();
+        _browserMarkInteractionController.SyncMarkState(hasMarks: _markedFiles.Count > 0);
         SyncActiveBrowserTabMarksFromCurrentSelection();
     }
     private void SyncActiveBrowserTabMarksFromCurrentSelection()
     {
-        if (_activeBrowserTabIndex < 0 || _activeBrowserTabIndex >= _browserTabs.Count)
+        if (_browserTabViewState.ActiveTabIndex < 0 || _browserTabViewState.ActiveTabIndex >= _browserTabViewState.Count)
         {
             return;
         }
-        _browserTabs[_activeBrowserTabIndex].MarkedPaths = CreatePersistableMarkedPaths(_markedFiles.Snapshot(), out int skippedCount);
+        _browserTabViewState.Tabs[_browserTabViewState.ActiveTabIndex].MarkedPaths = CreatePersistableMarkedPaths(_markedFiles.Snapshot(), out int skippedCount);
         if (skippedCount > 0)
         {
-            LogService.Info($"[BrowserTabs] Pruned stale active tab marks during sync. TabId={_browserTabs[_activeBrowserTabIndex].Id} Missing={skippedCount}");
+            LogService.Info($"[BrowserTabs] Pruned stale active tab marks during sync. TabId={_browserTabViewState.Tabs[_browserTabViewState.ActiveTabIndex].Id} Missing={skippedCount}");
         }
     }
     private int CountMarksOutsideCurrentDirectory()
@@ -11563,7 +6914,7 @@ private void InitializeBrowserTabControl()
             globalCategoryCount = snapshot.Categories.Count;
             foreach (var category in snapshot.Categories)
             {
-                bool isCurrentCategory = string.Equals(category.Id, _activeBrowserTabCategoryId, StringComparison.OrdinalIgnoreCase);
+                bool isCurrentCategory = string.Equals(category.Id, _categoryViewState.ActiveCategoryId, StringComparison.OrdinalIgnoreCase);
                 if (isCurrentCategory)
                 {
                     currentCategoryName = category.DisplayName;
@@ -11573,7 +6924,7 @@ private void InitializeBrowserTabControl()
                     globalTabCount++;
                     int markCount;
                     // 現在のタブは _markedFiles が最新
-                    if (isCurrentCategory && tab.TabId == (_activeBrowserTabIndex >= 0 && _activeBrowserTabIndex < _browserTabs.Count ? _browserTabs[_activeBrowserTabIndex].Id : Guid.Empty))
+                    if (isCurrentCategory && tab.TabId == (_browserTabViewState.ActiveTabIndex >= 0 && _browserTabViewState.ActiveTabIndex < _browserTabViewState.Count ? _browserTabViewState.Tabs[_browserTabViewState.ActiveTabIndex].Id : Guid.Empty))
                     {
                         markCount = activeTabMarkCount;
                     }
@@ -11618,7 +6969,7 @@ private void InitializeBrowserTabControl()
         bool changed = false;
         int clearedCount = 0;
         // 1. 現在メモリ上で管理されているタブの状態をクリア
-        foreach (var tab in _browserTabs)
+        foreach (var tab in _browserTabViewState.Tabs)
         {
             if (tab.MarkedPaths != null && tab.MarkedPaths.Count > 0)
             {
@@ -11639,7 +6990,7 @@ private void InitializeBrowserTabControl()
         {
             foreach (var category in snapshot.Categories)
             {
-                if (string.Equals(category.Id, _activeBrowserTabCategoryId, StringComparison.OrdinalIgnoreCase))
+                if (string.Equals(category.Id, _categoryViewState.ActiveCategoryId, StringComparison.OrdinalIgnoreCase))
                 {
                     foreach (var tab in category.OpenTabs)
                     {
@@ -11657,7 +7008,7 @@ private void InitializeBrowserTabControl()
         {
             foreach (var category in _settings.Session.BrowserTabCategories)
             {
-                if (string.Equals(category.CategoryId, _activeBrowserTabCategoryId, StringComparison.OrdinalIgnoreCase))
+                if (string.Equals(category.CategoryId, _categoryViewState.ActiveCategoryId, StringComparison.OrdinalIgnoreCase))
                 {
                     foreach (var tab in category.OpenTabs)
                     {
@@ -11676,7 +7027,7 @@ private void InitializeBrowserTabControl()
             SaveWorkspaceStateStore();
             RefreshMarkUi();
             RefreshBrowserTabHeaders();
-            ShowStatusMessage($"カテゴリ '{_activeBrowserTabCategoryId}' のマークをすべて解除しました ({clearedCount}件)。");
+            ShowStatusMessage($"カテゴリ '{_categoryViewState.ActiveCategoryId}' のマークをすべて解除しました ({clearedCount}件)。");
         }
     }
     private void ClearGlobalMarksFromDialog()
@@ -11686,7 +7037,7 @@ private void InitializeBrowserTabControl()
         bool changed = false;
         int clearedCount = 0;
         // 1. 現在メモリ上で管理されているタブの状態をクリア
-        foreach (var tab in _browserTabs)
+        foreach (var tab in _browserTabViewState.Tabs)
         {
             if (tab.MarkedPaths != null && tab.MarkedPaths.Count > 0)
             {
@@ -11858,7 +7209,7 @@ private void InitializeBrowserTabControl()
         slot.SavedAtUtc = DateTime.UtcNow;
         slot.Paths = currentPaths;
         slot.SourceScope = MarkSlotSourceScopes.CurrentTab;
-        slot.SourceCategoryId = ResolveExistingBrowserTabCategoryId(_activeBrowserTabCategoryId);
+        slot.SourceCategoryId = ResolveExistingBrowserTabCategoryId(_categoryViewState.ActiveCategoryId);
         slot.SourceCategoryName = GetActiveBrowserTabCategoryDisplayName();
         slot.SourceTabId = activeTab?.Id;
         slot.SourceTabDisplayName = GetBrowserTabDisplayName(activeTab);
@@ -12524,16 +7875,16 @@ private void InitializeBrowserTabControl()
     }
     private BrowserTabState? GetActiveBrowserTab()
     {
-        return _activeBrowserTabIndex >= 0 && _activeBrowserTabIndex < _browserTabs.Count
-            ? _browserTabs[_activeBrowserTabIndex]
+        return _browserTabViewState.ActiveTabIndex >= 0 && _browserTabViewState.ActiveTabIndex < _browserTabViewState.Count
+            ? _browserTabViewState.Tabs[_browserTabViewState.ActiveTabIndex]
             : null;
     }
     private string GetActiveBrowserTabCategoryDisplayName()
     {
-        return _browserTabCategories
-            .FirstOrDefault(category => string.Equals(category.Id, _activeBrowserTabCategoryId, StringComparison.OrdinalIgnoreCase))
+        return _categoryViewState.Categories
+            .FirstOrDefault(category => string.Equals(category.Id, _categoryViewState.ActiveCategoryId, StringComparison.OrdinalIgnoreCase))
             ?.DisplayName
-            ?? _activeBrowserTabCategoryId;
+            ?? (_categoryViewState.ActiveCategoryId ?? string.Empty);
     }
     private string? GetBrowserTabDisplayName(BrowserTabState? tab)
     {
@@ -12576,7 +7927,7 @@ private void InitializeBrowserTabControl()
     {
         SyncMarkSlotAggregationSnapshot();
         BrowserTabRestoreSnapshot snapshot = EnsureBrowserTabRestoreSnapshot();
-        string categoryId = ResolveExistingBrowserTabCategoryId(_activeBrowserTabCategoryId);
+        string categoryId = ResolveExistingBrowserTabCategoryId(_categoryViewState.ActiveCategoryId);
         BrowserTabRestoreCategoryState? categoryState = snapshot.Categories.FirstOrDefault(
             category => string.Equals(category.Id, categoryId, StringComparison.OrdinalIgnoreCase));
         if (categoryState == null)
@@ -12700,7 +8051,7 @@ private void InitializeBrowserTabControl()
     private void BeginPendingEscExitMarkPersistence(IReadOnlyList<string> markedPaths)
     {
         // Preserve pending marks when either restart persistence is enabled or workspace restore is enabled
-        bool shouldPreserve = _settings.Session.PersistMarksAcrossRestart || _settings.Session.RestoreTabsOnStartup;
+        bool shouldPreserve = _settings.Session.PersistMarksAcrossRestart || SessionRestorePolicy.ShouldRestoreStartupWorkspace(_settings.Session);
         if (!shouldPreserve || markedPaths.Count == 0)
         {
             ClearPendingEscExitMarkPersistence();
@@ -12736,27 +8087,37 @@ private void InitializeBrowserTabControl()
         else if (File.Exists(fullPath))
         {
             var rawKind = PreviewService.GetPreviewKind(fullPath);
-            if (rawKind == PreviewKind.Video && _settings.Preview?.VideoEnterPlaysExternal == true)
+            if (rawKind == PreviewKind.Video)
             {
-                var launchResult = VideoPlaybackLaunchService.Launch(
-                    fullPath,
-                    _settings.Preview?.VideoToolDirectory,
-                    _settings.Preview?.VideoPlaybackVolumePercent ?? 100,
-                    0);
-                if (launchResult.Success)
+                bool isAudio = PreviewService.IsSupportedAudioExtension(fullPath);
+                bool shouldPlayExternal = isAudio || _settings.Preview?.VideoEnterPlaysExternal == true;
+                if (shouldPlayExternal)
                 {
-                    if (launchResult.UsedFfplay)
+                    var launchResult = VideoPlaybackLaunchService.Launch(
+                        fullPath,
+                        _settings.Preview?.VideoToolDirectory,
+                        _settings.Preview?.VideoPlaybackVolumePercent ?? 100,
+                        0);
+                    if (launchResult.Success)
                     {
-                        ShowStatusMessage($"ffplay.exeで外部再生しました。音量:{launchResult.AppliedVolumePercent}%");
+                        string mediaType = isAudio ? "音声" : "動画";
+                        if (launchResult.UsedFfplay)
+                        {
+                            ShowStatusMessage($"ffplay.exeで{mediaType}を外部再生しました。音量:{launchResult.AppliedVolumePercent}%");
+                        }
+                        else
+                        {
+                            ShowStatusMessage($"ffplay.exeが見つからないため、既定アプリで{mediaType}を開きました。");
+                        }
                     }
                     else
                     {
-                        ShowStatusMessage("ffplay.exeが見つからないため、既定アプリで動画を開きました。");
+                        MessageBox.Show(this, launchResult.ErrorMessage ?? "外部再生の起動に失敗しました。", "エラー", MessageBoxButtons.OK, MessageBoxIcon.Error);
                     }
                 }
                 else
                 {
-                    MessageBox.Show(this, launchResult.ErrorMessage ?? "外部再生の起動に失敗しました。", "エラー", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    ExecuteBrowserOpenRequest(CreateBrowserOpenRequest(fullPath, allowExecuteTarget: true));
                 }
             }
             else
@@ -12846,8 +8207,7 @@ private void InitializeBrowserTabControl()
         }
         else if (File.Exists(fullPath))
         {
-            string? error = ExternalToolService.OpenWithShellAssociation(fullPath);
-            if (error != null) ShowStatusMessage(error);
+            OpenPathWithShellAssociation(fullPath);
         }
     }
     private void OpenImageViewer(string path)
@@ -12979,6 +8339,7 @@ private void InitializeBrowserTabControl()
         {
             LogService.Error($"Z-Launch 失敗: {ex.Message}");
             ShowStatusMessage("起動に失敗しました");
+            MessageBox.Show(this, $"エクスプローラーを起動できませんでした。\n理由: {ex.Message}", "起動エラー", MessageBoxButtons.OK, MessageBoxIcon.Error);
         }
     }
     private void ExecuteBackspace()
@@ -12992,11 +8353,11 @@ private void InitializeBrowserTabControl()
     }
     private bool TryHandleLockedRootParentNavigation()
     {
-        if (_activeBrowserTabIndex < 0 || _activeBrowserTabIndex >= _browserTabs.Count)
+        if (_browserTabViewState.ActiveTabIndex < 0 || _browserTabViewState.ActiveTabIndex >= _browserTabViewState.Count)
         {
             return false;
         }
-        BrowserTabState state = _browserTabs[_activeBrowserTabIndex];
+        BrowserTabState state = _browserTabViewState.Tabs[_browserTabViewState.ActiveTabIndex];
         if (!state.IsLocked || string.IsNullOrWhiteSpace(state.StartupPath))
         {
             return false;
@@ -13299,7 +8660,20 @@ private void InitializeBrowserTabControl()
     }
     private SelectionResult ResolveSelection()
     {
+        if (_browserContextMenuSelectionOverride != null)
+        {
+            return _browserContextMenuSelectionOverride;
+        }
         return SelectionResolver.Resolve(_markedFiles, GetCurrentBrowserItem());
+    }
+    private SelectionResult ResolveSelection(SelectionResult? selectionSnapshot)
+    {
+        if (selectionSnapshot is not null && selectionSnapshot.Count > 0)
+        {
+            return selectionSnapshot;
+        }
+
+        return ResolveSelection();
     }
     private enum MultiMarkGuardAction
     {
@@ -13415,7 +8789,7 @@ private void InitializeBrowserTabControl()
             return false;
         }
         int maxTabCount = GetMaxBrowserTabsPerCategory();
-        if (_browserTabs.Count >= maxTabCount)
+        if (_browserTabViewState.Count >= maxTabCount)
         {
             ShowStatusMessage($"タブは最大{maxTabCount}個までです。");
             _browserTabStrip?.FlashLimitReached();
@@ -13423,14 +8797,14 @@ private void InitializeBrowserTabControl()
             return false;
         }
         CaptureActiveBrowserTabState();
-        string categoryId = ResolveExistingBrowserTabCategoryId(_activeBrowserTabCategoryId);
+        string categoryId = ResolveExistingBrowserTabCategoryId(_categoryViewState.ActiveCategoryId);
         BrowserTabState newState = CreateInitialBrowserTabStateForCategory(categoryId);
-        int insertIndex = _activeBrowserTabIndex >= 0 && _activeBrowserTabIndex < _browserTabs.Count
-            ? _activeBrowserTabIndex + 1
-            : _browserTabs.Count;
-        _browserTabs.Insert(insertIndex, newState);
+        int insertIndex = _browserTabViewState.ActiveTabIndex >= 0 && _browserTabViewState.ActiveTabIndex < _browserTabViewState.Count
+            ? _browserTabViewState.ActiveTabIndex + 1
+            : _browserTabViewState.Count;
+        _browserTabViewState.Insert(insertIndex, newState);
         RefreshBrowserTabHeaders();
-        _activeBrowserTabIndex = -1;
+        _browserTabViewState.ActiveTabIndex = -1;
         SwitchBrowserTab(insertIndex);
         ShowStatusMessage("新しいタブを追加しました。");
         return true;
@@ -13570,3198 +8944,6 @@ private void InitializeBrowserTabControl()
         }
         return null;
     }
-    private void ExecuteRename()
-    {
-        if (GuardReadOnlyBrowserTab())
-        {
-            return;
-        }
-        var entryPlan = _fileOperationEntryCoordinator.CreateSelectionEntryPlan(
-            _isClipboardBusy,
-            _activeFileOperationName,
-            _fileOpCts != null,
-            "リネーム",
-            ResolveSelection(),
-            "リネーム対象がありません。");
-        if (!entryPlan.CanProceed)
-        {
-            if (!string.IsNullOrEmpty(entryPlan.StatusMessage))
-            {
-                ShowStatusMessage(entryPlan.StatusMessage, 1000);
-            }
-            return;
-        }
-        var selection = entryPlan.Selection;
-        if (!TryResolveMultiMarkSelectionAction("リネーム", "リネームをキャンセルしました。", selection, out selection))
-        {
-            return;
-        }
-        if (selection.Count == 1)
-        {
-            ExecuteSingleRename(selection.FirstPath);
-            return;
-        }
-        ExecuteRenameEntry(selection);
-    }
-    private void ExecuteRenameEntry(SelectionResult selection)
-    {
-        var dialogResult = _renameDialogCoordinator.ShowEntryDialog(this, selection.FullPaths);
-        if (!dialogResult.Confirmed || dialogResult.Mode == RenameEntryMode.Cancel)
-        {
-            ShowStatusMessage("リネームはキャンセルされました。");
-            return;
-        }
-        if (dialogResult.Mode == RenameEntryMode.SingleStep)
-        {
-            ExecuteSequentialRename(selection, dialogResult.SingleStepInitialName);
-            return;
-        }
-        ExecuteBatchRename(selection);
-    }
-    private void ExecuteSingleRename(string? sourcePath)
-    {
-        var outcome = _renameApplyCoordinator.ApplySingleRename(
-            sourcePath ?? string.Empty,
-            initialValue: null,
-            showNoChangeStatus: true,
-            showValidationMessage: true,
-            (path, value, skipInitialPrompt, showValidation) =>
-                _renameDialogCoordinator.ShowSingleRenameDialog(this, path, value, skipInitialPrompt, showValidation),
-            GetFriendlyRenameErrorMessage,
-            message => MessageBox.Show(message, "エラー", MessageBoxButtons.OK, MessageBoxIcon.Error),
-            BuildRenameUndoReadyMessage);
-        ApplyRenameOutcome(outcome);
-    }
-    private void ExecuteSequentialRename(SelectionResult selection, string? firstItemInitialName)
-    {
-        var outcome = _renameApplyCoordinator.ApplySequentialRename(
-            selection,
-            firstItemInitialName,
-            (path, value, skipInitialPrompt, showValidation) =>
-                _renameDialogCoordinator.ShowSingleRenameDialog(this, path, value, skipInitialPrompt, showValidation),
-            GetFriendlyRenameErrorMessage,
-            message => MessageBox.Show(message, "エラー", MessageBoxButtons.OK, MessageBoxIcon.Error),
-            BuildRenameUndoReadyMessage);
-        ApplyRenameOutcome(outcome);
-    }
-    private static string GetFriendlyRenameErrorMessage(Exception ex)
-    {
-        if (ex is IOException ioEx)
-        {
-            const int sharingViolationHResult = unchecked((int)0x80070020);
-            if (ioEx.HResult == sharingViolationHResult ||
-                ioEx.Message.Contains("being used by another process", StringComparison.OrdinalIgnoreCase))
-            {
-                return "別のプロセスがこのファイルを使用中のため、リネームできません。";
-            }
-        }
-        return ex.Message;
-    }
-    private async void ExecuteBatchRename(SelectionResult selection)
-    {
-        string initialTemplate = "$F$E";
-        if (_settings.Rename.RememberLastTemplate && !string.IsNullOrWhiteSpace(_settings.Rename.LastTemplate))
-        {
-            initialTemplate = _settings.Rename.LastTemplate;
-        }
-        var dialogResult = _renameDialogCoordinator.ShowBatchDialog(
-            this,
-            selection.FullPaths,
-            initialTemplate,
-            _settings.Rename.RememberLastTemplate);
-        if (!dialogResult.Confirmed)
-        {
-            ShowStatusMessage("リネームはキャンセルされました。");
-            return;
-        }
-        if (dialogResult.RememberTemplate)
-        {
-            _settings.Rename.RememberLastTemplate = true;
-            _settings.Rename.LastTemplate = dialogResult.LastTemplateCandidate;
-        }
-        else
-        {
-            _settings.Rename.RememberLastTemplate = false;
-        }
-        SettingsManager.Save(_settings);
-        if (GuardClipboardBusy()) return;
-        var token = PrepareFileOperation("一括リネーム");
-        int renameTotal = dialogResult.Preview.Items.Count(item => item.WillRename);
-        var progressForm = new FileOperationProgressFallbackForm("一括リネーム", renameTotal, requestCancel: null, canCancel: false);
-        PositionProgressFallbackForm(progressForm);
-        progressForm.Show(this);
-        progressForm.UpdateState("一括リネーム中", "準備中...", indeterminate: false, cancelRequested: false);
-        try
-        {
-            var outcome = await Task.Run(() => _renameApplyCoordinator.ApplyBatchRename(
-                selection,
-                dialogResult.Preview,
-                _navigationService.CurrentPath,
-                message =>
-                {
-                    if (!IsDisposed && IsHandleCreated)
-                    {
-                        Invoke(new Action(() => MessageBox.Show(this, message, "エラー", MessageBoxButtons.OK, MessageBoxIcon.Error)));
-                    }
-                },
-                BuildRenameUndoReadyMessage,
-                (processed, total, currentName) =>
-                {
-                    if (!IsDisposed && IsHandleCreated)
-                    {
-                        BeginInvoke(new Action(() => progressForm.UpdateProgress(processed, total, currentName, cancelRequested: false)));
-                    }
-                }));
-            if (outcome.StatusMessage == "問題のある行があるためリネームを実行できません。")
-            {
-                MessageBox.Show(this, outcome.StatusMessage, "Rename", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-                return;
-            }
-            ApplyRenameOutcome(outcome);
-        }
-        catch (Exception ex)
-        {
-            LogService.Error("ExecuteBatchRename async error", ex);
-            MessageBox.Show(this, $"予期せぬエラーが発生しました。\n{ex.Message}", "エラー", MessageBoxButtons.OK, MessageBoxIcon.Error);
-        }
-        finally
-        {
-            progressForm.Complete("一括リネーム完了");
-            FinalizeFileOperation();
-        }
-    }
-    private void ApplyRenameOutcome(RenameApplyCoordinator.RenameApplyOutcome outcome)
-    {
-        if (outcome.SuccessfulItems.Count > 0)
-        {
-            RecordRenameUndoBatch(outcome.SuccessfulItems);
-        }
-        if (outcome.PostOperationResult != null)
-        {
-            FileOperationResult renameResult = outcome.PostOperationResult;
-            string statusMessage = FileOperationPresentationHelper.GetRenameResultStatusMessage(renameResult);
-            HandlePostOperation(new FileOperationResult(
-                renameResult.OperationName,
-                renameResult.ExitStatus,
-                renameResult.SuccessCount,
-                renameResult.TotalCount,
-                renameResult.NextFocusTarget,
-                renameResult.DestinationDir,
-                renameResult.ShouldClearPreview,
-                renameResult.ShouldClearMarks,
-                statusMessage,
-                renameResult.SkipCount,
-                renameResult.FailCount));
-            return;
-        }
-        if (!string.IsNullOrWhiteSpace(outcome.StatusMessage))
-        {
-            ShowStatusMessage(outcome.StatusMessage);
-        }
-    }
-    private async void ExecuteFileOperationUndo()
-    {
-        var stopwatch = Stopwatch.StartNew();
-        LogService.Info($"[UndoRuntime] Undo requested. thread={Environment.CurrentManagedThreadId}");
-        if (_isFileOperationUndoRedoBusy)
-        {
-            LogService.Warn($"[UndoRuntime] Undo ignored because another undo/redo is running. elapsed={stopwatch.ElapsedMilliseconds}ms");
-            ShowStatusMessage("Undo/Redo 処理中です。");
-            return;
-        }
-        if (!_fileOperationUndoRedoService.TryPeekUndo(out FileOperationUndoRedoBatch batch))
-        {
-            LogService.Warn($"[UndoRuntime] No undo batch. elapsed={stopwatch.ElapsedMilliseconds}ms");
-            ShowStatusMessage("元に戻せるファイル操作がありません");
-            return;
-        }
-        LogService.Info($"[UndoRuntime] Undo batch peeked. operation={batch.Operation}, items={batch.Items.Count}");
-        bool showProgress = IsTrashDeleteUndoRedoOperation(batch.Operation);
-        _isFileOperationUndoRedoBusy = true;
-        UpdateMenuStripState();
-        if (showProgress)
-        {
-            ShowFileOperationUndoRedoProgressFallback("元に戻す", batch.Items.Count);
-        }
-        try
-        {
-            var applyResult = await Task.Run(() =>
-            {
-                bool success = TryApplyFileOperationUndoRedoBatch(
-                    batch,
-                    undo: true,
-                    out string? focusTargetName,
-                    out string? errorMessage,
-                    showProgress ? UpdateFileOperationUndoRedoProgressFallbackFromWorker : null);
-                return new FileOperationUndoRedoApplyResult(success, focusTargetName, errorMessage);
-            });
-            if (!applyResult.Success)
-            {
-                if (showProgress)
-                {
-                    CompleteFileOperationUndoRedoProgressFallback("元に戻せませんでした。");
-                }
-                stopwatch.Stop();
-                LogService.Warn(
-                    $"[UndoRuntime] Undo apply failed. operation={batch.Operation}, items={batch.Items.Count}, " +
-                    $"elapsed={stopwatch.ElapsedMilliseconds}ms, error={applyResult.ErrorMessage ?? "<none>"}");
-                ShowStatusMessage(applyResult.ErrorMessage ?? "ファイル操作を元に戻せませんでした。");
-                return;
-            }
-            _fileOperationUndoRedoService.CommitUndo();
-            LogService.Info($"[RedoRuntime] Redo batch recorded by CommitUndo. operation={batch.Operation}, items={batch.Items.Count}");
-            LoadDirectory(_navigationService.CurrentPath, applyResult.FocusTargetName);
-            stopwatch.Stop();
-            LogService.Info(
-                $"[UndoRuntime] Undo completed. operation={batch.Operation}, items={batch.Items.Count}, " +
-                $"focusTarget={applyResult.FocusTargetName ?? "<none>"}, elapsed={stopwatch.ElapsedMilliseconds}ms");
-            string opLabel = GetFileOperationUndoRedoOperationLabel(batch.Operation);
-            if (batch.IsPartialCancellation) opLabel += " (途中キャンセル分)";
-            ShowStatusMessage($"{batch.Items.Count} 件の{opLabel}を元に戻しました");
-            ScheduleBrowserFocusReturnAfterFileOperation("UndoCompleted");
-            if (showProgress)
-            {
-                CompleteFileOperationUndoRedoProgressFallback("元に戻しました");
-            }
-        }
-        catch (Exception ex)
-        {
-            if (showProgress)
-            {
-                CompleteFileOperationUndoRedoProgressFallback("元に戻せませんでした。");
-            }
-            stopwatch.Stop();
-            LogService.Error(
-                $"[UndoRuntime] Undo failed unexpectedly. operation={batch.Operation}, items={batch.Items.Count}, " +
-                $"elapsed={stopwatch.ElapsedMilliseconds}ms",
-                ex);
-            ShowStatusMessage("ファイル操作を元に戻せませんでした。");
-        }
-        finally
-        {
-            _isFileOperationUndoRedoBusy = false;
-            UpdateMenuStripState();
-            TryProcessPendingCurrentDirectoryRefresh("UndoFinally");
-        }
-    }
-    private async void ExecuteFileOperationRedo()
-    {
-        var stopwatch = Stopwatch.StartNew();
-        LogService.Info($"[RedoRuntime] Redo requested. thread={Environment.CurrentManagedThreadId}");
-        if (_isFileOperationUndoRedoBusy)
-        {
-            LogService.Warn($"[RedoRuntime] Redo ignored because another undo/redo is running. elapsed={stopwatch.ElapsedMilliseconds}ms");
-            ShowStatusMessage("Undo/Redo 処理中です。");
-            return;
-        }
-        if (!_fileOperationUndoRedoService.TryPeekRedo(out FileOperationUndoRedoBatch batch))
-        {
-            LogService.Warn($"[RedoRuntime] No redo batch. elapsed={stopwatch.ElapsedMilliseconds}ms");
-            ShowStatusMessage("やり直せるファイル操作がありません");
-            return;
-        }
-        LogService.Info($"[RedoRuntime] Redo batch peeked. operation={batch.Operation}, items={batch.Items.Count}");
-        bool showProgress = IsTrashDeleteUndoRedoOperation(batch.Operation);
-        string? precomputedFocusTargetName = IsTrashDeleteUndoRedoOperation(batch.Operation)
-            ? GetNextFocusTarget(batch.Items.Select(item => item.BeforePath).ToList())
-            : null;
-        _isFileOperationUndoRedoBusy = true;
-        UpdateMenuStripState();
-        if (showProgress)
-        {
-            ShowFileOperationUndoRedoProgressFallback("やり直し", batch.Items.Count);
-        }
-        try
-        {
-            var applyResult = await Task.Run(() =>
-            {
-                bool success = TryApplyFileOperationUndoRedoBatch(
-                    batch,
-                    undo: false,
-                    out string? focusTargetName,
-                    out string? errorMessage,
-                    showProgress ? UpdateFileOperationUndoRedoProgressFallbackFromWorker : null,
-                    precomputedFocusTargetName);
-                return new FileOperationUndoRedoApplyResult(success, focusTargetName, errorMessage);
-            });
-            if (!applyResult.Success)
-            {
-                if (showProgress)
-                {
-                    CompleteFileOperationUndoRedoProgressFallback("やり直せませんでした。");
-                }
-                stopwatch.Stop();
-                LogService.Warn(
-                    $"[RedoRuntime] Redo apply failed. operation={batch.Operation}, items={batch.Items.Count}, " +
-                    $"elapsed={stopwatch.ElapsedMilliseconds}ms, error={applyResult.ErrorMessage ?? "<none>"}");
-                ShowStatusMessage(applyResult.ErrorMessage ?? "ファイル操作をやり直せませんでした。");
-                return;
-            }
-            _fileOperationUndoRedoService.CommitRedo();
-            LogService.Info($"[UndoRuntime] Undo batch restored by CommitRedo. operation={batch.Operation}, items={batch.Items.Count}");
-            LoadDirectory(_navigationService.CurrentPath, applyResult.FocusTargetName);
-            stopwatch.Stop();
-            LogService.Info(
-                $"[RedoRuntime] Redo completed. operation={batch.Operation}, items={batch.Items.Count}, " +
-                $"focusTarget={applyResult.FocusTargetName ?? "<none>"}, elapsed={stopwatch.ElapsedMilliseconds}ms");
-            string opLabel = GetFileOperationUndoRedoOperationLabel(batch.Operation);
-            if (batch.IsPartialCancellation) opLabel += " (途中キャンセル分)";
-            ShowStatusMessage($"{batch.Items.Count} 件の{opLabel}をやり直しました");
-            ScheduleBrowserFocusReturnAfterFileOperation("RedoCompleted");
-            if (showProgress)
-            {
-                CompleteFileOperationUndoRedoProgressFallback("やり直しました");
-            }
-        }
-        catch (Exception ex)
-        {
-            if (showProgress)
-            {
-                CompleteFileOperationUndoRedoProgressFallback("やり直せませんでした。");
-            }
-            stopwatch.Stop();
-            LogService.Error(
-                $"[RedoRuntime] Redo failed unexpectedly. operation={batch.Operation}, items={batch.Items.Count}, " +
-                $"elapsed={stopwatch.ElapsedMilliseconds}ms",
-                ex);
-            ShowStatusMessage("ファイル操作をやり直せませんでした。");
-        }
-        finally
-        {
-            _isFileOperationUndoRedoBusy = false;
-            UpdateMenuStripState();
-            TryProcessPendingCurrentDirectoryRefresh("RedoFinally");
-        }
-    }
-    private readonly record struct FileOperationUndoRedoApplyResult(
-        bool Success,
-        string? FocusTargetName,
-        string? ErrorMessage);
-    private bool TryApplyFileOperationUndoRedoBatch(
-        FileOperationUndoRedoBatch batch,
-        bool undo,
-        out string? focusTargetName,
-        out string? errorMessage,
-        Action<int, int, string>? progress = null,
-        string? precomputedFocusTargetName = null)
-    {
-        focusTargetName = null;
-        errorMessage = null;
-        if (batch.Items.Count == 0)
-        {
-            errorMessage = "Undo/Redo 履歴が空です。";
-            return false;
-        }
-        if (batch.Operation == FileOperationUndoRedoOperation.CreateFromPaste)
-        {
-            if (!undo)
-            {
-                errorMessage = "この貼り付けUndoはやり直しに対応していません。";
-                return false;
-            }
-
-            foreach (FileOperationUndoRedoItem item in batch.Items)
-            {
-                if (!File.Exists(item.BeforePath))
-                {
-                    errorMessage = $"対象が見つからないため続行できません: {item.BeforePath}";
-                    return false;
-                }
-
-                var info = new FileInfo(item.BeforePath);
-                if (info.Length != item.CreatedFileLength || info.LastWriteTimeUtc.Ticks != item.CreatedFileLastWriteTimeUtcTicks)
-                {
-                    errorMessage = $"作成後に変更されたため続行できません: {item.BeforePath}";
-                    return false;
-                }
-            }
-
-            try
-            {
-                foreach (FileOperationUndoRedoItem item in batch.Items)
-                {
-                    FileOperationService.Delete(item.BeforePath);
-                }
-            }
-            catch (Exception ex)
-            {
-                _fileOperationUndoRedoService.Reset();
-                errorMessage = $"{ex.Message} (履歴は安全側で破棄しました)";
-                return false;
-            }
-
-            focusTargetName = null;
-            return true;
-        }
-        if (IsTrashDeleteUndoRedoOperation(batch.Operation))
-        {
-            return TryApplyTrashDeleteUndoRedoBatch(
-                batch,
-                undo,
-                out focusTargetName,
-                out errorMessage,
-                progress,
-                precomputedFocusTargetName);
-        }
-        var operations = batch.Items
-            .Select(item => undo
-                ? new { CurrentPath = item.AfterPath, TargetPath = item.BeforePath, TargetName = item.BeforeName }
-                : new { CurrentPath = item.BeforePath, TargetPath = item.AfterPath, TargetName = item.AfterName })
-            .ToList();
-        foreach (var operation in operations)
-        {
-            if (!PathExists(operation.CurrentPath))
-            {
-                errorMessage = $"対象が見つからないため続行できません: {operation.CurrentPath}";
-                return false;
-            }
-            if (PathExists(operation.TargetPath))
-            {
-                errorMessage = $"同名の項目があるため続行できません: {operation.TargetPath}";
-                return false;
-            }
-        }
-        try
-        {
-            foreach (var operation in Enumerable.Reverse(operations))
-            {
-                if (batch.Operation == FileOperationUndoRedoOperation.Rename)
-                {
-                    FileOperationService.Rename(operation.CurrentPath, operation.TargetPath);
-                    continue;
-                }
-                FileOperationService.Move(operation.CurrentPath, operation.TargetPath, overwrite: false);
-            }
-        }
-        catch (Exception ex)
-        {
-            _fileOperationUndoRedoService.Reset();
-            errorMessage = $"{ex.Message} (履歴は安全側で破棄しました)";
-            return false;
-        }
-        focusTargetName = operations
-            .Select(operation => operation.TargetPath)
-            .FirstOrDefault(path =>
-                string.Equals(
-                    NavigationService.NormalizeDirectoryForCompare(Path.GetDirectoryName(path) ?? string.Empty),
-                    NavigationService.NormalizeDirectoryForCompare(_navigationService.CurrentPath),
-                    StringComparison.OrdinalIgnoreCase))
-            is string focusPath
-                ? Path.GetFileName(focusPath)
-                : null;
-        return true;
-    }
-    private bool TryApplyTrashDeleteUndoRedoBatch(
-        FileOperationUndoRedoBatch batch,
-        bool undo,
-        out string? focusTargetName,
-        out string? errorMessage,
-        Action<int, int, string>? progress = null,
-        string? precomputedFocusTargetName = null)
-    {
-        focusTargetName = null;
-        errorMessage = null;
-        try
-        {
-            var batchStopwatch = Stopwatch.StartNew();
-            LogService.Info(
-                $"[UndoRuntime] Recycle-bin batch apply start. mode={(undo ? "UndoRestore" : "RedoDelete")}, " +
-                $"items={batch.Items.Count}, thread={Environment.CurrentManagedThreadId}");
-            if (undo)
-            {
-                if (batch.Operation == FileOperationUndoRedoOperation.DeleteToMidFdTrash)
-                {
-                    LogService.Info($"[FileOperationUndo] Restoring MidFD managed trash batch: {batch.Items.Count} items");
-                    MidFdManagedTrashService.ResetManifestOperationDiagnostics();
-                    MidFdManagedTrashService.BeginManifestBatch();
-                    var uiUpdateSw = new Stopwatch();
-                    int managedIndex = 0;
-                    long maxItemMs = 0;
-                    if (batch.Items.Count > 10)
-                    {
-                        MidFdManagedTrashService.SetLoggingSuppression(true);
-                    }
-                    try
-                    {
-                        var trashPathsToUpdate = new List<string>();
-                        foreach (FileOperationUndoRedoItem item in batch.Items)
-                        {
-                            var itemSw = Stopwatch.StartNew();
-                            managedIndex++;
-                            uiUpdateSw.Start();
-                            progress?.Invoke(managedIndex - 1, batch.Items.Count, Path.GetFileName(item.BeforePath));
-                            uiUpdateSw.Stop();
-                            bool suppressLogging = batch.Items.Count > 10;
-                            MidFdManagedTrashService.RestoreFromTrash(item, skipStatusUpdate: true, suppressLogging: suppressLogging);
-                            trashPathsToUpdate.Add(item.RecycleBinPath!);
-                            uiUpdateSw.Start();
-                            progress?.Invoke(managedIndex, batch.Items.Count, Path.GetFileName(item.BeforePath));
-                            uiUpdateSw.Stop();
-                            itemSw.Stop();
-                            if (itemSw.ElapsedMilliseconds > maxItemMs) maxItemMs = itemSw.ElapsedMilliseconds;
-                        }
-                        if (trashPathsToUpdate.Count > 0)
-                        {
-                            MidFdManagedTrashService.UpdateRecordStatuses(trashPathsToUpdate, TrashRecordStatus.Restored);
-                        }
-                    }
-                    finally
-                    {
-                        int suppressedCount = MidFdManagedTrashService.GetSuppressedSuccessCount();
-                        if (suppressedCount > 0 || batch.Items.Count > 10)
-                        {
-                            LogService.Info($"[MidFdTrashLogThrottle] Summary operation={(undo ? "UndoRestore" : "RedoDelete")} items={batch.Items.Count} suppressed={suppressedCount} [MidFdTrashLogThrottle] RuntimeGapCorrective active");
-                        }
-                        MidFdManagedTrashService.FlushManifestBatch();
-                        MidFdManagedTrashService.SetLoggingSuppression(false);
-                    }
-                    focusTargetName = batch.Items
-                        .Select(item => item.BeforePath)
-                        .FirstOrDefault(path =>
-                            string.Equals(
-                                NavigationService.NormalizeDirectoryForCompare(Path.GetDirectoryName(path) ?? string.Empty),
-                                NavigationService.NormalizeDirectoryForCompare(_navigationService.CurrentPath),
-                                StringComparison.OrdinalIgnoreCase))
-                        is string restoredPath
-                            ? Path.GetFileName(restoredPath)
-                            : null;
-                    batchStopwatch.Stop();
-                    var metrics = MidFdManagedTrashService.GetUndoRedoMetrics();
-                    LogService.Info(
-                        $"[UndoRedoPerf] Undo completed. operation={batch.Operation}, items={batch.Items.Count}, " +
-                        $"totalMs={batchStopwatch.ElapsedMilliseconds}, lookupMs={metrics.lookup}, fileMoveMs={metrics.fileMove}, " +
-                        $"statusUpdateMs={metrics.statusUpdate}, manifestStoreMs={metrics.manifestStore}, uiUpdateMs={uiUpdateSw.ElapsedMilliseconds}, " +
-                        $"perItemAvgMs={(double)batchStopwatch.ElapsedMilliseconds / Math.Max(1, batch.Items.Count):F2}, maxItemMs={maxItemMs}");
-                    return true;
-                }
-                errorMessage = "未対応の削除Undo操作です。";
-                return false;
-            }
-            var refreshedItems = new List<FileOperationUndoRedoItem>();
-            if (batch.Operation == FileOperationUndoRedoOperation.DeleteToMidFdTrash)
-            {
-                LogService.Info($"[FileOperationRedo] Re-deleting MidFD managed trash batch: {batch.Items.Count} items");
-                MidFdManagedTrashService.ResetManifestOperationDiagnostics();
-                MidFdManagedTrashService.BeginManifestBatch();
-                var uiUpdateSw = new Stopwatch();
-                int managedRedoIndex = 0;
-                long maxItemMs = 0;
-                var recordsToRegister = new List<TrashManifestRecord>();
-                if (batch.Items.Count > 10)
-                {
-                    MidFdManagedTrashService.SetLoggingSuppression(true);
-                }
-                try
-                {
-                    foreach (FileOperationUndoRedoItem item in batch.Items)
-                    {
-                        var itemSw = Stopwatch.StartNew();
-                        managedRedoIndex++;
-                        if (!PathExists(item.BeforePath))
-                        {
-                            errorMessage = $"対象が見つからないため続行できません: {item.BeforePath}";
-                            return false;
-                        }
-                        uiUpdateSw.Start();
-                        progress?.Invoke(managedRedoIndex - 1, batch.Items.Count, Path.GetFileName(item.BeforePath));
-                        uiUpdateSw.Stop();
-                        bool suppressLogging = batch.Items.Count > 10;
-                        refreshedItems.Add(MidFdManagedTrashService.RedoDeleteToTrash(item, out TrashManifestRecord? record, skipRegistration: true, suppressLogging: suppressLogging));
-                        if (record != null) recordsToRegister.Add(record);
-                        if (recordsToRegister.Count >= 1000)
-                        {
-                            MidFdManagedTrashService.RegisterNewTrashRecordsPublic(recordsToRegister);
-                            recordsToRegister.Clear();
-                        }
-                        uiUpdateSw.Start();
-                        progress?.Invoke(managedRedoIndex, batch.Items.Count, Path.GetFileName(item.BeforePath));
-                        uiUpdateSw.Stop();
-                        itemSw.Stop();
-                        if (itemSw.ElapsedMilliseconds > maxItemMs) maxItemMs = itemSw.ElapsedMilliseconds;
-                    }
-                }
-                finally
-                {
-                    if (recordsToRegister.Count > 0)
-                    {
-                        MidFdManagedTrashService.RegisterNewTrashRecordsPublic(recordsToRegister);
-                        recordsToRegister.Clear();
-                    }
-                    int suppressedCount = MidFdManagedTrashService.GetSuppressedSuccessCount();
-                    if (suppressedCount > 0 || batch.Items.Count > 10)
-                    {
-                        LogService.Info($"[MidFdTrashLogThrottle] Summary operation=RedoDelete items={batch.Items.Count} suppressed={suppressedCount} [MidFdTrashLogThrottle] RuntimeGapCorrective active");
-                    }
-                    MidFdManagedTrashService.FlushManifestBatch();
-                    MidFdManagedTrashService.SetLoggingSuppression(false);
-                }
-                batch.Items = FileOperationUndoRedoService.CreateDeleteToTrashBatch(refreshedItems);
-                focusTargetName = precomputedFocusTargetName;
-                batchStopwatch.Stop();
-                var metrics = MidFdManagedTrashService.GetUndoRedoMetrics();
-                LogService.Info(
-                    $"[UndoRedoPerf] Redo completed. operation={batch.Operation}, items={batch.Items.Count}, " +
-                    $"totalMs={batchStopwatch.ElapsedMilliseconds}, lookupMs={metrics.lookup}, fileMoveMs={metrics.fileMove}, " +
-                    $"statusUpdateMs={metrics.statusUpdate}, manifestStoreMs={metrics.manifestStore}, uiUpdateMs={uiUpdateSw.ElapsedMilliseconds}, " +
-                    $"perItemAvgMs={(double)batchStopwatch.ElapsedMilliseconds / Math.Max(1, batch.Items.Count):F2}, maxItemMs={maxItemMs}");
-                return true;
-            }
-            errorMessage = "未対応の削除Redo操作です。";
-            return false;
-        }
-        catch (Exception ex)
-        {
-            _fileOperationUndoRedoService.Reset();
-            LogService.Error("[UndoRuntime] Recycle-bin batch failed and history was reset.", ex);
-            errorMessage = $"{ex.Message} (履歴は安全側で破棄しました)";
-            return false;
-        }
-    }
-    private static bool PathExists(string path)
-    {
-        return File.Exists(path) || Directory.Exists(path);
-    }
-    private static List<string> CreatePersistableMarkedPaths(IEnumerable<string>? paths, out int skippedCount)
-    {
-        skippedCount = 0;
-        var result = new List<string>();
-        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        foreach (string? path in paths ?? Enumerable.Empty<string>())
-        {
-            if (string.IsNullOrWhiteSpace(path) || !PathExists(path))
-            {
-                skippedCount++;
-                continue;
-            }
-            if (seen.Add(path))
-            {
-                result.Add(path);
-            }
-        }
-        return result;
-    }
-    private void RecordRenameUndoBatch(IEnumerable<RenamePreviewItem> items)
-    {
-        _fileOperationUndoRedoService.RecordBatch(
-            FileOperationUndoRedoOperation.Rename,
-            FileOperationUndoRedoService.CreateRenameBatch(items));
-    }
-    private static string BuildRenameUndoReadyMessage(int successCount, int totalCount)
-    {
-        return BuildFileOperationUndoReadyMessage("リネーム", successCount, totalCount);
-    }
-    private static string BuildMoveUndoReadyMessage(int successCount, int totalCount)
-    {
-        return BuildFileOperationUndoReadyMessage("移動", successCount, totalCount);
-    }
-    private static string BuildFileOperationUndoReadyMessage(string operationLabel, int successCount, int totalCount)
-    {
-        return successCount == totalCount
-            ? $"{successCount} 件{operationLabel}しました。Ctrl+Z で元に戻せます。"
-            : $"{successCount} 件{operationLabel}しました。Ctrl+Z で成功分を元に戻せます。";
-    }
-    private static string GetFileOperationUndoRedoOperationLabel(FileOperationUndoRedoOperation operation)
-    {
-        return operation switch
-        {
-            FileOperationUndoRedoOperation.Rename => "リネーム",
-            FileOperationUndoRedoOperation.Move => "移動",
-            FileOperationUndoRedoOperation.DeleteToMidFdTrash => "削除",
-            FileOperationUndoRedoOperation.CreateFromPaste => "貼り付け作成",
-            _ => "ファイル操作"
-        };
-    }
-    private static bool IsTrashDeleteUndoRedoOperation(FileOperationUndoRedoOperation operation)
-    {
-        return operation == FileOperationUndoRedoOperation.DeleteToMidFdTrash;
-    }
-    private async Task ExecuteDelete(bool permanent = false)
-    {
-        if (GuardReadOnlyBrowserTab())
-        {
-            return;
-        }
-        var entryPlan = _fileOperationEntryCoordinator.CreateSelectionEntryPlan(
-            _isClipboardBusy,
-            _activeFileOperationName,
-            _fileOpCts != null,
-            "削除",
-            ResolveSelection(),
-            "削除対象がありません。");
-        if (!entryPlan.CanProceed)
-        {
-            if (!string.IsNullOrEmpty(entryPlan.StatusMessage))
-            {
-                ShowStatusMessage(entryPlan.StatusMessage, 1000);
-            }
-            return;
-        }
-        var selectionSw = Stopwatch.StartNew();
-        var selection = entryPlan.Selection;
-        if (!TryResolveMultiMarkSelectionAction("削除", "削除をキャンセルしました。", selection, out selection))
-        {
-            return;
-        }
-        selectionSw.Stop();
-        long selectionResolveMs = selectionSw.ElapsedMilliseconds;
-        var warningSw = Stopwatch.StartNew();
-        bool usePermanentDelete = permanent;
-        bool useMidFdManagedTrash = !usePermanentDelete && (_settings.FileOperations?.UseMidFdManagedTrash ?? false);
-        bool shouldConfirm = usePermanentDelete
-            ? (_settings.FileOperations?.ConfirmPermanentDelete ?? true)
-            : (_settings.FileOperations?.ConfirmDelete ?? true);
-        warningSw.Stop();
-        long outsideWarningMs = warningSw.ElapsedMilliseconds;
-        var confirmSw = Stopwatch.StartNew();
-        if (shouldConfirm && !_fileOperationDialogCoordinator.ConfirmDelete(this, selection, usePermanentDelete, _navigationService.CurrentPath, ShowStatusMessage))
-        {
-            return;
-        }
-        confirmSw.Stop();
-        long confirmDialogMs = confirmSw.ElapsedMilliseconds;
-        var focusPrepSw = Stopwatch.StartNew();
-        // 操作後に一気に一番上まで戻るのを防ぐため、あらかじめ次にフォーカスすべき対象を見つけておく
-        string? nextTargetName = GetNextFocusTarget(selection.FullPaths.ToList());
-        focusPrepSw.Stop();
-        long focusTargetPrepareMs = focusPrepSw.ElapsedMilliseconds;
-        int totalCount = selection.Count;
-        int successCount = 0;
-        int failCount = 0;
-        FileOpExitStatus exitStatus = FileOpExitStatus.Success;
-        var successPaths = new List<string>();
-        var recycleBinDeleteUndoItems = new List<FileOperationUndoRedoItem>();
-        bool canRecordRecycleBinUndo = useMidFdManagedTrash;
-        bool recordedRecycleBinUndo = false;
-        CancellationToken token = PrepareFileOperation(usePermanentDelete ? "完全削除" : "削除");
-        int deleteStatusVersion = _fileOperationStatusVersion;
-        bool useShellGuardedRecycleBinDelete = !usePermanentDelete && !useMidFdManagedTrash && totalCount <= ShellGuardedRecycleBinDeleteMaxItems;
-        ShowStatusMessage(FileOperationPresentationHelper.GetOperationStartingMessage("Delete", totalCount));
-        StartFileOperationProgressIndicator("Delete", totalCount);
-        if (!usePermanentDelete)
-        {
-            ShowShellDeleteProgressFallback(deleteStatusVersion, totalCount);
-            if (useShellGuardedRecycleBinDelete)
-            {
-                UpdateShellDeleteProgressFallbackStateIfCurrent(
-                    deleteStatusVersion,
-                    "Shell 削除実行中...",
-                    "Shell からの完了通知を待っています",
-                    indeterminate: true);
-            }
-        }
-        LogService.Info($"[MidFdTrashIntegrity] ExecuteDelete started. (Build: 2026-04-26-Investigation-Correctness)");
-        var deleteTotalStopwatch = Stopwatch.StartNew();
-        DateTime recycleBinDeleteStartedUtc = DateTime.UtcNow;
-        long deleteLoopTotalMs = 0;
-        long undoRecordMs = 0;
-        long postOperationMs = 0;
-        long shellServiceMs = 0;
-        long progressCompleteMs = 0;
-        // LargeDeletePerf metrics
-        long manifestOperationTotalMs = 0;
-        long manifestFileMoveTotalMs = 0;
-        long manifestUpsertTotalMs = 0;
-        long manifestLogTotalMs = 0;
-        long manifestSaveTotalMs = 0;
-        long progressUiTotalMs = 0;
-        long progressiveRemovalTotalMs = 0;
-        long markRemovalTotalMs = 0;
-        long headerMenuUpdateTotalMs = 0;
-        int manifestUpsertCount = 0;
-        int manifestSaveCount = 0;
-        int manifestFlushCount = 0;
-        int manifestLogSuppressedCount = 0;
-        int manifestSuccessLogCount = 0;
-        int manifestChunkSummaryCount = 0;
-        int manifestSlowItemCount = 0;
-        int manifestAppendCount = 0;
-        long manifestUpsertScanCount = 0;
-        long manifestAppendMs = 0;
-        int manifestRecordCountBefore = 0;
-        int manifestRecordCountAfter = 0;
-        bool manifestAppendMode = false;
-        int headerUpdateCount = 0;
-        int menuUpdateCount = 0;
-        int progressUpdateCount = 0;
-        int progressiveRemovalCount = 0;
-        int markRemoveCallCount = 0;
-        int invalidateCount = 0;
-        long uiFlushMaxMs = 0;
-        string midFdTrashBatchId = MidFdManagedTrashService.CreateBatchId();
-        try
-        {
-            var swLoop = Stopwatch.StartNew();
-            if (usePermanentDelete)
-            {
-                var result = await Task.Run(() =>
-                {
-                    int currentSuccess = 0;
-                    int currentFailCount = 0;
-                    FileOpExitStatus currentStatus = FileOpExitStatus.Success;
-                    var chunkSw = Stopwatch.StartNew();
-                    int chunkStartIndex = 0;
-                    long chunkMaxPerItemMs = 0;
-                    var pendingUiPaths = new List<string>();
-                    var uiThrottleSw = Stopwatch.StartNew();
-                    const int UI_CHUNK_SIZE = 250;
-                    const int UI_THROTTLE_MS = 250;
-                    bool largeDelete = totalCount >= 100;
-                    foreach (string path in selection.FullPaths)
-                    {
-                        if (token.IsCancellationRequested)
-                        {
-                            currentStatus = FileOpExitStatus.Canceled;
-                            break;
-                        }
-                        var itemSw = Stopwatch.StartNew();
-                        string fileName = Path.GetFileName(path);
-                        bool shouldUpdateProgress = (currentSuccess + currentFailCount) % 100 == 0 || pendingUiPaths.Count >= UI_CHUNK_SIZE || uiThrottleSw.ElapsedMilliseconds >= UI_THROTTLE_MS;
-                        if (shouldUpdateProgress)
-                        {
-                            var uiSw = Stopwatch.StartNew();
-                            Invoke(new Action(() => ShowFileOperationProgressIfCurrent(
-                                deleteStatusVersion,
-                                "完全削除",
-                                currentSuccess + currentFailCount + 1,
-                                totalCount,
-                                fileName)));
-                            uiSw.Stop();
-                            progressUiTotalMs += uiSw.ElapsedMilliseconds;
-                            progressUpdateCount++;
-                        }
-                        try
-                        {
-                            FileOperationService.Delete(path);
-                            currentSuccess++;
-                            pendingUiPaths.Add(path);
-                            string flushReason = "";
-                            if (pendingUiPaths.Count >= UI_CHUNK_SIZE) flushReason = "CountThreshold";
-                            else if (uiThrottleSw.ElapsedMilliseconds >= UI_THROTTLE_MS) flushReason = "TimeThreshold";
-                            if (!string.IsNullOrEmpty(flushReason))
-                            {
-                                var removalSw = Stopwatch.StartNew();
-                                var flushPaths = pendingUiPaths.ToList();
-                                pendingUiPaths.Clear();
-                                Invoke(new Action(() => ApplyProgressiveDeleteUiChunk(
-                                    flushPaths,
-                                    deleteStatusVersion,
-                                    ref markRemovalTotalMs,
-                                    ref markRemoveCallCount,
-                                    ref headerMenuUpdateTotalMs,
-                                    ref headerUpdateCount,
-                                    ref menuUpdateCount,
-                                    ref invalidateCount,
-                                    midFdTrashBatchId,
-                                    flushReason)));
-                                uiThrottleSw.Restart(); // restart AFTER invoke to avoid degenerate 1-item flushes
-                                removalSw.Stop();
-                                progressiveRemovalTotalMs += removalSw.ElapsedMilliseconds;
-                                if (removalSw.ElapsedMilliseconds > uiFlushMaxMs) uiFlushMaxMs = removalSw.ElapsedMilliseconds;
-                                progressiveRemovalCount++;
-                            }
-                        }
-                        catch (Exception ex)
-                        {
-                            Invoke(new Action(() =>
-                                MessageBox.Show($"完全削除失敗: {path}\n{ex.Message}", "エラー", MessageBoxButtons.OK, MessageBoxIcon.Error)));
-                            currentFailCount++;
-                            currentStatus = FileOpExitStatus.Error;
-                            break;
-                        }
-                        itemSw.Stop();
-                        long itemMs = itemSw.ElapsedMilliseconds;
-                        if (itemMs > chunkMaxPerItemMs) chunkMaxPerItemMs = itemMs;
-                        if (itemMs > 1000)
-                        {
-                            LogService.Info($"[LargeDeletePerf] SlowItem operationId={midFdTrashBatchId} index={currentSuccess + currentFailCount} elapsedMs={itemMs} stage=PermanentDelete path={path}");
-                        }
-                        if ((currentSuccess + currentFailCount) % 100 == 0)
-                        {
-                            LogService.Info($"[LargeDeletePerf] DeleteChunk operationId={midFdTrashBatchId} start={chunkStartIndex} count=100 elapsedMs={chunkSw.ElapsedMilliseconds} avgPerItemMs={chunkSw.ElapsedMilliseconds / 100.0:F1} maxPerItemMs={chunkMaxPerItemMs}");
-                            chunkSw.Restart();
-                            chunkStartIndex = currentSuccess + currentFailCount;
-                            chunkMaxPerItemMs = 0;
-                        }
-                    }
-                    // Final flush
-                    if (pendingUiPaths.Count > 0)
-                    {
-                        var removalSw = Stopwatch.StartNew();
-                        var flushPaths = pendingUiPaths.ToList();
-                        pendingUiPaths.Clear();
-                        Invoke(new Action(() => ApplyProgressiveDeleteUiChunk(
-                            flushPaths,
-                            deleteStatusVersion,
-                            ref markRemovalTotalMs,
-                            ref markRemoveCallCount,
-                            ref headerMenuUpdateTotalMs,
-                            ref headerUpdateCount,
-                            ref menuUpdateCount,
-                            ref invalidateCount,
-                            midFdTrashBatchId,
-                            currentStatus == FileOpExitStatus.Canceled ? "CancelFinalFlush" : "FinalFlush")));
-                        removalSw.Stop();
-                        progressiveRemovalTotalMs += removalSw.ElapsedMilliseconds;
-                        if (removalSw.ElapsedMilliseconds > uiFlushMaxMs) uiFlushMaxMs = removalSw.ElapsedMilliseconds;
-                        progressiveRemovalCount++;
-                    }
-                    return (currentSuccess, currentFailCount, currentStatus);
-                }, token);
-                swLoop.Stop();
-                deleteLoopTotalMs = swLoop.ElapsedMilliseconds;
-                LogService.Info($"[Perf] ExecuteDelete permanent async loop: {deleteLoopTotalMs}ms for {selection.Count} items");
-                successCount = result.currentSuccess;
-                failCount = result.currentFailCount;
-                exitStatus = result.currentStatus;
-            }
-            else
-            {
-                if (useShellGuardedRecycleBinDelete)
-                {
-                    var shellServiceStopwatch = Stopwatch.StartNew();
-                    var shellResult = await ShellRecycleBinDeleteService.DeleteToRecycleBinAsync(
-                        selection.FullPaths.ToList(),
-                        IsHandleCreated ? Handle : IntPtr.Zero,
-                        token,
-                        progress =>
-                        {
-                            if (IsDisposed || !IsHandleCreated)
-                            {
-                                return;
-                            }
-                            BeginInvoke(new Action(() =>
-                            {
-                                var uiSw = Stopwatch.StartNew();
-                                ShowFileOperationProgressIfCurrent(
-                                    deleteStatusVersion,
-                                    "Delete",
-                                    progress.ProcessedCount,
-                                    progress.TotalCount,
-                                    progress.Name);
-                                UpdateShellDeleteProgressFallbackStateIfCurrent(
-                                    deleteStatusVersion,
-                                    _fileOpCts?.IsCancellationRequested ?? false
-                                        ? "キャンセル要求中..."
-                                        : "Shell 削除実行中...",
-                                    progress.IsSuccess
-                                        ? $"Shell 完了通知: {progress.ProcessedCount}/{progress.TotalCount} 件"
-                                        : "Shell からの完了通知を待っています",
-                                    indeterminate: true);
-                                uiSw.Stop();
-                                progressUiTotalMs += uiSw.ElapsedMilliseconds;
-                                progressUpdateCount++;
-                                if (progress.IsSuccess)
-                                {
-                                    var removalSw = Stopwatch.StartNew();
-                                    // Shell guarded delete is usually small (<= MaxItems), so we use ApplyProgressiveDeleteUi directly
-                                    // but if user increased the limit, it might be heavy.
-                                    // For now, ShellGuardedRecycleBinDeleteMaxItems is likely small.
-                                    ApplyProgressiveDeleteUi(progress.Path, deleteStatusVersion, ref markRemovalTotalMs, ref markRemoveCallCount, ref headerMenuUpdateTotalMs, ref headerUpdateCount, ref menuUpdateCount, ref invalidateCount);
-                                    removalSw.Stop();
-                                    progressiveRemovalTotalMs += removalSw.ElapsedMilliseconds;
-                                    if (removalSw.ElapsedMilliseconds > uiFlushMaxMs) uiFlushMaxMs = removalSw.ElapsedMilliseconds;
-                                    progressiveRemovalCount++;
-                                }
-                            }));
-                        });
-                    shellServiceStopwatch.Stop();
-                    shellServiceMs = shellServiceStopwatch.ElapsedMilliseconds;
-                    swLoop.Stop();
-                    deleteLoopTotalMs = swLoop.ElapsedMilliseconds;
-                    LogService.Info(
-                        $"[Perf] ExecuteDelete shell recycle-bin guarded loop: {deleteLoopTotalMs}ms " +
-                        $"for {selection.Count} items, success={shellResult.SuccessCount}, " +
-                        $"fail={shellResult.FailCount}, canceled={shellResult.IsCanceled}, hr=0x{shellResult.HResult:X8}, " +
-                        $"serviceTotal={shellResult.TotalMs}ms, queueItems={shellResult.QueueItemsMs}ms, " +
-                        $"perform={shellResult.PerformOperationsMs}ms, callbackSpan={shellResult.CallbackSpanMs}ms, " +
-                        $"maxCallbackGap={shellResult.MaxCallbackGapMs}ms");
-                    successCount = shellResult.SuccessCount;
-                    failCount = shellResult.FailCount;
-                    exitStatus = shellResult.IsCanceled
-                        ? FileOpExitStatus.Canceled
-                        : shellResult.HResult < 0
-                            ? FileOpExitStatus.Error
-                            : FileOpExitStatus.Success;
-                    successPaths.AddRange(shellResult.SuccessPaths);
-                }
-                else if (useMidFdManagedTrash)
-                {
-                    bool largeDelete = totalCount > 10;
-                    MidFdManagedTrashService.ResetManifestOperationDiagnostics();
-                    // Always use batching for Managed Trash to ensure unified SQLite batch path even for small deletions
-                    MidFdManagedTrashService.BeginManifestBatch();
-                    if (largeDelete)
-                    {
-                        MidFdManagedTrashService.SetLoggingSuppression(true);
-                    }
-                    try
-                    {
-                        var managedTrashResult = await Task.Run(() =>
-                    {
-                        int currentSuccess = 0;
-                        int currentFailCount = 0;
-                        FileOpExitStatus currentStatus = FileOpExitStatus.Success;
-                        var currentUndoItems = new List<FileOperationUndoRedoItem>();
-                        var pendingRecords = new List<TrashManifestRecord>();
-                        try
-                        {
-                            var chunkSw = Stopwatch.StartNew();
-                            int chunkStartIndex = 0;
-                            long chunkMaxPerItemMs = 0;
-                            var pendingUiPaths = new List<string>();
-                            var uiThrottleSw = Stopwatch.StartNew();
-                            const int UI_CHUNK_SIZE = 250;
-                            const int UI_THROTTLE_MS = 250;
-                            foreach (string path in selection.FullPaths)
-                            {
-                                if (token.IsCancellationRequested)
-                                {
-                                    currentStatus = FileOpExitStatus.Canceled;
-                                    break;
-                                }
-                                var itemSw = Stopwatch.StartNew();
-                                string fileName = Path.GetFileName(path);
-                                int nextIndex = currentSuccess + currentFailCount + 1;
-                                bool shouldUpdateProgress = (currentSuccess + currentFailCount) % 100 == 0 || pendingUiPaths.Count >= UI_CHUNK_SIZE || uiThrottleSw.ElapsedMilliseconds >= UI_THROTTLE_MS;
-                                if (shouldUpdateProgress)
-                                {
-                                    var uiSw = Stopwatch.StartNew();
-                                    Invoke(new Action(() =>
-                                    {
-                                        ShowFileOperationProgressIfCurrent(
-                                            deleteStatusVersion,
-                                            "Delete",
-                                            nextIndex,
-                                            totalCount,
-                                            fileName);
-                                        UpdateShellDeleteProgressFallbackIfCurrent(
-                                            deleteStatusVersion,
-                                            currentSuccess + currentFailCount,
-                                            totalCount,
-                                            fileName);
-                                    }));
-                                    uiSw.Stop();
-                                    progressUiTotalMs += uiSw.ElapsedMilliseconds;
-                                    progressUpdateCount++;
-                                }
-                                try
-                                {
-                                    var trashSw = Stopwatch.StartNew();
-                                    FileOperationUndoRedoItem undoItem = MidFdManagedTrashService.MoveToTrash(
-                                        path,
-                                        midFdTrashBatchId,
-                                        nextIndex,
-                                        true, // Always skip individual registration, we use batch registration below
-                                        out TrashManifestRecord? record,
-                                        out long fMoveMs,
-                                        out long rUpsertMs,
-                                        out long lMs,
-                                        suppressLogging: largeDelete);
-                                    if (record != null) pendingRecords.Add(record);
-                                    trashSw.Stop();
-                                    long totalOpMs = trashSw.ElapsedMilliseconds;
-                                    manifestOperationTotalMs += totalOpMs;
-                                    manifestFileMoveTotalMs += fMoveMs;
-                                    manifestUpsertTotalMs += rUpsertMs;
-                                    manifestLogTotalMs += lMs;
-                                    manifestUpsertCount++;
-                                    if (MidFdManagedTrashService.IsLoggingSuppressed()) manifestLogSuppressedCount++;
-                                    else manifestSuccessLogCount++;
-                                    if (totalOpMs > 1000) manifestSlowItemCount++;
-                                    currentUndoItems.Add(undoItem);
-                                    currentSuccess++;
-                                    // Manifest chunk save (Unified for all deletion counts to ensure SQLite batch path)
-                                    if (pendingRecords.Count >= 1000)
-                                    {
-                                        var mSw = Stopwatch.StartNew();
-                                        MidFdManagedTrashService.RegisterNewTrashRecordsPublic(pendingRecords);
-                                        pendingRecords.Clear();
-                                        MidFdManagedTrashService.SaveActiveBatch();
-                                        mSw.Stop();
-                                        manifestSaveTotalMs += mSw.ElapsedMilliseconds;
-                                        manifestSaveCount++;
-                                        manifestFlushCount++;
-                                        LogService.Info($"[LargeDeletePerf] ManifestFlush operationId={midFdTrashBatchId} reason=CountThreshold items={currentSuccess} elapsedMs={mSw.ElapsedMilliseconds} saveCount={manifestSaveCount}");
-                                    }
-                                    pendingUiPaths.Add(path);
-                                    string flushReason = "";
-                                    if (pendingUiPaths.Count >= UI_CHUNK_SIZE) flushReason = "CountThreshold";
-                                    else if (uiThrottleSw.ElapsedMilliseconds >= UI_THROTTLE_MS) flushReason = "TimeThreshold";
-                                    if (!string.IsNullOrEmpty(flushReason))
-                                    {
-                                        var removalSw = Stopwatch.StartNew();
-                                        var flushPaths = pendingUiPaths.ToList();
-                                        pendingUiPaths.Clear();
-                                        Invoke(new Action(() =>
-                                        {
-                                            ApplyProgressiveDeleteUiChunk(
-                                                flushPaths,
-                                                deleteStatusVersion,
-                                                ref markRemovalTotalMs,
-                                                ref markRemoveCallCount,
-                                                ref headerMenuUpdateTotalMs,
-                                                ref headerUpdateCount,
-                                                ref menuUpdateCount,
-                                                ref invalidateCount,
-                                                midFdTrashBatchId,
-                                                flushReason);
-                                            UpdateShellDeleteProgressFallbackIfCurrent(
-                                                deleteStatusVersion,
-                                                currentSuccess,
-                                                totalCount,
-                                                fileName);
-                                        }));
-                                        uiThrottleSw.Restart(); // restart AFTER invoke to avoid degenerate 1-item flushes
-                                        removalSw.Stop();
-                                        progressiveRemovalTotalMs += removalSw.ElapsedMilliseconds;
-                                        if (removalSw.ElapsedMilliseconds > uiFlushMaxMs) uiFlushMaxMs = removalSw.ElapsedMilliseconds;
-                                        progressiveRemovalCount++;
-                                    }
-                                }
-                                catch (Exception ex)
-                                {
-                                    Invoke(new Action(() =>
-                                        MessageBox.Show($"削除失敗: {path}\n{ex.Message}", "エラー", MessageBoxButtons.OK, MessageBoxIcon.Error)));
-                                    currentFailCount++;
-                                    currentStatus = FileOpExitStatus.Error;
-                                    break;
-                                }
-                                itemSw.Stop();
-                                long itemMs = itemSw.ElapsedMilliseconds;
-                                if (itemMs > chunkMaxPerItemMs) chunkMaxPerItemMs = itemMs;
-                                if (itemMs > 1000)
-                                {
-                                    LogService.Info($"[LargeDeletePerf] SlowItem operationId={midFdTrashBatchId} index={currentSuccess + currentFailCount} elapsedMs={itemMs} stage=ManagedTrashMove path={path}");
-                                }
-                                if ((currentSuccess + currentFailCount) % 100 == 0)
-                                {
-                                    LogService.Info($"[LargeDeletePerf] DeleteChunk operationId={midFdTrashBatchId} start={chunkStartIndex} count=100 elapsedMs={chunkSw.ElapsedMilliseconds} avgPerItemMs={chunkSw.ElapsedMilliseconds / 100.0:F1} maxPerItemMs={chunkMaxPerItemMs}");
-                                    if (largeDelete)
-                                    {
-                                        LogService.Info($"[MidFdTrash] MoveChunkSummary operationId={midFdTrashBatchId} start={chunkStartIndex} count=100 elapsedMs={chunkSw.ElapsedMilliseconds} avgPerItemMs={chunkSw.ElapsedMilliseconds / 100.0:F1} moved=100 failed=0 manifestBatchMode=true");
-                                        manifestChunkSummaryCount++;
-                                    }
-                                    chunkSw.Restart();
-                                    chunkStartIndex = currentSuccess + currentFailCount;
-                                    chunkMaxPerItemMs = 0;
-                                }
-                            }
-                            // Final flush
-                            if (pendingUiPaths.Count > 0)
-                            {
-                                var removalSw = Stopwatch.StartNew();
-                                var flushPaths = pendingUiPaths.ToList();
-                                pendingUiPaths.Clear();
-                                Invoke(new Action(() => ApplyProgressiveDeleteUiChunk(
-                                    flushPaths,
-                                    deleteStatusVersion,
-                                    ref markRemovalTotalMs,
-                                    ref markRemoveCallCount,
-                                    ref headerMenuUpdateTotalMs,
-                                    ref headerUpdateCount,
-                                    ref menuUpdateCount,
-                                    ref invalidateCount,
-                                    midFdTrashBatchId,
-                                    currentStatus == FileOpExitStatus.Canceled ? "CancelFinalFlush" : "FinalFlush")));
-                                removalSw.Stop();
-                                progressiveRemovalTotalMs += removalSw.ElapsedMilliseconds;
-                                if (removalSw.ElapsedMilliseconds > uiFlushMaxMs) uiFlushMaxMs = removalSw.ElapsedMilliseconds;
-                                progressiveRemovalCount++;
-                            }
-                            return (currentSuccess, currentFailCount, currentStatus, currentUndoItems);
-                        }
-                        finally
-                        {
-                            if (pendingRecords.Count > 0)
-                            {
-                                MidFdManagedTrashService.RegisterNewTrashRecordsPublic(pendingRecords);
-                                pendingRecords.Clear();
-                            }
-                        }
-                    }, token);
-                        successCount = managedTrashResult.currentSuccess;
-                        failCount = managedTrashResult.currentFailCount;
-                        exitStatus = managedTrashResult.currentStatus;
-                        recycleBinDeleteUndoItems.AddRange(managedTrashResult.currentUndoItems);
-                    }
-                    finally
-                    {
-                        // Manifest flush moved to outer finally to allow RestoreNow to reuse the active batch
-                    }
-                    var manifestDiagnostics = MidFdManagedTrashService.GetManifestOperationDiagnostics();
-                    manifestAppendCount = manifestDiagnostics.AppendCount;
-                    manifestUpsertScanCount = manifestDiagnostics.UpsertScanCount;
-                    manifestAppendMs = manifestDiagnostics.AppendMs;
-                    manifestRecordCountBefore = manifestDiagnostics.RecordCountBefore;
-                    manifestRecordCountAfter = manifestDiagnostics.RecordCountAfter;
-                    manifestAppendMode = manifestDiagnostics.AppendMode;
-                    LogService.Info(
-                        $"[LargeDeletePerf] ManifestRecordSummary operationId={midFdTrashBatchId} " +
-                        $"appendMode={manifestAppendMode} appendCount={manifestAppendCount} " +
-                        $"upsertScanCount={manifestUpsertScanCount} appendMs={manifestAppendMs} " +
-                        $"recordCountBefore={manifestRecordCountBefore} recordCountAfter={manifestRecordCountAfter} " +
-                        $"recordBatchCount={manifestDiagnostics.RecordBatchCount} recordBatchFlushCount={manifestDiagnostics.RecordBatchFlushCount} " +
-                        $"recordBatchMs={manifestDiagnostics.RecordBatchMs} " +
-                        $"dbConnMs={manifestDiagnostics.DbConnectionOpenMs} dbTransMs={manifestDiagnostics.DbTransactionBeginMs} " +
-                        $"dbDelMs={manifestDiagnostics.DbDeleteLoopMs} dbInsMs={manifestDiagnostics.DbInsertLoopMs} dbCommitMs={manifestDiagnostics.DbCommitMs}");
-                    swLoop.Stop();
-                    deleteLoopTotalMs = swLoop.ElapsedMilliseconds;
-                    LogService.Info(
-                        $"[Perf] ExecuteDelete MidFD managed trash loop: {deleteLoopTotalMs}ms " +
-                        $"for {selection.Count} items, success={successCount}, " +
-                        $"fail={failCount}, canceled={exitStatus == FileOpExitStatus.Canceled}");
-                }
-                else
-                {
-                    var controlledResult = await Task.Run(() =>
-                    {
-                        int currentSuccess = 0;
-                        int currentFailCount = 0;
-                        FileOpExitStatus currentStatus = FileOpExitStatus.Success;
-                        var currentSuccessPaths = new List<string>();
-                        var chunkSw = Stopwatch.StartNew();
-                        int chunkStartIndex = 0;
-                        long chunkMaxPerItemMs = 0;
-                        var pendingUiPaths = new List<string>();
-                        var uiThrottleSw = Stopwatch.StartNew();
-                        const int UI_CHUNK_SIZE = 250;
-                        const int UI_THROTTLE_MS = 250;
-                        bool useChunkedShellDelete = totalCount >= ChunkedShellRecycleBinDeleteMinItems;
-                        if (useChunkedShellDelete)
-                        {
-                            int chunkCursor = 0;
-                            while (chunkCursor < selection.FullPaths.Count)
-                            {
-                                if (token.IsCancellationRequested)
-                                {
-                                    currentStatus = FileOpExitStatus.Canceled;
-                                    break;
-                                }
-                                int chunkCount = Math.Min(ChunkedShellRecycleBinDeleteChunkSize, selection.FullPaths.Count - chunkCursor);
-                                List<string> chunkPaths = selection.FullPaths.Skip(chunkCursor).Take(chunkCount).ToList();
-                                string progressFileName = Path.GetFileName(chunkPaths[^1]);
-                                var uiSw = Stopwatch.StartNew();
-                                Invoke(new Action(() =>
-                                {
-                                    ShowFileOperationProgressIfCurrent(
-                                        deleteStatusVersion,
-                                        "Delete",
-                                        currentSuccess + currentFailCount + 1,
-                                        totalCount,
-                                        progressFileName);
-                                    UpdateShellDeleteProgressFallbackIfCurrent(
-                                        deleteStatusVersion,
-                                        currentSuccess + currentFailCount,
-                                        totalCount,
-                                        progressFileName);
-                                }));
-                                uiSw.Stop();
-                                progressUiTotalMs += uiSw.ElapsedMilliseconds;
-                                progressUpdateCount++;
-                                ShellRecycleBinDeleteService.Result chunkResult =
-                                    ShellRecycleBinDeleteService.DeleteToRecycleBinAsync(
-                                        chunkPaths,
-                                        IntPtr.Zero,
-                                        token,
-                                        static _ => { })
-                                    .GetAwaiter()
-                                    .GetResult();
-                                currentSuccess += chunkResult.SuccessCount;
-                                currentFailCount += chunkResult.FailCount;
-                                currentSuccessPaths.AddRange(chunkResult.SuccessPaths);
-                                pendingUiPaths.AddRange(chunkResult.SuccessPaths);
-                                if (pendingUiPaths.Count > 0)
-                                {
-                                    var removalSw = Stopwatch.StartNew();
-                                    var flushPaths = pendingUiPaths.ToList();
-                                    pendingUiPaths.Clear();
-                                    Invoke(new Action(() =>
-                                    {
-                                        ApplyProgressiveDeleteUiChunk(
-                                            flushPaths,
-                                            deleteStatusVersion,
-                                            ref markRemovalTotalMs,
-                                            ref markRemoveCallCount,
-                                            ref headerMenuUpdateTotalMs,
-                                            ref headerUpdateCount,
-                                            ref menuUpdateCount,
-                                            ref invalidateCount,
-                                            midFdTrashBatchId,
-                                            "ShellChunk");
-                                        UpdateShellDeleteProgressFallbackIfCurrent(
-                                            deleteStatusVersion,
-                                            currentSuccess + currentFailCount,
-                                            totalCount,
-                                            progressFileName);
-                                    }));
-                                    removalSw.Stop();
-                                    progressiveRemovalTotalMs += removalSw.ElapsedMilliseconds;
-                                    if (removalSw.ElapsedMilliseconds > uiFlushMaxMs) uiFlushMaxMs = removalSw.ElapsedMilliseconds;
-                                    progressiveRemovalCount++;
-                                }
-                                LogService.Info(
-                                    $"[Perf] ExecuteDelete chunked shell recycle-bin chunk: start={chunkCursor} count={chunkCount} " +
-                                    $"success={chunkResult.SuccessCount} fail={chunkResult.FailCount} canceled={chunkResult.IsCanceled} " +
-                                    $"serviceTotal={chunkResult.TotalMs}ms perform={chunkResult.PerformOperationsMs}ms");
-                                if (chunkResult.IsCanceled)
-                                {
-                                    currentStatus = FileOpExitStatus.Canceled;
-                                    break;
-                                }
-                                if (chunkResult.HResult < 0)
-                                {
-                                    currentStatus = FileOpExitStatus.Error;
-                                    break;
-                                }
-                                chunkCursor += chunkCount;
-                            }
-                        }
-                        else
-                        {
-                            foreach (string path in selection.FullPaths)
-                            {
-                                if (token.IsCancellationRequested)
-                                {
-                                    currentStatus = FileOpExitStatus.Canceled;
-                                    break;
-                                }
-                                var itemSw = Stopwatch.StartNew();
-                                string fileName = Path.GetFileName(path);
-                                bool shouldUpdateProgress = (currentSuccess + currentFailCount) % 100 == 0 || pendingUiPaths.Count >= UI_CHUNK_SIZE || uiThrottleSw.ElapsedMilliseconds >= UI_THROTTLE_MS;
-                                if (shouldUpdateProgress)
-                                {
-                                    var uiSw = Stopwatch.StartNew();
-                                    Invoke(new Action(() =>
-                                    {
-                                        ShowFileOperationProgressIfCurrent(
-                                            deleteStatusVersion,
-                                            "Delete",
-                                            currentSuccess + currentFailCount + 1,
-                                            totalCount,
-                                            fileName);
-                                        UpdateShellDeleteProgressFallbackIfCurrent(
-                                            deleteStatusVersion,
-                                            currentSuccess + currentFailCount,
-                                            totalCount,
-                                            fileName);
-                                    }));
-                                    uiSw.Stop();
-                                    progressUiTotalMs += uiSw.ElapsedMilliseconds;
-                                    progressUpdateCount++;
-                                }
-                                try
-                                {
-                                    FileOperationService.DeleteToRecycleBin(path);
-                                    currentSuccess++;
-                                    currentSuccessPaths.Add(path);
-                                    pendingUiPaths.Add(path);
-                                    string flushReason = "";
-                                    if (pendingUiPaths.Count >= UI_CHUNK_SIZE) flushReason = "CountThreshold";
-                                    else if (uiThrottleSw.ElapsedMilliseconds >= UI_THROTTLE_MS) flushReason = "TimeThreshold";
-                                    if (!string.IsNullOrEmpty(flushReason))
-                                    {
-                                        var removalSw = Stopwatch.StartNew();
-                                        var flushPaths = pendingUiPaths.ToList();
-                                        pendingUiPaths.Clear();
-                                        Invoke(new Action(() =>
-                                        {
-                                            ApplyProgressiveDeleteUiChunk(
-                                                flushPaths,
-                                                deleteStatusVersion,
-                                                ref markRemovalTotalMs,
-                                                ref markRemoveCallCount,
-                                                ref headerMenuUpdateTotalMs,
-                                                ref headerUpdateCount,
-                                                ref menuUpdateCount,
-                                                ref invalidateCount,
-                                                midFdTrashBatchId,
-                                                flushReason);
-                                            UpdateShellDeleteProgressFallbackIfCurrent(
-                                                deleteStatusVersion,
-                                                currentSuccess,
-                                                totalCount,
-                                                fileName);
-                                        }));
-                                        uiThrottleSw.Restart(); // restart AFTER invoke to avoid degenerate 1-item flushes
-                                        removalSw.Stop();
-                                        progressiveRemovalTotalMs += removalSw.ElapsedMilliseconds;
-                                        if (removalSw.ElapsedMilliseconds > uiFlushMaxMs) uiFlushMaxMs = removalSw.ElapsedMilliseconds;
-                                        progressiveRemovalCount++;
-                                    }
-                                }
-                                catch (Exception ex)
-                                {
-                                    Invoke(new Action(() =>
-                                        MessageBox.Show($"削除失敗: {path}\n{ex.Message}", "エラー", MessageBoxButtons.OK, MessageBoxIcon.Error)));
-                                    currentFailCount++;
-                                    currentStatus = FileOpExitStatus.Error;
-                                    break;
-                                }
-                                itemSw.Stop();
-                                long itemMs = itemSw.ElapsedMilliseconds;
-                                if (itemMs > chunkMaxPerItemMs) chunkMaxPerItemMs = itemMs;
-                                if (itemMs > 1000)
-                                {
-                                    LogService.Info($"[LargeDeletePerf] SlowItem operationId={midFdTrashBatchId} index={currentSuccess + currentFailCount} elapsedMs={itemMs} stage=StandardRecycleBinDelete path={path}");
-                                }
-                                if ((currentSuccess + currentFailCount) % 100 == 0)
-                                {
-                                    LogService.Info($"[LargeDeletePerf] DeleteChunk operationId={midFdTrashBatchId} start={chunkStartIndex} count=100 elapsedMs={chunkSw.ElapsedMilliseconds} avgPerItemMs={chunkSw.ElapsedMilliseconds / 100.0:F1} maxPerItemMs={chunkMaxPerItemMs}");
-                                    chunkSw.Restart();
-                                    chunkStartIndex = currentSuccess + currentFailCount;
-                                    chunkMaxPerItemMs = 0;
-                                }
-                            }
-                        }
-                    // Final flush
-                    if (pendingUiPaths.Count > 0)
-                    {
-                        var removalSw = Stopwatch.StartNew();
-                        var flushPaths = pendingUiPaths.ToList();
-                        pendingUiPaths.Clear();
-                        Invoke(new Action(() => ApplyProgressiveDeleteUiChunk(
-                            flushPaths,
-                            deleteStatusVersion,
-                            ref markRemovalTotalMs,
-                            ref markRemoveCallCount,
-                            ref headerMenuUpdateTotalMs,
-                            ref headerUpdateCount,
-                            ref menuUpdateCount,
-                            ref invalidateCount,
-                            midFdTrashBatchId,
-                            currentStatus == FileOpExitStatus.Canceled ? "CancelFinalFlush" : "FinalFlush")));
-                        removalSw.Stop();
-                        progressiveRemovalTotalMs += removalSw.ElapsedMilliseconds;
-                        if (removalSw.ElapsedMilliseconds > uiFlushMaxMs) uiFlushMaxMs = removalSw.ElapsedMilliseconds;
-                        progressiveRemovalCount++;
-                    }
-                        return (currentSuccess, currentFailCount, currentStatus, currentSuccessPaths);
-                    }, token);
-                    swLoop.Stop();
-                    deleteLoopTotalMs = swLoop.ElapsedMilliseconds;
-                    LogService.Info(
-                        $"[Perf] ExecuteDelete controlled recycle-bin loop: {deleteLoopTotalMs}ms " +
-                        $"for {selection.Count} items, success={controlledResult.currentSuccess}, " +
-                        $"fail={controlledResult.currentFailCount}, canceled={controlledResult.currentStatus == FileOpExitStatus.Canceled}");
-                    successCount = controlledResult.currentSuccess;
-                    failCount = controlledResult.currentFailCount;
-                    exitStatus = controlledResult.currentStatus;
-                    successPaths.AddRange(controlledResult.currentSuccessPaths);
-                }
-            }
-            bool isFullSuccess = exitStatus == FileOpExitStatus.Success
-                && successCount == totalCount
-                && failCount == 0
-                && !token.IsCancellationRequested;
-            if (exitStatus == FileOpExitStatus.Canceled && useMidFdManagedTrash && successCount > 0)
-            {
-                int pendingCount = totalCount - successCount - failCount;
-                var resolution = _fileOperationDialogCoordinator.ShowDeleteCancelResolution(this, successCount, pendingCount, failCount);
-                LogService.Info($"[DeleteCancelResolution] Cancel requested success={successCount} pending={pendingCount} failed={failCount} UserChoice={resolution}");
-                if (resolution == DeleteCancelResolution.RestoreNow)
-                {
-                    ShowStatusMessage($"{successCount} 件を復元中...");
-                    LogService.Info($"[DeleteCancelRestorePerf] RestoreNow started items={recycleBinDeleteUndoItems.Count}");
-                    var restoreSw = Stopwatch.StartNew();
-                    long fileMoveTotalMs = 0;
-                    long statusUpdateTotalMs = 0;
-                    long maxItemMs = 0;
-                    int slowCount = 0;
-                    var restoredPaths = new List<string>();
-                    var restoreResult = await Task.Run(() =>
-                    {
-                        try
-                        {
-                            MidFdManagedTrashService.ResetManifestOperationDiagnostics();
-                            bool suppressLogging = recycleBinDeleteUndoItems.Count > 10;
-                            if (suppressLogging)
-                            {
-                                MidFdManagedTrashService.SetLoggingSuppression(true); // Still set global for safety, but pass param too
-                            }
-                            foreach (var item in recycleBinDeleteUndoItems)
-                            {
-                                var itemSw = Stopwatch.StartNew();
-                                try
-                                {
-                                    MidFdManagedTrashService.RestoreFromTrash(item, skipStatusUpdate: true, suppressLogging: suppressLogging);
-                                    restoredPaths.Add(item.RecycleBinPath);
-                                }
-                                catch (Exception ex)
-                                {
-                                    LogService.Error($"[DeleteCancelRestorePerf] RestoreNow item failed path={item.BeforePath}", ex);
-                                }
-                                itemSw.Stop();
-                                long elapsed = itemSw.ElapsedMilliseconds;
-                                if (elapsed > 100)
-                                {
-                                    slowCount++;
-                                    LogService.Info($"[DeleteCancelRestorePerf] RestoreNow slowItem path={item.BeforePath} elapsedMs={elapsed}");
-                                }
-                                if (elapsed > maxItemMs) maxItemMs = elapsed;
-                                fileMoveTotalMs += elapsed;
-                            }
-                            if (restoredPaths.Count > 0)
-                            {
-                                var sSw = Stopwatch.StartNew();
-                                MidFdManagedTrashService.UpdateRecordStatuses(restoredPaths, TrashRecordStatus.Restored);
-                                sSw.Stop();
-                                statusUpdateTotalMs = sSw.ElapsedMilliseconds;
-                            }
-                            int suppressedCount = MidFdManagedTrashService.GetSuppressedSuccessCount();
-                            if (suppressedCount > 0 || recycleBinDeleteUndoItems.Count > 10)
-                            {
-                                LogService.Info($"[MidFdTrashLogThrottle] Summary operation=RestoreNow items={recycleBinDeleteUndoItems.Count} suppressed={suppressedCount} [MidFdTrashLogThrottle] RuntimeGapCorrective active");
-                            }
-                            int suppressedCountAtEnd = MidFdManagedTrashService.GetSuppressedSuccessCount();
-                            return (true, suppressedCountAtEnd);
-                        }
-                        catch (Exception ex)
-                        {
-                            LogService.Error("[DeleteCancelResolution] RestoreNow fatal error", ex);
-                            return (false, 0);
-                        }
-                        finally
-                        {
-                            MidFdManagedTrashService.SetLoggingSuppression(false);
-                        }
-                    });
-                    restoreSw.Stop();
-                    long totalMs = restoreSw.ElapsedMilliseconds;
-                    if (restoreResult.Item1)
-                    {
-                        int suppressedCount = restoreResult.Item2;
-                        LogService.Info($"[DeleteCancelRestorePerf] RestoreNow completed items={successCount} totalMs={totalMs} fileMoveMs={fileMoveTotalMs} statusUpdateMs={statusUpdateTotalMs} slowItemCount={slowCount} maxItemMs={maxItemMs} perItemAvgMs={(double)totalMs / Math.Max(1, successCount):F2} suppressedSuccessLogs={suppressedCount}");
-                        ShowStatusMessage("中断し、削除済みのファイルを復元しました。");
-                    }
-                    else
-                    {
-                        LogService.Warn($"[DeleteCancelRestorePerf] RestoreNow completed with some failures. totalMs={totalMs}");
-                        ShowStatusMessage("中断しましたが、一部のファイル復元に失敗しました。");
-                    }
-                    canRecordRecycleBinUndo = false;
-                    recycleBinDeleteUndoItems.Clear();
-                }
-                else
-                {
-                    // KeepDeleted or Cancel -> record undo for partial success items
-                    canRecordRecycleBinUndo = true;
-                    LogService.Info($"[DeleteCancelResolution] PartialUndoBatch will be registered count={successCount}");
-                    ShowStatusMessage($"中断しました。削除済み {successCount} 件は Ctrl+Z で復元できます。");
-                }
-            }
-            // partial / cancel では安全側として Undo 履歴を積まない。
-            if (!usePermanentDelete && canRecordRecycleBinUndo && isFullSuccess && recycleBinDeleteUndoItems.Count != totalCount)
-            {
-                // Windows標準ごみ箱の場合、MidFD削除 Undo/Redo を積まない契約
-                canRecordRecycleBinUndo = false;
-                recycleBinDeleteUndoItems.Clear();
-            }
-            exitStatus = FileOperationPresentationHelper.NormalizeExitStatus(exitStatus, successCount, totalCount, failCount: failCount);
-            if (!usePermanentDelete &&
-                canRecordRecycleBinUndo &&
-                (exitStatus == FileOpExitStatus.Success || (exitStatus == FileOpExitStatus.Canceled && recycleBinDeleteUndoItems.Count > 0)) &&
-                recycleBinDeleteUndoItems.Count == successCount &&
-                successCount > 0)
-            {
-                var undoRecordStopwatch = Stopwatch.StartNew();
-                bool isPartialCancel = exitStatus == FileOpExitStatus.Canceled;
-                _fileOperationUndoRedoService.RecordBatch(
-                    FileOperationUndoRedoOperation.DeleteToMidFdTrash,
-                    FileOperationUndoRedoService.CreateDeleteToTrashBatch(recycleBinDeleteUndoItems),
-                    isPartialCancel);
-                undoRecordStopwatch.Stop();
-                undoRecordMs = undoRecordStopwatch.ElapsedMilliseconds;
-                recordedRecycleBinUndo = true;
-                LogService.Info($"[ShellDeleteUndo] Recorded MidFD managed trash undo batch: {recycleBinDeleteUndoItems.Count} items in {undoRecordMs}ms");
-            }
-            else if (!usePermanentDelete && useMidFdManagedTrash && isFullSuccess && !recordedRecycleBinUndo)
-            {
-                LogService.Warn(
-                    $"[ShellDeleteUndo] MidFD recycle-bin undo batch was not recorded. " +
-                    $"canRecord={canRecordRecycleBinUndo}, undoItems={recycleBinDeleteUndoItems.Count}, total={totalCount}");
-            }
-        }
-        catch (OperationCanceledException)
-        {
-            exitStatus = FileOpExitStatus.Canceled;
-        }
-        catch (Exception ex)
-        {
-            exitStatus = FileOpExitStatus.Error;
-            LogService.Error("ExecuteDelete async error", ex);
-            _fileOperationDialogCoordinator.ShowUnexpectedOperationError(this, usePermanentDelete ? "完全削除" : "削除", ex);
-        }
-        finally
-        {
-            if (useMidFdManagedTrash)
-            {
-                var fSw = Stopwatch.StartNew();
-                int suppressedCount = MidFdManagedTrashService.GetSuppressedSuccessCount();
-                if (suppressedCount > 0 || totalCount > 10)
-                {
-                    string opName = exitStatus == FileOpExitStatus.Canceled ? "Delete(Canceled)" : "Delete";
-                    LogService.Info($"[MidFdTrashLogThrottle] Summary operation={opName} items={totalCount} processed={successCount} suppressed={suppressedCount} [MidFdTrashLogThrottle] RuntimeGapCorrective active");
-                }
-                MidFdManagedTrashService.FlushManifestBatch();
-                MidFdManagedTrashService.SetLoggingSuppression(false);
-                fSw.Stop();
-                manifestSaveTotalMs += fSw.ElapsedMilliseconds;
-                manifestSaveCount++;
-                manifestFlushCount++;
-            }
-            var manifestDiagnostics = MidFdManagedTrashService.GetManifestOperationDiagnostics();
-            var progressCompleteStopwatch = Stopwatch.StartNew();
-            CompleteShellDeleteProgressFallbackIfCurrent(deleteStatusVersion, exitStatus, successCount, totalCount, failCount);
-            progressCompleteStopwatch.Stop();
-            progressCompleteMs = progressCompleteStopwatch.ElapsedMilliseconds;
-            var postOperationStopwatch = Stopwatch.StartNew();
-            HandlePostOperation(_fileOperationPostOperationCoordinator.CreateDeleteResult(
-                exitStatus,
-                successCount,
-                totalCount,
-                nextTargetName,
-                usePermanentDelete,
-                recordedRecycleBinUndo,
-                failCount));
-            postOperationStopwatch.Stop();
-            postOperationMs = postOperationStopwatch.ElapsedMilliseconds;
-            deleteTotalStopwatch.Stop();
-            long cancelLatencyMs = 0;
-            if (exitStatus == FileOpExitStatus.Canceled && _fileOperationCancelRequestedTimestamp > 0)
-            {
-                cancelLatencyMs = (long)Stopwatch.GetElapsedTime(_fileOperationCancelRequestedTimestamp).TotalMilliseconds;
-            }
-            string mode = usePermanentDelete ? "PermanentDelete" : (useMidFdManagedTrash ? "MidFdManagedTrash" : "WindowsRecycleBin");
-            LogService.Info($"[LargeDeletePerf] BatchSummary operationId={midFdTrashBatchId} mode={mode} count={totalCount} success={successCount} fail={failCount} canceled={exitStatus == FileOpExitStatus.Canceled} totalMs={deleteTotalStopwatch.ElapsedMilliseconds} undoRecorded={recordedRecycleBinUndo}");
-            LogService.Info($"[LargeDeletePerf] StageSummary operationId={midFdTrashBatchId} selectionResolveMs={selectionResolveMs} outsideWarningMs={outsideWarningMs} confirmDialogMs={confirmDialogMs} focusTargetPrepareMs={focusTargetPrepareMs} deleteLoopMs={deleteLoopTotalMs} manifestOperationMs={manifestOperationTotalMs} manifestFileMoveMs={manifestFileMoveTotalMs} manifestUpsertMs={manifestUpsertTotalMs} manifestLogMs={manifestLogTotalMs} manifestLogSuppressedCount={manifestLogSuppressedCount} manifestLogSuccessCount={manifestSuccessLogCount} manifestChunkSummaryCount={manifestChunkSummaryCount} manifestSlowItemCount={manifestSlowItemCount} manifestUpsertCount={manifestUpsertCount} manifestAppendMode={manifestAppendMode} manifestAppendCount={manifestAppendCount} manifestUpsertScanCount={manifestUpsertScanCount} manifestAppendMs={manifestAppendMs} manifestRecordCountBefore={manifestRecordCountBefore} manifestRecordCountAfter={manifestRecordCountAfter} manifestSaveCount={manifestSaveCount} manifestFlushCount={manifestFlushCount} manifestSaveTotalMs={manifestSaveTotalMs} dbConnMs={manifestDiagnostics.DbConnectionOpenMs} dbTransMs={manifestDiagnostics.DbTransactionBeginMs} dbDelMs={manifestDiagnostics.DbDeleteLoopMs} dbInsMs={manifestDiagnostics.DbInsertLoopMs} dbCommitMs={manifestDiagnostics.DbCommitMs} [ManagedTrashPerfInvestigation] totalFileMoveMs={manifestDiagnostics.TotalFileMoveMs} crossVolumeMoveCount={manifestDiagnostics.CrossVolumeMoveCount} sameVolumeCount={manifestDiagnostics.SameVolumeMoveCount} appDataFallbackCount={manifestDiagnostics.AppDataFallbackMoveCount} cancelLatencyMs={cancelLatencyMs} progressUiMs={progressUiTotalMs} progressCount={progressUpdateCount} progressiveRemovalMs={progressiveRemovalTotalMs} uiFlushCount={progressiveRemovalCount} uiFlushMaxMs={uiFlushMaxMs} markRemovalMs={markRemovalTotalMs} headerMenuUpdateMs={headerMenuUpdateTotalMs} postReloadMs={postOperationMs} undoRecordMs={undoRecordMs}");
-            if (useMidFdManagedTrash && successCount > 0)
-            {
-                _ = MidFdManagedTrashService.RunRetentionCleanupAsync(_settings, _fileOperationUndoRedoService, "DeleteComplete");
-            }
-        }
-    }
-    private void ScheduleBrowserFocusReturnAfterFileOperation(string reason)
-    {
-        if (!CanRestoreBrowserFocusAfterFileOperation())
-        {
-            return;
-        }
-        BeginInvoke(new Action(() =>
-        {
-            if (!CanRestoreBrowserFocusAfterFileOperation() || _uiMode != UIMode.Browser || !browserPanel.Visible)
-            {
-                return;
-            }
-            Activate();
-            browserPanel.Focus();
-            LogService.Info(
-                $"[FileOperationFocus] Browser focus returned. reason={reason}, " +
-                $"activeControl={DescribeControl(ActiveControl)}, browserFocused={browserPanel.Focused}");
-        }));
-    }
-    private bool CanRestoreBrowserFocusAfterFileOperation()
-    {
-        if (IsDisposed || !IsHandleCreated || !Visible)
-        {
-            return false;
-        }
-        Form? activeForm = Form.ActiveForm;
-        if (activeForm != null && !ReferenceEquals(activeForm, this))
-        {
-            return false;
-        }
-        foreach (Form ownedForm in OwnedForms)
-        {
-            if (ownedForm != null && !ownedForm.IsDisposed && ownedForm.Visible)
-            {
-                return false;
-            }
-        }
-        return true;
-    }
-    private void ShowFileOperationUndoRedoProgressFallback(string operationName, int totalCount)
-    {
-        CloseFileOperationUndoRedoProgressFallback();
-        var form = new FileOperationProgressFallbackForm(operationName, totalCount, requestCancel: null, canCancel: false);
-        form.FormClosed += (_, _) =>
-        {
-            if (ReferenceEquals(_undoRedoProgressFallback, form))
-            {
-                _undoRedoProgressFallback = null;
-            }
-            ScheduleBrowserFocusReturnAfterFileOperation("UndoRedoProgressFallbackClosed");
-        };
-        PositionProgressFallbackForm(form);
-        _undoRedoProgressFallback = form;
-        form.Show(this);
-        form.UpdateProgress(0, totalCount, "準備中...", cancelRequested: false);
-    }
-    private void UpdateFileOperationUndoRedoProgressFallbackFromWorker(int processedCount, int totalCount, string currentFileName)
-    {
-        if (IsDisposed || !IsHandleCreated)
-        {
-            return;
-        }
-        BeginInvoke(new Action(() =>
-        {
-            _undoRedoProgressFallback?.UpdateProgress(processedCount, totalCount, currentFileName, cancelRequested: false);
-        }));
-    }
-    private void CompleteFileOperationUndoRedoProgressFallback(string message)
-    {
-        if (IsDisposed || !IsHandleCreated)
-        {
-            return;
-        }
-        BeginInvoke(new Action(() =>
-        {
-            _undoRedoProgressFallback?.Complete(message);
-        }));
-    }
-    private void CloseFileOperationUndoRedoProgressFallback()
-    {
-        var form = _undoRedoProgressFallback;
-        _undoRedoProgressFallback = null;
-        if (form != null && !form.IsDisposed)
-        {
-            form.Close();
-        }
-    }
-    private void ApplyProgressiveDeleteUi(string deletedPath, int statusVersion, ref long markRemovalMs, ref int markRemoveCount, ref long headerUpdateMs, ref int headerUpdateCount, ref int menuUpdateCount, ref int invalidateCount)
-    {
-        if (!IsCurrentFileOperationStatusVersion(statusVersion))
-        {
-            return;
-        }
-        var markSw = Stopwatch.StartNew();
-        UnmarkPath(deletedPath);
-        markSw.Stop();
-        markRemovalMs += markSw.ElapsedMilliseconds;
-        markRemoveCount++;
-        for (int i = 0; i < fileListView.Items.Count; i++)
-        {
-            if (fileListView.Items[i].Tag is string itemPath &&
-                string.Equals(itemPath, deletedPath, StringComparison.OrdinalIgnoreCase))
-            {
-                fileListView.Items.RemoveAt(i);
-                if (fileListView.Items.Count == 0)
-                {
-                    _browserCursorIndex = 0;
-                }
-                else if (_browserCursorIndex >= fileListView.Items.Count)
-                {
-                    _browserCursorIndex = fileListView.Items.Count - 1;
-                }
-                else if (i < _browserCursorIndex)
-                {
-                    _browserCursorIndex--;
-                }
-                break;
-            }
-        }
-        if (string.Equals(_currentPreviewTarget, deletedPath, StringComparison.OrdinalIgnoreCase))
-        {
-            _currentPreviewTarget = null;
-            ClearPreview();
-        }
-        var headerSw = Stopwatch.StartNew();
-        UpdateInfoPanel();
-        headerSw.Stop();
-        headerUpdateMs += headerSw.ElapsedMilliseconds;
-        headerUpdateCount++;
-        UpdateMenuStripState();
-        menuUpdateCount++;
-        UpdateFunctionBar();
-        browserPanel.Invalidate();
-        invalidateCount++;
-    }
-    private void ApplyProgressiveDeleteUi(string deletedPath, int statusVersion)
-    {
-        long dummyMs = 0;
-        int dummyCount = 0;
-        ApplyProgressiveDeleteUi(deletedPath, statusVersion, ref dummyMs, ref dummyCount, ref dummyMs, ref dummyCount, ref dummyCount, ref dummyCount);
-    }
-    private void ApplyProgressiveDeleteUiChunk(
-        List<string> deletedPaths,
-        int statusVersion,
-        ref long markRemovalMs,
-        ref int markRemoveCount,
-        ref long headerUpdateMs,
-        ref int headerUpdateCount,
-        ref int menuUpdateCount,
-        ref int invalidateCount,
-        string operationId,
-        string reason)
-    {
-        if (!IsCurrentFileOperationStatusVersion(statusVersion) || deletedPaths.Count == 0)
-        {
-            return;
-        }
-        var swFlush = Stopwatch.StartNew();
-        // 1. Bulk Unmark
-        var markSw = Stopwatch.StartNew();
-        int removedMarks = _markedFiles.RemoveRange(deletedPaths);
-        markSw.Stop();
-        markRemovalMs += markSw.ElapsedMilliseconds;
-        markRemoveCount++;
-        if (removedMarks > 0)
-        {
-            // 大量削除中の chunk flush では、mark 全件の File I/O を避けるため
-            // count-only のキャッシュ更新に留める。
-            SetCountOnlyMarkSummaryCache();
-            InvalidateRecentMultiMarkIntent();
-            ClearPendingEscExitMarkPersistence();
-            LogService.Info($"[LargeDeletePerf] BulkUnmark operationId={operationId} count={removedMarks} elapsedMs={markSw.ElapsedMilliseconds} reason={reason}");
-        }
-        // 2. Bulk UI Removal
-        var targets = new HashSet<string>(deletedPaths, StringComparer.OrdinalIgnoreCase);
-        for (int i = fileListView.Items.Count - 1; i >= 0; i--)
-        {
-            if (fileListView.Items[i].Tag is string itemPath && targets.Contains(itemPath))
-            {
-                fileListView.Items.RemoveAt(i);
-                if (fileListView.Items.Count == 0)
-                {
-                    _browserCursorIndex = 0;
-                }
-                else if (_browserCursorIndex >= fileListView.Items.Count)
-                {
-                    _browserCursorIndex = fileListView.Items.Count - 1;
-                }
-                else if (i < _browserCursorIndex)
-                {
-                    _browserCursorIndex--;
-                }
-            }
-        }
-        foreach (var path in deletedPaths)
-        {
-            if (string.Equals(_currentPreviewTarget, path, StringComparison.OrdinalIgnoreCase))
-            {
-                _currentPreviewTarget = null;
-                ClearPreview();
-                break;
-            }
-        }
-        // 3. UI Global Updates
-        if (reason.EndsWith("FinalFlush"))
-        {
-            var headerSw = Stopwatch.StartNew();
-            UpdateInfoPanel();
-            headerSw.Stop();
-            headerUpdateMs += headerSw.ElapsedMilliseconds;
-            headerUpdateCount++;
-            UpdateMenuStripState();
-            menuUpdateCount++;
-            UpdateFunctionBar();
-            browserPanel.Invalidate();
-            invalidateCount++;
-        }
-        swFlush.Stop();
-        LogService.Info($"[LargeDeletePerf] UiFlush operationId={operationId} reason={reason} items={deletedPaths.Count} elapsedMs={swFlush.ElapsedMilliseconds}");
-    }
-    private void ShowShellDeleteProgressFallback(int statusVersion, int totalCount)
-    {
-        if (!IsCurrentFileOperationStatusVersion(statusVersion))
-        {
-            return;
-        }
-        CloseShellDeleteProgressFallback();
-        StartFileOperationProgressIndicator("Delete", totalCount);
-        var form = new FileOperationProgressFallbackForm("削除", totalCount, () =>
-        {
-            RequestActiveFileOperationCancel("ShellDeleteProgressFallback");
-        });
-        form.FormClosed += (_, _) =>
-        {
-            if (ReferenceEquals(_shellDeleteProgressFallback, form))
-            {
-                _shellDeleteProgressFallback = null;
-            }
-            ScheduleBrowserFocusReturnAfterFileOperation("ShellDeleteProgressFallbackClosed");
-        };
-        PositionProgressFallbackForm(form);
-        _shellDeleteProgressFallback = form;
-        form.Show(this);
-        form.UpdateProgress(0, totalCount, "準備中...", _fileOpCts?.IsCancellationRequested ?? false);
-    }
-    private void PositionProgressFallbackForm(Form form)
-    {
-        form.Location = new Point(
-            Left + Math.Max(0, (Width - form.Width) / 2),
-            Top + Math.Max(0, (Height - form.Height) / 2));
-    }
-    private void UpdateShellDeleteProgressFallbackIfCurrent(int statusVersion, int processedCount, int totalCount, string currentFileName)
-    {
-        if (!IsCurrentFileOperationStatusVersion(statusVersion))
-        {
-            return;
-        }
-        UpdateFileOperationProgressIndicatorIfCurrent(statusVersion, "Delete", processedCount, totalCount);
-        _shellDeleteProgressFallback?.UpdateProgress(
-            processedCount,
-            totalCount,
-            currentFileName,
-            _fileOpCts?.IsCancellationRequested ?? false);
-    }
-    private void UpdateShellDeleteProgressFallbackStateIfCurrent(
-        int statusVersion,
-        string title,
-        string detail,
-        bool indeterminate)
-    {
-        if (!IsCurrentFileOperationStatusVersion(statusVersion))
-        {
-            return;
-        }
-        _shellDeleteProgressFallback?.UpdateState(
-            title,
-            detail,
-            indeterminate,
-            _fileOpCts?.IsCancellationRequested ?? false);
-    }
-    private void CompleteShellDeleteProgressFallbackIfCurrent(
-        int statusVersion,
-        FileOpExitStatus exitStatus,
-        int successCount,
-        int totalCount,
-        int failCount)
-    {
-        if (!IsCurrentFileOperationStatusVersion(statusVersion))
-        {
-            return;
-        }
-        var form = _shellDeleteProgressFallback;
-        if (form == null)
-        {
-            return;
-        }
-        string message = exitStatus switch
-        {
-            FileOpExitStatus.Success when successCount == totalCount && failCount == 0 => $"削除完了: {successCount}/{totalCount} 件",
-            FileOpExitStatus.Canceled => $"削除を中断しました: {successCount}/{totalCount} 件",
-            FileOpExitStatus.PartialSuccess => $"削除は一部完了: {successCount}/{totalCount} 件",
-            _ => $"削除失敗または未完了: {successCount}/{totalCount} 件"
-        };
-        form.Complete(message);
-    }
-    private void CloseShellDeleteProgressFallback()
-    {
-        var form = _shellDeleteProgressFallback;
-        _shellDeleteProgressFallback = null;
-        if (form != null && !form.IsDisposed)
-        {
-            form.Close();
-        }
-    }
-    private void ExecuteClipboardCopy()
-    {
-        var entryPlan = _fileOperationEntryCoordinator.CreateSelectionEntryPlan(
-            _isClipboardBusy,
-            null,
-            _fileOpCts != null,
-            "コピー",
-            ResolveSelection(),
-            "コピー対象がありません。");
-        if (!entryPlan.CanProceed)
-        {
-            if (!string.IsNullOrEmpty(entryPlan.StatusMessage))
-            {
-                ShowStatusMessage(entryPlan.StatusMessage, 1000);
-            }
-            return;
-        }
-        var selection = entryPlan.Selection;
-        if (!TryResolveMultiMarkSelectionAction("コピー", "コピーをキャンセルしました。", selection, out selection))
-        {
-            return;
-        }
-        _isClipboardBusy = true;
-        try
-        {
-            ShellClipboardService.SetFileDrop(selection.FullPaths, false);
-            ShowStatusMessage($"{selection.Count} 件をクリップボードにコピーしました。");
-        }
-        finally
-        {
-            _isClipboardBusy = false;
-        }
-    }
-    private void ExecuteClipboardCut()
-    {
-        if (GuardReadOnlyBrowserTab("切り取り")) return;
-        var entryPlan = _fileOperationEntryCoordinator.CreateSelectionEntryPlan(
-            _isClipboardBusy,
-            null,
-            _fileOpCts != null,
-            "切り取り",
-            ResolveSelection(),
-            "切り取り対象がありません。");
-        if (!entryPlan.CanProceed)
-        {
-            if (!string.IsNullOrEmpty(entryPlan.StatusMessage))
-            {
-                ShowStatusMessage(entryPlan.StatusMessage, 1000);
-            }
-            return;
-        }
-        _isClipboardBusy = true;
-        try
-        {
-            var selection = entryPlan.Selection;
-            ShellClipboardService.SetFileDrop(selection.FullPaths, true);
-            ShowStatusMessage($"{selection.Count} 件をクリップボードに切り取り登録しました。");
-        }
-        finally
-        {
-            _isClipboardBusy = false;
-        }
-    }
-    private async void ExecuteClipboardPaste()
-    {
-        if (GuardReadOnlyBrowserTab())
-        {
-            return;
-        }
-        if (!ShellClipboardService.TryHasFileDrop(out bool hasFileDrop, out string? clipboardError))
-        {
-            ShowStatusMessage("クリップボードの確認に失敗しました");
-            return;
-        }
-        if (!ShellClipboardService.TryHasImage(out bool hasImage, out string? imageClipboardError))
-        {
-            ShowStatusMessage("クリップボードの確認に失敗しました");
-            return;
-        }
-        if (!ShellClipboardService.TryHasText(out bool hasText, out string? textClipboardError))
-        {
-            ShowStatusMessage("クリップボードの確認に失敗しました");
-            return;
-        }
-        var pasteEntryPlan = _fileOperationEntryCoordinator.CreateClipboardPasteEntryPlan(
-            _uiMode == UIMode.Browser,
-            _isClipboardBusy,
-            _fileOpCts != null,
-            _fileOpCts?.IsCancellationRequested ?? false,
-            hasFileDrop,
-            hasImage,
-            hasText,
-            _navigationService.CurrentPath);
-        if (!pasteEntryPlan.CanProceed)
-        {
-            if (!string.IsNullOrEmpty(pasteEntryPlan.StatusMessage))
-            {
-                ShowStatusMessage(pasteEntryPlan.StatusMessage, 1000);
-            }
-            return;
-        }
-        if (hasFileDrop && hasImage)
-        {
-            var choice = _fileOperationDialogCoordinator.ChooseClipboardPasteMode(this);
-            if (choice == ClipboardPasteChoice.Cancel)
-            {
-                ShowStatusMessage("貼り付けはキャンセルされました。");
-                return;
-            }
-            if (choice == ClipboardPasteChoice.ClipboardImage)
-            {
-                ExecuteClipboardImagePaste();
-                return;
-            }
-        }
-        else if (!hasFileDrop && hasImage)
-        {
-            ExecuteClipboardImagePaste();
-            return;
-        }
-        else if (!hasFileDrop && !hasImage && hasText)
-        {
-            ExecuteClipboardTextPaste();
-            return;
-        }
-        try
-        {
-            ShellClipboardService.TryGetSnapshot(out var beforeSnapshot, out _);
-            if (!ShellClipboardService.TryGetFileDrop(out List<string> validPaths, out bool isCut))
-            {
-                ShowStatusMessage("クリップボードに有効なファイルがありません。");
-                return;
-            }
-            string destDir = pasteEntryPlan.CurrentPath;
-            if (isCut && validPaths.Count >= 2 && !ConfirmBulkCutPasteMove(validPaths.Count, validPaths[0], destDir))
-            {
-                ShowStatusMessage("貼り付け(移動)はキャンセルされました。");
-                return;
-            }
-            string pasteOperationDisplayName = isCut ? "貼り付け(移動)" : "貼り付け(コピー)";
-            CancellationToken token = PrepareFileOperation(pasteOperationDisplayName);
-            int pasteStatusVersion = _fileOperationStatusVersion;
-            ShowStatusMessage(FileOperationPresentationHelper.GetOperationStartingMessage("Paste", validPaths.Count, destDir));
-            StartFileOperationProgressIndicator(isCut ? "Move" : "Copy", validPaths.Count);
-            IProgress<FileOperationProgress> progress = _fileOperationDialogCoordinator.CreatePasteProgress(
-                isCut,
-                message => ShowFileOperationStatusIfCurrent(
-                    pasteStatusVersion,
-                    (_fileOpCts?.IsCancellationRequested ?? false)
-                        ? FileOperationPresentationHelper.GetCancelRequestedMessage(_activeFileOperationName ?? pasteOperationDisplayName)
-                        : message),
-                p => UpdateFileOperationProgressIndicatorIfCurrent(
-                    pasteStatusVersion,
-                    isCut ? "Move" : "Copy",
-                    p.ProcessedCount,
-                    p.TotalCount));
-            var result = await Task.Run(() =>
-            {
-                string? firstSuccessName = null;
-                string? firstRenamedName = null;
-                int successCount = 0;
-                int skipCount = 0;
-                int failCount = 0;
-                int renamedCount = 0;
-                bool wasCancelled = false;
-                bool canRecordMoveUndoBatch = isCut;
-                bool canRecordCreatedFilesUndoBatch = !isCut;
-                bool applyRenameCopyToAllSameDirectory = false;
-                CopyCollisionDecision? applyToAllDecision = null;
-                DirectoryMergeDecision? directoryApplyToAllDecision = null;
-                var successfulMoveUndoItems = new List<(string SourcePath, string DestinationPath)>();
-                var successfulCreatedFilePaths = new List<string>();
-                foreach (var sourcePath in validPaths)
-                {
-                    if (token.IsCancellationRequested)
-                    {
-                        wasCancelled = true;
-                        break;
-                    }
-                    string fileName = Path.GetFileName(sourcePath);
-                    string destPath = Path.Combine(destDir, fileName);
-                    progress.Report(new FileOperationProgress(successCount + skipCount + failCount + 1, validPaths.Count, fileName));
-                    if (string.Equals(
-                        NavigationService.NormalizeDirectoryForCompare(Path.GetDirectoryName(sourcePath) ?? string.Empty),
-                        NavigationService.NormalizeDirectoryForCompare(destDir),
-                        StringComparison.OrdinalIgnoreCase))
-                    {
-                        if (!isCut)
-                        {
-                            string originalDestPath = destPath;
-                            if (!applyRenameCopyToAllSameDirectory)
-                            {
-                                string suggestedPath = FileOperationService.GetUniquePath(destPath);
-                                string suggestedName = Path.GetFileName(suggestedPath);
-                                var sameDirDecision = (PasteSameDirectoryConfirmAction)this.Invoke(new Func<PasteSameDirectoryConfirmAction>(() =>
-                                {
-                                    ShowStatusMessage(FileOperationPresentationHelper.GetSameDirectoryAliasCopyConfirmationMessage(fileName, suggestedName));
-                                    return _fileOperationDialogCoordinator.ConfirmPasteSameDirectory(this, fileName, suggestedName, validPaths.Count > 1);
-                                }));
-                                if (sameDirDecision == PasteSameDirectoryConfirmAction.Cancel)
-                                {
-                                    wasCancelled = true;
-                                    break;
-                                }
-                                if (sameDirDecision == PasteSameDirectoryConfirmAction.No)
-                                {
-                                    skipCount++;
-                                    continue;
-                                }
-                                if (sameDirDecision == PasteSameDirectoryConfirmAction.All)
-                                {
-                                    applyRenameCopyToAllSameDirectory = true;
-                                }
-                            }
-                            ShowFileOperationProgressIfCurrent(
-                                pasteStatusVersion,
-                                pasteOperationDisplayName,
-                                successCount + skipCount + failCount + 1,
-                                validPaths.Count,
-                                fileName,
-                                usePasteProgress: true,
-                                isCut: isCut);
-                            destPath = FileOperationService.GetUniquePath(destPath);
-                            fileName = Path.GetFileName(destPath);
-                            if (!string.Equals(originalDestPath, destPath, StringComparison.OrdinalIgnoreCase))
-                            {
-                                renamedCount++;
-                                firstRenamedName ??= fileName;
-                            }
-                        }
-                        else
-                        {
-                            skipCount++;
-                            continue;
-                        }
-                    }
-                    bool sourceIsDir = Directory.Exists(sourcePath);
-                    if (!isCut && sourceIsDir)
-                    {
-                        canRecordCreatedFilesUndoBatch = false;
-                    }
-                    bool destExists = File.Exists(destPath) || Directory.Exists(destPath);
-                    bool overwriteMove = false;
-                    if (destExists)
-                    {
-                        bool destIsDir = Directory.Exists(destPath);
-                        if (sourceIsDir != destIsDir)
-                        {
-                            string conflictPath = destPath;
-                            this.Invoke(() => _fileOperationDialogCoordinator.ShowTypeMismatchConflict(this, conflictPath));
-                            failCount++;
-                            canRecordMoveUndoBatch = false;
-                            continue;
-                        }
-                        if (sourceIsDir)
-                        {
-                            canRecordMoveUndoBatch = false;
-                            canRecordCreatedFilesUndoBatch = false;
-                            if (!TryResolvePasteDirectoryMerge(sourcePath, destPath, isCut, ref directoryApplyToAllDecision, out bool pasteShouldSkip, out bool pasteShouldCancel))
-                            {
-                                if (pasteShouldCancel)
-                                {
-                                    wasCancelled = true;
-                                    break;
-                                }
-                                if (pasteShouldSkip)
-                                {
-                                    skipCount++;
-                                    continue;
-                                }
-                            }
-                            try
-                            {
-                                if (isCut)
-                                {
-                                    PasteMoveDirectoryIntoExisting(
-                                        sourcePath,
-                                        destPath,
-                                        ref applyToAllDecision,
-                                        out bool directoryShouldCancel,
-                                        out int directorySkipCount,
-                                        out int directoryFailCount);
-                                    if (directoryShouldCancel)
-                                    {
-                                        wasCancelled = true;
-                                        break;
-                                    }
-                                    skipCount += directorySkipCount;
-                                    failCount += directoryFailCount;
-                                }
-                                else
-                                {
-                                    PasteCopyDirectoryIntoExisting(sourcePath, destPath, ref applyToAllDecision, out bool directoryShouldCancel);
-                                    if (directoryShouldCancel)
-                                    {
-                                        wasCancelled = true;
-                                        break;
-                                    }
-                                }
-                                firstSuccessName ??= fileName;
-                                successCount++;
-                            }
-                            catch (OperationCanceledException)
-                            {
-                                wasCancelled = true;
-                                break;
-                            }
-                            catch (Exception ex)
-                            {
-                                string opErrName = isCut ? "貼り付け(移動)" : "貼り付け(コピー)";
-                                LogService.Error($"{opErrName}フォルダ統合失敗: {fileName}", ex);
-                                failCount++;
-                            }
-                            continue;
-                        }
-                        var collisionResolution = (PasteCollisionResolution)this.Invoke(() =>
-                        {
-                            ShowStatusMessage(FileOperationPresentationHelper.GetConflictConfirmationMessage(
-                                isCut ? "貼り付け(移動)" : "貼り付け(コピー)",
-                                fileName));
-                            return _fileOperationDialogCoordinator.ResolvePasteCollision(
-                                this,
-                                sourcePath,
-                                destPath,
-                                allowRename: !isCut,
-                                isCut: isCut,
-                                ref applyToAllDecision);
-                        });
-                        if (collisionResolution.ShouldCancel)
-                        {
-                            wasCancelled = true;
-                            break;
-                        }
-                        if (collisionResolution.ShouldSkip)
-                        {
-                            skipCount++;
-                            canRecordMoveUndoBatch = false;
-                            canRecordCreatedFilesUndoBatch = false;
-                            continue;
-                        }
-                        ShowFileOperationProgressIfCurrent(
-                            pasteStatusVersion,
-                            pasteOperationDisplayName,
-                            successCount + skipCount + failCount + 1,
-                            validPaths.Count,
-                            fileName,
-                            usePasteProgress: true,
-                            isCut: isCut);
-                        destPath = collisionResolution.DestinationPath;
-                        fileName = Path.GetFileName(destPath);
-                        overwriteMove = collisionResolution.OverwriteExisting;
-                        if (overwriteMove)
-                        {
-                            canRecordMoveUndoBatch = false;
-                            canRecordCreatedFilesUndoBatch = false;
-                        }
-                        if (collisionResolution.UsedRenameCopy)
-                        {
-                            renamedCount++;
-                            firstRenamedName ??= collisionResolution.RenameTargetName ?? fileName;
-                        }
-                    }
-                    try
-                    {
-                        if (isCut)
-                        {
-                            FileOperationService.Move(sourcePath, destPath, overwriteMove, suppressLogging: validPaths.Count > 100);
-                            if (canRecordMoveUndoBatch)
-                            {
-                                successfulMoveUndoItems.Add((sourcePath, destPath));
-                            }
-                        }
-                        else
-                        {
-                            FileOperationService.Copy(sourcePath, destPath);
-                            if (canRecordCreatedFilesUndoBatch && File.Exists(destPath))
-                            {
-                                successfulCreatedFilePaths.Add(destPath);
-                            }
-                        }
-                        firstSuccessName ??= fileName;
-                        successCount++;
-                    }
-                    catch (Exception ex)
-                    {
-                        string opErrName = isCut ? "切り取り(移動)" : "コピー";
-                        LogService.Error($"{opErrName}失敗: {fileName}", ex);
-                        failCount++;
-                        canRecordMoveUndoBatch = false;
-                        canRecordCreatedFilesUndoBatch = false;
-                    }
-                }
-                IReadOnlyList<FileOperationUndoRedoItem> moveUndoItems =
-                    canRecordMoveUndoBatch &&
-                    !wasCancelled &&
-                    failCount == 0 &&
-                    skipCount == 0 &&
-                    successCount == validPaths.Count &&
-                    successfulMoveUndoItems.Count == validPaths.Count
-                        ? FileOperationUndoRedoService.CreateMoveBatch(successfulMoveUndoItems)
-                        : Array.Empty<FileOperationUndoRedoItem>();
-                IReadOnlyList<FileOperationUndoRedoItem> createdFilesUndoItems =
-                    canRecordCreatedFilesUndoBatch &&
-                    !wasCancelled &&
-                    failCount == 0 &&
-                    skipCount == 0 &&
-                    successCount == validPaths.Count &&
-                    successfulCreatedFilePaths.Count == validPaths.Count
-                        ? FileOperationUndoRedoService.CreateCreatedFilesBatch(successfulCreatedFilePaths)
-                        : Array.Empty<FileOperationUndoRedoItem>();
-                return (successCount, skipCount, failCount, wasCancelled, firstSuccessName, renamedCount, firstRenamedName, moveUndoItems, createdFilesUndoItems);
-            }, token);
-            if (isCut && !result.wasCancelled && result.successCount > 0 && result.failCount == 0 && result.skipCount == 0 && beforeSnapshot != null)
-            {
-                if (ShellClipboardService.TryGetSnapshot(out var afterSnapshot, out _) &&
-                    ShellClipboardService.IsSameCutSnapshot(beforeSnapshot, afterSnapshot))
-                {
-                    ShellClipboardService.TryClear(out _);
-                }
-            }
-            if (result.wasCancelled)
-            {
-                var canceledResult = new FileOperationResult("Paste", FileOpExitStatus.Canceled, result.successCount, validPaths.Count, result.firstSuccessName,
-                    skipCount: result.skipCount, failCount: result.failCount);
-                string cancelMsg = FileOperationPresentationHelper.GetPasteResultStatusMessage(
-                    canceledResult,
-                    isCut,
-                    result.renamedCount,
-                    result.firstRenamedName,
-                    preserveClipboardOnIncomplete: true);
-                HandlePostOperation(new FileOperationResult("Paste", FileOpExitStatus.Canceled, result.successCount, validPaths.Count, result.firstSuccessName,
-                    customMessage: cancelMsg, skipCount: result.skipCount, failCount: result.failCount));
-                return;
-            }
-            FileOpExitStatus pasteExitStatus = FileOperationPresentationHelper.NormalizeExitStatus(
-                FileOpExitStatus.Success,
-                result.successCount,
-                validPaths.Count,
-                result.skipCount,
-                result.failCount);
-            var pasteResult = new FileOperationResult("Paste", pasteExitStatus, result.successCount, validPaths.Count, result.firstSuccessName,
-                skipCount: result.skipCount, failCount: result.failCount);
-            string resultMsg = FileOperationPresentationHelper.GetPasteResultStatusMessage(
-                pasteResult,
-                isCut,
-                result.renamedCount,
-                result.firstRenamedName,
-                preserveClipboardOnIncomplete: true);
-            if (result.moveUndoItems.Count > 0)
-            {
-                _fileOperationUndoRedoService.RecordBatch(FileOperationUndoRedoOperation.Move, result.moveUndoItems);
-                resultMsg = BuildMoveUndoReadyMessage(result.successCount, validPaths.Count);
-            }
-            else if (result.createdFilesUndoItems.Count > 0)
-            {
-                _fileOperationUndoRedoService.RecordBatch(FileOperationUndoRedoOperation.CreateFromPaste, result.createdFilesUndoItems);
-                resultMsg = BuildCreatedFilesUndoReadyMessage(result.successCount, validPaths.Count);
-            }
-            HandlePostOperation(new FileOperationResult("Paste", pasteExitStatus, result.successCount, validPaths.Count, result.firstSuccessName,
-                customMessage: resultMsg, skipCount: result.skipCount, failCount: result.failCount));
-        }
-        catch (OperationCanceledException)
-        {
-            HandlePostOperation(new FileOperationResult("Paste", FileOpExitStatus.Canceled, 0, 0, customMessage: "貼り付けを中断しました。"));
-        }
-        catch (Exception ex)
-        {
-            LogService.Error("貼り付け処理中に致命的なエラーが発生しました", ex);
-            HandlePostOperation(new FileOperationResult("Paste", FileOpExitStatus.Error, 0, 0));
-        }
-    }
-    private static string BuildCreatedFilesUndoReadyMessage(int successCount, int totalCount)
-    {
-        return BuildFileOperationUndoReadyMessage("作成", successCount, totalCount);
-    }
-    private bool ConfirmBulkCutPasteMove(int itemCount, string firstSourcePath, string destinationDirectory)
-    {
-        string sourceDirectory = Path.GetDirectoryName(firstSourcePath) ?? firstSourcePath;
-        string message =
-            $"切り取り済みの {itemCount} 件を現在のフォルダへ移動します。{Environment.NewLine}{Environment.NewLine}" +
-            $"移動元:{Environment.NewLine}{sourceDirectory}{Environment.NewLine}{Environment.NewLine}" +
-            $"移動先:{Environment.NewLine}{destinationDirectory}{Environment.NewLine}{Environment.NewLine}" +
-            "この操作は元の場所からファイルを移動します。実行しますか？" +
-            $"{Environment.NewLine}{Environment.NewLine}※ 成功した移動は、このセッション中に限り「元に戻す」できます。";
-        return MessageBox.Show(
-            this,
-            message,
-            "複数項目の移動確認",
-            MessageBoxButtons.YesNo,
-            MessageBoxIcon.Warning,
-            MessageBoxDefaultButton.Button2) == DialogResult.Yes;
-    }
-    private void HandlePostOperation(FileOperationResult result)
-    {
-        CompleteFileOperationProgressIndicator();
-        var totalStopwatch = Stopwatch.StartNew();
-        long finalizeMs = 0;
-        long clearPreviewMs = 0;
-        long reloadMs = 0;
-        long refreshMarksMs = 0;
-        long clearMarksMs = 0;
-        long statusMs = 0;
-        var plan = _fileOperationPostOperationCoordinator.CreatePlan(
-            result,
-            _settings.FileOperations?.ReloadAfterFileOperation ?? true,
-            _navigationService.CurrentPath);
-        if (plan.ShouldFinalizeBusy)
-        {
-            var sw = Stopwatch.StartNew();
-            FinalizeFileOperation();
-            sw.Stop();
-            finalizeMs = sw.ElapsedMilliseconds;
-        }
-        if (plan.ShouldClearPreview)
-        {
-            var sw = Stopwatch.StartNew();
-            ClearPreview();
-            sw.Stop();
-            clearPreviewMs = sw.ElapsedMilliseconds;
-        }
-        if (plan.ShouldReloadCurrentDirectory)
-        {
-            var sw = Stopwatch.StartNew();
-            LoadDirectory(_navigationService.CurrentPath, plan.NextFocusTarget);
-            sw.Stop();
-            reloadMs = sw.ElapsedMilliseconds;
-        }
-        else if (plan.ShouldRefreshMarks)
-        {
-            var sw = Stopwatch.StartNew();
-            RefreshMarkUi();
-            sw.Stop();
-            refreshMarksMs = sw.ElapsedMilliseconds;
-        }
-        if (plan.ShouldClearMarks)
-        {
-            var sw = Stopwatch.StartNew();
-            ClearMarks();
-            sw.Stop();
-            clearMarksMs = sw.ElapsedMilliseconds;
-        }
-        var statusStopwatch = Stopwatch.StartNew();
-        ShowStatusMessage(plan.StatusMessage);
-        statusStopwatch.Stop();
-        statusMs = statusStopwatch.ElapsedMilliseconds;
-        totalStopwatch.Stop();
-        LogService.Info(
-            $"[Perf] FileOperationPostOperation operation={result.OperationName} status={result.ExitStatus} " +
-            $"total={totalStopwatch.ElapsedMilliseconds}ms finalize={finalizeMs}ms clearPreview={clearPreviewMs}ms " +
-            $"reload={reloadMs}ms refreshMarks={refreshMarksMs}ms clearMarks={clearMarksMs}ms status={statusMs}ms " +
-            $"reloadApplied={plan.ShouldReloadCurrentDirectory} focusTarget={plan.NextFocusTarget ?? "<none>"}");
-    }
-    private string? GetCreatedItemFocusTarget(string? fileName)
-    {
-        if (!(_settings.FileOperations?.SelectCreatedItemAfterCreate ?? true))
-        {
-            return null;
-        }
-        return string.IsNullOrWhiteSpace(fileName) ? null : fileName;
-    }
-    private bool IsCurrentFileOperationStatusVersion(int statusVersion)
-    {
-        return _isClipboardBusy && statusVersion == _fileOperationStatusVersion;
-    }
-    private static FileOperationItemProgressKind ResolveFileOperationItemProgressKind(string operationDisplayName)
-    {
-        return operationDisplayName switch
-        {
-            "Copy" or "コピー" or "貼り付け(コピー)" => FileOperationItemProgressKind.Copy,
-            "Move" or "移動" or "貼り付け(移動)" => FileOperationItemProgressKind.Move,
-            "Delete" or "削除" or "完全削除" => FileOperationItemProgressKind.Delete,
-            _ => FileOperationItemProgressKind.Other
-        };
-    }
-    private void ShowFileOperationStatusIfCurrent(int statusVersion, string message)
-    {
-        if (!IsCurrentFileOperationStatusVersion(statusVersion))
-        {
-            return;
-        }
-        // busy feedback などの一時優先メッセージが表示されている間は進捗更新をスキップする
-        if (DateTime.UtcNow < _statusNoticeHoldUntilUtc)
-        {
-            return;
-        }
-        ShowStatusMessage(message);
-    }
-    private void UpdateFileOperationProgressIndicatorIfCurrent(
-        int statusVersion,
-        string operationDisplayName,
-        int processedCount,
-        int totalCount)
-    {
-        if (!IsCurrentFileOperationStatusVersion(statusVersion))
-        {
-            return;
-        }
-
-        bool isIndeterminate = totalCount <= 0;
-        UpdateFileOperationItemProgressState(new FileOperationItemProgressState(
-            ResolveFileOperationItemProgressKind(operationDisplayName),
-            processedCount,
-            totalCount,
-            isIndeterminate,
-            true));
-    }
-    private void StartFileOperationProgressIndicator(string operationDisplayName, int totalCount)
-    {
-        UpdateFileOperationItemProgressState(new FileOperationItemProgressState(
-            ResolveFileOperationItemProgressKind(operationDisplayName),
-            0,
-            totalCount,
-            totalCount <= 0,
-            true));
-    }
-    private void CompleteFileOperationProgressIndicator()
-    {
-        ClearFileOperationItemProgressState();
-    }
-    private void ShowFileOperationProgressIfCurrent(
-        int statusVersion,
-        string operationDisplayName,
-        int processedCount,
-        int totalCount,
-        string currentFileName,
-        bool usePasteProgress = false,
-        bool isCut = false)
-    {
-        UpdateFileOperationProgressIndicatorIfCurrent(statusVersion, operationDisplayName, processedCount, totalCount);
-        string message = (_fileOpCts?.IsCancellationRequested ?? false)
-            ? FileOperationPresentationHelper.GetCancelRequestedMessage(_activeFileOperationName ?? operationDisplayName)
-            : usePasteProgress
-                ? FileOperationPresentationHelper.GetPasteProgressMessage(isCut, processedCount, totalCount, currentFileName)
-                : FileOperationPresentationHelper.GetOperationProgressMessage(operationDisplayName, processedCount, totalCount, currentFileName);
-        ShowFileOperationStatusIfCurrent(statusVersion, message);
-    }
-    private CancellationToken PrepareFileOperation(string? operationName = null)
-    {
-        _fileOperationStatusVersion++;
-        _isClipboardBusy = true;
-        _activeFileOperationName = operationName;
-        UpdateMenuStripState();
-        _fileOpCts?.Cancel();
-        _fileOpCts?.Dispose();
-        _fileOpCts = new CancellationTokenSource();
-        _fileOperationCancelRequestedTimestamp = 0;
-        return _fileOpCts.Token;
-    }
-    private void FinalizeFileOperation()
-    {
-        _fileOperationStatusVersion++;
-        CompleteFileOperationProgressIndicator();
-        _fileOpCts?.Dispose();
-        _fileOpCts = null;
-        _isClipboardBusy = false;
-        _activeFileOperationName = null;
-        UpdateMenuStripState();
-        TryProcessPendingCurrentDirectoryRefresh("FinalizeFileOperation");
-    }
-    private bool TryResolveCopyCollision(
-        string sourcePath,
-        ref string destPath,
-        ref CopyCollisionDecision? applyToAllDecision,
-        out CopyCollisionPolicy appliedPolicy,
-        out bool shouldSkip,
-        out bool shouldCancel)
-    {
-        appliedPolicy = CopyCollisionPolicy.Cancel;
-        shouldSkip = false;
-        shouldCancel = false;
-        bool sourceIsDir = Directory.Exists(sourcePath);
-        bool destIsDir = Directory.Exists(destPath);
-        if (sourceIsDir != destIsDir)
-        {
-            string conflictPath = destPath;
-            this.Invoke(() => _fileOperationDialogCoordinator.ShowTypeMismatchConflict(this, conflictPath));
-            shouldSkip = true;
-            return false;
-        }
-        if (sourceIsDir)
-        {
-            this.Invoke(() => _fileOperationDialogCoordinator.ShowUnsupportedDirectoryOverwrite(this));
-            shouldSkip = true;
-            return false;
-        }
-        var decision = applyToAllDecision;
-        if (decision == null)
-        {
-            string dialogDestPath = destPath;
-            string targetName = Path.GetFileName(dialogDestPath);
-            decision = (CopyCollisionDecision)this.Invoke(() =>
-            {
-                ShowStatusMessage(FileOperationPresentationHelper.GetConflictConfirmationMessage("コピー", targetName));
-                return _fileOperationDialogCoordinator.ShowCopyCollision(this, sourcePath, dialogDestPath);
-            });
-            if (decision.ApplyToAll && decision.Policy != CopyCollisionPolicy.Cancel)
-            {
-                applyToAllDecision = new CopyCollisionDecision
-                {
-                    Policy = decision.Policy,
-                    ApplyToAll = true
-                };
-            }
-        }
-        switch (decision.Policy)
-        {
-            case CopyCollisionPolicy.NewerOnly:
-                appliedPolicy = CopyCollisionPolicy.NewerOnly;
-                var sourceTime = File.GetLastWriteTimeUtc(sourcePath);
-                var destTime = File.GetLastWriteTimeUtc(destPath);
-                shouldSkip = sourceTime <= destTime;
-                return !shouldSkip;
-            case CopyCollisionPolicy.RenameCopy:
-                appliedPolicy = CopyCollisionPolicy.RenameCopy;
-                destPath = FileOperationService.GetUniquePathStartingAtOne(destPath);
-                return true;
-            case CopyCollisionPolicy.Overwrite:
-                appliedPolicy = CopyCollisionPolicy.Overwrite;
-                return true;
-            case CopyCollisionPolicy.Skip:
-                appliedPolicy = CopyCollisionPolicy.Skip;
-                shouldSkip = true;
-                return false;
-            default:
-                shouldCancel = true;
-                return false;
-        }
-    }
-    private void ExecuteClipboardImagePaste()
-    {
-        if (GuardReadOnlyBrowserTab())
-        {
-            return;
-        }
-        if (_uiMode != UIMode.Browser)
-        {
-            ShowStatusMessage("この画面では貼り付けできません");
-            return;
-        }
-        if (_isClipboardBusy)
-        {
-            ShowStatusMessage(FileOperationPresentationHelper.GetBusyBlockedMessage(
-                "貼り付け",
-                canCancel: _fileOpCts != null,
-                isCancelRequested: _fileOpCts?.IsCancellationRequested ?? false));
-            return;
-        }
-        if (string.IsNullOrEmpty(_navigationService.CurrentPath))
-        {
-            return;
-        }
-        _isClipboardBusy = true;
-        try
-        {
-            if (!ShellClipboardService.TryGetImage(out var image, out string? imageError) || image == null)
-            {
-                LogBrowserImageImportWarn($"Source=ClipboardImageUnavailable Error={imageError ?? "<none>"}");
-                ShowStatusMessage("クリップボードに画像がありません");
-                return;
-            }
-            using (image)
-            {
-                string savedPath = ClipboardImagePasteService.SavePngToDirectory(image, _navigationService.CurrentPath);
-                string fileName = Path.GetFileName(savedPath);
-                var createdUndoItems = FileOperationUndoRedoService.CreateCreatedFilesBatch(new[] { savedPath });
-                if (createdUndoItems.Count > 0)
-                {
-                    _fileOperationUndoRedoService.RecordBatch(FileOperationUndoRedoOperation.CreateFromPaste, createdUndoItems);
-                }
-                LoadDirectory(_navigationService.CurrentPath, GetCreatedItemFocusTarget(fileName));
-                LogBrowserImageImportInfo($"Source=ClipboardImage Saved={savedPath}");
-                ShowStatusMessage(createdUndoItems.Count > 0
-                    ? "画像を PNG として貼り付けました。Ctrl+Z で元に戻せます。"
-                    : $"画像を PNG として貼り付けました: {fileName}");
-            }
-        }
-        catch (Exception ex)
-        {
-            LogService.Error("クリップボード画像の貼り付けに失敗しました", ex);
-            ShowStatusMessage($"画像貼り付け失敗: {ex.Message}");
-        }
-        finally
-        {
-            _isClipboardBusy = false;
-        }
-    }
-    private void ExecuteClipboardTextPaste()
-    {
-        if (GuardReadOnlyBrowserTab())
-        {
-            return;
-        }
-        if (_uiMode != UIMode.Browser)
-        {
-            ShowStatusMessage("この画面では貼り付けできません");
-            return;
-        }
-        if (!(_settings.FileOperations?.ClipboardPasteTextAsFileEnabled ?? false))
-        {
-            ShowStatusMessage("テキスト貼り付けファイル化は設定でOFFです。");
-            return;
-        }
-        if (_isClipboardBusy)
-        {
-            ShowStatusMessage(FileOperationPresentationHelper.GetBusyBlockedMessage(
-                "貼り付け",
-                canCancel: _fileOpCts != null,
-                isCancelRequested: _fileOpCts?.IsCancellationRequested ?? false));
-            return;
-        }
-        if (string.IsNullOrEmpty(_navigationService.CurrentPath))
-        {
-            return;
-        }
-
-        _isClipboardBusy = true;
-        try
-        {
-            if (!ShellClipboardService.TryGetText(out string? text, out string? textError))
-            {
-                ShowStatusMessage("クリップボードにテキストがありません");
-                return;
-            }
-
-            if (string.IsNullOrWhiteSpace(text))
-            {
-                ShowStatusMessage("空のテキストは貼り付けできません");
-                return;
-            }
-
-            string targetPath = CreateClipboardTextPasteFilePath(_navigationService.CurrentPath);
-            File.WriteAllText(targetPath, text, new UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
-            string fileName = Path.GetFileName(targetPath);
-            var createdUndoItems = FileOperationUndoRedoService.CreateCreatedFilesBatch(new[] { targetPath });
-            if (createdUndoItems.Count > 0)
-            {
-                _fileOperationUndoRedoService.RecordBatch(FileOperationUndoRedoOperation.CreateFromPaste, createdUndoItems);
-            }
-            LoadDirectory(_navigationService.CurrentPath, GetCreatedItemFocusTarget(fileName));
-            ShowStatusMessage(createdUndoItems.Count > 0
-                ? "テキストを貼り付けてファイル作成しました。Ctrl+Z で元に戻せます。"
-                : $"テキストを貼り付けてファイル作成しました: {fileName}");
-        }
-        catch (Exception ex)
-        {
-            LogService.Error("クリップボードテキストの貼り付けに失敗しました", ex);
-            ShowStatusMessage($"テキスト貼り付け失敗: {ex.Message}");
-        }
-        finally
-        {
-            _isClipboardBusy = false;
-        }
-    }
-    private static string CreateClipboardTextPasteFilePath(string directory)
-    {
-        string stamp = DateTime.Now.ToString("yyyyMMdd_HHmmss");
-        string baseName = $"clipboard_text_{stamp}";
-        string path = Path.Combine(directory, $"{baseName}.txt");
-        if (!PathExists(path))
-        {
-            return path;
-        }
-
-        for (int i = 1; i <= 999; i++)
-        {
-            string numbered = Path.Combine(directory, $"{baseName}_{i:000}.txt");
-            if (!PathExists(numbered))
-            {
-                return numbered;
-            }
-        }
-
-        return Path.Combine(directory, $"{baseName}_{Guid.NewGuid():N}.txt");
-    }
-    private bool TryResolvePasteDirectoryMerge(
-        string sourcePath,
-        string destPath,
-        bool isCut,
-        ref DirectoryMergeDecision? applyToAllDecision,
-        out bool shouldSkip,
-        out bool shouldCancel)
-    {
-        shouldSkip = false;
-        shouldCancel = false;
-        var guard = FileOperationService.AnalyzeDirectoryPasteMerge(sourcePath, destPath, isCut);
-        if (!guard.CanMerge)
-        {
-            this.Invoke(() => _fileOperationDialogCoordinator.ShowInformationDialog(
-                this,
-                guard.Message,
-                isCut ? "貼り付け(移動)エラー" : "貼り付け(コピー)エラー"));
-            shouldSkip = true;
-            return false;
-        }
-        var decision = applyToAllDecision;
-        if (decision == null)
-        {
-            string targetName = Path.GetFileName(destPath);
-            decision = (DirectoryMergeDecision)this.Invoke(() =>
-            {
-                ShowStatusMessage(FileOperationPresentationHelper.GetConflictConfirmationMessage(
-                    isCut ? "貼り付け(移動)" : "貼り付け(コピー)",
-                    targetName));
-                return _fileOperationDialogCoordinator.ShowPasteDirectoryMerge(this, sourcePath, destPath, isCut);
-            });
-            if (decision.ApplyToAll && decision.Policy != DirectoryMergePolicy.Cancel)
-            {
-                applyToAllDecision = new DirectoryMergeDecision
-                {
-                    Policy = decision.Policy,
-                    ApplyToAll = true
-                };
-            }
-        }
-        switch (decision.Policy)
-        {
-            case DirectoryMergePolicy.Merge:
-                return true;
-            case DirectoryMergePolicy.Skip:
-                shouldSkip = true;
-                return false;
-            default:
-                shouldCancel = true;
-                return false;
-        }
-    }
-    private bool TryResolveCopyDirectoryMerge(
-        string sourcePath,
-        string destPath,
-        ref DirectoryMergeDecision? applyToAllDecision,
-        out bool shouldSkip,
-        out bool shouldCancel)
-    {
-        shouldSkip = false;
-        shouldCancel = false;
-        var decision = applyToAllDecision;
-        if (decision == null)
-        {
-            string targetName = Path.GetFileName(destPath);
-            decision = (DirectoryMergeDecision)this.Invoke(() =>
-            {
-                ShowStatusMessage(FileOperationPresentationHelper.GetConflictConfirmationMessage("コピー", targetName));
-                return _fileOperationDialogCoordinator.ShowCopyDirectoryMerge(this, sourcePath, destPath);
-            });
-            if (decision.ApplyToAll && decision.Policy != DirectoryMergePolicy.Cancel)
-            {
-                applyToAllDecision = new DirectoryMergeDecision
-                {
-                    Policy = decision.Policy,
-                    ApplyToAll = true
-                };
-            }
-        }
-        switch (decision.Policy)
-        {
-            case DirectoryMergePolicy.Merge:
-                return true;
-            case DirectoryMergePolicy.Skip:
-                shouldSkip = true;
-                return false;
-            default:
-                shouldCancel = true;
-            return false;
-        }
-    }
-    private bool TryResolveMoveDirectoryMerge(
-        string sourcePath,
-        string destPath,
-        ref DirectoryMergeDecision? applyToAllDecision,
-        out bool shouldSkip,
-        out bool shouldCancel)
-    {
-        shouldSkip = false;
-        shouldCancel = false;
-        var guard = FileOperationService.AnalyzeDirectoryMoveMergePractical(sourcePath, destPath);
-        if (!guard.CanMerge)
-        {
-            this.Invoke(() => _fileOperationDialogCoordinator.ShowInformationDialog(this, guard.Message, "移動エラー"));
-            shouldSkip = true;
-            return false;
-        }
-        var decision = applyToAllDecision;
-        if (decision == null)
-        {
-            string targetName = Path.GetFileName(destPath);
-            decision = (DirectoryMergeDecision)this.Invoke(() =>
-            {
-                ShowStatusMessage(FileOperationPresentationHelper.GetConflictConfirmationMessage("移動", targetName));
-                return _fileOperationDialogCoordinator.ShowMoveDirectoryMerge(this, sourcePath, destPath);
-            });
-            if (decision.ApplyToAll && decision.Policy != DirectoryMergePolicy.Cancel)
-            {
-                applyToAllDecision = new DirectoryMergeDecision
-                {
-                    Policy = decision.Policy,
-                    ApplyToAll = true
-                };
-            }
-        }
-        switch (decision.Policy)
-        {
-            case DirectoryMergePolicy.Merge:
-                return true;
-            case DirectoryMergePolicy.Skip:
-                shouldSkip = true;
-                return false;
-            default:
-                shouldCancel = true;
-                return false;
-        }
-    }
-    private void CopyDirectoryIntoExisting(
-        string sourceDir,
-        string destinationDir,
-        ref CopyCollisionDecision? fileApplyToAllDecision,
-        CancellationToken token)
-    {
-        foreach (var entry in FileOperationService.BuildDirectoryCopyPlan(sourceDir, destinationDir))
-        {
-            token.ThrowIfCancellationRequested();
-            if (entry.IsDirectory)
-            {
-                Directory.CreateDirectory(entry.DestinationPath);
-                continue;
-            }
-            string destinationPath = entry.DestinationPath;
-            bool destExists = File.Exists(destinationPath) || Directory.Exists(destinationPath);
-            if (destExists)
-            {
-                if (!TryResolveCopyCollision(entry.SourcePath, ref destinationPath, ref fileApplyToAllDecision, out _, out bool shouldSkip, out bool shouldCancel))
-                {
-                    if (shouldCancel)
-                    {
-                        throw new OperationCanceledException(token);
-                    }
-                    if (shouldSkip)
-                    {
-                        continue;
-                    }
-                }
-            }
-            FileOperationService.Copy(entry.SourcePath, destinationPath);
-        }
-    }
-    private void PasteCopyDirectoryIntoExisting(
-        string sourceDir,
-        string destinationDir,
-        ref CopyCollisionDecision? fileApplyToAllDecision,
-        out bool shouldCancel)
-    {
-        shouldCancel = false;
-        foreach (var entry in FileOperationService.BuildDirectoryCopyPlan(sourceDir, destinationDir))
-        {
-            if (entry.IsDirectory)
-            {
-                Directory.CreateDirectory(entry.DestinationPath);
-                continue;
-            }
-            string destinationPath = entry.DestinationPath;
-            bool destExists = File.Exists(destinationPath) || Directory.Exists(destinationPath);
-            if (destExists)
-            {
-                var collisionResolution = _fileOperationDialogCoordinator.ResolvePasteCollision(
-                    this,
-                    entry.SourcePath,
-                    destinationPath,
-                    allowRename: true,
-                    isCut: false,
-                    ref fileApplyToAllDecision);
-                if (collisionResolution.ShouldCancel)
-                {
-                    shouldCancel = true;
-                    return;
-                }
-                if (collisionResolution.ShouldSkip)
-                {
-                    continue;
-                }
-                destinationPath = collisionResolution.DestinationPath;
-            }
-            FileOperationService.Copy(entry.SourcePath, destinationPath);
-        }
-    }
-    private void PasteMoveDirectoryIntoExisting(
-        string sourceDir,
-        string destinationDir,
-        ref CopyCollisionDecision? fileApplyToAllDecision,
-        out bool shouldCancel,
-        out int skipCount,
-        out int failCount)
-    {
-        MoveDirectoryIntoExistingWithCollisionResolution(
-            sourceDir,
-            destinationDir,
-            ref fileApplyToAllDecision,
-            "貼り付け(移動)",
-            out shouldCancel,
-            out skipCount,
-            out failCount);
-    }
-    private void DirectMoveDirectoryIntoExisting(
-        string sourceDir,
-        string destinationDir,
-        ref CopyCollisionDecision? fileApplyToAllDecision,
-        out bool shouldCancel,
-        out int skipCount,
-        out int failCount)
-    {
-        MoveDirectoryIntoExistingWithCollisionResolution(
-            sourceDir,
-            destinationDir,
-            ref fileApplyToAllDecision,
-            "移動",
-            out shouldCancel,
-            out skipCount,
-            out failCount);
-    }
-    private void MoveDirectoryIntoExistingWithCollisionResolution(
-        string sourceDir,
-        string destinationDir,
-        ref CopyCollisionDecision? fileApplyToAllDecision,
-        string operationLogLabel,
-        out bool shouldCancel,
-        out int skipCount,
-        out int failCount)
-    {
-        shouldCancel = false;
-        skipCount = 0;
-        failCount = 0;
-        IReadOnlyList<DirectoryCopyPlanEntry> copyPlan = FileOperationService.BuildDirectoryCopyPlan(sourceDir, destinationDir);
-        bool suppressItemSuccessLogs = copyPlan.Count > 100;
-        foreach (var entry in copyPlan)
-        {
-            if (entry.IsDirectory)
-            {
-                Directory.CreateDirectory(entry.DestinationPath);
-                continue;
-            }
-            string destinationPath = entry.DestinationPath;
-            bool overwriteMove = false;
-            bool destExists = File.Exists(destinationPath) || Directory.Exists(destinationPath);
-            if (destExists)
-            {
-                var collisionResolution = PasteCollisionResolver.Resolve(
-                    this,
-                    entry.SourcePath,
-                    destinationPath,
-                    allowRename: false,
-                    isCut: true,
-                    ref fileApplyToAllDecision);
-                if (collisionResolution.ShouldCancel)
-                {
-                    shouldCancel = true;
-                    return;
-                }
-                if (collisionResolution.ShouldSkip)
-                {
-                    skipCount++;
-                    continue;
-                }
-                destinationPath = collisionResolution.DestinationPath;
-                overwriteMove = collisionResolution.OverwriteExisting;
-            }
-            try
-            {
-                FileOperationService.Move(entry.SourcePath, destinationPath, overwriteMove, suppressLogging: suppressItemSuccessLogs);
-            }
-            catch (Exception ex)
-            {
-                LogService.Error($"{operationLogLabel}フォルダ統合失敗: {Path.GetFileName(entry.SourcePath)}", ex);
-                failCount++;
-            }
-        }
-        DeleteEmptyDirectoriesBottomUp(sourceDir);
-    }
-    private static void DeleteEmptyDirectoriesBottomUp(string rootDir)
-    {
-        if (!Directory.Exists(rootDir))
-        {
-            return;
-        }
-        foreach (string directoryPath in Directory.EnumerateDirectories(rootDir, "*", SearchOption.AllDirectories)
-                     .OrderByDescending(path => path.Length))
-        {
-            if (!Directory.EnumerateFileSystemEntries(directoryPath).Any())
-            {
-                Directory.Delete(directoryPath, false);
-            }
-        }
-        if (Directory.Exists(rootDir) && !Directory.EnumerateFileSystemEntries(rootDir).Any())
-        {
-            Directory.Delete(rootDir, false);
-        }
-    }
-    private bool TryExtractSevenZipProgress(string line, out string percent)
-    {
-        percent = string.Empty;
-        var match = System.Text.RegularExpressions.Regex.Match(line, @"(\d+)%");
-        if (match.Success)
-        {
-            percent = match.Groups[1].Value;
-            return true;
-        }
-        return false;
-    }
-    /// <summary>
-    /// Phase 5-viewer-ux1: Viewer の現在状態（エンコーディング・折り返し）をまとめた statusLabel 用の文字列を生成する。
-    /// </summary>
     private string GetViewerStatusLine()
     {
         string encLabel = GetViewerEncodingStatusLabel();
@@ -16791,7 +8973,10 @@ private void InitializeBrowserTabControl()
                 ? "Unknown"
                 : _largeFileState.DetectedEncodingLabel;
         }
-        if (_currentViewerKind == PreviewKind.Text && !string.IsNullOrWhiteSpace(_currentViewerDetectedEncodingLabel))
+        if ((_currentViewerKind == PreviewKind.Text
+                || _currentViewerKind == PreviewKind.Markdown
+                || _currentViewerKind == PreviewKind.Sqlite)
+            && !string.IsNullOrWhiteSpace(_currentViewerDetectedEncodingLabel))
         {
             return _currentViewerDetectedEncodingLabel;
         }
@@ -16829,7 +9014,7 @@ private void InitializeBrowserTabControl()
     {
         return _uiMode == UIMode.Viewer
             && viewerTextBox.Visible
-            && (_currentViewerKind == PreviewKind.Text || _currentViewerKind == PreviewKind.Binary);
+            && IsPlainTextBoxViewerKind(_currentViewerKind);
     }
     private void NormalizeStatusLabelLayout()
     {
@@ -16853,24 +9038,12 @@ private void InitializeBrowserTabControl()
             statusStrip.Height = desiredHeight;
         }
         statusLabel.Alignment = ToolStripItemAlignment.Left;
-        statusLabel.Overflow = ToolStripItemOverflow.Never;
+        statusLabel.Overflow = ToolStripItemOverflow.AsNeeded;
         statusLabel.TextAlign = ContentAlignment.MiddleLeft;
-        // ToolStripItem 特有の不定な余白を排除し、Padding で位置を安定させる。
-        statusLabel.Margin = Padding.Empty;
+        statusLabel.Margin = new Padding(0, 1, 0, 1);
         statusLabel.Padding = new Padding(0, 1, 0, 1);
-        // StatusStrip内で利用可能幅を取らせ、長い文字列は右側でクリップさせる。
-        statusLabel.Spring = true;
-        // Springだけで安定しない場合に備え、明示幅も保険として設定する。
-        // SizingGripや余白分を少し差し引く。
-        int gripReserve = statusStrip.SizingGrip ? 20 : 0;
-        int width = Math.Max(
-            50,
-            statusStrip.ClientSize.Width
-            - statusLabel.Margin.Horizontal
-            - gripReserve
-            - 4);
-        statusLabel.AutoSize = false;
-        statusLabel.Width = width;
+        statusLabel.Spring = false;
+        statusLabel.AutoSize = true;
     }
     private void UpdateFileOperationItemProgressState(FileOperationItemProgressState state)
     {
@@ -16882,7 +9055,7 @@ private void InitializeBrowserTabControl()
         }
 
         var dialog = EnsureFileOperationProgressDialog();
-        dialog.UpdateProgress(state, _fileOpCts?.IsCancellationRequested ?? false);
+        dialog.UpdateProgress(state, _fileOpUiState.Cts?.IsCancellationRequested ?? false);
         NormalizeStatusLabelLayout();
     }
     private void ClearFileOperationItemProgressState()
@@ -16896,7 +9069,7 @@ private void InitializeBrowserTabControl()
         {
             _fileOperationProgressDialog = new FileOperationProgressDialog(
                 () => RequestActiveFileOperationCancel("FileOperationProgressDialog"),
-                canCancel: _fileOpCts != null);
+                canCancel: _fileOpUiState.Cts != null);
             PositionFileOperationProgressDialog(_fileOperationProgressDialog);
             _fileOperationProgressDialog.Show(this);
         }
@@ -17225,17 +9398,17 @@ private void InitializeBrowserTabControl()
     }
     private int GetHeaderRow2LeftRequiredWidth(Font font, string pageText, string totalText, string usedText, string freeText)
     {
-        int pageWidth = MeasureHeaderRow2SegmentWidth(font, pageText, lblPage);
-        int totalWidth = MeasureHeaderRow2SegmentWidth(font, totalText, lblTotal);
-        int usedWidth = MeasureHeaderRow2SegmentWidth(font, usedText, lblUsed);
-        int freeWidth = MeasureHeaderRow2SegmentWidth(font, freeText, lblFree);
+        int pageWidth = HeaderLayoutHelper.MeasureRow2SegmentWidth(font, pageText, lblPage);
+        int totalWidth = HeaderLayoutHelper.MeasureRow2SegmentWidth(font, totalText, lblTotal);
+        int usedWidth = HeaderLayoutHelper.MeasureRow2SegmentWidth(font, usedText, lblUsed);
+        int freeWidth = HeaderLayoutHelper.MeasureRow2SegmentWidth(font, freeText, lblFree);
         return pageWidth + totalWidth + usedWidth + freeWidth + (HeaderRow2ClockSafetyGap * 4);
     }
     private int GetHeaderRow1FitGuardPx(Font font)
     {
         int dpiGuard = (int)Math.Ceiling(12f * Math.Max(1, DeviceDpi) / 96f);
         int heightGuard = GetSafeHeaderFontHeight(font) / 2;
-        int textGuard = MeasureHeaderDisplayWidth("00", font);
+        int textGuard = HeaderLayoutHelper.MeasureDisplayWidth("00", font);
         return Math.Max(dpiGuard, Math.Max(heightGuard, textGuard));
     }
     private int GetSafeHeaderFontHeight(Font? font)
@@ -17261,13 +9434,13 @@ private void InitializeBrowserTabControl()
         string freeText,
         string clockText)
     {
-        int pageWidth = MeasureHeaderRow2SegmentWidth(font, pageText, lblPage);
-        int totalWidth = MeasureHeaderRow2SegmentWidth(font, totalText, lblTotal);
-        int usedWidth = MeasureHeaderRow2SegmentWidth(font, usedText, lblUsed);
-        int freeWidth = MeasureHeaderRow2SegmentWidth(font, freeText, lblFree);
+        int pageWidth = HeaderLayoutHelper.MeasureRow2SegmentWidth(font, pageText, lblPage);
+        int totalWidth = HeaderLayoutHelper.MeasureRow2SegmentWidth(font, totalText, lblTotal);
+        int usedWidth = HeaderLayoutHelper.MeasureRow2SegmentWidth(font, usedText, lblUsed);
+        int freeWidth = HeaderLayoutHelper.MeasureRow2SegmentWidth(font, freeText, lblFree);
         int leftRequiredWidth = pageWidth + totalWidth + usedWidth + freeWidth + (HeaderRow2ClockSafetyGap * 4);
         int clockReservedWidth = GetHeaderClockReservedWidth(font);
-        int clockMeasuredWidth = MeasureHeaderDisplayWidth(clockText, font);
+        int clockMeasuredWidth = HeaderLayoutHelper.MeasureDisplayWidth(clockText, font);
         int guardBand = GetHeaderRow1FitGuardPx(font);
         int totalRequiredWidth = leftRequiredWidth + clockReservedWidth + HeaderRow2ClockSafetyGap + guardBand;
         int availableLeftWidth = Math.Max(0, rowWidth - clockReservedWidth - HeaderRow2ClockSafetyGap - guardBand);
@@ -17296,7 +9469,7 @@ private void InitializeBrowserTabControl()
             return 0;
         }
 
-        return Math.Max(0, MeasureHeaderLabelReservedWidth(lblClock, lblClock.Text, font, HeaderRow2ClockSafetyGap));
+        return Math.Max(0, HeaderLayoutHelper.MeasureLabelReservedWidth(lblClock, lblClock.Text, font, HeaderRow2ClockSafetyGap));
     }
     private HeaderRow1FitMetrics GetCurrentHeaderRow1FitMetrics(Font font)
     {
@@ -17434,13 +9607,17 @@ private void InitializeBrowserTabControl()
     }
     private bool TryCopyLargeFileVisibleText()
     {
+        _ = TryCopyLargeFileVisibleTextAsync();
+        return true;
+    }
+    private async Task<bool> TryCopyLargeFileVisibleTextAsync()
+    {
         if (_currentViewerKind != PreviewKind.LargeText || _largeFileState == null)
             return false;
         if (_largeFileControl.TryGetCharacterSelectionRange(out var rawRange))
         {
             var range = NormalizeCharacterSelectionRange(rawRange);
-            _ = TryCopyLargeFileCharacterSelectionAsync(range, _previewCts?.Token ?? CancellationToken.None);
-            return true;
+            return await TryCopyLargeFileCharacterSelectionAsync(range, _previewRequestCoordinator.Token);
         }
         bool hasSelection = _largeFileControl.HasSelectedLines;
         int selectedLineCount = _largeFileControl.SelectedLineCount;
@@ -17844,6 +10021,7 @@ private void InitializeBrowserTabControl()
         if (error != null)
         {
             ShowStatusMessage(error);
+            MessageBox.Show(this, $"関連付けられたアプリで開くことができませんでした。\n理由: {error}", "起動エラー", MessageBoxButtons.OK, MessageBoxIcon.Error);
         }
     }
     private void ShowArchiveContentsOrFallback(string archivePath)
@@ -17854,7 +10032,14 @@ private void InitializeBrowserTabControl()
             LogService.Info($"Archive contents loaded: {archivePath} Entries={result.Entries.Count}");
             ShowStatusMessage($"archive 内容一覧を表示します: {Path.GetFileName(archivePath)}");
             bool isReadOnly = IsActiveBrowserTabReadOnly();
-            using var dialog = new ArchiveListDialog(archivePath, result.Entries, _navigationService.CurrentPath, isReadOnly);
+            using var dialog = new ArchiveListDialog(
+                archivePath,
+                result.Entries,
+                _navigationService.CurrentPath,
+                isReadOnly,
+                _settings.Appearance?.DateFormat,
+                _settings.Appearance?.SizeFormat,
+                _settings.SevenZip?.ExePath);
             dialog.ShowDialog(this);
             if (dialog.PendingExtractRequest != null)
             {
@@ -17947,17 +10132,17 @@ private void InitializeBrowserTabControl()
     {
         return ArchiveFileTypeHelper.IsArchive(fullPath);
     }
-    private async Task ExecuteCopy()
+    private async Task ExecuteCopy(SelectionResult? selectionSnapshot = null)
     {
         var entryPlan = _fileOperationEntryCoordinator.CreateSelectionEntryPlan(
             _isClipboardBusy,
-            _activeFileOperationName,
-            _fileOpCts != null,
+            _fileOpUiState.ActiveOperationName,
+            _fileOpUiState.Cts != null,
             "コピー",
-            ResolveSelection(),
+            ResolveSelection(selectionSnapshot),
             "コピー対象がありません。",
             busyOperationName: "Copy",
-            isCancelRequested: _fileOpCts?.IsCancellationRequested ?? false);
+            isCancelRequested: _fileOpUiState.Cts?.IsCancellationRequested ?? false);
         if (!entryPlan.CanProceed)
         {
             if (!string.IsNullOrEmpty(entryPlan.StatusMessage))
@@ -18017,15 +10202,15 @@ private void InitializeBrowserTabControl()
         int failCount = 0;
         // 非同期実行の準備
         var token = PrepareFileOperation(entryPlan.BusyOperationName);
-        int copyStatusVersion = _fileOperationStatusVersion;
+        int copyStatusVersion = _fileOpUiState.StatusVersion;
         ShowStatusMessage(FileOperationPresentationHelper.GetOperationStartingMessage("Copy", totalCount, destDir));
         StartFileOperationProgressIndicator("Copy", totalCount);
         IProgress<FileOperationProgress> progress = _fileOperationDialogCoordinator.CreateOperationProgress(
             "Copy",
             message => ShowFileOperationStatusIfCurrent(
                 copyStatusVersion,
-                (_fileOpCts?.IsCancellationRequested ?? false)
-                    ? FileOperationPresentationHelper.GetCancelRequestedMessage(_activeFileOperationName ?? "Copy")
+                (_fileOpUiState.Cts?.IsCancellationRequested ?? false)
+                    ? FileOperationPresentationHelper.GetCancelRequestedMessage(_fileOpUiState.ActiveOperationName ?? "Copy")
                     : message),
             p => UpdateFileOperationProgressIndicatorIfCurrent(copyStatusVersion, "Copy", p.ProcessedCount, p.TotalCount));
         try
@@ -18182,7 +10367,7 @@ private void InitializeBrowserTabControl()
                 skipCount: skipCount, failCount: failCount));
         }
     }
-    private async Task ExecuteMove()
+    private async Task ExecuteMove(SelectionResult? selectionSnapshot = null)
     {
         if (GuardReadOnlyBrowserTab())
         {
@@ -18190,13 +10375,13 @@ private void InitializeBrowserTabControl()
         }
         var entryPlan = _fileOperationEntryCoordinator.CreateSelectionEntryPlan(
             _isClipboardBusy,
-            _activeFileOperationName,
-            _fileOpCts != null,
+            _fileOpUiState.ActiveOperationName,
+            _fileOpUiState.Cts != null,
             "移動",
-            ResolveSelection(),
+            ResolveSelection(selectionSnapshot),
             "移動対象がありません。",
             busyOperationName: "Move",
-            isCancelRequested: _fileOpCts?.IsCancellationRequested ?? false);
+            isCancelRequested: _fileOpUiState.Cts?.IsCancellationRequested ?? false);
         if (!entryPlan.CanProceed)
         {
             if (!string.IsNullOrEmpty(entryPlan.StatusMessage))
@@ -18244,15 +10429,15 @@ private void InitializeBrowserTabControl()
         string? moveResultMessage = null;
         // 非同期実行の準備
         var token = PrepareFileOperation(entryPlan.BusyOperationName);
-        int moveStatusVersion = _fileOperationStatusVersion;
+        int moveStatusVersion = _fileOpUiState.StatusVersion;
         ShowStatusMessage(FileOperationPresentationHelper.GetOperationStartingMessage("Move", totalCount, normalizedDestDir));
         StartFileOperationProgressIndicator("Move", totalCount);
         IProgress<FileOperationProgress> progress = _fileOperationDialogCoordinator.CreateOperationProgress(
             "Move",
             message => ShowFileOperationStatusIfCurrent(
                 moveStatusVersion,
-                (_fileOpCts?.IsCancellationRequested ?? false)
-                    ? FileOperationPresentationHelper.GetCancelRequestedMessage(_activeFileOperationName ?? "Move")
+                (_fileOpUiState.Cts?.IsCancellationRequested ?? false)
+                    ? FileOperationPresentationHelper.GetCancelRequestedMessage(_fileOpUiState.ActiveOperationName ?? "Move")
                     : message),
             p => UpdateFileOperationProgressIndicatorIfCurrent(moveStatusVersion, "Move", p.ProcessedCount, p.TotalCount));
         try
@@ -18505,22 +10690,22 @@ private void InitializeBrowserTabControl()
     private void ShowArchiveProgressFallback(string operationName, int totalCount)
     {
         CloseArchiveProgressFallback();
-        var form = new FileOperationProgressFallbackForm(operationName, totalCount, () =>
-        {
-            RequestActiveFileOperationCancel($"{operationName}ProgressFallback");
-        });
-        form.FormClosed += (_, _) =>
-        {
-            if (ReferenceEquals(_archiveProgressFallback, form))
+        var form = Presentation.FileOperationFallbackUiPresenter.ShowProgressFallback(
+            this,
+            operationName,
+            totalCount,
+            () => RequestActiveFileOperationCancel($"{operationName}ProgressFallback"),
+            canCancel: true,
+            closedCallback: closedForm =>
             {
-                _archiveProgressFallback = null;
-            }
-            ScheduleBrowserFocusReturnAfterFileOperation("ArchiveProgressFallbackClosed");
-        };
-        PositionProgressFallbackForm(form);
+                if (ReferenceEquals(_archiveProgressFallback, closedForm))
+                {
+                    _archiveProgressFallback = null;
+                }
+                ScheduleBrowserFocusReturnAfterFileOperation("ArchiveProgressFallbackClosed");
+            });
         _archiveProgressFallback = form;
-        form.Show(this);
-        form.UpdateState($"{operationName}中", "準備中...", indeterminate: true, _fileOpCts?.IsCancellationRequested ?? false);
+        form.UpdateState($"{operationName}中", "準備中...", indeterminate: true, _fileOpUiState.Cts?.IsCancellationRequested ?? false);
     }
     private void UpdateArchiveProgressFallbackState(string operationName, string detail, bool indeterminate = true)
     {
@@ -18528,20 +10713,15 @@ private void InitializeBrowserTabControl()
             $"{operationName}中",
             detail,
             indeterminate,
-            _fileOpCts?.IsCancellationRequested ?? false);
+            _fileOpUiState.Cts?.IsCancellationRequested ?? false);
     }
     private void CompleteArchiveProgressFallback(string message)
     {
-        _archiveProgressFallback?.Complete(message);
+        Presentation.FileOperationFallbackUiPresenter.CompleteProgressFallback(_archiveProgressFallback, message);
     }
     private void CloseArchiveProgressFallback()
     {
-        var form = _archiveProgressFallback;
-        _archiveProgressFallback = null;
-        if (form != null && !form.IsDisposed)
-        {
-            form.Close();
-        }
+        Presentation.FileOperationFallbackUiPresenter.CloseProgressFallback(ref _archiveProgressFallback);
     }
     private string BuildPackSelectionSummary(SelectionResult selection)
     {
@@ -18780,10 +10960,10 @@ private void InitializeBrowserTabControl()
             }
         }
     }
-    private async Task ExecutePack(bool forcePackEachFolderIndividually = false)
+    private async Task ExecutePack(bool forcePackEachFolderIndividually = false, SelectionResult? selectionSnapshot = null)
     {
         if (GuardReadOnlyBrowserTab("圧縮")) return;
-        var selection = ResolveSelection();
+        var selection = ResolveSelection(selectionSnapshot);
         if (selection.Count == 0)
         {
             ShowStatusMessage("圧縮(Pack)対象がありません。");
@@ -19283,9 +11463,9 @@ private void InitializeBrowserTabControl()
     {
         return PackOverwriteBackupSession.Create(SevenZipService.GetPackOutputArtifacts(archivePath));
     }
-    private async Task ExecuteHashAsync(SevenZipHashAlgorithm algorithm)
+    private async Task ExecuteHashAsync(SevenZipHashAlgorithm algorithm, SelectionResult? selectionSnapshot = null)
     {
-        var selection = ResolveSelection();
+        var selection = ResolveSelection(selectionSnapshot);
         if (selection.Count == 0) return;
         if (selection.FullPaths.Any(Directory.Exists))
         {
@@ -19334,10 +11514,10 @@ private void InitializeBrowserTabControl()
             FinalizeFileOperation();
         }
     }
-    private async Task ExecuteUnpack()
+    private async Task ExecuteUnpack(SelectionResult? selectionSnapshot = null)
     {
         if (GuardReadOnlyBrowserTab("解凍")) return;
-        var selection = ResolveSelection();
+        var selection = ResolveSelection(selectionSnapshot);
         // アーカイブファイルのみを抽出
         var archivePaths = selection.FullPaths
             .Where(path => File.Exists(path) && IsArchiveTarget(path))
@@ -19715,10 +11895,10 @@ private void InitializeBrowserTabControl()
         _largeFileState.FirstVisibleLine = line;
         // コントロールのスクロールバー位置を同期 (イベント発火は抑止される)
         _largeFileControl.SetScrollValueSilently(line);
-        int reqId = Interlocked.Increment(ref _previewRequestId);
+        int reqId = _previewRequestCoordinator.CurrentRequestId;
         Interlocked.Exchange(ref _activePreviewRequestId, reqId);
         // 内容を非同期で更新
-        await UpdateLargeFileVirtualDisplayAsync(reqId, _previewCts?.Token ?? CancellationToken.None, preserveCharacterSelection);
+        await UpdateLargeFileVirtualDisplayAsync(reqId, _previewRequestCoordinator.Token, preserveCharacterSelection);
         if (characterSelectionAutoScrollDirection != 0)
         {
             _largeFileControl.ExtendCharacterSelectionToVisibleEdge(characterSelectionAutoScrollDirection);
@@ -19794,6 +11974,10 @@ private void InitializeBrowserTabControl()
     }
     private void ShowStatusMessage(string message, int holdMs)
     {
+        ShowStatusMessage(message, holdMs, StatusMessageKindClassifier.Classify(message));
+    }
+    private void ShowStatusMessage(string message, int holdMs, StatusKind kind)
+    {
         if (holdMs > 0)
         {
             _statusNoticeHoldUntilUtc = DateTime.UtcNow.AddMilliseconds(holdMs);
@@ -19804,7 +11988,7 @@ private void InitializeBrowserTabControl()
             this.statusLabel.Text = message;
             return;
         }
-        _notificationService.Show(message);
+        _notificationService.Show(message, kind);
         if (_currentViewerKind == PreviewKind.LargeText)
         {
             LogViewerStatusRoute("ShowStatusMessage", GetViewerStatusLine());
@@ -19935,11 +12119,29 @@ private void InitializeBrowserTabControl()
     {
         return kind == PreviewKind.Image;
     }
+    private string? ResolveViewerClickedUrl(string? linkText)
+    {
+        if (_currentViewerKind == PreviewKind.Markdown)
+        {
+            return MarkdownPreviewService.ResolveClickedUrl(linkText);
+        }
+
+        return linkText;
+    }
+    private static bool IsPlainTextBoxViewerKind(PreviewKind kind)
+    {
+        return kind == PreviewKind.Text
+            || kind == PreviewKind.Markdown
+            || kind == PreviewKind.Sqlite
+            || kind == PreviewKind.Binary;
+    }
     private static string GetBrowserAutoPreviewSuppressedMessage(PreviewKind kind)
     {
         return kind switch
         {
             PreviewKind.Text => "自動プレビューなし\nV / Enter で開きます。",
+            PreviewKind.Markdown => "自動プレビューなし\nV / Enter で開きます。",
+            PreviewKind.Sqlite => "自動プレビューなし\nV / Enter で開きます。",
             PreviewKind.Binary => "自動プレビューなし\nV / Enter で開きます。",
             PreviewKind.Video => "動画は自動プレビュー対象外です。",
             _ => "プレビュー対象外"
@@ -20223,6 +12425,55 @@ private void InitializeBrowserTabControl()
                     ApplyViewerStatusLine("Text preview applied");
                 }
             }
+            else if (kind == PreviewKind.Markdown)
+            {
+                stage = "Markdown";
+                await _previewDiagnosticDelayService.DelayAsync(
+                    "PreviewOpen:Markdown",
+                    fullPath,
+                    _previewDiagnosticDelayService.PreviewOpenDelayMs,
+                    token);
+                string previewText = await MarkdownPreviewService.GetPreviewAsync(
+                    fullPath,
+                    PreviewService.LargeTextThresholdBytes,
+                    token);
+                if (IsLatestPreviewRequest(reqId, fullPath, token) && _uiMode == UIMode.Viewer)
+                {
+                    _currentViewerKind = PreviewKind.Markdown;
+                    _currentViewerDetectedEncodingLabel = "Markdown";
+                    ApplyViewerChromeState();
+                    if (_previewPopup.Visible) _previewPopup.Clear();
+                    viewerMessageLabel.Visible = false;
+                    viewerPictureBox.Visible = false;
+                    viewerTextBox.Text = previewText;
+                    viewerTextBox.Visible = true;
+                    viewerTextBox.Focus();
+                    ApplyViewerStatusLine("Markdown preview applied");
+                }
+            }
+            else if (kind == PreviewKind.Sqlite)
+            {
+                stage = "SQLite";
+                await _previewDiagnosticDelayService.DelayAsync(
+                    "PreviewOpen:SQLite",
+                    fullPath,
+                    _previewDiagnosticDelayService.PreviewOpenDelayMs,
+                    token);
+                string previewText = await SqlitePreviewService.GetPreviewAsync(fullPath, token);
+                if (IsLatestPreviewRequest(reqId, fullPath, token) && _uiMode == UIMode.Viewer)
+                {
+                    _currentViewerKind = PreviewKind.Sqlite;
+                    _currentViewerDetectedEncodingLabel = "SQLite";
+                    ApplyViewerChromeState();
+                    if (_previewPopup.Visible) _previewPopup.Clear();
+                    viewerMessageLabel.Visible = false;
+                    viewerPictureBox.Visible = false;
+                    viewerTextBox.Text = previewText;
+                    viewerTextBox.Visible = true;
+                    viewerTextBox.Focus();
+                    ApplyViewerStatusLine("SQLite preview applied");
+                }
+            }
             else if (kind == PreviewKind.LargeText)
             {
                 stage = "LargeText";
@@ -20454,7 +12705,7 @@ private void InitializeBrowserTabControl()
             }
             if (_activePreviewRequestId == reqId)
             {
-                _previewRequestInFlight = false;
+                _previewRequestCoordinator.EndRequest(_activePreviewRequestId);
             }
         }
     }
@@ -20481,6 +12732,7 @@ private void InitializeBrowserTabControl()
                     $"builtOffsets={result.LineOffsets.Count} totalBytes={result.TotalBytes}");
                 BeginInvoke(new Action(() =>
                 {
+
                     if (IsDisposed || !IsHandleCreated)
                     {
                         return;
@@ -20552,8 +12804,7 @@ private void InitializeBrowserTabControl()
         {
             if (allowShellFallback)
             {
-                string? shellError = ExternalToolService.OpenWithShellAssociation(fullPath);
-                if (shellError != null) ShowStatusMessage(shellError);
+                OpenPathWithShellAssociation(fullPath);
             }
             else
             {
@@ -20582,7 +12833,7 @@ private void InitializeBrowserTabControl()
         // --- text gate ---
         // テキスト系ファイル以外（バイナリや画像など）は、外部エディタで開くのではなく内蔵 Viewer 経路へ回す。
         var kind = PreviewService.GetPreviewKind(fullPath);
-        if (kind != PreviewKind.Text && kind != PreviewKind.LargeText)
+        if (kind != PreviewKind.Text && kind != PreviewKind.Markdown && kind != PreviewKind.LargeText)
         {
             ExecutePreviewLaunch();
             return;
@@ -20868,9 +13119,12 @@ private void InitializeBrowserTabControl()
         bool showProgress = options.IncludeSubdirectories || totalCount >= 64;
         if (showProgress)
         {
-            progressForm = new FileOperationProgressFallbackForm("属性 / 日時変更", totalCount, requestCancel: null, canCancel: false);
-            PositionProgressFallbackForm(progressForm);
-            progressForm.Show(this);
+            progressForm = Presentation.FileOperationFallbackUiPresenter.ShowProgressFallback(
+                this,
+                "属性 / 日時変更",
+                totalCount,
+                requestCancel: null,
+                canCancel: false);
             progressForm.UpdateProgress(0, totalCount, "準備中...", cancelRequested: false);
         }
         int progressCounter = 0;
@@ -21020,9 +13274,9 @@ private void InitializeBrowserTabControl()
         string? requestPath = GetCurrentPreviewSelectionPath();
         if (string.IsNullOrEmpty(requestPath))
         {
-            _previewCts?.Cancel();
+            _previewRequestCoordinator.Cancel();
             _lastPreviewRequestedPath = null;
-            _previewRequestInFlight = false;
+            _previewRequestCoordinator.EndRequest(_activePreviewRequestId);
             ResetBrowserAutoPreviewSuppressedState();
             ClearPreview("選択なしのためプレビューなし");
             return;
@@ -21036,30 +13290,27 @@ private void InitializeBrowserTabControl()
                 LogService.Info(
                     $"[PreviewRequest] completed reqId=-1 result={skipResult} kind={shallowKind} " +
                     $"requestPath='{requestPath}' currentPath='{GetCurrentPreviewSelectionPath()}' force={force}");
-                _previewCts?.Cancel();
+                _previewRequestCoordinator.Cancel();
                 _lastPreviewRequestedPath = null;
-                _previewRequestInFlight = false;
+                _previewRequestCoordinator.EndRequest(_activePreviewRequestId);
                 ShowBrowserAutoPreviewSuppressedMessage(requestPath, shallowKind);
                 return;
             }
         }
         if (!force
             && string.Equals(_lastPreviewRequestedPath, requestPath, StringComparison.OrdinalIgnoreCase)
-            && _previewRequestInFlight)
+            && _previewRequestCoordinator.IsInFlight)
         {
             LogService.Info($"[PreviewRequest] skippedReason=DuplicatePath requestPath='{requestPath}' activeReqId={_activePreviewRequestId}");
             return;
         }
         ResetBrowserAutoPreviewSuppressedState();
-        _previewCts?.Cancel();
-        _previewCts?.Dispose();
-        _previewCts = new CancellationTokenSource();
-        int reqId = Interlocked.Increment(ref _previewRequestId);
+        _previewRequestCoordinator.Cancel();
+        CancellationToken token = _previewRequestCoordinator.StartNewRequest(out int reqId);
         Interlocked.Exchange(ref _activePreviewRequestId, reqId);
         _lastPreviewRequestedPath = requestPath;
-        _previewRequestInFlight = true;
         LogService.Info($"[PreviewRequest] queued reqId={reqId} requestPath='{requestPath}' force={force}");
-        _ = UpdatePreviewAsync(reqId, requestPath, _previewCts.Token);
+        _ = UpdatePreviewAsync(reqId, requestPath, token);
     }
     /// <summary>O キー: 設定画面を開く。OK 保存後は _settings を再読込して次のコマンドに反映する。</summary>
     private void OpenSettingsForm(SettingsForm.InitialTab initialTab = SettingsForm.InitialTab.Display)
@@ -21098,11 +13349,11 @@ private void InitializeBrowserTabControl()
                 ApplyColorSettings();
                 viewerTextBox.WordWrap = _settings.Preview.ViewerWordWrap;
                 viewerTextBox.ScrollBars = viewerTextBox.WordWrap ? RichTextBoxScrollBars.Vertical : RichTextBoxScrollBars.Both;
-                if (_settings.Session.RestoreColumnCount)
+                if (SessionRestorePolicy.ShouldRestoreColumnCount(_settings.Session))
                 {
                     _columnCount = Math.Clamp(_settings.Session.LastColumnCount, 1, 9);
                 }
-                if (_settings.Session.RestoreSort)
+                if (SessionRestorePolicy.ShouldRestoreSort(_settings.Session))
                 {
                     _currentSort = _settings.Session.LastSortKind;
                     _sortAscending = _settings.Session.LastSortAscending;
@@ -21140,11 +13391,11 @@ private void InitializeBrowserTabControl()
                 ApplyColorSettings();
                 viewerTextBox.WordWrap = _settings.Preview.ViewerWordWrap;
                 viewerTextBox.ScrollBars = viewerTextBox.WordWrap ? RichTextBoxScrollBars.Vertical : RichTextBoxScrollBars.Both;
-                if (_settings.Session.RestoreColumnCount)
+                if (SessionRestorePolicy.ShouldRestoreColumnCount(_settings.Session))
                 {
                     _columnCount = Math.Clamp(_settings.Session.LastColumnCount, 1, 9);
                 }
-                if (_settings.Session.RestoreSort)
+                if (SessionRestorePolicy.ShouldRestoreSort(_settings.Session))
                 {
                     _currentSort = _settings.Session.LastSortKind;
                     _sortAscending = _settings.Session.LastSortAscending;
@@ -21664,6 +13915,10 @@ private void InitializeBrowserTabControl()
             var filerFont = new Font(filerFamily, filerSize);
             fileListView.Font = filerFont;
             browserPanel.Font = filerFont;
+            if (_browserTabStrip != null)
+            {
+                _browserTabStrip.Font = new Font("Consolas", _settings.BrowserTabs?.TabFontSize ?? BrowserTabSettings.DefaultTabFontSize, FontStyle.Regular, GraphicsUnit.Point);
+            }
             // 重要行 (FileListFontSize を反映)
             var filerInfoFont = new Font(filerFamily, filerSize);
             _headerPaintFont = filerInfoFont; // Phase 2g-fix3a: Paint 向けに保持
@@ -21717,6 +13972,10 @@ private void InitializeBrowserTabControl()
             var viewerFont = new Font(viewerFamily, viewerSize);
             viewerTextBox.Font = viewerFont;
             viewerMessageLabel.Font = viewerFont;
+            if (_largeFileControl != null)
+            {
+                _largeFileControl.Font = viewerFont;
+            }
             // Phase 2f-fix2: レイアウト確定前にテキストの値を最新化しておく
             LogFontRouteDiag("ApplyFontSettings:BeforeUpdateInfoPanel");
             LogHeaderRightDiag("ApplyFontSettings");
@@ -21811,13 +14070,18 @@ private void InitializeBrowserTabControl()
             lblFree.Text,
             lblClock?.Text ?? string.Empty);
         int zoneAvailableWidth = row1FitMetrics.AvailableLeftWidth;
-        var widths = CalculateRow2ZoneWidthsFromMeasuredTexts(
+        var widths = HeaderLayoutHelper.CalculateMeasuredZoneWidths(
             zoneAvailableWidth,
             lblPage.Font,
             lblPage.Text,
             lblTotal.Text,
             lblUsed.Text,
-            lblFree.Text
+            lblFree.Text,
+            lblPage,
+            lblTotal,
+            lblUsed,
+            lblFree,
+            HeaderRow2ClockSafetyGap
         );
         headerZone1.Width = widths.Zone1;
         headerZone2.Width = widths.Zone2;
@@ -21831,46 +14095,6 @@ private void InitializeBrowserTabControl()
         }
         LogHeaderRow2LayoutDiagnostics(row1FitMetrics.ClockReservedWidth, zoneAvailableWidth, widths);
         // Px1 diag: LayoutHeaderZones:END log は clock tick毎秒呼出しで大量出力になるため削除
-    }
-    private HeaderLayoutHelper.ZoneWidths CalculateRow2ZoneWidthsFromMeasuredTexts(
-        int availableWidth,
-        Font font,
-        string pageText,
-        string totalText,
-        string usedText,
-        string freeText)
-    {
-        int p1 = MeasureHeaderRow2SegmentWidth(font, pageText, lblPage) + HeaderRow2ClockSafetyGap;
-        int p2 = MeasureHeaderRow2SegmentWidth(font, totalText, lblTotal) + HeaderRow2ClockSafetyGap;
-        int p3 = MeasureHeaderRow2SegmentWidth(font, usedText, lblUsed) + HeaderRow2ClockSafetyGap;
-        int p4 = MeasureHeaderRow2SegmentWidth(font, freeText, lblFree) + HeaderRow2ClockSafetyGap;
-
-        int totalMin = p1 + p2 + p3 + p4;
-        var result = new HeaderLayoutHelper.ZoneWidths();
-
-        if (availableWidth > totalMin)
-        {
-            int extra = availableWidth - totalMin;
-            double w1 = 1.0, w2 = 1.6, w3 = 1.6, w4 = 1.8;
-            double totalWeight = w1 + w2 + w3 + w4;
-
-            result.Zone1 = p1 + (int)(extra * w1 / totalWeight);
-            result.Zone2 = p2 + (int)(extra * w2 / totalWeight);
-            result.Zone3 = p3 + (int)(extra * w3 / totalWeight);
-            result.Zone4 = p4 + (int)(extra * w4 / totalWeight);
-        }
-        else
-        {
-            double scale = totalMin > 0 ? (double)availableWidth / totalMin : 1d;
-            result.Zone1 = Math.Max(1, (int)Math.Floor(p1 * scale));
-            result.Zone2 = Math.Max(1, (int)Math.Floor(p2 * scale));
-            result.Zone3 = Math.Max(1, (int)Math.Floor(p3 * scale));
-            result.Zone4 = Math.Max(1, Math.Max(availableWidth - result.Zone1 - result.Zone2 - result.Zone3, 1));
-        }
-
-        int requiredMinFormWidth = totalMin + 40;
-        result.MinimumFormWidth = Math.Clamp(requiredMinFormWidth, 400, 1200);
-        return result;
     }
     /// <summary>
     /// Phase 34A: ヘッダラベルの配置を動的に計算する。
@@ -21910,307 +14134,6 @@ private void InitializeBrowserTabControl()
             clockRect = new Rectangle(clockX, 0, clockSize.Width, panel.Height);
         }
     }
-    /// <summary>
-    /// 最上段ヘッダ (titleHeaderPanel) 専用：文字描画
-    /// Phase 36Z: 枠線は contentFramePanel が描くため、ここでは文字の上書きのみ。
-    /// </summary>
-    private void titleHeaderPanel_Paint(object sender, PaintEventArgs e)
-    {
-        // Title header is now compact/hidden in Browser mode.
-        // No text drawing here.
-    }
-    /// <summary>
-    /// コンテンツ・フレーム (contentFramePanel) 専用：アプリケーション全体の 1px 枠線描画 (オーナー)
-    /// </summary>
-    private void contentFramePanel_Paint(object sender, PaintEventArgs e)
-    {
-        var panel = sender as Panel;
-        if (panel == null) return;
-        if (FileListColorResolver.NormalizeCoreTheme(_settings.Appearance?.ColorTheme) == "Light")
-        {
-            // Light テーマ: 左右線はスキップ、下辺は SeparatorLine で弱めに描画
-            using (var pen = new Pen(MidFDColors.SeparatorLine, 1))
-            {
-                // 下辺 (一覧領域の外枠として描画)
-                e.Graphics.DrawLine(pen, 0, panel.Height - 1, panel.Width, panel.Height - 1);
-            }
-        }
-        else
-        {
-            // 既存どおり: BorderLine で左辺/右辺/下辺を描く
-            using (var pen = new Pen(MidFDColors.BorderLine, 1))
-            {
-                // 左辺
-                e.Graphics.DrawLine(pen, 0, 0, 0, panel.Height);
-                // 右辺
-                e.Graphics.DrawLine(pen, panel.Width - 1, 0, panel.Width - 1, panel.Height);
-                // 下辺 (一覧領域の外枠として描画)
-                e.Graphics.DrawLine(pen, 0, panel.Height - 1, panel.Width, panel.Height - 1);
-            }
-        }
-    }
-    // ─── Phase 2g-fix3a: Row 1 時計更新ロジック ──────────────────────────
-    private void StartHeaderClockTimer()
-    {
-        _headerClockTimer?.Stop();
-        _headerClockTimer?.Dispose();
-        _headerClockTimer = new System.Windows.Forms.Timer();
-        _headerClockTimer.Interval = 1000; // 1秒周期
-        _headerClockTimer.Tick += (s, e) => UpdateTitleHeaderClock();
-        _headerClockTimer.Start();
-    }
-    private void UpdateTitleHeaderClock()
-    {
-        // 秒単位の時計文字列を更新
-        lblClock.Text = DateTime.Now.ToString("yyyy-MM-dd(ddd) HH:mm:ss");
-        // Px1 diag note: UpdateTitleHeaderClock は LayoutHeaderZones のみ呼び、
-        //   ResolveAdaptiveHeaderStatusFont は呼ばない (font は ApplyFontSettings 後そのまま)。
-        LayoutHeaderZones();
-        LogHeaderRightDiag("UpdateTitleHeaderClock");
-        // 再描画を要求
-        lblClock.Invalidate();
-        contentFramePanel.Invalidate();
-        // 必要ならデバッグログ (最終的に削除可能)
-        // Debug.WriteLine($"[Clock] {lblClock.Text}");
-    }
-    /// <summary>
-    /// Phase 2g-fix4a: 各要素への配色適用を一括して行う。
-    /// </summary>
-    private void ApplyColorSettings()
-    {
-        // UIクロームは一覧配色に追従し、Viewer は従来のテーマ基調を維持する。
-        MidFDColors.ApplyTheme(FileListColorResolver.NormalizeCoreTheme(_settings.Appearance?.ColorTheme));
-
-        var uiThemeColors = UiThemeResolver.Resolve(_settings.Appearance);
-        MidFDColors.BorderLine = uiThemeColors.BorderColor;
-        MidFDColors.SeparatorLine = uiThemeColors.SeparatorColor;
-        MidFDColors.ViewerBack = uiThemeColors.ViewerBackColor;
-        MidFDColors.ViewerFore = uiThemeColors.ViewerForeColor;
-
-        _resolvedColors = FileListColorResolver.ResolveColors(_settings);
-
-        var headerColors = GetHeaderColors();
-        // Row 2 (現在は monolithic データストア、表示は Paint へ移譲)
-        lblPage.ForeColor = headerColors.HeaderRow2Fore;
-        lblTotal.ForeColor = headerColors.HeaderRow2Fore;
-        lblUsed.ForeColor = headerColors.HeaderRow2Fore;
-        lblFree.ForeColor = headerColors.HeaderRow2Fore;
-        // Phase 2g-fix4b: 表示のみ抑制 (LayoutHeaderZones が計測できるようにコントロールは残す)
-        lblPage.Visible = false;
-        lblTotal.Visible = false;
-        lblUsed.Visible = false;
-        lblFree.Visible = false;
-        // Row 3 (Meta)
-        lblSort.ForeColor = headerColors.HeaderMetaFore;
-        lblItemAttr.ForeColor = headerColors.HeaderMetaFore;
-        lblFileDate.ForeColor = headerColors.HeaderMetaFore;
-        lblFileStats.ForeColor = headerColors.HeaderMetaFore;
-        lblFileStatsEx.ForeColor = headerColors.HeaderMetaFore;
-        lblClock.ForeColor = headerColors.HeaderClockFore;
-        lblClock.BackColor = uiThemeColors.HeaderBackColor;
-        // Row 4 (Path)
-        lblPath.ForeColor = headerColors.HeaderPathFore;
-        // Row 5 (Name)
-        lblName.ForeColor = headerColors.HeaderNameFore;
-        // 一覧部
-        fileListView.ForeColor = _resolvedColors.NormalFile;
-        fileListView.BackColor = _resolvedColors.Background;
-        browserPanel.ForeColor = _resolvedColors.NormalFile;
-        browserPanel.BackColor = _resolvedColors.Background;
-        string menuPreset = UiThemeResolver.MapFromDisplayColor(_settings.Appearance?.ColorTheme);
-        var menuThemeColors = UiThemeResolver.Resolve(menuPreset);
-        mainMenuStrip.BackColor = menuThemeColors.ChromeBackColor;
-        mainMenuStrip.ForeColor = menuThemeColors.ChromeForeColor;
-        ApplyMenuStripRenderer(
-            FileListColorResolver.NormalizeCoreTheme(_settings.Appearance?.ColorTheme, _settings) == "Light",
-            menuThemeColors.ChromeForeColor);
-        foreach (ToolStripItem item in mainMenuStrip.Items)
-        {
-            item.BackColor = menuThemeColors.ChromeBackColor;
-            item.ForeColor = menuThemeColors.ChromeForeColor;
-            if (item is ToolStripMenuItem rootItem)
-            {
-                ApplyDropDownTheme(rootItem, menuThemeColors.ChromeBackColor, menuThemeColors.ChromeForeColor);
-            }
-        }
-        UpdateBrowserToolbarVisibility();
-        viewerPanel.BackColor = uiThemeColors.ViewerBackColor;
-        viewerTextBox.BackColor = uiThemeColors.ViewerBackColor;
-        viewerTextBox.ForeColor = uiThemeColors.ViewerForeColor;
-        viewerMessageLabel.BackColor = uiThemeColors.ViewerBackColor;
-        viewerMessageLabel.ForeColor = uiThemeColors.ViewerForeColor;
-        // セパレーター
-        sepBeforeTopPanel.BackColor = uiThemeColors.BorderColor;
-        sepAfterRow2.BackColor = uiThemeColors.SeparatorColor;
-        sepAfterRow3.BackColor = uiThemeColors.SeparatorColor;
-        sepAfterRow4.BackColor = uiThemeColors.BorderColor;
-        // 背景色の一貫性
-        outerHostPanel.BackColor = uiThemeColors.ChromeBackColor;
-        mainAreaPanel.BackColor = uiThemeColors.ChromeBackColor;
-        headerPanel.BackColor = uiThemeColors.HeaderBackColor;
-        topPanel.BackColor = uiThemeColors.HeaderBackColor;
-        infoRow2Panel.BackColor = uiThemeColors.HeaderBackColor;
-        infoRow3Panel.BackColor = uiThemeColors.HeaderBackColor;
-        infoRow4Panel.BackColor = uiThemeColors.HeaderBackColor;
-        titleHeaderPanel.BackColor = uiThemeColors.HeaderBackColor;
-        contentFramePanel.BackColor = uiThemeColors.HeaderBackColor;
-        functionBarPanel.BackColor = uiThemeColors.ChromeBackColor;
-
-        headerZone1.BackColor = uiThemeColors.HeaderBackColor;
-        headerZone2.BackColor = uiThemeColors.HeaderBackColor;
-        headerZone3.BackColor = uiThemeColors.HeaderBackColor;
-        headerZone4.BackColor = uiThemeColors.HeaderBackColor;
-        lblClock.BackColor = uiThemeColors.HeaderBackColor;
-        lblPath.BackColor = uiThemeColors.HeaderBackColor;
-        lblSort.BackColor = uiThemeColors.HeaderBackColor;
-        lblItemAttr.BackColor = uiThemeColors.HeaderBackColor;
-        lblFileDate.BackColor = uiThemeColors.HeaderBackColor;
-        lblFileStats.BackColor = uiThemeColors.HeaderBackColor;
-        lblFileStatsEx.BackColor = uiThemeColors.HeaderBackColor;
-        lblName.BackColor = uiThemeColors.HeaderBackColor;
-        lblTitle.BackColor = uiThemeColors.HeaderBackColor;
-
-        bool isCompatible = FunctionKeyProfileService.ResolveProfile(CurrentFunctionKeyProfileValue) == FunctionKeyProfile.FDCompatible;
-        var functionColors = GetFunctionBarColors(isCompatible);
-        functionBarPanel.BackColor = functionColors.BackColor;
-
-        // FunctionBar のラベル色を更新
-        if (lblFuncKeys != null)
-        {
-            foreach (var lbl in lblFuncKeys)
-            {
-                lbl.BackColor = functionColors.EnabledBackColor;
-                lbl.ForeColor = functionColors.EnabledTextColor;
-            }
-        }
-        statusStrip.BackColor = uiThemeColors.StatusBackColor;
-        statusStrip.ForeColor = uiThemeColors.StatusForeColor;
-        statusLabel.BackColor = uiThemeColors.StatusBackColor;
-        statusLabel.ForeColor = uiThemeColors.StatusForeColor;
-        if (_browserTabHostPanel != null)
-        {
-            _browserTabHostPanel.BackColor = uiThemeColors.ChromeBackColor;
-        }
-        if (_browserTabStrip != null)
-        {
-            ApplyBrowserTabStripDisplaySettings();
-            _browserTabStrip.BackColor = uiThemeColors.ChromeBackColor;
-            _browserTabStrip.ForeColor = uiThemeColors.ChromeForeColor;
-            _browserTabStrip.ActiveTabBackColor = MidFDColors.ListSelectedBack;
-            _browserTabStrip.InactiveTabBackColor = uiThemeColors.ChromeBackColor;
-            _browserTabStrip.TabBorderColor = uiThemeColors.BorderColor;
-            _browserTabStrip.ActiveTabTextColor = uiThemeColors.AccentColor;
-            _browserTabStrip.InactiveTabTextColor = uiThemeColors.ChromeForeColor;
-            _browserTabStrip.Invalidate();
-        }
-        foreach (ListViewItem item in fileListView.Items)
-        {
-            if (item.Tag is string fullPath)
-            {
-                ApplyMarkColor(item, fullPath);
-            }
-        }
-        functionBarPanel.Invalidate();
-
-        fileListView.Invalidate();
-        browserPanel.Invalidate();
-    }
-    private void ApplyDropDownTheme(ToolStripDropDownItem item, Color backColor, Color foreColor)
-    {
-        Color dropDownBack = Color.WhiteSmoke;
-        Color dropDownFore = Color.Black;
-
-        item.DropDown.BackColor = dropDownBack;
-        item.DropDown.ForeColor = dropDownFore;
-        ConfigureGlobalDropDownProperties(item, null);
-        foreach (ToolStripItem child in item.DropDownItems)
-        {
-            child.BackColor = dropDownBack;
-            child.ForeColor = dropDownFore;
-            if (child is ToolStripDropDownItem childDropDown)
-            {
-                ApplyDropDownTheme(childDropDown, dropDownBack, dropDownFore);
-            }
-        }
-    }
-    /// <summary>
-    /// Phase 2g-fix4a: アプリケーション全体の配色定数。
-    /// </summary>
-    private sealed class HeaderColorPalette
-    {
-        public required Color HeaderTitleFore { get; init; }
-        public required Color HeaderClockFore { get; init; }
-        public required Color HeaderRow2Fore { get; init; }
-        public required Color HeaderRow2Value { get; init; }
-        public required Color HeaderPathFore { get; init; }
-        public required Color HeaderMetaFore { get; init; }
-        public required Color HeaderNameFore { get; init; }
-    }
-    private HeaderColorPalette GetHeaderColors()
-    {
-        // 一覧配色から UI クロームを追従させつつ、既存基本 preset の header 細部色は従来契約を維持する。
-        string canonicalPreset = FileListColorResolver.CanonicalizePresetKey(_settings.Appearance?.ColorTheme);
-        var resolvedUiColors = UiThemeResolver.Resolve(_settings.Appearance);
-        bool useCustomUiTheme = _settings.Appearance?.CustomUiThemeColorsEnabled == true;
-
-        return canonicalPreset switch
-        {
-            "Green" => new HeaderColorPalette
-            {
-                HeaderTitleFore = useCustomUiTheme ? resolvedUiColors.ChromeForeColor : Color.Lime,
-                HeaderClockFore = useCustomUiTheme ? resolvedUiColors.ChromeForeColor : Color.Lime,
-                HeaderRow2Fore = useCustomUiTheme ? resolvedUiColors.ChromeForeColor : Color.Lime,
-                HeaderRow2Value = Color.White,
-                HeaderPathFore = useCustomUiTheme ? resolvedUiColors.ChromeForeColor : Color.Lime,
-                HeaderMetaFore = useCustomUiTheme ? resolvedUiColors.ChromeForeColor : Color.Lime,
-                HeaderNameFore = useCustomUiTheme ? resolvedUiColors.ChromeForeColor : Color.LightGreen
-            },
-            "Amber" => new HeaderColorPalette
-            {
-                HeaderTitleFore = useCustomUiTheme ? resolvedUiColors.ChromeForeColor : Color.FromArgb(255, 220, 120),
-                HeaderClockFore = useCustomUiTheme ? resolvedUiColors.ChromeForeColor : Color.FromArgb(255, 220, 120),
-                HeaderRow2Fore = useCustomUiTheme ? resolvedUiColors.ChromeForeColor : Color.FromArgb(255, 190, 80),
-                HeaderRow2Value = Color.White,
-                HeaderPathFore = useCustomUiTheme ? resolvedUiColors.ChromeForeColor : Color.FromArgb(255, 210, 120),
-                HeaderMetaFore = useCustomUiTheme ? resolvedUiColors.ChromeForeColor : Color.FromArgb(255, 210, 120),
-                HeaderNameFore = useCustomUiTheme ? resolvedUiColors.ChromeForeColor : Color.FromArgb(255, 235, 180)
-            },
-            "Light" => new HeaderColorPalette
-            {
-                HeaderTitleFore = useCustomUiTheme ? resolvedUiColors.ChromeForeColor : Color.Black,
-                HeaderClockFore = useCustomUiTheme ? resolvedUiColors.ChromeForeColor : Color.Black,
-                HeaderRow2Fore = useCustomUiTheme ? resolvedUiColors.ChromeForeColor : Color.FromArgb(80, 80, 80),
-                HeaderRow2Value = Color.Black,
-                HeaderPathFore = useCustomUiTheme ? resolvedUiColors.ChromeForeColor : Color.Black,
-                HeaderMetaFore = useCustomUiTheme ? resolvedUiColors.ChromeForeColor : Color.FromArgb(80, 80, 80),
-                HeaderNameFore = useCustomUiTheme ? resolvedUiColors.ChromeForeColor : Color.Black
-            },
-            "Slate" or "Mono Dark" or "Cyber" or "Violet" or "Sepia" => new HeaderColorPalette
-            {
-                HeaderTitleFore = resolvedUiColors.ChromeForeColor,
-                HeaderClockFore = resolvedUiColors.ChromeForeColor,
-                HeaderRow2Fore = resolvedUiColors.ChromeForeColor,
-                HeaderRow2Value = Color.White,
-                HeaderPathFore = resolvedUiColors.ChromeForeColor,
-                HeaderMetaFore = resolvedUiColors.ChromeForeColor,
-                HeaderNameFore = resolvedUiColors.ChromeForeColor
-            },
-            // ClassicCyan は既存標準 preset として従来 header 配色を維持する。
-            _ => new HeaderColorPalette
-            {
-                HeaderTitleFore = useCustomUiTheme ? resolvedUiColors.ChromeForeColor : Color.Yellow,
-                HeaderClockFore = useCustomUiTheme ? resolvedUiColors.ChromeForeColor : Color.Yellow,
-                HeaderRow2Fore = useCustomUiTheme ? resolvedUiColors.ChromeForeColor : Color.Cyan,
-                HeaderRow2Value = Color.White,
-                HeaderPathFore = useCustomUiTheme ? resolvedUiColors.ChromeForeColor : Color.Cyan,
-                HeaderMetaFore = useCustomUiTheme ? resolvedUiColors.ChromeForeColor : Color.Cyan,
-                HeaderNameFore = useCustomUiTheme ? resolvedUiColors.ChromeForeColor : Color.LightCyan
-            }
-        };
-    }
-    /// <summary>
-    /// Phase 2g-fix4b: Row 2 (Page, Total, Used, Free) を見出しと値で別々に描画するハンドラ。
-    /// </summary>
     private void HeaderZone_Paint(object? sender, PaintEventArgs e)
     {
         if (sender is not Panel zone) return;
@@ -22228,7 +14151,7 @@ private void InitializeBrowserTabControl()
     /// </summary>
     private void DrawRow2ZoneText(Graphics g, Panel zone, Label lbl, Font font)
     {
-        var headerColors = GetHeaderColors();
+        var headerColors = HeaderColorPaletteResolver.Resolve(_settings.Appearance);
         string text = lbl.Text;
         int colonIndex = text.IndexOf(':');
         if (colonIndex < 0)
@@ -22262,6 +14185,7 @@ private void InitializeBrowserTabControl()
     }
     private void lblPath_Click(object sender, EventArgs e)
     {
+        OpenBrowserPathEntry();
     }
     private void RestoreSelectionState(string? focusTargetName, int lastIndex, bool isReload)
     {
@@ -22465,9 +14389,9 @@ private void InitializeBrowserTabControl()
         int resolvedTotalRequiredWidth = resolvedLeftRequiredWidth + resolvedClockReservedWidth + HeaderRow2ClockSafetyGap + resolvedGuardBand;
         bool resolvedFitResult = fitResult ?? (resolvedTotalRequiredWidth <= resolvedRowWidth && resolvedLeftRequiredWidth <= resolvedAvailableLeftWidth);
         string clockText = lblClock?.Text ?? string.Empty;
-        int resolvedClockMeasuredWidth = clockMeasuredWidth ?? MeasureHeaderDisplayWidth(clockText, rowFont);
-        int resolvedFreeMeasuredWidth = freeMeasuredWidth ?? MeasureHeaderRow2SegmentWidth(rowFont, lblFree?.Text ?? string.Empty, lblFree);
-        string markSizeText = ExtractMarkSizeText(lblSort?.Text);
+        int resolvedClockMeasuredWidth = clockMeasuredWidth ?? HeaderLayoutHelper.MeasureDisplayWidth(clockText, rowFont);
+        int resolvedFreeMeasuredWidth = freeMeasuredWidth ?? HeaderLayoutHelper.MeasureRow2SegmentWidth(rowFont, lblFree?.Text ?? string.Empty, lblFree);
+        string markSizeText = HeaderLayoutHelper.ExtractMarkSizeText(lblSort?.Text);
         string snapshot =
             $"{eventName}|{reason}|{clientSize}|{headerClientSize}|{DeviceDpi}|{baseFont.Size:0.##}|{effectiveResolvedFont.Size:0.##}|{resolvedRowWidth}|{resolvedLeftRequiredWidth}|{resolvedClockReservedWidth}|{resolvedGuardBand}|{resolvedAvailableLeftWidth}|{resolvedFitResult}|{scheduled}|{skippedReason}";
         DateTime nowUtc = DateTime.UtcNow;
@@ -22537,11 +14461,11 @@ private void InitializeBrowserTabControl()
         Font sortFont = lblSort?.Font ?? SystemFonts.DefaultFont;
         Font clockFont = lblClock?.Font ?? sortFont;
         int pathRightMeasuredWidth = Math.Max(
-            MeasureHeaderTextWidth(currentPathRightText, sortFont),
-            MeasureHeaderControlTextWidth(currentPathRightText, sortFont));
+            HeaderLayoutHelper.MeasureTextWidth(currentPathRightText, sortFont),
+            HeaderLayoutHelper.MeasureControlTextWidth(currentPathRightText, sortFont));
         int clockMeasuredWidth = Math.Max(
-            MeasureHeaderTextWidth(currentClockText, clockFont),
-            MeasureHeaderControlTextWidth(currentClockText, clockFont));
+            HeaderLayoutHelper.MeasureTextWidth(currentClockText, clockFont),
+            HeaderLayoutHelper.MeasureControlTextWidth(currentClockText, clockFont));
         int resolvedClockReservedWidth = clockReservedWidth >= 0
             ? clockReservedWidth
             : GetHeaderClockReservedWidth(clockFont);
@@ -22582,456 +14506,23 @@ private void InitializeBrowserTabControl()
             $"infoRow2Panel.ClientSize={infoRow2Size} headerPanel.ClientSize={headerSize} fontSize={fontSize:0.##}");
     }
 
-    private static int MeasureHeaderTextWidth(string text, Font font)
-    {
-        if (string.IsNullOrEmpty(text))
-        {
-            return 0;
-        }
-        return TextRenderer.MeasureText(
-            text,
-            font,
-            Size.Empty,
-            TextFormatFlags.NoPadding | TextFormatFlags.SingleLine
-        ).Width;
-    }
-    private static int MeasureHeaderControlTextWidth(string text, Font font)
-    {
-        if (string.IsNullOrEmpty(text))
-        {
-            return 0;
-        }
-        return TextRenderer.MeasureText(
-            text,
-            font,
-            Size.Empty,
-            TextFormatFlags.SingleLine
-        ).Width;
-    }
-    private static int MeasureHeaderDisplayWidth(string text, Font font)
-    {
-        return Math.Max(
-            MeasureHeaderTextWidth(text, font),
-            MeasureHeaderControlTextWidth(text, font));
-    }
-    private static int MeasureHeaderRow2SegmentWidth(Font font, string text, Label? label)
-    {
-        if (string.IsNullOrEmpty(text))
-        {
-            return 0;
-        }
-
-        int width = MeasureHeaderDisplayWidth(text, font);
-        if (label != null)
-        {
-            width += label.Padding.Horizontal;
-        }
-
-        return width;
-    }
-    private static string ExtractMarkSizeText(string? sortText)
-    {
-        if (string.IsNullOrWhiteSpace(sortText))
-        {
-            return string.Empty;
-        }
-
-        const string marker = "MarkSize:";
-        int markerIndex = sortText.IndexOf(marker, StringComparison.OrdinalIgnoreCase);
-        if (markerIndex < 0)
-        {
-            return string.Empty;
-        }
-
-        return sortText[(markerIndex + marker.Length)..].Trim();
-    }
-    private static int MeasureHeaderLabelReservedWidth(Label? label, string text, int extraPadding)
-    {
-        Font font = label?.Font ?? SystemFonts.DefaultFont;
-        return MeasureHeaderLabelReservedWidth(label, text, font, extraPadding);
-    }
-    private static int MeasureHeaderLabelReservedWidth(Label? label, string text, Font font, int extraPadding)
-    {
-        if (label == null || string.IsNullOrEmpty(text))
-        {
-            return 0;
-        }
-
-        int measuredWidth = Math.Max(
-            MeasureHeaderTextWidth(text, font),
-            MeasureHeaderControlTextWidth(text, font));
-        return measuredWidth + label.Padding.Horizontal + extraPadding;
-    }
-    private static string FitTextWithEllipsis(string text, Font font, int maxWidth, string ellipsis = "...")
-    {
-        if (string.IsNullOrEmpty(text) || maxWidth <= 0)
-        {
-            return string.Empty;
-        }
-        if (MeasureHeaderTextWidth(text, font) <= maxWidth)
-        {
-            return text;
-        }
-        int ellipsisWidth = MeasureHeaderTextWidth(ellipsis, font);
-        if (ellipsisWidth >= maxWidth)
-        {
-            return ellipsis;
-        }
-        int low = 0;
-        int high = text.Length;
-        while (low < high)
-        {
-            int mid = (low + high + 1) / 2;
-            string candidate = text.Substring(0, mid) + ellipsis;
-            if (MeasureHeaderTextWidth(candidate, font) <= maxWidth)
-            {
-                low = mid;
-            }
-            else
-            {
-                high = mid - 1;
-            }
-        }
-        return text.Substring(0, low) + ellipsis;
-    }
-    private static string FitFileNameWithSizePreservingExtension(
-        string fileName,
-        string sizeText,
-        Font font,
-        int maxWidth)
-    {
-        if (string.IsNullOrWhiteSpace(fileName) || maxWidth <= 0)
-        {
-            return string.Empty;
-        }
-        string sizeSuffix = string.IsNullOrWhiteSpace(sizeText)
-            ? string.Empty
-            : $" [{sizeText}]";
-        string full = fileName + sizeSuffix;
-        if (MeasureHeaderTextWidth(full, font) <= maxWidth)
-        {
-            return full;
-        }
-        string extension = Path.GetExtension(fileName);
-        string baseName = fileName;
-        if (!string.IsNullOrEmpty(extension) &&
-            fileName.Length > extension.Length)
-        {
-            baseName = fileName[..^extension.Length];
-        }
-        else
-        {
-            extension = string.Empty;
-        }
-        string protectedSuffix = extension + sizeSuffix;
-        int protectedSuffixWidth = MeasureHeaderTextWidth(protectedSuffix, font);
-        int baseMaxWidth = maxWidth - protectedSuffixWidth;
-        const string ellipsis = "…";
-        int ellipsisWidth = MeasureHeaderTextWidth(ellipsis, font);
-        if (baseMaxWidth <= ellipsisWidth)
-        {
-            // 極端に幅が足りない場合でも、拡張子と size を優先する。
-            string fallback = ellipsis + protectedSuffix;
-            if (MeasureHeaderTextWidth(fallback, font) <= maxWidth)
-            {
-                return fallback;
-            }
-            return FitTextWithEllipsis(full, font, maxWidth, ellipsis);
-        }
-        string shortenedBase = FitTextWithEllipsis(baseName, font, baseMaxWidth, ellipsis);
-        return shortenedBase + protectedSuffix;
-    }
-    private static string FitDirectoryNameHeaderText(
-        string displayName,
-        Font font,
-        int maxWidth)
-    {
-        return FitTextWithEllipsis(displayName, font, maxWidth);
-    }
-    private static string FitMarkSummaryCompact(
-        int markCount,
-        string markSizeText,
-        Font font,
-        int maxWidth)
-    {
-        string[] candidates =
-        {
-            $"Mark: {markCount} MarkSize: {markSizeText}",
-            $"Mark: {markCount} {markSizeText}",
-            $"M:{markCount} {markSizeText}",
-            $"M:{markCount}",
-        };
-        foreach (string candidate in candidates)
-        {
-            if (MeasureHeaderTextWidth(candidate, font) <= maxWidth)
-            {
-                return candidate;
-            }
-        }
-        return candidates[^1];
-    }
-    #region Browser Header Interaction Polish
-    private void InitializeHeaderInteractionPolish()
-    {
-        if (_headerInteractionInitialized) return;
-        _headerInteractionInitialized = true;
-        _headerToolTip = new ToolTip
-        {
-            ShowAlways = true,
-            InitialDelay = 400,
-            ReshowDelay = 100,
-            AutoPopDelay = 8000
-        };
-        InitializeHeaderContextMenus();
-        WireHeaderCopyInteractions();
-    }
-    private void InitializeHeaderContextMenus()
-    {
-        // Path 行用メニュー
-        _headerPathContextMenu = new ContextMenuStrip();
-        var copyPathItem = new ToolStripMenuItem("パスをコピー");
-        copyPathItem.Click += (_, _) => CopyCurrentDirectoryFromHeader();
-        _headerPathContextMenu.Items.Add(copyPathItem);
-        // Item 行用メニュー
-        _headerItemContextMenu = new ContextMenuStrip();
-        var copyFullPathItem = new ToolStripMenuItem("フルパスをコピー");
-        copyFullPathItem.Click += (_, _) => CopySelectedItemFullPathFromHeader();
-        var copyFileNameItem = new ToolStripMenuItem("ファイル名をコピー");
-        copyFileNameItem.Click += (_, _) => CopySelectedItemNameFromHeader();
-        _headerItemContextMenu.Items.Add(copyFullPathItem);
-        _headerItemContextMenu.Items.Add(copyFileNameItem);
-        _headerItemContextMenu.Opening += (s, e) =>
-        {
-            bool hasItem = !string.IsNullOrWhiteSpace(GetSelectedItemFullPathForHeaderCopy());
-            copyFullPathItem.Enabled = hasItem;
-            copyFileNameItem.Enabled = hasItem;
-            e.Cancel = false;
-        };
-    }
-    private void WireHeaderCopyInteractions()
-    {
-        // Cursor
-        lblPath.Cursor = Cursors.Hand;
-        lblName.Cursor = Cursors.Hand;
-        // MouseClick (Left click copy)
-        lblPath.MouseClick += HeaderPath_MouseClick;
-        infoRow2Panel.MouseClick += HeaderPath_MouseClick;
-        lblName.MouseClick += HeaderItem_MouseClick;
-        infoRow4Panel.MouseClick += HeaderItem_MouseClick;
-        // ContextMenuStrip
-        lblPath.ContextMenuStrip = _headerPathContextMenu;
-        infoRow2Panel.ContextMenuStrip = _headerPathContextMenu;
-        lblName.ContextMenuStrip = _headerItemContextMenu;
-        infoRow4Panel.ContextMenuStrip = _headerItemContextMenu;
-    }
-    private void HeaderPath_MouseClick(object? sender, MouseEventArgs e)
-    {
-        if (e.Button == MouseButtons.Left)
-        {
-            CopyCurrentDirectoryFromHeader();
-        }
-    }
-    private void HeaderItem_MouseClick(object? sender, MouseEventArgs e)
-    {
-        if (e.Button == MouseButtons.Left)
-        {
-            CopySelectedItemFullPathFromHeader();
-        }
-    }
-    private void CopyCurrentDirectoryFromHeader()
-    {
-        string? path = GetCurrentDirectoryForHeaderCopy();
-        CopyTextToClipboardWithStatus(path, "パスをコピーしました。");
-    }
-    private void CopySelectedItemFullPathFromHeader()
-    {
-        string? fullPath = GetSelectedItemFullPathForHeaderCopy();
-        CopyTextToClipboardWithStatus(fullPath, "フルパスをコピーしました。");
-    }
-    private void CopySelectedOrMarkedFullPathsToClipboard()
-    {
-        SelectionResult selection = ResolveSelection();
-        if (!selection.FullPaths.Any())
-        {
-            ShowStatusMessage("コピーできるパスがありません。");
-            return;
-        }
-
-        CopyTextToClipboardWithStatus(
-            string.Join(Environment.NewLine, selection.FullPaths),
-            $"{selection.FullPaths.Count} 件のパスをクリップボードにコピーしました。");
-    }
-    private void CopySelectedItemNameFromHeader()
-    {
-        string? fileName = GetSelectedItemNameForHeaderCopy();
-        CopyTextToClipboardWithStatus(fileName, "ファイル名をコピーしました。");
-    }
-    private void CopyTextToClipboardWithStatus(string? text, string successMessage)
-    {
-        if (string.IsNullOrWhiteSpace(text))
-        {
-            ShowStatusMessage("コピーできる内容がありません。");
-            return;
-        }
-        try
-        {
-            Clipboard.SetText(text, TextDataFormat.UnicodeText);
-            ShowStatusMessage(successMessage);
-        }
-        catch (Exception ex)
-        {
-            ShowStatusMessage("クリップボードへコピーできませんでした。");
-            LogService.Info($"[HeaderCopy] Clipboard copy failed: {ex}");
-        }
-    }
-    private string? GetCurrentDirectoryForHeaderCopy()
-    {
-        string path = _navigationService.CurrentPath;
-        return string.IsNullOrWhiteSpace(path) ? null : path;
-    }
-    private string? GetSelectedItemFullPathForHeaderCopy()
-    {
-        string currentPath = _navigationService.CurrentPath;
-        var item = GetCurrentBrowserItem();
-        if (item == null) return null;
-        string name = item.Text;
-        if (string.IsNullOrWhiteSpace(name)) return null;
-        if (name == "..")
-        {
-            try
-            {
-                return Directory.GetParent(currentPath)?.FullName;
-            }
-            catch { return null; }
-        }
-        // item.Tag にフルパスが入っている場合はそれを使う
-        if (item.Tag is string tagPath && !string.IsNullOrWhiteSpace(tagPath))
-        {
-            return tagPath;
-        }
-        try
-        {
-            return Path.Combine(currentPath, name);
-        }
-        catch { return null; }
-    }
-    private string? GetSelectedItemNameForHeaderCopy()
-    {
-        var item = GetCurrentBrowserItem();
-        if (item == null) return null;
-        string name = item.Text;
-        if (string.IsNullOrWhiteSpace(name)) return null;
-        return name;
-    }
-    private void UpdateHeaderInteractionTooltips()
-    {
-        if (_headerToolTip == null) return;
-        string? path = GetCurrentDirectoryForHeaderCopy();
-        string? fullPath = GetSelectedItemFullPathForHeaderCopy();
-        _headerToolTip.SetToolTip(lblPath, string.IsNullOrWhiteSpace(path) ? null : $"左クリックでパスをコピー:\r\n{path}");
-        _headerToolTip.SetToolTip(infoRow2Panel, string.IsNullOrWhiteSpace(path) ? null : $"左クリックでパスをコピー:\r\n{path}");
-        _headerToolTip.SetToolTip(lblName, string.IsNullOrWhiteSpace(fullPath) ? null : $"左クリックでフルパスをコピー:\r\n{fullPath}");
-        _headerToolTip.SetToolTip(infoRow4Panel, string.IsNullOrWhiteSpace(fullPath) ? null : $"左クリックでフルパスをコピー:\r\n{fullPath}");
-        // アイテムがない場合のカーソル調整
-        lblName.Cursor = string.IsNullOrWhiteSpace(fullPath) ? Cursors.Default : Cursors.Hand;
-    }
-    #endregion
-
     private DialogResult ShowDragInCopyConfirmationDialog(string message)
     {
-        using (var form = new Form())
-        {
-            form.Text = "Drag-in (Copy)";
-            form.FormBorderStyle = FormBorderStyle.FixedDialog;
-            form.MaximizeBox = false;
-            form.MinimizeBox = false;
-            form.ShowInTaskbar = false;
-            form.StartPosition = FormStartPosition.CenterParent;
-            form.ClientSize = new Size(420, 140);
+        return ConfirmationDialogPresenter.ShowDragInCopyConfirmationDialog(this, message);
+    }
 
-            var label = new Label
-            {
-                Text = message,
-                Location = new Point(15, 15),
-                Size = new Size(390, 60),
-                TextAlign = ContentAlignment.MiddleLeft
-            };
-
-            var btnYes = new Button
-            {
-                Text = "はい(&Y)",
-                DialogResult = DialogResult.Yes,
-                Location = new Point(210, 90),
-                Size = new Size(90, 30)
-            };
-
-            var btnNo = new Button
-            {
-                Text = "いいえ(&N)",
-                DialogResult = DialogResult.No,
-                Location = new Point(310, 90),
-                Size = new Size(90, 30)
-            };
-
-            form.Controls.Add(label);
-            form.Controls.Add(btnYes);
-            form.Controls.Add(btnNo);
-
-            form.AcceptButton = btnYes;
-            form.CancelButton = btnNo;
-
-            return form.ShowDialog(this);
-        }
+    private DialogResult ShowDragInMoveConfirmationDialog(string message)
+    {
+        return ConfirmationDialogPresenter.ShowDragInMoveConfirmationDialog(this, message);
     }
 
     private DialogResult ShowLargeTextClipboardCopyConfirmationDialog(int lineCount, long estimatedBytes)
     {
-        string message = $"{lineCount:N0} 行 / 約 {FileOperationService.FormatSize(estimatedBytes)} の選択範囲です。\n" +
-                         "クリップボードへは大きすぎるため、直接コピーしません。\n\n" +
-                         "選択範囲をファイルへ保存しますか？";
+        return ConfirmationDialogPresenter.ShowLargeTextClipboardCopyConfirmationDialog(this, lineCount, estimatedBytes);
+    }
 
-        using (var form = new Form())
-        {
-            form.Text = "LargeText 大量コピー";
-            form.FormBorderStyle = FormBorderStyle.FixedDialog;
-            form.MaximizeBox = false;
-            form.MinimizeBox = false;
-            form.ShowInTaskbar = false;
-            form.StartPosition = FormStartPosition.CenterParent;
-            form.ClientSize = new Size(420, 140);
-
-            var label = new Label
-            {
-                Text = message,
-                Location = new Point(15, 15),
-                Size = new Size(390, 60),
-                TextAlign = ContentAlignment.MiddleLeft
-            };
-
-            var btnYes = new Button
-            {
-                Text = "はい(&Y)",
-                DialogResult = DialogResult.Yes,
-                Location = new Point(210, 90),
-                Size = new Size(90, 30)
-            };
-
-            var btnNo = new Button
-            {
-                Text = "いいえ(&N)",
-                DialogResult = DialogResult.No,
-                Location = new Point(310, 90),
-                Size = new Size(90, 30)
-            };
-
-            form.Controls.Add(label);
-            form.Controls.Add(btnYes);
-            form.Controls.Add(btnNo);
-
-            form.AcceptButton = btnYes;
-            form.CancelButton = btnNo;
-
-            return form.ShowDialog(this);
-        }
+    private Color ResolveStatusColor(StatusKind kind)
+    {
+        return StatusColorResolver.Resolve(kind, _resolvedColors, _settings?.Appearance);
     }
 }

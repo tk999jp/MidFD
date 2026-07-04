@@ -1,4 +1,4 @@
-﻿using System.Diagnostics;
+using System.Diagnostics;
 using System.Runtime.InteropServices;
 using MidFD.Models;
 
@@ -8,11 +8,11 @@ public static class ShellRecycleBinDeleteService
 {
     private const uint FOF_NOCONFIRMATION = 0x0010;
     private const uint FOF_ALLOWUNDO = 0x0040;
-    private const uint FOF_SIMPLEPROGRESS = 0x0100;
+    private const uint FOF_SILENT = 0x0004;
     private const int S_OK = 0;
     private const int E_ABORT = unchecked((int)0x80004004);
     private static readonly Guid FileOperationClassId = new("3AD05575-8857-4850-9277-11B85BDB8E09");
-    private const uint DeleteOperationFlags = FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_SIMPLEPROGRESS;
+    private const uint DeleteOperationFlags = FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_SILENT;
 
     public sealed record Progress(
         string Path,

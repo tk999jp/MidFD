@@ -134,8 +134,11 @@ public sealed class FunctionBarAssignmentDialog : Form
             Width = 140,
             ToolTipText = "通常キーはこの機能に対する共通ショートカットです。変更は「入力割り当て」で行います。"
         };
-        normalKeyCol.CellTemplate.Style.BackColor = SystemColors.Control;
-        normalKeyCol.CellTemplate.Style.ForeColor = SystemColors.GrayText;
+        if (normalKeyCol.CellTemplate is not null)
+        {
+            normalKeyCol.CellTemplate.Style.BackColor = SystemColors.Control;
+            normalKeyCol.CellTemplate.Style.ForeColor = SystemColors.GrayText;
+        }
 
         var cmdComboCol = new DataGridViewComboBoxColumn
         {
@@ -156,8 +159,11 @@ public sealed class FunctionBarAssignmentDialog : Form
             AutoSizeMode = DataGridViewAutoSizeColumnMode.Fill,
             MinimumWidth = 240
         };
-        descriptionCol.CellTemplate.Style.BackColor = SystemColors.Control;
-        descriptionCol.CellTemplate.Style.ForeColor = SystemColors.GrayText;
+        if (descriptionCol.CellTemplate is not null)
+        {
+            descriptionCol.CellTemplate.Style.BackColor = SystemColors.Control;
+            descriptionCol.CellTemplate.Style.ForeColor = SystemColors.GrayText;
+        }
 
         _assignmentGrid.Columns.Add(keyCol);
         _assignmentGrid.Columns.Add(labelCol);
@@ -165,11 +171,30 @@ public sealed class FunctionBarAssignmentDialog : Form
         _assignmentGrid.Columns.Add(normalKeyCol);
         _assignmentGrid.Columns.Add(descriptionCol);
 
-        _assignmentGrid.Columns["Key"].DisplayIndex = 0;
-        _assignmentGrid.Columns["Label"].DisplayIndex = 1;
-        _assignmentGrid.Columns["Command"].DisplayIndex = 2;
-        _assignmentGrid.Columns["NormalKey"].DisplayIndex = 3;
-        _assignmentGrid.Columns["Description"].DisplayIndex = 4;
+        if (_assignmentGrid.Columns["Key"] is DataGridViewColumn keyColumn)
+        {
+            keyColumn.DisplayIndex = 0;
+        }
+
+        if (_assignmentGrid.Columns["Label"] is DataGridViewColumn labelColumnRef)
+        {
+            labelColumnRef.DisplayIndex = 1;
+        }
+
+        if (_assignmentGrid.Columns["Command"] is DataGridViewColumn commandColumn)
+        {
+            commandColumn.DisplayIndex = 2;
+        }
+
+        if (_assignmentGrid.Columns["NormalKey"] is DataGridViewColumn normalKeyColumnRef)
+        {
+            normalKeyColumnRef.DisplayIndex = 3;
+        }
+
+        if (_assignmentGrid.Columns["Description"] is DataGridViewColumn descriptionColumn)
+        {
+            descriptionColumn.DisplayIndex = 4;
+        }
 
         _assignmentGrid.CellValueChanged += AssignmentGrid_CellValueChanged;
         _assignmentGrid.CellContextMenuStripNeeded += AssignmentGrid_CellContextMenuStripNeeded;
@@ -347,10 +372,12 @@ public sealed class FunctionBarAssignmentDialog : Form
                 }
             }
 
-            var cmdComboCol = (DataGridViewComboBoxColumn)_assignmentGrid.Columns["Command"];
-            cmdComboCol.DataSource = comboItems;
-            cmdComboCol.ValueMember = "Value";
-            cmdComboCol.DisplayMember = "Display";
+            if (_assignmentGrid.Columns["Command"] is DataGridViewComboBoxColumn cmdComboCol)
+            {
+                cmdComboCol.DataSource = comboItems;
+                cmdComboCol.ValueMember = "Value";
+                cmdComboCol.DisplayMember = "Display";
+            }
 
             for (int slot = 1; slot <= 12; slot++)
             {

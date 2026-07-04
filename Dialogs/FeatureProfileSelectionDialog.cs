@@ -6,8 +6,7 @@ namespace MidFD.Dialogs;
 
 public sealed class FeatureProfileSelectionDialog : Form
 {
-    private readonly CheckBox _restoreLastPathCheckBox;
-    private readonly CheckBox _enableWorkspaceSnapshotCheckBox;
+    private readonly CheckBox _restoreStartupStateCheckBox;
     private readonly CheckBox _enableMouseGesturesCheckBox;
     private readonly CheckBox _showFunctionBarTooltipsCheckBox;
     private readonly CheckBox _enableDragArchiveHandoffCheckBox;
@@ -21,8 +20,7 @@ public sealed class FeatureProfileSelectionDialog : Form
     public FeatureProfile SelectedProfile { get; private set; } = FeatureProfile.PracticalStable;
     public bool UseFdCompatibleFunctionKeys => _fdCompatibleFunctionKeysCheckBox.Checked;
     public bool VideoEnterPlaysExternal => _videoEnterPlaysExternalCheckBox.Checked;
-    public bool RestoreLastPath => _restoreLastPathCheckBox.Checked;
-    public bool EnableWorkspaceSnapshotFeatures => _enableWorkspaceSnapshotCheckBox.Checked;
+    public bool RestoreStartupState => _restoreStartupStateCheckBox.Checked;
     public bool EnableMouseGestures => _enableMouseGesturesCheckBox.Checked;
     public bool ShowFunctionBarTooltips => _showFunctionBarTooltipsCheckBox.Checked;
     public bool EnableDragArchiveHandoff => _enableDragArchiveHandoffCheckBox.Checked;
@@ -56,7 +54,7 @@ public sealed class FeatureProfileSelectionDialog : Form
 
         var advancedHeadingLabel = new Label
         {
-            Text = "初回セットアップでは導入用の項目だけを表示します。後から「設定 > 操作 / 外部連携」で変更できます。",
+            Text = "初回セットアップでは導入用の項目だけを表示します。後から「設定 > 起動・ログ / 操作 / 外部連携」で変更できます。",
             AutoSize = false,
             Location = new Point(16, 48),
             Size = new Size(680, 36)
@@ -142,37 +140,28 @@ public sealed class FeatureProfileSelectionDialog : Form
             Text = "Functionバーのマウスオーバー時に説明やキーヒントを表示します。"
         });
 
-        _restoreLastPathCheckBox = new CheckBox
+        _restoreStartupStateCheckBox = new CheckBox
         {
-            Text = "前回フォルダを復元する",
+            Text = "起動時に前回の状態を復元する",
             AutoSize = true,
             Location = new Point(16, advancedTop + 188),
-            Checked = settings?.Session?.RestoreLastPath ?? true
+            Checked = settings?.Session?.RestoreStartupState ?? true
         };
-        advancedGroup.Controls.Add(_restoreLastPathCheckBox);
+        advancedGroup.Controls.Add(_restoreStartupStateCheckBox);
         advancedGroup.Controls.Add(new Label
         {
             AutoSize = false,
             Location = new Point(36, advancedTop + 208),
-            Size = new Size(620, 20),
-            Text = "起動時に前回見ていたフォルダへ戻ります。"
+            Size = new Size(620, 40),
+            Text = "前回のカテゴリ・タブ構成、最後に開いていたフォルダ、\r\nウィンドウ位置、列数、ソートなどを復元します。"
         });
-
-        _enableWorkspaceSnapshotCheckBox = new CheckBox
-        {
-            Text = "Workspace Snapshot / 作業状態復元を使う",
-            AutoSize = true,
-            Location = new Point(16, advancedTop + 236),
-            Checked = SelectedProfile == FeatureProfile.Full
-        };
-        advancedGroup.Controls.Add(_enableWorkspaceSnapshotCheckBox);
 
         advancedGroup.Controls.Add(new Label
         {
             AutoSize = false,
-            Location = new Point(36, advancedTop + 256),
+            Location = new Point(16, advancedTop + 252),
             Size = new Size(620, 36),
-            Text = "Workspace Snapshot や MarkSlot の拡張管理導線を表示します。\r\n起動時の復元内容は、後から「設定 > 起動・ログ」で調整できます。"
+            Text = "後から「設定 > 起動・ログ」で個別に調整できます。\r\nMarkSlot などの導線は通常の設定から利用します。"
         });
 
         var operationGroup = new GroupBox
@@ -199,7 +188,7 @@ public sealed class FeatureProfileSelectionDialog : Form
 
         _videoEnterPlaysExternalCheckBox = new CheckBox
         {
-            Text = "動画ファイルは Enter で外部再生する",
+            Text = "メディアファイルは Enter で外部再生する",
             AutoSize = true,
             Location = new Point(16, 64),
             Checked = settings?.Preview?.VideoEnterPlaysExternal ?? false
@@ -210,7 +199,7 @@ public sealed class FeatureProfileSelectionDialog : Form
             AutoSize = false,
             Location = new Point(36, 86),
             Size = new Size(632, 40),
-            Text = "OFF: Enter=静止画 / Ctrl+Enter=外部再生\r\nON : Enter=外部再生 / Ctrl+Enter=静止画\r\nVキーは常に静止画プレビュー"
+            Text = "動画: OFF=Enterで静止画 / Ctrl+Enterで外部再生\r\n動画: ON=Enterで外部再生 / Ctrl+Enterで静止画\r\n音声: 設定ON/OFFに関係なく Enter / Ctrl+Enter で外部再生"
         });
 
         var externalInfoGroup = new GroupBox
@@ -263,13 +252,6 @@ public sealed class FeatureProfileSelectionDialog : Form
             Location = new Point(316, buttonBottomY),
             DialogResult = DialogResult.OK
         };
-        startButton.Click += (_, _) =>
-        {
-            SelectedProfile = _enableWorkspaceSnapshotCheckBox.Checked
-                ? FeatureProfile.Full
-                : FeatureProfile.PracticalStable;
-        };
-
         var cancelButton = new Button
         {
             Text = "キャンセル",

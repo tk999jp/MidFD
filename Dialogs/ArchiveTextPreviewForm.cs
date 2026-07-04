@@ -1,13 +1,14 @@
 using System;
 using System.Drawing;
 using System.Windows.Forms;
+using MidFD.Helpers;
 using MidFD.Models;
 
 namespace MidFD.Dialogs;
 
 public sealed class ArchiveTextPreviewForm : Form
 {
-    private readonly TextBox _textBox;
+    private readonly RichTextBox _textBox;
 
     public ArchiveTextPreviewForm(string title, string content)
     {
@@ -19,12 +20,15 @@ public sealed class ArchiveTextPreviewForm : Form
         ShowInTaskbar = false;
         FormBorderStyle = FormBorderStyle.Sizable;
 
-        _textBox = new TextBox
+        _textBox = new RichTextBox
         {
             Dock = DockStyle.Fill,
             Multiline = true,
             ReadOnly = true,
-            ScrollBars = ScrollBars.Both,
+            DetectUrls = true,
+            ShortcutsEnabled = true,
+            WordWrap = false,
+            ScrollBars = RichTextBoxScrollBars.Both,
             BackColor = MidFDColors.ViewerBack,
             ForeColor = MidFDColors.ViewerFore,
             Font = new Font("Consolas", 10F),
@@ -35,10 +39,13 @@ public sealed class ArchiveTextPreviewForm : Form
         // テキスト選択が青くハイライトされるのを抑止
         _textBox.SelectionStart = 0;
         _textBox.SelectionLength = 0;
+        _textBox.TabStop = true;
+        _textBox.TabIndex = 0;
 
         Controls.Add(_textBox);
+        TextPreviewInteractionHelper.Attach(_textBox, dialogOwner: this, showErrorDialog: true);
 
-        // Esc, Q, Enter キーでフォームを閉じる
+        // Esc, Q, Enter キーでフォームを閉じる。Tab, F6 キーは閉じることなく一覧へフォーカスを戻す。
         KeyDown += (sender, e) =>
         {
             if (e.KeyCode == Keys.Escape || e.KeyCode == Keys.Q || e.KeyCode == Keys.Enter)
@@ -46,6 +53,15 @@ public sealed class ArchiveTextPreviewForm : Form
                 Close();
                 e.Handled = true;
                 e.SuppressKeyPress = true;
+            }
+            else if (e.KeyCode == Keys.F6 || e.KeyCode == Keys.Tab)
+            {
+                if (Owner is ArchiveListDialog dialog)
+                {
+                    dialog.FocusListView();
+                    e.Handled = true;
+                    e.SuppressKeyPress = true;
+                }
             }
         };
 
@@ -57,9 +73,33 @@ public sealed class ArchiveTextPreviewForm : Form
                 e.Handled = true;
                 e.SuppressKeyPress = true;
             }
+            else if (e.KeyCode == Keys.F6 || e.KeyCode == Keys.Tab)
+            {
+                if (Owner is ArchiveListDialog dialog)
+                {
+                    dialog.FocusListView();
+                    e.Handled = true;
+                    e.SuppressKeyPress = true;
+                }
+            }
         };
 
         KeyPreview = true;
+    }
+
+    public RichTextBox TextBox => _textBox;
+
+    protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
+    {
+        if ((keyData & Keys.KeyCode) == Keys.Tab)
+        {
+            if (Owner is ArchiveListDialog dialog)
+            {
+                dialog.FocusListView();
+                return true;
+            }
+        }
+        return base.ProcessCmdKey(ref msg, keyData);
     }
 
     public void SetContent(string title, string text)

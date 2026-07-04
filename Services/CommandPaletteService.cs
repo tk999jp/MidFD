@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using MidFD.Models;
 
@@ -9,6 +9,65 @@ namespace MidFD.Services;
 /// </summary>
 public static class CommandPaletteService
 {
+    public static CommandPalettePresentation BuildPresentation(
+        MainForm mainForm,
+        FeatureGateService featureGate,
+        CommandPaletteUsageState usageState,
+        string rawQuery,
+        IReadOnlySet<string>? expandedSections = null,
+        SelectionResult? selectionSnapshot = null)
+    {
+        CommandPaletteSearchContext context = new(
+            () => mainForm.InvokeGetCommandRegistry(),
+            (id, scope, source, selection) => mainForm.InvokeExecuteCommandFromUi(id, scope, source, selection),
+            () => mainForm.InvokeOpenSettingsForm(),
+            initialTab => mainForm.InvokeOpenSettingsForm(initialTab),
+            () => mainForm.InvokeShowCommandList(),
+            () => mainForm.InvokeShowSystemInformationDialog(),
+            () => mainForm.InvokeOpenControlPanel(),
+            () => selectionSnapshot ?? mainForm.InvokeResolveSelection(),
+            () => mainForm.InvokeGetCurrentBrowserPath(),
+            path => mainForm.InvokeShowArchiveContents(path),
+            algorithm => _ = mainForm.InvokeExecuteArchiveHashAsync(algorithm),
+            commandId => CommandPaletteSearchContext.ResolveKeyBindingText(mainForm, commandId));
+
+        return CommandPaletteUniversalSearchService.BuildPresentation(context, featureGate, usageState, rawQuery, expandedSections);
+    }
+
+    internal static CommandPalettePresentation BuildPresentation(
+        IReadOnlyList<CommandLauncherCommand> standardCommands,
+        ICommandPaletteLayerHost host,
+        FeatureGateService featureGate,
+        CommandPaletteUsageState usageState,
+        string rawQuery)
+    {
+        CommandPaletteLayerQuery query = CommandPaletteLayerQueryParser.Parse(rawQuery);
+        if (!query.IsLayered)
+        {
+            return CommandPalettePresentation.Standard(standardCommands);
+        }
+
+        if (!CommandPaletteLayerService.TryBuild(host, featureGate, usageState, query, out CommandPalettePresentation? layeredPresentation) ||
+            layeredPresentation == null)
+        {
+            return CommandPalettePresentation.Standard(standardCommands);
+        }
+
+        if (query.IsExplicitLayerQuery)
+        {
+            return layeredPresentation;
+        }
+
+        return CommandPalettePresentation.Mixed(layeredPresentation.Commands, standardCommands, layeredPresentation.StatusText);
+    }
+
+    public static IReadOnlyList<CommandLauncherCommand> GetStandardCommands(MainForm mainForm, FeatureGateService featureGate)
+    {
+        return GetBuiltInCommands(mainForm, featureGate)
+            .Concat(GetExternalCommands(mainForm))
+            .ToList();
+    }
+
     public static IEnumerable<CommandLauncherCommand> GetBuiltInCommands(MainForm mainForm, FeatureGateService featureGate)
     {
         var commands = new List<CommandLauncherCommand>
@@ -129,7 +188,7 @@ public static class CommandPaletteService
 
     public static IEnumerable<CommandLauncherCommand> GetAllCommands(MainForm mainForm, FeatureGateService featureGate)
     {
-        return GetBuiltInCommands(mainForm, featureGate).Concat(GetExternalCommands(mainForm));
+        return GetStandardCommands(mainForm, featureGate);
     }
 
     private static string? BuildExternalSecondaryText(ExternalToolCommandDefinition tool)

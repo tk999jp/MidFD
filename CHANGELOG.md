@@ -3,9 +3,50 @@
 MidFD の主な変更点をまとめます。
 詳細な開発ログではなく、利用者向けの変更概要です。
 
-## Unreleased
+## v2026.07.04 - .NET 10移行とQuickAccess/メディア再生改善
 
-- なし
+> 公開候補版です。公開日は GitHub Release 作成時に確定します。
+
+### 配布・実行環境
+- .NET 10 を公開ビルド対象にします。
+- 通常ZIP（Framework-dependent）を基本配布とし、リリース ZIP root に Desktop Runtime 導入導線として `README_FIRST.txt` を同梱します。
+- GitHub の `Code > Download ZIP` / `Source code (zip)` はソースコード用であり、通常利用向けの実行パッケージではありません。
+- `README_FIRST.txt` では `.NET 10.0 Desktop Runtime` を案内し、7-Zip / ffmpeg / ffprobe / ffplay は同梱しない前提を明示します。
+- Portable / Installed 用のローカルパッケージ生成と storage profile diagnostics を整備しました。公開 asset として採用する範囲は release 前に確定します。
+
+### QuickAccess / お気に入り
+- QuickAccess の登録先一覧で、カテゴリ列・カテゴリフィルタ・カテゴリ見出し表示を追加しました。
+- `未分類` を最後にまとめ、カテゴリの開閉、カテゴリ自体の並べ替え、カテゴリ内の項目並べ替えに対応しました。
+- QuickAccess 起動後、一覧フォーカス中に `1`〜`9` で表示中候補へ直接移動できるようにしました。
+- 検索欄では `1`、`7z`、`2026` など数字を含む検索語を通常入力できるようにし、数字ショートカットとの衝突を避けました。
+- `Ctrl+F` または `/` で検索欄へ移動できるようにし、`Tab` / `Shift+Tab` の導線を整理しました。
+- お気に入りメニュー側もカテゴリ順を反映し、QuickAccess 管理画面と見え方を揃えました。
+
+### 設定・保存先
+- アプリ設定の正本を SQLite (`Data\Settings\settings.db`) へ移行しました。
+- 従来の `settings.json` は初回 import / backup 用として扱い、通常保存では再生成しない構成にしました。
+- Portable 既定を維持しつつ、Installed profile の明示 opt-in と `%LOCALAPPDATA%\MidFD` 配下の設定 DB 導線を追加しました。
+- Managed Trash / Workspace / Session Restore / QuickAccess の実移行は行わず、診断・将来候補として分離しています。
+
+### 操作・検索
+- Command Palette を拡張し、機能名・説明・設定を検索して実行しやすくしました。
+- ファイル操作系コマンドは確認導線を挟む形に整理し、誤実行しにくくしました。
+
+### ファイル操作・ドラッグ
+- MidFD から Explorer へのドラッグ時の Copy / Move 判定を Explorer 互換に近づけました。
+- Drag ZIP のドロップ互換性を改善し、ChatGPT などへの添付操作で扱いやすくしました。
+- Explorer 右ドラッグの完全な Shell 互換（例: 「ショートカットをここに作成」）は未対応です。
+
+### プレビュー
+- Large text preview で通常選択、Shift+click 範囲選択、Ctrl+A、Ctrl+C の挙動を改善しました。
+- Markdown / SQLite の read-only preview を追加し、編集用途は MidEditor 連携を優先する方針にしました。
+- メディアファイルの Enter 外部再生を整理し、動画は設定で切り替え、音声は設定に関係なく外部再生するようにしました。
+
+### タブ・表示設定
+- タブ文字サイズとタブ幅を設定できるようにしました。
+- 一覧表示フォントサイズ、タブ文字サイズ、タブ幅を個別に初期値へ戻せるようにしました。
+- タブ幅を小さくしてもタブ表示が消えないようにしました。
+- ステータス表示などの表示色カスタマイズ範囲を拡張し、状態表示の視認性を調整しやすくしました。
 
 ## v2026.06.14 (2026-06-14)
 

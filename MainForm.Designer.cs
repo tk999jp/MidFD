@@ -1,4 +1,4 @@
-﻿namespace MidFD;
+namespace MidFD;
 
 partial class MainForm
 {
@@ -605,7 +605,7 @@ partial class MainForm
         // 
         // 
         // MainForm
-        // 
+        //
         AutoScaleDimensions = new SizeF(8F, 20F);
         AutoScaleMode = AutoScaleMode.Font;
         ClientSize = new Size(800, 600);

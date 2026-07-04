@@ -15,7 +15,10 @@ public static class CommandIds
     public const string BrowserOpenExplorer = "browser.open.explorer";
     public const string BrowserOpenShell = "browser.open.shell";
     public const string BrowserOpenExternalEditor = "browser.open.external_editor";
+    public const string BrowserOpenCommandPrompt = "browser.open.command_prompt";
     public const string BrowserCreateDirectory = "browser.create_directory";
+    public const string BrowserCreateFile = "browser.create_file";
+    public const string BrowserPathEntryOpen = "browser.path_entry.open";
     public const string BrowserPreview = "browser.preview";
     public const string BrowserSort = "browser.sort";
     public const string BrowserFilter = "browser.filter";
@@ -28,6 +31,11 @@ public static class CommandIds
     public const string BrowserTabNew = "browser.tab.new";
     public const string BrowserTabNext = "browser.tab.next";
     public const string BrowserTabPrevious = "browser.tab.previous";
+    public const string BrowserTabCategoryAdd = "browser.tab_category.add";
+    public const string BrowserTabCategoryRename = "browser.tab_category.rename";
+    public const string BrowserTabCategoryDelete = "browser.tab_category.delete";
+    public const string BrowserTabCategoryMoveLeft = "browser.tab_category.move_left";
+    public const string BrowserTabCategoryMoveRight = "browser.tab_category.move_right";
     public const string BrowserTabCategoryNext = "browser.tab_category.next";
     public const string BrowserTabCategoryPrevious = "browser.tab_category.previous";
     public const string BrowserTabClose = "browser.tab.close";
@@ -42,5 +50,11 @@ public static class CommandIds
     public const string AppOpenCommandLauncher = "app.open_command_launcher";
     public const string BrowserShowHelp = "browser.show_help";
     public const string BrowserOpenMarkSlot = "browser.open_mark_slot";
+    public const string BrowserTabFilterLock = "browser.tab.filter_lock";
+    public const string BrowserTabLock = "browser.tab.lock";
     public const string AppOpenCommandList = "app.open_command_list";
+    public const string FileCopy = "file.copy";
+    public const string FileMove = "file.move";
+    public const string FileRename = "file.rename";
+    public const string FileDelete = "file.delete";
 }

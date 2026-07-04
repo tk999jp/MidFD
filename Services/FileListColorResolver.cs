@@ -8,10 +8,11 @@ namespace MidFD.Services;
 
 public class FileListColorResolver
 {
-    public static readonly string[] CoreThemes = { "ClassicCyan", "Green", "Amber", "Light" };
+    public static readonly string[] CoreThemes = { "MidFdStandard", "Green", "Amber", "Light" };
     public static readonly string[] BuiltInPresetKeys =
     {
-        "ClassicCyan",
+        "MidFdStandard",
+        "WinFdCompatible",
         "Green",
         "Amber",
         "Light",
@@ -24,6 +25,9 @@ public class FileListColorResolver
 
     private static readonly (string Alias, string Canonical)[] PresetAliases =
     {
+        ("ClassicCyan", "MidFdStandard"),
+        ("MidFD標準色プリセット", "MidFdStandard"),
+        ("FD/WinFD互換色プリセット", "WinFdCompatible"),
         ("High Contrast Dark", "Mono Dark"),
         ("High Contrast Light", "Light"),
         ("Contrast Dark", "Mono Dark"),
@@ -47,6 +51,9 @@ public class FileListColorResolver
         public Color Marked { get; set; }
         public Color SelectedBackground { get; set; }
         public Color SelectedForeground { get; set; }
+        public Color StatusNormal { get; set; }
+        public Color StatusResult { get; set; }
+        public Color StatusError { get; set; }
     }
 
     public static bool IsCoreTheme(string? themeKey)
@@ -69,7 +76,18 @@ public class FileListColorResolver
     {
         if (string.IsNullOrWhiteSpace(presetKey) || TryGetUserPresetName(presetKey, out _))
         {
-            return presetKey ?? "ClassicCyan";
+            return presetKey ?? "MidFdStandard";
+        }
+
+        if (string.Equals(presetKey, "MidFD標準色プリセット", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(presetKey, "MidFD標準", StringComparison.OrdinalIgnoreCase))
+        {
+            return "MidFdStandard";
+        }
+        if (string.Equals(presetKey, "FD/WinFD互換色プリセット", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(presetKey, "FD/WinFD互換色", StringComparison.OrdinalIgnoreCase))
+        {
+            return "WinFdCompatible";
         }
 
         foreach (var (alias, canonical) in PresetAliases)
@@ -83,11 +101,44 @@ public class FileListColorResolver
         return presetKey;
     }
 
+    public static string GetPresetDisplayName(string presetKey)
+    {
+        if (string.IsNullOrWhiteSpace(presetKey))
+        {
+            return "MidFD標準";
+        }
+        string canonical = CanonicalizePresetKey(presetKey);
+        return canonical switch
+        {
+            "MidFdStandard" => "MidFD標準",
+            "WinFdCompatible" => "FD/WinFD互換色",
+            _ => presetKey
+        };
+    }
+
+    public static string GetPresetKeyFromDisplayName(string displayName)
+    {
+        if (string.IsNullOrWhiteSpace(displayName))
+        {
+            return "MidFdStandard";
+        }
+        if (string.Equals(displayName, "MidFD標準", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(displayName, "MidFD標準色プリセット", StringComparison.OrdinalIgnoreCase))
+        {
+            return "MidFdStandard";
+        }
+        if (string.Equals(displayName, "FD/WinFD互換色", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(displayName, "FD/WinFD互換色プリセット", StringComparison.OrdinalIgnoreCase))
+        {
+            return "WinFdCompatible";
+        }
+        return CanonicalizePresetKey(displayName);
+    }
+
     public static string NormalizeCoreTheme(string? themeKey, AppSettings? settings = null)
     {
         themeKey = CanonicalizePresetKey(themeKey);
-        if (string.Equals(themeKey, "Light", StringComparison.OrdinalIgnoreCase) ||
-            string.Equals(themeKey, "Light", StringComparison.OrdinalIgnoreCase))
+        if (string.Equals(themeKey, "Light", StringComparison.OrdinalIgnoreCase))
         {
             return "Light";
         }
@@ -115,7 +166,7 @@ public class FileListColorResolver
             }
         }
 
-        return "ClassicCyan";
+        return "MidFdStandard";
     }
 
     public static string MakeUserPresetKey(string name) => $"USER:{name}";
@@ -147,6 +198,9 @@ public class FileListColorResolver
                 colors.Marked = Color.White;
                 colors.SelectedBackground = Color.FromArgb(0, 48, 0);
                 colors.SelectedForeground = Color.FromArgb(240, 240, 224);
+                colors.StatusNormal = Color.Lime;
+                colors.StatusResult = Color.Yellow;
+                colors.StatusError = Color.OrangeRed;
                 break;
             case "Amber":
                 colors.Background = Color.FromArgb(24, 18, 0);
@@ -158,6 +212,9 @@ public class FileListColorResolver
                 colors.Marked = Color.FromArgb(240, 240, 224);
                 colors.SelectedBackground = Color.FromArgb(92, 58, 0);
                 colors.SelectedForeground = Color.FromArgb(255, 250, 240);
+                colors.StatusNormal = Color.FromArgb(255, 210, 120);
+                colors.StatusResult = Color.Yellow;
+                colors.StatusError = Color.OrangeRed;
                 break;
             case "Light":
                 colors.Background = Color.White;
@@ -169,8 +226,11 @@ public class FileListColorResolver
                 colors.Marked = Color.Black;
                 colors.SelectedBackground = Color.FromArgb(204, 232, 255);
                 colors.SelectedForeground = Color.Black;
+                colors.StatusNormal = Color.Black;                         // #000000
+                colors.StatusResult = Color.FromArgb(32, 32, 32);          // #202020 dark neutral
+                colors.StatusError = Color.FromArgb(64, 64, 64);           // #404040 dark neutral
                 break;
-            default: // ClassicCyan
+            default: // MidFdStandard (旧ClassicCyan同等)
                 colors.Background = Color.Black;
                 colors.NormalFile = Color.Khaki;
                 colors.Directory = Color.Cyan;
@@ -180,6 +240,9 @@ public class FileListColorResolver
                 colors.Marked = Color.White;
                 colors.SelectedBackground = Color.FromArgb(0, 64, 80);
                 colors.SelectedForeground = Color.FromArgb(240, 240, 224);
+                colors.StatusNormal = Color.Cyan;
+                colors.StatusResult = Color.Yellow;
+                colors.StatusError = Color.OrangeRed;
                 break;
         }
         return colors;
@@ -192,7 +255,7 @@ public class FileListColorResolver
             var userPreset = userPresets.FirstOrDefault(preset => string.Equals(preset.Name, userName, StringComparison.OrdinalIgnoreCase));
             if (userPreset != null)
             {
-                return ApplyCustomColors(ResolveDefaultColors("ClassicCyan"), userPreset.Colors);
+                return ApplyCustomColors(ResolveDefaultColors("MidFdStandard"), userPreset.Colors);
             }
         }
 
@@ -210,6 +273,9 @@ public class FileListColorResolver
                 colors.Marked = Color.FromArgb(245, 245, 248);
                 colors.SelectedBackground = Color.FromArgb(48, 72, 96);
                 colors.SelectedForeground = Color.FromArgb(248, 250, 252);
+                colors.StatusNormal = Color.FromArgb(214, 222, 228);
+                colors.StatusResult = Color.Yellow;
+                colors.StatusError = Color.OrangeRed;
                 break;
             case "Mono Dark":
                 colors.Background = Color.FromArgb(18, 18, 18);
@@ -221,6 +287,9 @@ public class FileListColorResolver
                 colors.Marked = Color.FromArgb(244, 244, 244);
                 colors.SelectedBackground = Color.FromArgb(62, 62, 62);
                 colors.SelectedForeground = Color.FromArgb(248, 248, 248);
+                colors.StatusNormal = Color.FromArgb(214, 214, 214);
+                colors.StatusResult = Color.Yellow;
+                colors.StatusError = Color.OrangeRed;
                 break;
             case "Cyber":
                 colors.Background = Color.FromArgb(16, 22, 36);
@@ -232,6 +301,9 @@ public class FileListColorResolver
                 colors.Marked = Color.FromArgb(255, 244, 168);
                 colors.SelectedBackground = Color.FromArgb(78, 30, 110);
                 colors.SelectedForeground = Color.FromArgb(244, 248, 255);
+                colors.StatusNormal = Color.FromArgb(72, 240, 255);
+                colors.StatusResult = Color.Yellow;
+                colors.StatusError = Color.OrangeRed;
                 break;
             case "Violet":
                 colors.Background = Color.FromArgb(24, 16, 36);
@@ -243,6 +315,9 @@ public class FileListColorResolver
                 colors.Marked = Color.FromArgb(250, 246, 255);
                 colors.SelectedBackground = Color.FromArgb(68, 42, 104);
                 colors.SelectedForeground = Color.FromArgb(248, 244, 255);
+                colors.StatusNormal = Color.FromArgb(184, 144, 255);
+                colors.StatusResult = Color.Yellow;
+                colors.StatusError = Color.OrangeRed;
                 break;
             case "Sepia":
                 colors.Background = Color.FromArgb(38, 30, 22);
@@ -254,6 +329,9 @@ public class FileListColorResolver
                 colors.Marked = Color.FromArgb(246, 236, 220);
                 colors.SelectedBackground = Color.FromArgb(84, 60, 34);
                 colors.SelectedForeground = Color.FromArgb(255, 246, 232);
+                colors.StatusNormal = Color.FromArgb(196, 168, 124);
+                colors.StatusResult = Color.Yellow;
+                colors.StatusError = Color.OrangeRed;
                 break;
             default:
                 return ResolveDefaultColors(presetKey);
@@ -274,7 +352,9 @@ public class FileListColorResolver
             "Green" => "緑系主体の既存テーマです。",
             "Amber" => "アンバー系主体の既存テーマです。",
             "Light" => "白背景の既存テーマです。",
-            _ => "既存のClassicCyanを基準にした標準配色です。"
+            "MidFdStandard" => "入力プロファイル:MidFD標準に最適化した配色です。",
+            "WinFdCompatible" => "入力プロファイル:FD/WinFD互換に最適化した配色です。",
+            _ => "標準的な配色です。"
         };
     }
 
@@ -297,6 +377,9 @@ public class FileListColorResolver
                 resolved.Hidden = EnsureContrast(resolved.Hidden, resolved.Background, minimumSafetyRatio);
                 resolved.System = EnsureContrast(resolved.System, resolved.Background, minimumSafetyRatio);
                 resolved.Marked = EnsureContrast(resolved.Marked, resolved.Background, minimumSafetyRatio);
+                resolved.StatusNormal = EnsureContrast(resolved.StatusNormal, resolved.Background, minimumSafetyRatio);
+                resolved.StatusResult = EnsureContrast(resolved.StatusResult, resolved.Background, minimumSafetyRatio);
+                resolved.StatusError = EnsureContrast(resolved.StatusError, resolved.Background, minimumSafetyRatio);
             }
         }
 
@@ -315,7 +398,10 @@ public class FileListColorResolver
             System = ParseHexColor(custom.System) ?? resolved.System,
             Marked = ParseHexColor(custom.Marked) ?? resolved.Marked,
             SelectedBackground = ParseHexColor(custom.SelectedBackground) ?? resolved.SelectedBackground,
-            SelectedForeground = ParseHexColor(custom.SelectedForeground) ?? resolved.SelectedForeground
+            SelectedForeground = ParseHexColor(custom.SelectedForeground) ?? resolved.SelectedForeground,
+            StatusNormal = ParseHexColor(custom.StatusNormal) ?? resolved.StatusNormal,
+            StatusResult = ParseHexColor(custom.StatusResult) ?? resolved.StatusResult,
+            StatusError = ParseHexColor(custom.StatusError) ?? resolved.StatusError
         };
     }
 

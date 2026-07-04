@@ -1,5 +1,7 @@
 ﻿using System.Runtime.InteropServices;
 
+using System.ComponentModel;
+
 namespace MidFD;
 
 /// <summary>
@@ -24,6 +26,8 @@ public class PreviewPopupForm : Form
     private Point _formOrigin;              // ドラッグ開始時の Form の Location
 
     /// <summary>ユーザーが手動で移動したかどうか。true の間は自動配置を上書きしない。</summary>
+    [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
+    [Browsable(false)]
     public bool IsManuallyPositioned { get; set; } = false;
 
     // ─── コンストラクタ ──────────────────────────────────────────────

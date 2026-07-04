@@ -9,7 +9,7 @@ MidFD は Windows 環境での利用を前提にしています。
 | 項目 | 内容 |
 |---|---|
 | OS | Windows |
-| .NET | .NET 8 SDK |
+| .NET | .NET 10 SDK |
 | プロジェクト | MidFD.csproj |
 | UI | Windows Forms |
 
@@ -17,11 +17,11 @@ MidFD は Windows 環境での利用を前提にしています。
 ビルドには、次の環境が必要です。
 
 - Windows
-- .NET 8 SDK
+- .NET 10 SDK
 - Git
 - 必要に応じて Visual Studio または Visual Studio Code  
 
-Visual Studio を使う場合は、.NET デスクトップ開発ワークロードを入れてください。
+Visual Studio を使う場合は、 .NET デスクトップ開発ワークロードを入れてください。
 
 ## ソースコードの取得
 GitHub からソースコードを取得します。
@@ -44,7 +44,7 @@ dotnet build .\MidFD.csproj
 ビルドに成功すると、Debugビルドの出力は通常次の場所に作成されます。
 
 ```text
-bin\Debug\net8.0-windows\
+bin\Debug\net10.0-windows\
 ```
 
 ## 実行
@@ -52,13 +52,13 @@ bin\Debug\net8.0-windows\
 ビルド後、次の実行ファイルを起動します。
 
 ```text
-bin\Debug\net8.0-windows\MidFD.exe
+bin\Debug\net10.0-windows\MidFD.exe
 ```
 
 PowerShell から直接起動する場合は、次のように実行できます。
 
 ```powershell
-.\bin\Debug\net8.0-windows\MidFD.exe
+.\bin\Debug\net10.0-windows\MidFD.exe
 ```
 
 ## 初回起動（初回セットアップ）
@@ -69,12 +69,12 @@ PowerShell から直接起動する場合は、次のように実行できます
 
 - **操作プリセット（キー操作体系）**: 標準的なショートカット操作（標準）か、Fキー中心の操作体系（FD互換）かを選択できます。
 - **動画ファイルの Enter 動作**: 動画ファイルを選択して Enter キーを押したときの動作（内蔵プレビュー、外部プレイヤー等）を設定できます。
-- **初期オプション（高度な使い方）**: 一部の高度な管理機能（Workspace Snapshot 等）や、追加のファイル操作機能の有効/無効をチェックボックスで選択できます。
+- **初期オプション（高度な使い方）**: 起動時に前回の状態を復元する設定や、追加のファイル操作機能の有効/無効をチェックボックスで選択できます。
 - **外部連携パス**: 7-Zip や外部テキストエディタ、ターミナル等の実行ファイルパスを自動検出または手動指定できます。
 
 通常は操作プリセットをお好みに合わせて選択し、初期オプションはチェックを外した状態でセットアップを完了することを推奨します。
 
-設定は後から「設定」画面でいつでも個別に変更可能です。また、初回セットアップ画面自体を設定画面の「起動 / 復元」から再表示することもできます。
+設定は後から「設定」画面でいつでも個別に変更可能です。また、初回セットアップ画面自体を設定画面の「起動・ログ」から再表示することもできます。
 
 詳しくは [PROFILES.md](PROFILES.md) を参照してください。
 
@@ -89,7 +89,7 @@ dotnet build .\MidFD.csproj -c Release
 出力先は通常次の場所です。
 
 ```text
-bin\Release\net8.0-windows\
+bin\Release\net10.0-windows\
 ```
 
 ## publish
@@ -103,7 +103,7 @@ dotnet publish .\MidFD.csproj -c Release
 publish出力は通常次の場所に作成されます。
 
 ```text
-bin\Release\net8.0-windows\publish\
+bin\Release\net10.0-windows\publish\
 ```
 
 単一ファイル化などの詳細な配布設定は、今後の公開方針に合わせて変更される可能性があります。
@@ -113,25 +113,25 @@ bin\Release\net8.0-windows\publish\
 配布用の正式なリリースZIPを作成する場合は、以下の PowerShell スクリプト（正本経路）を使用します。
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\publish-release.ps1 -ReleaseTag v2026.05.20
+powershell -ExecutionPolicy Bypass -File .\scripts\publish-release.ps1 -ReleaseTag vYYYY.MM.DD
 ```
 
 ### 主要パラメータと仕様
 
 - `-ReleaseTag` (必須): `vYYYY.MM.DD` 形式でリリースバージョンを指定します。
-- `-SelfContained` (オプション): このスイッチを指定すると、.NET 8 Runtime を同梱した `self-contained` 配布パッケージを作成します。指定しない場合、既定では [.NET 8 Windows Desktop Runtime](https://dotnet.microsoft.com/ja-jp/download/dotnet/8.0) のインストールを前提とする `framework-dependent`（ランタイム非同梱）パッケージを作成します。通常配布時はこのスイッチを指定しません。「.NET Desktop Runtime」の Windows x64 版をインストールしてください。
+- `-SelfContained` (オプション): このスイッチを指定すると、.NET 10 Runtime を同梱した `self-contained` 配布パッケージを作成します。指定しない場合、既定では [.NET 10 Windows Desktop Runtime](https://dotnet.microsoft.com/ja-jp/download/dotnet/10.0) のインストールを前提とする `framework-dependent`（ランタイム非同梱）パッケージを作成します。通常配布時はこのスイッチを指定しません。「.NET Desktop Runtime」の Windows x64 版をインストールしてください。
 - `-AllowDirty` (オプション): ワーキングツリーに未コミットの変更がある状態での実行を許可します（開発検証用）。
 - `-SkipTagCheck` (オプション): 指定されたGitタグの存在チェック、およびHEADコミットとの一致チェックをスキップします（開発検証用）。
 
 ### スクリプトの動作概要
 
-1. **バージョン情報の動的生成**: 指定された `ReleaseTag` から、Csproj用の各種バージョン値を動的に算出して注入します（例: `v2026.05.20` から `Version=2026.5.20`, `InformationalVersion=v2026.05.20` を生成）。
+1. **バージョン情報の動的生成**: 指定された `ReleaseTag` から、Csproj用の各種バージョン値を動的に算出して注入します（例: `vYYYY.MM.DD` から `Version=YYYY.M.D`, `InformationalVersion=vYYYY.MM.DD` を生成）。
 2. **安全性の検証**: 実リリース時は、Gitワーキングツリーがクリーンであり、かつ指定したリリースタグが HEAD コミットを指していることを自動確認します。
 3. **発行と動的注入**: `/p:Version` や `/p:InformationalVersion` 等のパラメータを付与し、さらに `-SelfContained` の有無に応じた `--self-contained` 値を設定して `dotnet publish` を実行します。これによりアセンブリおよび `Application.ProductVersion` にバージョンとGitコミットハッシュが自動的に埋め込まれます。
 4. **ZIP作成と検証**: `artifacts/release/MidFD-win-x64.zip` を作成後、自動で `artifacts/release-test/` に再解凍して以下の検証を行います。
    - `MidFD.exe` の ProductVersion に指定タグおよびコミットハッシュが正常に含まれていることの確認。
    - 既定の framework-dependent ビルド時、解凍したパッケージに `coreclr.dll`, `hostfxr.dll`, `System.Private.CoreLib.dll` などのランタイム関連ファイルが含まれていない（非同梱である）ことの確認。
-5. **SHA256ハッシュの出力**: 検証に成功した場合、ZIP のハッシュ値を `artifacts/release/MidFD-win-x64.zip.sha256` に保存します。
+5. **SHA256ハッシュの出力**: 検証に成功した場合、ZIP のハッシュファイル `artifacts/release/MidFD-win-x64.zip.sha256` を出力します。これはスクリプト単体の出力例であり、正式なリリース候補では通常版・同梱版をまとめて `SHA256SUMS.txt` で一括管理します。
 
 ## 7-Zip連携
 

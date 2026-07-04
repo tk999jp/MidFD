@@ -251,11 +251,11 @@ internal sealed class CommandStateCoordinator
             case CommandIds.BrowserCreateDirectory:
                 return true;
 
-            case "file.rename":
-            case "file.copy":
-            case "file.move":
-            case "file.delete":
-            case CommandIds.BrowserCopyFullPath:
+            case CommandIds.FileRename:
+            case CommandIds.FileCopy:
+            case CommandIds.FileMove:
+            case CommandIds.FileDelete:
+                case CommandIds.BrowserCopyFullPath:
                 return snapshot.SelectionKind == BrowserSelectionKind.Directory ||
                        snapshot.SelectionKind == BrowserSelectionKind.File ||
                        snapshot.SelectionKind == BrowserSelectionKind.ArchiveCandidate;
@@ -270,7 +270,6 @@ internal sealed class CommandStateCoordinator
                        snapshot.SelectionKind == BrowserSelectionKind.ArchiveCandidate;
 
             case CommandIds.BrowserOpenExternalEditor:
-            case "file.edit":
                 return snapshot.SelectionKind == BrowserSelectionKind.File ||
                        snapshot.SelectionKind == BrowserSelectionKind.ArchiveCandidate;
 

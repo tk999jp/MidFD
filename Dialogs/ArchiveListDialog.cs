@@ -33,12 +33,19 @@ public sealed class ArchiveListDialog : Form
 
     public ArchiveExtractRequest? PendingExtractRequest { get; private set; }
 
-    public ArchiveListDialog(string archivePath, IReadOnlyList<ArchiveEntry> entries, string initialExtractDirectory, bool isReadOnly = false)
+    private readonly string? _dateFormat;
+    private readonly string? _sizeFormat;
+    private readonly string? _sevenZipPath;
+
+    public ArchiveListDialog(string archivePath, IReadOnlyList<ArchiveEntry> entries, string initialExtractDirectory, bool isReadOnly = false, string? dateFormat = null, string? sizeFormat = null, string? sevenZipPath = null)
     {
         _archivePath = archivePath;
         _initialExtractDirectory = initialExtractDirectory;
         _allEntries = entries;
         _isReadOnly = isReadOnly;
+        _dateFormat = dateFormat;
+        _sizeFormat = sizeFormat;
+        _sevenZipPath = sevenZipPath;
 
         Text = $"Archive Contents - {Path.GetFileName(archivePath)}";
         ClientSize = new Size(800, 650);
@@ -121,6 +128,9 @@ public sealed class ArchiveListDialog : Form
         _listView.KeyDown += ListView_KeyDown;
         _listView.DoubleClick += (_, _) => HandleNavigation();
 
+        _listView.TabIndex = 0;
+        _listView.TabStop = true;
+
         PopulateItems();
 
         var buttonPanel = new FlowLayoutPanel
@@ -129,7 +139,8 @@ public sealed class ArchiveListDialog : Form
             Height = 50,
             FlowDirection = FlowDirection.RightToLeft,
             Padding = new Padding(10, 5, 10, 10),
-            WrapContents = false
+            WrapContents = false,
+            TabStop = false
         };
 
         _closeButton = new Button
@@ -138,7 +149,9 @@ public sealed class ArchiveListDialog : Form
             DialogResult = DialogResult.OK,
             AutoSize = true,
             MinimumSize = new Size(110, 30),
-            Margin = new Padding(5, 0, 0, 0)
+            Margin = new Padding(5, 0, 0, 0),
+            TabIndex = 3,
+            TabStop = true
         };
 
         _extractAllButton = new Button
@@ -146,7 +159,9 @@ public sealed class ArchiveListDialog : Form
             Text = "すべて解凍...",
             AutoSize = true,
             MinimumSize = new Size(110, 30),
-            Margin = new Padding(5, 0, 0, 0)
+            Margin = new Padding(5, 0, 0, 0),
+            TabIndex = 2,
+            TabStop = true
         };
         _extractAllButton.Click += (_, _) => BeginExtractAll();
 
@@ -155,7 +170,9 @@ public sealed class ArchiveListDialog : Form
             Text = "マーク解凍...",
             AutoSize = true,
             MinimumSize = new Size(110, 30),
-            Margin = new Padding(5, 0, 0, 0)
+            Margin = new Padding(5, 0, 0, 0),
+            TabIndex = 1,
+            TabStop = true
         };
         _extractSelectedButton.Click += (_, _) => BeginExtractMarked();
 
@@ -187,6 +204,21 @@ public sealed class ArchiveListDialog : Form
 
         KeyDown += ArchiveListDialog_KeyDown;
         FormClosed += (_, _) => _activeTextPreviewForm?.Close();
+    }
+
+    public void FocusListView()
+    {
+        Activate();
+        _listView.Focus();
+    }
+
+    public void FocusPreviewText()
+    {
+        if (_activeTextPreviewForm != null && !_activeTextPreviewForm.IsDisposed && _activeTextPreviewForm.Visible)
+        {
+            _activeTextPreviewForm.Activate();
+            _activeTextPreviewForm.TextBox.Focus();
+        }
     }
 
     private void PopulateItems()
@@ -271,8 +303,12 @@ public sealed class ArchiveListDialog : Form
     {
         string sizeText = entry.IsDirectory
             ? string.Empty
-            : (entry.Size?.ToString("N0") ?? string.Empty);
-        string modifiedText = entry.ModifiedAt?.ToString("yyyy-MM-dd HH:mm:ss") ?? string.Empty;
+            : (entry.Size != null
+                ? FileSystemItemFactory.FormatDisplaySize(entry.Size.Value, _sizeFormat)
+                : string.Empty);
+        string modifiedText = entry.ModifiedAt != null
+            ? FileSystemItemFactory.FormatDisplayDate(entry.ModifiedAt.Value, _dateFormat)
+            : string.Empty;
         string nameText = string.IsNullOrWhiteSpace(entry.Name) ? entry.EntryPath : entry.Name;
         string locationText = BuildLocationText(entry);
         var item = new ListViewItem(string.Empty)
@@ -356,8 +392,33 @@ public sealed class ArchiveListDialog : Form
 
     protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
     {
+        if (keyData == Keys.F6)
+        {
+            if (_activeTextPreviewForm != null && !_activeTextPreviewForm.IsDisposed && _activeTextPreviewForm.Visible)
+            {
+                if (_listView.ContainsFocus)
+                {
+                    FocusPreviewText();
+                }
+                else
+                {
+                    FocusListView();
+                }
+                return true;
+            }
+        }
+
         if (_listView.ContainsFocus)
         {
+            if (keyData == Keys.Tab)
+            {
+                if (_activeTextPreviewForm != null && !_activeTextPreviewForm.IsDisposed && _activeTextPreviewForm.Visible)
+                {
+                    FocusPreviewText();
+                    return true;
+                }
+            }
+
             if (keyData == Keys.Space)
             {
                 ToggleFocusedItemMark(moveNext: true);
@@ -435,15 +496,23 @@ public sealed class ArchiveListDialog : Form
         // ファイルの場合の Enter 挙動
         string archiveExt = Path.GetExtension(_archivePath);
         bool isZip = string.Equals(archiveExt, ".zip", StringComparison.OrdinalIgnoreCase);
+        bool isSevenZip = string.Equals(archiveExt, ".7z", StringComparison.OrdinalIgnoreCase);
         bool isText = ArchiveEntryPreviewService.IsTextFile(entry.EntryPath);
 
-        if (isZip && isText)
+        if ((isZip || isSevenZip) && isText)
         {
             string archivePath = _archivePath;
             string entryPath = string.IsNullOrEmpty(entry.RawEntryPath) ? entry.EntryPath : entry.RawEntryPath;
 
-            // 同期的にプレビューを読み出す
-            var result = ArchiveEntryPreviewService.GetZipEntryTextPreview(archivePath, entryPath);
+            ArchiveEntryPreviewResult result;
+            if (isZip)
+            {
+                result = ArchiveEntryPreviewService.GetZipEntryTextPreview(archivePath, entryPath);
+            }
+            else
+            {
+                result = ArchiveEntryPreviewService.Get7zEntryTextPreview(archivePath, entryPath, _sevenZipPath);
+            }
 
             _activeTextPreviewForm?.Close();
             _activeTextPreviewForm?.Dispose();
@@ -750,17 +819,26 @@ public sealed class ArchiveListDialog : Form
 
         string archiveExt = Path.GetExtension(_archivePath);
         bool isZip = string.Equals(archiveExt, ".zip", StringComparison.OrdinalIgnoreCase);
+        bool isSevenZip = string.Equals(archiveExt, ".7z", StringComparison.OrdinalIgnoreCase);
         bool isText = ArchiveEntryPreviewService.IsTextFile(entry.EntryPath);
 
-        if (isZip && isText)
+        if ((isZip || isSevenZip) && isText)
         {
             string entryPath = string.IsNullOrEmpty(entry.RawEntryPath) ? entry.EntryPath : entry.RawEntryPath;
-            var result = ArchiveEntryPreviewService.GetZipEntryTextPreview(_archivePath, entryPath);
+            ArchiveEntryPreviewResult result;
+            if (isZip)
+            {
+                result = ArchiveEntryPreviewService.GetZipEntryTextPreview(_archivePath, entryPath);
+            }
+            else
+            {
+                result = ArchiveEntryPreviewService.Get7zEntryTextPreview(_archivePath, entryPath, _sevenZipPath);
+            }
             _activeTextPreviewForm.SetContent(entry.Name, result.Text);
         }
-        else if (!isZip)
+        else if (!isZip && !isSevenZip)
         {
-            _activeTextPreviewForm.SetContent(entry.Name, "[ZIP以外のファイルはプレビュー対象外です。]");
+            _activeTextPreviewForm.SetContent(entry.Name, "[ZIP/7z以外のファイルはプレビュー対象外です。]");
         }
         else
         {

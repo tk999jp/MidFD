@@ -1,3 +1,4 @@
+using MidFD.Configuration.Storage;
 using System.IO;
 using System.IO.Compression;
 using System.Text;
@@ -13,6 +14,7 @@ public sealed class ArchiveEntryPreviewResult
 
 public static class ArchiveEntryPreviewService
 {
+    private static readonly AppStoragePaths StoragePaths = LegacyStoragePathProvider.CreateDefault().GetPaths();
     private static readonly HashSet<string> TextExtensions = new(StringComparer.OrdinalIgnoreCase)
     {
         ".txt", ".md", ".csv", ".log", ".json", ".xml", ".ini",
@@ -83,6 +85,94 @@ public static class ArchiveEntryPreviewService
             return new ArchiveEntryPreviewResult { IsSupported = false, Text = $"[プレビューの読み込みに失敗しました: {ex.Message}]" };
         }
     }
+    public static ArchiveEntryPreviewResult Get7zEntryTextPreview(string archivePath, string entryPath, string? sevenZipPath, int maxBytes = 64 * 1024)
+    {
+        if (!File.Exists(archivePath))
+        {
+            return new ArchiveEntryPreviewResult { IsSupported = false, Text = "[アーカイブファイルが見つかりません。]" };
+        }
+
+        string? exePath = SevenZipService.ResolveCliExecutable(sevenZipPath);
+        if (string.IsNullOrWhiteSpace(exePath) || !File.Exists(exePath))
+        {
+            return new ArchiveEntryPreviewResult { IsSupported = false, Text = "[7-Zip がインストールされていないか、設定されていません。]" };
+        }
+
+        string tempDir = Path.Combine(Current7zPreviewTempRoot, $"midfd-7z-preview-{Guid.NewGuid():N}");
+        try
+        {
+            Directory.CreateDirectory(tempDir);
+
+            // 7z x "archive" -o"tempDir" "entryPath" -y
+            var result = SevenZipService.ExtractSelection(
+                exePath,
+                archivePath,
+                tempDir,
+                new[] { entryPath },
+                default);
+
+            if (result.ExitCode != 0)
+            {
+                return new ArchiveEntryPreviewResult { IsSupported = false, Text = $"[7-Zip 抽出失敗 (ExitCode: {result.ExitCode}): {result.Error}]" };
+            }
+
+            // 展開されたファイルを検索
+            string expectedPath = Path.Combine(tempDir, entryPath.Replace('/', Path.DirectorySeparatorChar));
+            if (!File.Exists(expectedPath))
+            {
+                // 例外的なパス展開（フラット展開等）に備え、フォルダ内を全探索
+                var files = Directory.GetFiles(tempDir, "*", SearchOption.AllDirectories);
+                if (files.Length > 0)
+                {
+                    expectedPath = files[0];
+                }
+                else
+                {
+                    return new ArchiveEntryPreviewResult { IsSupported = false, Text = "[展開されたファイルを一時ディレクトリ内で見つけることができませんでした。]" };
+                }
+            }
+
+            using var stream = File.OpenRead(expectedPath);
+            long fileLength = stream.Length;
+            byte[] buffer = new byte[maxBytes];
+            int bytesRead = ReadExactOrEnd(stream, buffer, maxBytes);
+            bool isTruncated = fileLength > bytesRead;
+
+            string text = DetectEncodingAndGetString(buffer, bytesRead);
+
+            if (isTruncated)
+            {
+                text += "\r\n\r\n--- preview truncated ---";
+            }
+
+            return new ArchiveEntryPreviewResult
+            {
+                IsSupported = true,
+                IsTruncated = isTruncated,
+                Text = text
+            };
+        }
+        catch (Exception ex)
+        {
+            return new ArchiveEntryPreviewResult { IsSupported = false, Text = $"[プレビューの読み込みに失敗しました: {ex.Message}]" };
+        }
+        finally
+        {
+            try
+            {
+                if (Directory.Exists(tempDir))
+                {
+                    Directory.Delete(tempDir, true);
+                }
+            }
+            catch
+            {
+                // 一時ディレクトリのクリーンアップ失敗は無視
+            }
+        }
+    }
+
+    internal static string Current7zPreviewTempRoot => StoragePaths.TempRoot;
 
     private static string NormalizeEntryName(string entryName)
     {

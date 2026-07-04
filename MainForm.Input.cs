@@ -1,4 +1,4 @@
-﻿using System.IO;
+using System.IO;
 using System.Drawing;
 using System.Diagnostics;
 using System.Threading;
@@ -147,9 +147,14 @@ public partial class MainForm : Form
         }
         if (keyData == (Keys.Control | Keys.A))
         {
-            if (_currentViewerKind == PreviewKind.Text && viewerTextBox.Visible)
+            if (IsPlainTextBoxViewerKind(_currentViewerKind) && viewerTextBox.Visible)
             {
                 viewerTextBox.SelectAll();
+                return true;
+            }
+            if (_currentViewerKind == PreviewKind.LargeText && _largeFileControl.Visible)
+            {
+                _largeFileControl.SelectAll();
                 return true;
             }
         }
@@ -163,11 +168,21 @@ public partial class MainForm : Form
             ExecuteViewerFindNext(backward: true);
             return true;
         }
-        // Ctrl+C: ラージファイル表示中コピー
+        // Ctrl+C: 表示中コピー
         if (keyData == (Keys.Control | Keys.C))
         {
-            if (TryCopyLargeFileVisibleText())
+            if (IsPlainTextBoxViewerKind(_currentViewerKind) && viewerTextBox.Visible)
             {
+                if (viewerTextBox.SelectionLength > 0)
+                {
+                    viewerTextBox.Copy();
+                    ShowStatusMessage("選択範囲をコピーしました。");
+                }
+                return true;
+            }
+            if (_currentViewerKind == PreviewKind.LargeText)
+            {
+                _ = TryCopyLargeFileVisibleTextAsync();
                 return true;
             }
         }
@@ -403,7 +418,8 @@ public partial class MainForm : Form
                     var rawKind = PreviewService.GetPreviewKind(fullPath);
                     if (rawKind == PreviewKind.Video)
                     {
-                        if (_settings.Preview?.VideoEnterPlaysExternal == true)
+                        bool isAudio = PreviewService.IsSupportedAudioExtension(fullPath);
+                        if (_settings.Preview?.VideoEnterPlaysExternal == true && !isAudio)
                         {
                             ExecuteBrowserOpenRequest(CreateBrowserOpenRequest(fullPath, allowExecuteTarget: true));
                         }
@@ -418,11 +434,13 @@ public partial class MainForm : Form
                             {
                                 if (launchResult.UsedFfplay)
                                 {
-                                    ShowStatusMessage($"ffplay.exeで外部再生しました。音量:{launchResult.AppliedVolumePercent}%");
+                                    string mediaType = isAudio ? "音声" : "動画";
+                                    ShowStatusMessage($"ffplay.exeで{mediaType}外部再生しました。音量:{launchResult.AppliedVolumePercent}%");
                                 }
                                 else
                                 {
-                                    ShowStatusMessage("ffplay.exeが見つからないため、既定アプリで動画を開きました。");
+                                    string mediaType = isAudio ? "音声" : "動画";
+                                    ShowStatusMessage($"ffplay.exeが見つからないため、既定アプリで{mediaType}を開きました。");
                                 }
                             }
                             else
@@ -480,6 +498,12 @@ public partial class MainForm : Form
         if (keyData == (Keys.Control | Keys.V))
         {
             return ExecuteCommandFromUi(CommandIds.ClipboardPaste, CommandScope.Browser, "Browser.CmdKey.CtrlV");
+        }
+        if (keyData == (Keys.Control | Keys.Shift | Keys.N))
+        {
+            if (GuardClipboardBusy()) return true;
+            ExecuteCommandFromUi(CommandIds.BrowserCreateDirectory, CommandScope.Browser, "Browser.CmdKey.CtrlShiftN");
+            return true;
         }
         return false;
     }
@@ -552,11 +576,16 @@ public partial class MainForm : Form
             _lastColumnCountKey = 0;
         }
 
+        if (IsBrowserPathEntryActive())
+        {
+            return base.ProcessCmdKey(ref msg, keyData);
+        }
+
         if (keyCode == Keys.Escape)
         {
             LogService.Info(
                 $"[CancelRuntime] MainForm.ProcessCmdKey Escape. busy={_isClipboardBusy}, " +
-                $"hasCts={_fileOpCts != null}, requested={_fileOpCts?.IsCancellationRequested ?? false}, " +
+                $"hasCts={_fileOpUiState.Cts != null}, requested={_fileOpUiState.Cts?.IsCancellationRequested ?? false}, " +
                 $"activeControl={DescribeControl(ActiveControl)}, thread={Environment.CurrentManagedThreadId}");
         }
         if (keyCode == Keys.Escape && TryRouteActiveFileOperationCancel("MainForm.ProcessCmdKey"))
@@ -577,14 +606,6 @@ public partial class MainForm : Form
         }
         if (_viewerInputRouter.TryHandleCmdKey(CreateViewerCmdKeyContext(), keyData)) return true;
         if (_browserInputRouter.TryHandleCmdKey(CreateBrowserCmdKeyContext(), keyData)) return true;
-        if (keyData == (Keys.Control | Keys.Shift | Keys.L))
-        {
-            if (_uiMode == UIMode.Browser && !IsCurrentDirectoryBusy())
-            {
-                OpenActiveTabFilterLockDialog();
-                return true;
-            }
-        }
         return base.ProcessCmdKey(ref msg, keyData);
     }
 
@@ -626,6 +647,10 @@ public partial class MainForm : Form
         if (e.KeyCode == Keys.Menu || e.KeyCode == Keys.LMenu || e.KeyCode == Keys.RMenu || (e.Control && e.Alt))
         {
             LogAltHint($"MainForm_KeyDown Key={e.KeyCode} Alt={e.Alt} Ctrl={e.Control} OverlayVisible={IsCommandHintOverlayVisible()}");
+        }
+        if (IsBrowserPathEntryActive())
+        {
+            return;
         }
         if (e.KeyCode == Keys.Escape && TryRouteActiveFileOperationCancel("MainForm.KeyDown"))
         {
@@ -679,7 +704,7 @@ public partial class MainForm : Form
         return new BrowserInputRouter.CmdKeyContext
         {
             IsBrowserMode = _uiMode == UIMode.Browser,
-            IsBrowserFocused = browserPanel.Focused,
+            IsBrowserFocused = BrowserInputRouter.IsBrowserInputFocused(browserPanel),
             IsAuxPreviewActive = _previewPopupVisible && _previewPopup != null && _previewPopup.Visible,
             CanUseCommandLauncherCommands = CanUseCommandLauncherCommands(),
             TryHandleTabs = TryHandleBrowserCmdKeyTabs,
@@ -789,7 +814,7 @@ public partial class MainForm : Form
         }
         if (keyData == (Keys.Control | Keys.L))
         {
-            ToggleActiveBrowserTabLock();
+            OpenBrowserPathEntry();
             return true;
         }
         if (keyData == (Keys.Control | Keys.W))
@@ -804,13 +829,13 @@ public partial class MainForm : Form
         }
         if (keyData == (Keys.Control | Keys.Shift | Keys.Left))
         {
-            LogService.Info($"[BrowserTabCategory] Shortcut Key=Ctrl+Shift+Left ActiveCategory={_activeBrowserTabCategoryId} Tabs={_browserTabs.Count} ActiveIndex={_activeBrowserTabIndex}");
+            LogService.Info($"[BrowserTabCategory] Shortcut Key=Ctrl+Shift+Left ActiveCategory={_categoryViewState.ActiveCategoryId} Tabs={_browserTabViewState.Count} ActiveIndex={_browserTabViewState.ActiveTabIndex}");
             SelectAdjacentBrowserTabCategory(-1);
             return true;
         }
         if (keyData == (Keys.Control | Keys.Shift | Keys.Right))
         {
-            LogService.Info($"[BrowserTabCategory] Shortcut Key=Ctrl+Shift+Right ActiveCategory={_activeBrowserTabCategoryId} Tabs={_browserTabs.Count} ActiveIndex={_activeBrowserTabIndex}");
+            LogService.Info($"[BrowserTabCategory] Shortcut Key=Ctrl+Shift+Right ActiveCategory={_categoryViewState.ActiveCategoryId} Tabs={_browserTabViewState.Count} ActiveIndex={_browserTabViewState.ActiveTabIndex}");
             SelectAdjacentBrowserTabCategory(+1);
             return true;
         }
@@ -826,12 +851,18 @@ public partial class MainForm : Form
         }
         if (keyData == (Keys.Control | Keys.Alt | Keys.Left))
         {
-            MoveBrowserTabCategory(_activeBrowserTabCategoryId, -1);
+            if (_categoryViewState.ActiveCategoryId != null)
+            {
+                MoveBrowserTabCategory(_categoryViewState.ActiveCategoryId, -1);
+            }
             return true;
         }
         if (keyData == (Keys.Control | Keys.Alt | Keys.Right))
         {
-            MoveBrowserTabCategory(_activeBrowserTabCategoryId, +1);
+            if (_categoryViewState.ActiveCategoryId != null)
+            {
+                MoveBrowserTabCategory(_categoryViewState.ActiveCategoryId, +1);
+            }
             return true;
         }
         if (keyData == (Keys.Control | Keys.Tab))

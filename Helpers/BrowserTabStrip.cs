@@ -6,12 +6,14 @@ using System.Windows.Forms;
 using MidFD.Models;
 using MidFD.Services;
 
+using System.ComponentModel;
+
 namespace MidFD.Helpers;
 
 public sealed class BrowserTabStrip : Control
 {
     public const string ManageCategoriesEntryId = "__manage_categories__";
-    private const int MinimumPartialTabWidth = 32;
+    private const int MinimumPartialTabWidth = 1;
 
     private readonly List<BrowserTabStripCategoryItem> _categories = new();
     private readonly List<Rectangle> _categoryBounds = new();
@@ -42,20 +44,40 @@ public sealed class BrowserTabStrip : Control
     private Rectangle _tabListBounds = Rectangle.Empty;
     private Rectangle _tabViewportBounds = Rectangle.Empty;
     private int _firstVisibleTabIndex;
+    [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
+    [Browsable(false)]
     public bool ShowCategoryRow { get; set; } = true;
 
+    [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
+    [Browsable(false)]
     public Color ActiveTabBackColor { get; set; } = MidFDColors.ListSelectedBack;
+    [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
+    [Browsable(false)]
     public Color InactiveTabBackColor { get; set; } = MidFDColors.ListNormalBack;
+    [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
+    [Browsable(false)]
     public Color TabBorderColor { get; set; } = MidFDColors.BorderLine;
+    [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
+    [Browsable(false)]
     public Color ActiveTabTextColor { get; set; } = Color.Yellow;
+    [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
+    [Browsable(false)]
     public Color InactiveTabTextColor { get; set; } = MidFDColors.ListNormalFore;
+    [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
+    [Browsable(false)]
     public Color AttentionBorderColor { get; set; } = Color.Yellow;
+    [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
+    [Browsable(false)]
     public int PreferredTabWidth { get; set; } = 140;
+    [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
+    [Browsable(false)]
     public int PreferredCategoryWidth { get; set; } = 110;
 
     public int TabCount => _tabs.Count;
     public int CategoryCount => _categories.Count;
 
+    [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
+    [Browsable(false)]
     public int SelectedCategoryIndex
     {
         get => _selectedCategoryIndex;
@@ -72,6 +94,8 @@ public sealed class BrowserTabStrip : Control
         }
     }
 
+    [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
+    [Browsable(false)]
     public int SelectedIndex
     {
         get => _selectedIndex;
@@ -240,7 +264,7 @@ public sealed class BrowserTabStrip : Control
             return;
         }
 
-        int tabWidth = Math.Max(80, PreferredTabWidth);
+        int tabWidth = PreferredTabWidth;
         int navButtonWidth = GetTabNavigationButtonWidth();
         int contentWidth = Math.Max(0, contentRight - contentLeft);
         bool isOverflow = _tabs.Count * tabWidth > Math.Max(0, contentWidth - addTabWidth);
@@ -498,8 +522,9 @@ public sealed class BrowserTabStrip : Control
             int categoryIndex = GetCategoryIndexAt(e.Location);
             if (categoryIndex >= 0 && categoryIndex < _categories.Count)
             {
-                // ドラッグ並び替え中ではなかった場合のみ、カテゴリ切り替えクリックとして処理
-                if (e.Button == MouseButtons.Right || wasCategoryDrag)
+                // 左クリックは通常のカテゴリ切り替え / 追加ボタン、右クリックはコンテキストメニューとして扱う。
+                // ドラッグ完了直後のマウスアップでは click を重複発火させない。
+                if (e.Button == MouseButtons.Right || (e.Button == MouseButtons.Left && !_isCategoryDragActive))
                 {
                     BrowserTabStripCategoryItem category = _categories[categoryIndex];
                     CategoryClicked?.Invoke(this, new BrowserTabStripCategoryEventArgs(categoryIndex, category.CategoryId, category.Kind, e.Button, e.Location));
@@ -1079,7 +1104,7 @@ public sealed class BrowserTabStrip : Control
 
     private int EstimateVisibleCapacity()
     {
-        int tabWidth = Math.Max(80, PreferredTabWidth);
+        int tabWidth = PreferredTabWidth;
         int contentWidth = Math.Max(0, Width - 2);
         int addTabWidth = MeasureFallbackAddTabEntryWidth();
         int navButtonWidth = GetTabNavigationButtonWidth();

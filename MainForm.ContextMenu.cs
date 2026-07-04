@@ -17,12 +17,14 @@ using System.Media;
 using MidFD.Models;
 using MidFD.Helpers;
 using MidFD.Commands;
+using MidFD.Presentation;
 using MidFD.Services.TrashManifestStore;
 using MidFD.Services.Workspace;
 namespace MidFD;
 
 public partial class MainForm : Form
 {
+    private SelectionResult? _browserContextMenuSelectionOverride;
 
     private void ExecuteOpenCurrentPathInExplorer()
     {
@@ -39,6 +41,7 @@ public partial class MainForm : Form
         catch (Exception ex)
         {
             LogService.Error($"Explorer 起動失敗: {ex.Message}");
+            MessageBox.Show(this, $"エクスプローラーを開くことができませんでした。\n理由: {ex.Message}", "起動エラー", MessageBoxButtons.OK, MessageBoxIcon.Error);
         }
     }
 
@@ -58,6 +61,7 @@ public partial class MainForm : Form
         {
             LogService.Error($"Explorer 選択起動失敗: {ex.Message}");
             ShowStatusMessage("Explorer の起動に失敗しました。");
+            MessageBox.Show(this, $"エクスプローラーで項目を選択して開くことができませんでした。\n理由: {ex.Message}", "起動エラー", MessageBoxButtons.OK, MessageBoxIcon.Error);
         }
     }
 
@@ -72,14 +76,23 @@ public partial class MainForm : Form
         }
     }
 
-    private void ShowBrowserItemContextMenu(Point location)
+    private void RunWithBrowserContextMenuSelection(SelectionResult selection, Action action)
+    {
+        SelectionResult? previous = _browserContextMenuSelectionOverride;
+        _browserContextMenuSelectionOverride = selection;
+        try
+        {
+            action();
+        }
+        finally
+        {
+            _browserContextMenuSelectionOverride = previous;
+        }
+    }
+
+    private void ShowBrowserItemContextMenu(Point location, ListViewItem item, BrowserContextMenuTargetResolution targetResolution)
     {
         if (TryConsumeBrowserContextMenuSuppress())
-        {
-            return;
-        }
-        ListViewItem? item = GetCurrentBrowserItem();
-        if (item == null)
         {
             return;
         }
@@ -92,7 +105,7 @@ public partial class MainForm : Form
             _browserItemContextMenu.Close();
             ClearAndDisposeMenuItems(_browserItemContextMenu);
         }
-        BuildBrowserItemContextMenu(_browserItemContextMenu, item);
+        BuildBrowserItemContextMenu(_browserItemContextMenu, item, targetResolution);
         if (_browserItemContextMenu.Items.Count == 0)
         {
             return;
@@ -123,12 +136,213 @@ public partial class MainForm : Form
         _browserBlankContextMenu.Show(browserPanel, location);
     }
 
-    private void BuildBrowserItemContextMenu(ContextMenuStrip menu, ListViewItem item)
+    private void EnsureBrowserTabCategoryContextMenu()
     {
-        var selection = ResolveSelection();
+        if (_browserTabCategoryContextMenu != null)
+        {
+            return;
+        }
+        _browserTabCategoryContextMenu = new ContextMenuStrip();
+        _addBrowserTabCategoryContextMenuItem = new ToolStripMenuItem("カテゴリ追加");
+        _addBrowserTabCategoryContextMenuItem.ShortcutKeyDisplayString = "Ctrl+Shift+N";
+        _addBrowserTabCategoryContextMenuItem.Click += (_, _) => AddGeneratedBrowserTabCategory();
+        _moveBrowserTabCategoryLeftContextMenuItem = new ToolStripMenuItem("左へ移動");
+        _moveBrowserTabCategoryLeftContextMenuItem.ShortcutKeyDisplayString = "Ctrl+Alt+Left";
+        _moveBrowserTabCategoryLeftContextMenuItem.Click += (_, _) => MoveBrowserTabCategoryFromContext(-1);
+        _moveBrowserTabCategoryRightContextMenuItem = new ToolStripMenuItem("右へ移動");
+        _moveBrowserTabCategoryRightContextMenuItem.ShortcutKeyDisplayString = "Ctrl+Alt+Right";
+        _moveBrowserTabCategoryRightContextMenuItem.Click += (_, _) => MoveBrowserTabCategoryFromContext(+1);
+        _renameBrowserTabCategoryContextMenuItem = new ToolStripMenuItem("名前変更");
+        _renameBrowserTabCategoryContextMenuItem.Click += (_, _) => RenameBrowserTabCategoryFromContext();
+        _deleteBrowserTabCategoryContextMenuItem = new ToolStripMenuItem("削除");
+        _deleteBrowserTabCategoryContextMenuItem.Click += (_, _) => DeleteBrowserTabCategoryFromContext();
+        _manageBrowserTabCategoriesContextMenuItem = new ToolStripMenuItem("カテゴリ管理...");
+        _manageBrowserTabCategoriesContextMenuItem.Click += (_, _) => OpenBrowserTabCategoryManager();
+        _browserTabCategoryContextMenu.Items.AddRange(
+        [
+            _addBrowserTabCategoryContextMenuItem,
+            new ToolStripSeparator(),
+            _moveBrowserTabCategoryLeftContextMenuItem,
+            _moveBrowserTabCategoryRightContextMenuItem,
+            _renameBrowserTabCategoryContextMenuItem,
+            _deleteBrowserTabCategoryContextMenuItem,
+            new ToolStripSeparator(),
+            _manageBrowserTabCategoriesContextMenuItem
+        ]);
+    }
+
+    private void ShowBrowserTabCategoryContextMenu(BrowserTabStripCategoryEventArgs e)
+    {
+        if (_browserTabStrip == null)
+        {
+            return;
+        }
+        EnsureBrowserTabCategoryConfiguration();
+        EnsureBrowserTabCategoryContextMenu();
+        ClearBrowserTabCategoryContextState();
+        _categoryViewState.ContextCategoryId = e.Kind == BrowserTabStripCategoryItemKind.ManageEntry ? null : e.CategoryId;
+        _browserTabCategoryContextKind = e.Kind;
+        BrowserTabCategoryDefinition? targetCategory = FindBrowserTabCategoryDefinition(_categoryViewState.ContextCategoryId);
+        int targetIndex = targetCategory == null
+            ? -1
+            : _categoryViewState.FindIndex(category => string.Equals(category.Id, targetCategory.Id, StringComparison.OrdinalIgnoreCase));
+        var state = new BrowserTabCategoryContextMenuState(
+            targetCategory != null,
+            targetIndex > 0,
+            targetIndex >= 0 && targetIndex < _categoryViewState.Count - 1);
+        BrowserTabContextMenuPresenter.ApplyCategoryState(
+            state,
+            _moveBrowserTabCategoryLeftContextMenuItem,
+            _moveBrowserTabCategoryRightContextMenuItem,
+            _renameBrowserTabCategoryContextMenuItem,
+            _deleteBrowserTabCategoryContextMenuItem,
+            _browserTabCategoryContextMenu);
+        _browserTabCategoryContextMenu?.Show(_browserTabStrip, e.Location);
+    }
+
+    private void MoveBrowserTabCategoryFromContext(int delta)
+    {
+        if (!string.IsNullOrWhiteSpace(_categoryViewState.ContextCategoryId))
+        {
+            MoveBrowserTabCategory(_categoryViewState.ContextCategoryId, delta);
+        }
+    }
+
+    private void RenameBrowserTabCategoryFromContext()
+    {
+        BrowserTabCategoryDefinition? target = FindBrowserTabCategoryDefinition(_categoryViewState.ContextCategoryId);
+        if (target != null)
+        {
+            RenameBrowserTabCategory(target);
+        }
+    }
+
+    private void DeleteBrowserTabCategoryFromContext()
+    {
+        BrowserTabCategoryDefinition? target = FindBrowserTabCategoryDefinition(_categoryViewState.ContextCategoryId);
+        if (target != null)
+        {
+            DeleteBrowserTabCategory(target);
+        }
+    }
+
+    private void EnsureBrowserTabContextMenu()
+    {
+        if (_browserTabContextMenu != null)
+        {
+            return;
+        }
+        _browserTabContextMenu = new ContextMenuStrip();
+        _toggleBrowserTabLockContextMenuItem = new ToolStripMenuItem();
+        _toggleBrowserTabLockContextMenuItem.Click += (_, _) =>
+        {
+            if (_browserTabViewState.ContextTabIndex < 0)
+            {
+                return;
+            }
+            ToggleBrowserTabLock(_browserTabViewState.ContextTabIndex);
+        };
+        _toggleBrowserTabReadOnlyContextMenuItem = new ToolStripMenuItem();
+        _toggleBrowserTabReadOnlyContextMenuItem.Click += (_, _) =>
+        {
+            if (_browserTabViewState.ContextTabIndex < 0)
+            {
+                return;
+            }
+            ToggleBrowserTabReadOnly(_browserTabViewState.ContextTabIndex);
+        };
+        _openBrowserTabFilterLockContextMenuItem = new ToolStripMenuItem("フィルタロック...(&L)");
+        _openBrowserTabFilterLockContextMenuItem.Click += (_, _) =>
+        {
+            if (_browserTabViewState.ContextTabIndex < 0) return;
+            OpenTabFilterLockDialog(_browserTabViewState.ContextTabIndex);
+        };
+        _clearBrowserTabFilterLockContextMenuItem = new ToolStripMenuItem("フィルタロックを解除(&U)");
+        _clearBrowserTabFilterLockContextMenuItem.Click += (_, _) =>
+        {
+            if (_browserTabViewState.ContextTabIndex < 0) return;
+            ClearTabFilterLock(_browserTabViewState.ContextTabIndex);
+        };
+        _closeBrowserTabContextMenuItem = new ToolStripMenuItem("このタブを閉じる");
+        _closeBrowserTabContextMenuItem.Click += (_, _) =>
+        {
+            if (_browserTabViewState.ContextTabIndex < 0)
+            {
+                return;
+            }
+            TryCloseBrowserTab(_browserTabViewState.ContextTabIndex);
+        };
+        _closeRightBrowserTabsContextMenuItem = new ToolStripMenuItem("右側の全てのタブを閉じる");
+        _closeRightBrowserTabsContextMenuItem.Click += (_, _) =>
+        {
+            if (_browserTabViewState.ContextTabIndex < 0)
+            {
+                return;
+            }
+            CloseBrowserTabsToRight(_browserTabViewState.ContextTabIndex);
+        };
+        _closeLeftBrowserTabsContextMenuItem = new ToolStripMenuItem("左側の全てのタブを閉じる");
+        _closeLeftBrowserTabsContextMenuItem.Click += (_, _) =>
+        {
+            if (_browserTabViewState.ContextTabIndex < 0)
+            {
+                return;
+            }
+            CloseBrowserTabsToLeft(_browserTabViewState.ContextTabIndex);
+        };
+        _closeOtherBrowserTabsContextMenuItem = new ToolStripMenuItem("このタブ以外を閉じる");
+        _closeOtherBrowserTabsContextMenuItem.Click += (_, _) =>
+        {
+            if (_browserTabViewState.ContextTabIndex < 0)
+            {
+                return;
+            }
+            CloseOtherBrowserTabs(_browserTabViewState.ContextTabIndex);
+        };
+        _browserTabContextMenu.Items.Add(_toggleBrowserTabLockContextMenuItem);
+        _browserTabContextMenu.Items.Add(_toggleBrowserTabReadOnlyContextMenuItem);
+        _browserTabContextMenu.Items.Add(new ToolStripSeparator());
+        _browserTabContextMenu.Items.Add(_openBrowserTabFilterLockContextMenuItem);
+        _browserTabContextMenu.Items.Add(_clearBrowserTabFilterLockContextMenuItem);
+        _browserTabContextMenu.Items.Add(new ToolStripSeparator());
+        _browserTabContextMenu.Items.Add(_closeBrowserTabContextMenuItem);
+        _browserTabContextMenu.Items.Add(_closeRightBrowserTabsContextMenuItem);
+        _browserTabContextMenu.Items.Add(_closeLeftBrowserTabsContextMenuItem);
+        _browserTabContextMenu.Items.Add(_closeOtherBrowserTabsContextMenuItem);
+    }
+
+    private void UpdateBrowserTabContextMenuItems(int tabIndex)
+    {
+        if (tabIndex < 0 || tabIndex >= _browserTabViewState.Count)
+        {
+            return;
+        }
+        BrowserTabState state = _browserTabViewState.Tabs[tabIndex];
+        var menuState = new BrowserTabContextMenuState(
+            state.IsLocked,
+            state.IsReadOnly,
+            state.FilterLock.Enabled && state.FilterLock.HasAnyCondition,
+            CountClosableBrowserTabs(index => index > tabIndex) > 0,
+            CountClosableBrowserTabs(index => index < tabIndex) > 0,
+            CountClosableBrowserTabs(index => index != tabIndex) > 0);
+        BrowserTabContextMenuPresenter.ApplyTabState(
+            menuState,
+            _toggleBrowserTabLockContextMenuItem,
+            _toggleBrowserTabReadOnlyContextMenuItem,
+            _clearBrowserTabFilterLockContextMenuItem,
+            _closeBrowserTabContextMenuItem,
+            _closeRightBrowserTabsContextMenuItem,
+            _closeLeftBrowserTabsContextMenuItem,
+            _closeOtherBrowserTabsContextMenuItem);
+    }
+
+    private void BuildBrowserItemContextMenu(ContextMenuStrip menu, ListViewItem item, BrowserContextMenuTargetResolution targetResolution)
+    {
+        var selection = targetResolution.Selection;
         bool isReadOnly = IsActiveBrowserTabReadOnly();
         bool isBusy = IsCurrentDirectoryBusy();
         bool hasSelection = selection.Count > 0;
+        bool isMultiSelectionContext = targetResolution.Kind == BrowserContextMenuKind.MultiSelection;
         string? itemPath = item.Tag as string;
         bool canUseItemPath = item.Text != ".." && !string.IsNullOrWhiteSpace(itemPath);
         string? browserItemWorkingDirectory = canUseItemPath && itemPath != null ? GetBrowserItemWorkingDirectory(itemPath) : null;
@@ -139,12 +353,12 @@ public partial class MainForm : Form
             && Directory.Exists(itemPath);
         var openItem = new ToolStripMenuItem("開く", null, (s, e) => ExecuteEnter())
         {
-            Enabled = !isBusy
+            Enabled = !isBusy && !isMultiSelectionContext && canUseItemPath
         };
         menu.Items.Add(openItem);
         var openDefaultItem = new ToolStripMenuItem("既定アプリで開く", null, (s, e) => ExecuteDefaultOpen())
         {
-            Enabled = !isBusy
+            Enabled = !isBusy && !isMultiSelectionContext && canUseItemPath
         };
         menu.Items.Add(openDefaultItem);
         menu.Items.Add(new ToolStripSeparator());
@@ -200,33 +414,45 @@ public partial class MainForm : Form
         menu.Items.Add(commandPromptItem);
         menu.Items.Add(new ToolStripSeparator());
         var copyPathItem = new ToolStripMenuItem("パスをコピー", null, (s, e) =>
-            ExecuteCommandFromUi(CommandIds.BrowserCopyFullPath, CommandScope.Browser, "BrowserContextMenu.Item.CopyFullPath"))
+            RunWithBrowserContextMenuSelection(selection, () =>
+                ExecuteCommandFromUi(CommandIds.BrowserCopyFullPath, CommandScope.Browser, "BrowserContextMenu.Item.CopyFullPath")))
         {
             Enabled = !isBusy && hasSelection
         };
         menu.Items.Add(copyPathItem);
-        var copyItem = new ToolStripMenuItem("コピー", null, (s, e) => _ = ExecuteCopy())
+        var cutItem = new ToolStripMenuItem("切り取り", null, (s, e) =>
+            RunWithBrowserContextMenuSelection(selection, ExecuteClipboardCut))
+        {
+            Enabled = !isBusy && hasSelection && !isReadOnly
+        };
+        menu.Items.Add(cutItem);
+        var copyItem = new ToolStripMenuItem("コピー", null, (s, e) =>
+            RunWithBrowserContextMenuSelection(selection, () => _ = ExecuteCopy(selection)))
         {
             Enabled = !isBusy && hasSelection
         };
         menu.Items.Add(copyItem);
-        var moveItem = new ToolStripMenuItem("移動", null, (s, e) => _ = ExecuteMove())
+        var moveItem = new ToolStripMenuItem("移動", null, (s, e) =>
+            RunWithBrowserContextMenuSelection(selection, () => _ = ExecuteMove(selection)))
         {
             Enabled = !isBusy && hasSelection && !isReadOnly
         };
         menu.Items.Add(moveItem);
-        var renameItem = new ToolStripMenuItem("リネーム", null, (s, e) => ExecuteRename())
+        var renameItem = new ToolStripMenuItem("リネーム", null, (s, e) =>
+            RunWithBrowserContextMenuSelection(selection, () => ExecuteRename(selection)))
         {
             Enabled = !isBusy && hasSelection && !isReadOnly
         };
         menu.Items.Add(renameItem);
-        var deleteItem = new ToolStripMenuItem("削除", null, (s, e) => _ = ExecuteDelete(permanent: false))
+        var deleteItem = new ToolStripMenuItem("削除", null, (s, e) =>
+            RunWithBrowserContextMenuSelection(selection, () => _ = ExecuteDelete(permanent: false, selection)))
         {
             Enabled = !isBusy && hasSelection && !isReadOnly
         };
         menu.Items.Add(deleteItem);
         var attributeItem = new ToolStripMenuItem("属性/日時変更", null, (s, e) =>
-            ExecuteCommandFromUi(CommandIds.BrowserChangeAttributes, CommandScope.Browser, "BrowserContextMenu.Item.Attribute"))
+            RunWithBrowserContextMenuSelection(selection, () =>
+                ExecuteCommandFromUi(CommandIds.BrowserChangeAttributes, CommandScope.Browser, "BrowserContextMenu.Item.Attribute")))
         {
             Enabled = !isBusy && hasSelection && !isReadOnly
         };
@@ -239,7 +465,7 @@ public partial class MainForm : Form
         menu.Items.Add(new ToolStripSeparator());
         var propertiesItem = new ToolStripMenuItem("プロパティ", null, (s, e) => ExecuteProperties(selection))
         {
-            Enabled = !isBusy && hasSelection
+            Enabled = !isBusy && selection.Count == 1
         };
         menu.Items.Add(propertiesItem);
     }
@@ -370,6 +596,7 @@ public partial class MainForm : Form
     internal void InvokeOpenShell() => OpenTerminalInCurrentDirectory(ShellKind.PowerShell);
     internal void InvokeOpenExternalEditor() => ExecuteOpenWithEditor();
     internal void InvokeOpenSettingsForm() => OpenSettingsForm();
+    internal void InvokeOpenSettingsForm(SettingsForm.InitialTab initialTab) => OpenSettingsForm(initialTab);
     internal void InvokeOpenMarkSlotDialog() => OpenMarkSlotDialog();
     internal void InvokeOpenWorkspaceSnapshotDialog() => OpenWorkspaceSnapshotDialog();
     internal void InvokeLaunchExternalTool(ExternalToolCommandDefinition definition)

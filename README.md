@@ -34,19 +34,34 @@ FDライクな操作感を参考にしつつも、
 > 注意:
 > GitHub の `Code > Download ZIP` や `Source code (zip)` はソースコードです。
 > 通常利用する場合は、上記の `MidFD-win-x64.zip` を使用してください。
+> 7-Zip / ffmpeg / ffprobe / ffplay は同梱していません。必要に応じて別途用意してください。
 
-> 実行には [.NET 8 Windows Desktop Runtime](https://dotnet.microsoft.com/ja-jp/download/dotnet/8.0) が必要です。
-> 「.NET Desktop Runtime」の Windows x64 版をインストールしてください。
+> [!IMPORTANT]
+> **.NET 10.0 Desktop Runtime の導入について**
+> 本アプリを起動するには、お使いのPCに「.NET 10.0 Desktop Runtime」がインストールされている必要があります。
+> GitHub の `Code > Download ZIP` や `Source code (zip)` はソースコード用であり、実行用ではありません。
+> 起動できない場合は、同梱の `README_FIRST.txt` を参照するか、以下の公式ダウンロードページより
+> **「.NET Desktop Runtime」 (Desktop Runtime / Windows x64版)** のダウンロード・インストールを行ってください。
+> - [Microsoft .NET 10.0 ダウンロードページ](https://dotnet.microsoft.com/download/dotnet/10.0)
+
 
 ## スクリーンショット
 
-### Browser画面
+### メイン画面
 
 ![MidFD Browser画面](UserDocs/images/screenshot-main-browser.png)
 
 ### Command Palette
 
 ![MidFD Command Palette](UserDocs/images/screenshot-command-palette.png)
+
+### 表示・タブ設定
+
+![MidFD 表示・タブ設定](UserDocs/images/screenshot-settings-tab-appearance.png)
+
+### 配色設定
+
+![MidFD 配色設定](UserDocs/images/screenshot-settings-colors.png)
 
 ### 操作カスタマイズ
 
@@ -89,11 +104,16 @@ MidFD は、ファイルの表示、コピー、移動、削除、リネーム�
 - Browser画面のマウスジェスチャーカスタマイズ（16パターン）
 - Helpメニューからのコマンド一覧表示
 - QuickAccess / 最近 / 履歴による移動ハブ
-- Command Palette による機能検索と起動
+- Command Palette v1.1 による機能・設定検索と安全な起動
 - 一覧表示モード（ファイル名のみ / サイズ / サイズ+更新日時）
 - アンダーラインカーソル表示
-- 配色タブ（表示色プリセット、ユーザープリセット、HEX/RGB編集）
+- 一覧表示フォントサイズ、タブ文字サイズ、タブ幅の個別調整
+- 日本語固定ピッチフォントの既定値改善
+- 設定画面のフォント選択欄は直接入力、コピー、貼り付けに対応
+- 配色タブ（表示色プリセット、ユーザープリセット、HEX/RGB編集、ステータス表示色のカスタマイズ）
 - Logdsk / Move 先履歴（Up/Down=履歴, Tab=補完）
+- Drag ZIP / Explorer 互換ドラッグの改善
+- LargeText preview の選択、Shift+click、Ctrl+A、Ctrl+C 改善
 - 画像ビューアの矩形選択コピー、回転・反転、画像情報表示
 - VideoStill時の動画メタ情報表示
 - クリップボード貼り付けで作成したファイルのUndo
@@ -199,7 +219,7 @@ MidFD の基本的な操作の流れは次のとおりです。
 | [UserDocs/SUPPORT.md](UserDocs/SUPPORT.md) | 不具合報告・サポート方針 |
 
 ## ビルド
-MidFD は .NET 8 / Windows 向けのアプリケーションです。
+MidFD は .NET 10 / Windows 向けのアプリケーションです。
 
 * `dotnet build .\MidFD.csproj`
 
@@ -228,7 +248,7 @@ MidFD は、日付ベースのバージョン表記を使用します。
 
 報告時は、可能な範囲で次の情報を添えてください。
 * MidFD のバージョン
-* 高度な使い方の設定（Workspace Snapshot 有効/無効 等）
+* 起動時の設定（起動時に前回の状態を復元する 等）
 * キー操作体系
   * 標準
   * FD互換

@@ -280,11 +280,11 @@ public class InputSettings
         ArgumentNullException.ThrowIfNull(settings);
         if (settings.BrowserKeyCommandOverrides != null)
         {
-            if (settings.BrowserKeyCommandOverrides.TryGetValue("file.copy", out var copyGestures) && copyGestures != null)
+            if (settings.BrowserKeyCommandOverrides.TryGetValue(CommandIds.FileCopy, out var copyGestures) && copyGestures != null)
             {
                 copyGestures.RemoveAll(g => string.Equals(NormalizeKeyGestureText(g), "Ctrl+C", StringComparison.OrdinalIgnoreCase));
             }
-            if (settings.BrowserKeyCommandOverrides.TryGetValue("file.move", out var moveGestures) && moveGestures != null)
+            if (settings.BrowserKeyCommandOverrides.TryGetValue(CommandIds.FileMove, out var moveGestures) && moveGestures != null)
             {
                 moveGestures.RemoveAll(g => string.Equals(NormalizeKeyGestureText(g), "Ctrl+X", StringComparison.OrdinalIgnoreCase));
             }
@@ -498,7 +498,7 @@ public class InputSettings
             [CommandIds.BrowserLogdisk] = new[] { "L" },
             [CommandIds.BrowserOpenMarkSlot] = new[] { "Ctrl+M" },
             [CommandIds.AppOpenCommandLauncher] = new[] { "Ctrl+Shift+P" },
-            [CommandIds.AppOpenCommandList] = new[] { "Ctrl+Shift+L" },
+            [CommandIds.BrowserTabLock] = new[] { "Ctrl+Shift+L" },
             [CommandIds.BrowserShowHelp] = new[] { "Ctrl+H" },
             [CommandIds.AppOpenSystemInformation] = new[] { "I" },
             [CommandIds.BrowserCopyFullPath] = new[] { "Ctrl+Shift+C" },
@@ -510,10 +510,10 @@ public class InputSettings
             [CommandIds.ArchivePack] = new[] { "P" },
             [CommandIds.ArchiveUnpack] = new[] { "U" },
             [CommandIds.AppOpenSettings] = new[] { "O" },
-            ["file.copy"] = new[] { "C" },
-            ["file.move"] = new[] { "M" },
-            ["file.rename"] = new[] { "R" },
-            ["file.delete"] = new[] { "D", "Delete" },
+            [CommandIds.FileCopy] = new[] { "C" },
+            [CommandIds.FileMove] = new[] { "M" },
+            [CommandIds.FileRename] = new[] { "R" },
+            [CommandIds.FileDelete] = new[] { "D", "Delete" },
             [CommandIds.EditUndo] = new[] { "Ctrl+Z", "Alt+Z" },
             [CommandIds.EditRedo] = new[] { "Ctrl+Y", "Alt+Y" }
         };

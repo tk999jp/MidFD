@@ -27,6 +27,8 @@ public class SettingsForm : Form
     private readonly Label _editorStatusLabel;
     private readonly ComboBox _filerFontCombo;
     private readonly NumericUpDown _filerFontSizeBox;
+    private readonly NumericUpDown _browserTabFontSizeBox;
+    private readonly NumericUpDown _browserTabWidthBox;
     private readonly ComboBox _viewerFontCombo;
     private readonly NumericUpDown _viewerFontSizeBox;
     private readonly ComboBox _colorThemeCombo;
@@ -63,13 +65,14 @@ public class SettingsForm : Form
     private readonly CheckBox _clipboardPasteTextAsFileCheckBox;
     private CheckBox _enableDragArchiveHandoffCheckBox = null!;
     private CheckBox _includeDragZipManifestCheckBox = null!;
-    private readonly CheckBox _restoreLastPathCheckBox;
+    private readonly CheckBox _restoreStartupStateCheckBox;
     private readonly CheckBox _restoreTabsOnStartupCheckBox;
+    private readonly CheckBox _restoreLastPathCheckBox;
+    private readonly CheckBox _restoreDisplayStateCheckBox;
     private readonly CheckBox _restoreWindowBoundsCheckBox;
     private readonly CheckBox _restoreColumnCountCheckBox;
     private readonly CheckBox _restoreSortCheckBox;
     private readonly CheckBox _enableMouseGesturesCheckBox;
-    private readonly CheckBox _enableWorkspaceSnapshotCheckBox;
     private readonly InputAssignmentDialog _embeddedInputAssignmentView;
     private readonly CheckBox _enableLogCheckBox;
     private readonly CheckBox _enableDetailedLogCheckBox;
@@ -137,6 +140,7 @@ public class SettingsForm : Form
         _settings.SevenZip ??= new SevenZipSettings();
         _settings.ExternalTools ??= new ExternalToolsSettings();
         _settings.FileOperations ??= new FileOperationsSettings();
+        _settings.BrowserTabs ??= new BrowserTabSettings();
         _settings.Fonts ??= new FontSettings();
         _settings.Input.MouseGestureCommandMap ??= new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         _settings.Input.BrowserKeyCommandOverrides ??= new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
@@ -183,7 +187,7 @@ public class SettingsForm : Form
         StartPosition = FormStartPosition.CenterParent;
         Padding = new Padding(12);
         AutoScaleMode = AutoScaleMode.Font;
-        ClientSize = new Size(1040, 720);
+        ClientSize = new Size(1088, 720);
 
         var tabs = new TabControl
         {
@@ -228,7 +232,7 @@ public class SettingsForm : Form
         tabDisplay.AutoScroll = false;
         tabColor.AutoScroll = false;
 
-        (_filerFontCombo, _filerFontSizeBox, _showBrowserTabCategoryRowCheckBox, _showExtensionsCheckBox, _showDirectoryMarkerCheckBox, _showHiddenFilesCheckBox, _showItemIconsCheckBox, _useUnderlineCursorCheckBox, _showFunctionBarCheckBox, _showBrowserToolbarCheckBox, _fileDisplayModeCombo, _dateFormatCombo, _sizeFormatCombo,
+        (_filerFontCombo, _filerFontSizeBox, _browserTabFontSizeBox, _browserTabWidthBox, _showBrowserTabCategoryRowCheckBox, _showExtensionsCheckBox, _showDirectoryMarkerCheckBox, _showHiddenFilesCheckBox, _showItemIconsCheckBox, _useUnderlineCursorCheckBox, _showFunctionBarCheckBox, _showBrowserToolbarCheckBox, _fileDisplayModeCombo, _dateFormatCombo, _sizeFormatCombo,
          _viewerFontCombo, _viewerFontSizeBox, _viewerWordWrapCheckBox, _reuseImageViewerCheckBox, _closeImageViewerOnNonImageCheckBox, _rememberImageViewerBoundsCheckBox)
             = BuildDisplayAndPreviewTab(tabDisplay, fonts, dateFormats, sizeFormats);
 
@@ -248,14 +252,14 @@ public class SettingsForm : Form
         _functionBarPreviewPanel = colorTabResult.FunctionBarPreviewPanel;
 
         (_confirmDeleteCheckBox, _confirmPermanentDeleteCheckBox, _useMidFdManagedTrashCheckBox, _managedTrashAutoHandoffCheckBox, _managedTrashUndoRetentionDaysBox, _reloadAfterFileOperationCheckBox, _selectCreatedItemCheckBox, _clipboardPasteTextAsFileCheckBox,
-         _enableMouseGesturesCheckBox, _enableWorkspaceSnapshotCheckBox, _restoreLastPathCheckBox)
+         _enableMouseGesturesCheckBox)
             = BuildOperationAndInputTab(tabOperation);
 
         _embeddedInputAssignmentView = BuildInputAssignmentTab(tabInputAssignment);
 
         tabStartupAndLog.AutoScroll = false;
 
-        (_restoreTabsOnStartupCheckBox, _restoreWindowBoundsCheckBox, _restoreColumnCountCheckBox, _restoreSortCheckBox)
+        (_restoreStartupStateCheckBox, _restoreTabsOnStartupCheckBox, _restoreLastPathCheckBox, _restoreDisplayStateCheckBox, _restoreWindowBoundsCheckBox, _restoreColumnCountCheckBox, _restoreSortCheckBox)
             = BuildLaunchAndRestoreTab(tabStartupAndLog);
 
         (_sevenZipPathBox, _diffPathBox, _editorPathBox, _videoPlaybackVolumeCombo, _videoStillPreviewFfmpegPathBox, _videoEnterPlaysExternalCheckBox, _sevenZipStatusLabel, _diffStatusLabel, _editorStatusLabel, _videoStillPreviewFfmpegStatusLabel, _videoStillPreviewEnabledCheckBox, _videoSkipSecondsCombo)
@@ -314,7 +318,7 @@ public class SettingsForm : Form
         };
     }
 
-    private (ComboBox filerFont, NumericUpDown filerSize, CheckBox showBrowserTabCategoryRow, CheckBox showExtensions, CheckBox showDirectoryMarker, CheckBox showHiddenFiles, CheckBox showItemIcons, CheckBox useUnderlineCursor, CheckBox showFunctionBar, CheckBox showBrowserToolbar, ComboBox fileDisplayMode, ComboBox dateFormat, ComboBox sizeFormat,
+    private (ComboBox filerFont, NumericUpDown filerSize, NumericUpDown browserTabFontSize, NumericUpDown browserTabWidth, CheckBox showBrowserTabCategoryRow, CheckBox showExtensions, CheckBox showDirectoryMarker, CheckBox showHiddenFiles, CheckBox showItemIcons, CheckBox useUnderlineCursor, CheckBox showFunctionBar, CheckBox showBrowserToolbar, ComboBox fileDisplayMode, ComboBox dateFormat, ComboBox sizeFormat,
              ComboBox viewerFont, NumericUpDown viewerSize, CheckBox viewerWordWrap, CheckBox reuseImageViewer, CheckBox closeOnNonImage, CheckBox rememberBounds)
         BuildDisplayAndPreviewTab(TabPage tab, string[] fonts, string[] dateFormats, string[] sizeFormats)
     {
@@ -336,18 +340,59 @@ public class SettingsForm : Form
         {
             Text = "一覧表示フォント:",
             Location = new Point(16, top + 4),
-            Size = new Size(112, 20),
+            Size = new Size(140, 20),
             TextAlign = ContentAlignment.MiddleLeft
         };
         groupList.Controls.Add(fileListFontLabel);
-        var filerFont = AddFontComboBox(groupList, 130, top, 176, fonts, _settings.Fonts.FileListFontFamily);
-        var filerSize = AddNumericUpDown(groupList, 314, top, 60, (decimal)_settings.Fonts.FileListFontSize);
+        var filerFont = AddFontComboBox(groupList, 160, top, 146, fonts, _settings.Fonts.FileListFontFamily);
+        var filerSize = AddNumericUpDown(groupList, 314, top, 60, (decimal)_settings.Fonts.FileListFontSize, min: 0.1m, max: 999m);
+        var resetFileListFontSizeButton = new Button
+        {
+            Text = "初期値",
+            Location = new Point(382, top - 1),
+            Size = new Size(104, 26)
+        };
+        resetFileListFontSizeButton.Click += (_, _) =>
+        {
+            _filerFontSizeBox.Value = 11.0m;
+        };
+        groupList.Controls.Add(resetFileListFontSizeButton);
         top += rowH + 8;
 
         int fileListPreviewTop = top + 4;
         var fileListFontSample = CreateFontSampleTextBox(new Point(16, fileListPreviewTop), new Size(460, 104), FontPreviewSampleText);
         groupList.Controls.Add(fileListFontSample);
         top += 112;
+
+        AddLabel(groupList, "タブ文字サイズ:", top, lblW);
+        var browserTabFontSize = AddNumericUpDown(groupList, inpX, top, 72, (decimal)_settings.BrowserTabs.TabFontSize, min: 0.1m, max: 9999m, decimalPlaces: 1, increment: 0.5m);
+        var resetTabFontSizeButton = new Button
+        {
+            Text = "初期値",
+            Location = new Point(194, top - 1),
+            Size = new Size(104, 26)
+        };
+        resetTabFontSizeButton.Click += (_, _) =>
+        {
+            _browserTabFontSizeBox.Value = (decimal)BrowserTabSettings.DefaultTabFontSize;
+        };
+        groupList.Controls.Add(resetTabFontSizeButton);
+        top += rowH;
+
+        AddLabel(groupList, "タブ幅:", top, lblW);
+        var browserTabWidth = AddNumericUpDown(groupList, inpX, top, 72, _settings.BrowserTabs.TabWidth, min: 0m, max: 99999m, decimalPlaces: 0, increment: 10m);
+        var resetTabWidthButton = new Button
+        {
+            Text = "初期値",
+            Location = new Point(194, top - 1),
+            Size = new Size(104, 26)
+        };
+        resetTabWidthButton.Click += (_, _) =>
+        {
+            _browserTabWidthBox.Value = BrowserTabSettings.DefaultTabWidth;
+        };
+        groupList.Controls.Add(resetTabWidthButton);
+        top += rowH + 8;
 
         // チェックボックス群（1列配置）
         int checkY = top;
@@ -442,18 +487,18 @@ public class SettingsForm : Form
         var rememberBounds = AddCheckBox(groupViewer, "ビューアの位置/サイズを記憶する", checkX, top, _settings.Preview.RememberImageViewerBounds);
         groupViewer.Height = rememberBounds.Bottom + 16;
 
-        return (filerFont, filerSize, showBrowserTabCategoryRow, showExtensions, showDirectoryMarker, showHiddenFiles, showItemIcons, useUnderlineCursor, showFunctionBar, showBrowserToolbar, fileDisplayMode, dateFormat, sizeFormat,
+        return (filerFont, filerSize, browserTabFontSize, browserTabWidth, showBrowserTabCategoryRow, showExtensions, showDirectoryMarker, showHiddenFiles, showItemIcons, useUnderlineCursor, showFunctionBar, showBrowserToolbar, fileDisplayMode, dateFormat, sizeFormat,
                 viewerFont, viewerSize, viewerWordWrap, reuseImageViewer, closeOnNonImage, rememberBounds);
     }
 
     private (CheckBox confirmDelete, CheckBox confirmPermanentDelete, CheckBox useMidFdManagedTrash, CheckBox managedTrashAutoHandoff, NumericUpDown managedTrashUndoRetentionDays, CheckBox reloadAfterFileOperation, CheckBox selectCreatedItem, CheckBox clipboardPasteTextAsFile,
-             CheckBox enableMouseGestures, CheckBox enableWorkspaceSnapshot, CheckBox restoreLastPath)
+             CheckBox enableMouseGestures)
         BuildOperationAndInputTab(TabPage tab)
     {
         int rowH = 28;
 
         // --- Left: File Operation ---
-        var groupFile = new GroupBox { Text = "ファイル操作", Location = new Point(8, 6), Size = new Size(490, 528) };
+        var groupFile = new GroupBox { Text = "ファイル操作", Location = new Point(8, 6), Size = new Size(490, 560) };
         tab.Controls.Add(groupFile);
 
         int top = 28;
@@ -518,7 +563,7 @@ public class SettingsForm : Form
             32,
             top,
             430,
-            "ChatGPT等へ複数ソースをまとめて渡す場合に便利です。通常のドラッグ操作と挙動が変わります。");
+            "ChatGPT等へ複数ソースをまとめて渡す場合に便利です。\n通常のドラッグ操作と挙動が変わります。");
         top = dragHint.Bottom + 8;
 
         _includeDragZipManifestCheckBox = AddCheckBox(groupFile, "ZIPに内容一覧manifestを同梱する", 32, top, _settings.FileOperations.IncludeDragZipManifest);
@@ -547,34 +592,43 @@ public class SettingsForm : Form
         var tooltipHint = AddWrappedHintLabel(groupAdvanced, 32, advancedTop + 24, 444, "Functionバーのマウスオーバー時に説明とキーヒントを表示します。");
         advancedTop = tooltipHint.Bottom + 8;
 
-        var restoreLastPath = AddCheckBox(groupAdvanced, "前回フォルダを復元する", 16, advancedTop, _settings.Session.RestoreLastPath);
-        var restoreLastPathHint = AddWrappedHintLabel(groupAdvanced, 32, advancedTop + 24, 444, "起動時に前回見ていたフォルダへ戻ります。");
-        advancedTop = restoreLastPathHint.Bottom + 8;
-
-        var enableWorkspaceSnapshot = AddCheckBox(groupAdvanced, "Workspace Snapshot / 作業状態復元を使う", 16, advancedTop, IsAdvancedWorkspaceFeaturesEnabled(_settings.Profile));
-        var workspaceHint = AddWrappedHintLabel(groupAdvanced, 32, advancedTop + 24, 444, "作業状態の復元と拡張管理導線を有効にします。\n復元内容は「起動・ログ」で調整します。");
+        var workspaceHint = AddWrappedHintLabel(groupAdvanced, 16, advancedTop, 444, "詳細な復元設定は起動・ログで調整できます。\nここでは管理導線だけを設定します。");
         advancedTop = workspaceHint.Bottom + 8;
 
-        return (confirmDelete, confirmPermanentDelete, useMidFdManagedTrash, managedTrashAutoHandoff, managedTrashUndoRetentionDays, reloadAfterFileOperation, selectCreatedItem, clipboardPasteTextAsFile, enableMouseGestures, enableWorkspaceSnapshot, restoreLastPath);
+        return (confirmDelete, confirmPermanentDelete, useMidFdManagedTrash, managedTrashAutoHandoff, managedTrashUndoRetentionDays, reloadAfterFileOperation, selectCreatedItem, clipboardPasteTextAsFile, enableMouseGestures);
     }
 
-    private (CheckBox restoreTabsOnStartup, CheckBox restoreWindowBounds, CheckBox restoreColumnCount, CheckBox restoreSort)
+    private (CheckBox restoreStartupState, CheckBox restoreTabsOnStartup, CheckBox restoreLastPath, CheckBox restoreDisplayState, CheckBox restoreWindowBounds, CheckBox restoreColumnCount, CheckBox restoreSort)
         BuildLaunchAndRestoreTab(TabPage tab)
     {
         int rowH = 32;
 
-        // --- Left: Startup ---
-        var groupStartup = new GroupBox { Text = "起動時の復元", Location = new Point(8, 6), Size = new Size(490, 320) };
+        var groupStartup = new GroupBox { Text = "起動時に復元する内容", Location = new Point(8, 6), Size = new Size(490, 432) };
         tab.Controls.Add(groupStartup);
 
         int top = 28;
-        var hint1 = AddWrappedHintLabel(groupStartup, 16, top, 460, "Workspace Snapshot / 作業状態復元の利用有無は「操作」タブの高度な使い方から切り替えます。\nここでは、起動時にどこまで復元するかを設定します。");
-        top = hint1.Bottom + 8;
-        var restoreTabsOnStartup = AddCheckBox(groupStartup, "前回の作業状態(タブ等)を復元する", 16, top, _settings.Session.RestoreTabsOnStartup);
-        top += rowH + 8;
+        var restoreStartupState = AddCheckBox(groupStartup, "起動時に前回の状態を復元する", 16, top, _settings.Session.RestoreStartupState);
+        top += rowH - 4;
+        var hint1 = AddWrappedHintLabel(groupStartup, 32, top, 436, "下の項目を使って、前回終了時の状態を復元します。\nOFFにすると復元は行いませんが、下のチェック状態は保持します。");
+        top = hint1.Bottom + 10;
 
-        var hint2 = AddWrappedHintLabel(groupStartup, 16, top, 460, "作業状態復元が ON の場合、カテゴリ、タブ構成、タブごとのマーク、固定状態等を復元します。");
-        top = hint2.Bottom + 16;
+        var restoreTabsOnStartup = AddCheckBox(groupStartup, "前回のカテゴリ・タブ構成を復元する", 32, top, _settings.Session.RestoreTabsOnStartup);
+        top += rowH - 4;
+        var hint2 = AddWrappedHintLabel(groupStartup, 48, top, 420, "カテゴリ、タブ、タブごとの場所、固定状態などを復元します。");
+        top = hint2.Bottom + 8;
+
+        var restoreLastPath = AddCheckBox(groupStartup, "前回開いていたフォルダを初期表示する", 32, top, _settings.Session.RestoreLastPath);
+        top += rowH - 4;
+        var hint3 = AddWrappedHintLabel(groupStartup, 48, top, 420, "カテゴリ・タブ構成を復元しない場合に、最後に開いていたフォルダを開きます。");
+        top = hint3.Bottom + 8;
+
+        var restoreWindowBounds = AddCheckBox(groupStartup, "ウィンドウ位置/サイズを復元する", 32, top, _settings.Session.RestoreWindowBounds);
+        top += rowH - 4;
+        var restoreColumnCount = AddCheckBox(groupStartup, "前回の列数を復元する", 32, top, _settings.Session.RestoreColumnCount);
+        top += rowH - 4;
+        var restoreSort = AddCheckBox(groupStartup, "前回のソートを復元する", 32, top, _settings.Session.RestoreSort);
+        top += rowH + 2;
+
         var btnOpenFirstSetup = new Button
         {
             Text = "初回セットアップを開く...",
@@ -584,21 +638,29 @@ public class SettingsForm : Form
         btnOpenFirstSetup.Click += (_, _) => OpenFirstLaunchSetupDialog();
         groupStartup.Controls.Add(btnOpenFirstSetup);
         top += rowH + 4;
-        var hint3 = AddWrappedHintLabel(groupStartup, 16, top, 460, "初回オプション、Fキー配置、動画Enter動作、外部連携の基本設定を再設定できます。\n初期化ではありません。");
-        groupStartup.Height = hint3.Bottom + 16;
+        var hint4 = AddWrappedHintLabel(groupStartup, 16, top, 460, "初回オプション、Fキー配置、メディアEnter動作、外部連携の基本設定を再設定できます。\n初期化ではありません。");
+        groupStartup.Height = hint4.Bottom + 16;
 
-        // --- Left Bottom: Display State ---
-        var groupDisplay = new GroupBox { Text = "表示状態の復元", Location = new Point(8, groupStartup.Bottom + 12), Size = new Size(490, 150) };
-        tab.Controls.Add(groupDisplay);
+        void UpdateStartupRestoreControlsEnabledStateLocal()
+        {
+            bool enabled = restoreStartupState.Checked;
+            restoreTabsOnStartup.Enabled = enabled;
+            restoreLastPath.Enabled = enabled;
+            restoreWindowBounds.Enabled = enabled;
+            restoreColumnCount.Enabled = enabled;
+            restoreSort.Enabled = enabled;
+        }
 
-        top = 28;
-        var restoreWindowBounds = AddCheckBox(groupDisplay, "ウィンドウ位置/サイズを復元する", 16, top, _settings.Session.RestoreWindowBounds);
-        top += rowH;
-        var restoreColumnCount = AddCheckBox(groupDisplay, "前回の列数を復元する", 16, top, _settings.Session.RestoreColumnCount);
-        top += rowH;
-        var restoreSort = AddCheckBox(groupDisplay, "前回のソートを復元する", 16, top, _settings.Session.RestoreSort);
+        restoreStartupState.CheckedChanged += (_, _) => UpdateStartupRestoreControlsEnabledStateLocal();
+        UpdateStartupRestoreControlsEnabledStateLocal();
 
-        return (restoreTabsOnStartup, restoreWindowBounds, restoreColumnCount, restoreSort);
+        var restoreDisplayState = new CheckBox
+        {
+            Visible = false,
+            Checked = _settings.Session.RestoreDisplayState
+        };
+
+        return (restoreStartupState, restoreTabsOnStartup, restoreLastPath, restoreDisplayState, restoreWindowBounds, restoreColumnCount, restoreSort);
     }
 
     private InputAssignmentDialog BuildInputAssignmentTab(TabPage tab)
@@ -610,9 +672,46 @@ public class SettingsForm : Form
             Dock = DockStyle.Fill
         };
 
+        embedded.ProfileChanged += HandleInputProfileChanged;
+
         tab.Controls.Add(embedded);
         embedded.Show();
         return embedded;
+    }
+
+    private void HandleInputProfileChanged(object? sender, EventArgs e)
+    {
+        if (_embeddedInputAssignmentView == null || _colorThemeCombo == null)
+        {
+            return;
+        }
+
+        _suppressColorUiEvents = true;
+        try
+        {
+            string profileValue = _embeddedInputAssignmentView.SelectedProfileValue;
+            string targetPresetKey = string.Equals(profileValue, InputSettings.FdCompatibleProfileValue, StringComparison.OrdinalIgnoreCase)
+                 ? "WinFdCompatible"
+                 : "MidFdStandard";
+
+            _settings.Appearance.ColorTheme = targetPresetKey;
+
+            _settings.Appearance.CustomFunctionBarBackColor = null;
+            _settings.Appearance.CustomFunctionBarForeColor = null;
+
+            string displayPresetName = FileListColorResolver.GetPresetDisplayName(targetPresetKey);
+            int idx = _colorThemeCombo.FindStringExact(displayPresetName);
+            if (idx >= 0)
+            {
+                _colorThemeCombo.SelectedIndex = idx;
+            }
+        }
+        finally
+        {
+            _suppressColorUiEvents = false;
+        }
+
+        ApplySelectedColorPresetToEditor(forceRefresh: true);
     }
 
     private void SyncInputAssignmentDraftFromEmbeddedView()
@@ -748,9 +847,9 @@ public class SettingsForm : Form
         AddLabel(groupVideoTools, "ffplay音量(%):", top, labelWidth);
         var videoPlaybackVolume = AddEditableComboBox(groupVideoTools, baseX, top, 100, new[] { "0", "30", "50", "70", "100" }, _settings.Preview.VideoPlaybackVolumePercent.ToString());
         top += 30;
-        var videoEnterPlaysExternal = AddCheckBox(groupVideoTools, "動画 Enter で外部再生する (Ctrl+Enterでプレビュー)", 16, top, _settings.Preview.VideoEnterPlaysExternal);
+        var videoEnterPlaysExternal = AddCheckBox(groupVideoTools, "メディアファイル Enter で外部再生する", 16, top, _settings.Preview.VideoEnterPlaysExternal);
         top += 26;
-        AddHintLabel(groupVideoTools, 16, top, 460, "※ 静止画: ffmpeg / 再生: ffplay / 長さ: ffprobe", 54);
+        AddHintLabel(groupVideoTools, 16, top, 460, "※ 動画: OFF=Enterで静止画 / Ctrl+Enterで外部再生\n※ 動画: ON=Enterで外部再生 / Ctrl+Enterで静止画\n※ 音声: 設定ON/OFFに関係なく Enter / Ctrl+Enter で外部再生\n※ 静止画: ffmpeg / 再生: ffplay / 長さ: ffprobe", 54);
 
         sevenZip.TextChanged += (_, _) => RefreshExternalStatus();
         diff.TextChanged += (_, _) => RefreshExternalStatus();
@@ -972,11 +1071,24 @@ public class SettingsForm : Form
 
     private ComboBox AddFontComboBox(Control parent, int x, int top, int width, string[] items, string current)
     {
-        var cb = AddComboBox(parent, x, top, width, items, current);
+        var cb = new ComboBox
+        {
+            Location = new Point(x, top),
+            Size = new Size(width, 24),
+            DropDownStyle = ComboBoxStyle.DropDown,
+            AutoCompleteMode = AutoCompleteMode.SuggestAppend,
+            AutoCompleteSource = AutoCompleteSource.ListItems
+        };
+        cb.Items.AddRange(items);
+        int idx = cb.FindStringExact(current);
+        if (idx >= 0) cb.SelectedIndex = idx;
+        else cb.Text = current;
+
         cb.DrawMode = DrawMode.OwnerDrawFixed;
         cb.IntegralHeight = false;
         cb.ItemHeight = Math.Max(20, cb.Font.Height + 6);
         cb.DrawItem += FontCombo_DrawItem;
+        parent.Controls.Add(cb);
         return cb;
     }
 
@@ -1038,14 +1150,14 @@ public class SettingsForm : Form
 
     private static Font? CreatePreviewFont(string familyName, float size)
     {
-        if (string.IsNullOrWhiteSpace(familyName))
+        if (string.IsNullOrWhiteSpace(familyName) || !MidFD.Helpers.FontResolver.IsFontInstalled(familyName, out string normalizedName))
         {
             return null;
         }
 
         try
         {
-            return new Font(familyName, size, FontStyle.Regular, GraphicsUnit.Point);
+            return new Font(normalizedName, size, FontStyle.Regular, GraphicsUnit.Point);
         }
         catch
         {
@@ -1097,16 +1209,17 @@ public class SettingsForm : Form
         e.DrawFocusRectangle();
     }
 
-    private NumericUpDown AddNumericUpDown(Control parent, int x, int top, int width, decimal current)
+    private NumericUpDown AddNumericUpDown(Control parent, int x, int top, int width, decimal current, decimal min = 6m, decimal max = 72m, int decimalPlaces = 1, decimal increment = 1m)
     {
         var n = new NumericUpDown
         {
             Location = new Point(x, top),
             Size = new Size(width, 24),
-            Minimum = 6,
-            Maximum = 72,
+            Minimum = min,
+            Maximum = max,
             Value = current,
-            DecimalPlaces = 1
+            DecimalPlaces = decimalPlaces,
+            Increment = increment
         };
         parent.Controls.Add(n);
         return n;
@@ -1724,7 +1837,6 @@ public class SettingsForm : Form
     {
         SyncInputAssignmentDraftFromEmbeddedView();
 
-        _settings.Profile = ToFeatureProfileSettingValue(_enableWorkspaceSnapshotCheckBox.Checked);
         _settings.Input.FunctionKeyProfile = _embeddedInputAssignmentView.SelectedProfileValue;
         _settings.Input.EnableMouseGestures = _enableMouseGesturesCheckBox.Checked;
         _settings.Input.MouseGestureCommandMap = InputSettings.NormalizeMouseGestureCommandMap(_mouseGestureCommandMapDraft);
@@ -1768,6 +1880,8 @@ public class SettingsForm : Form
 
         _settings.Fonts.FileListFontFamily = _filerFontCombo.Text;
         _settings.Fonts.FileListFontSize = (float)_filerFontSizeBox.Value;
+        _settings.BrowserTabs.TabFontSize = (float)_browserTabFontSizeBox.Value;
+        _settings.BrowserTabs.TabWidth = (int)_browserTabWidthBox.Value;
         _settings.Fonts.ViewerFontFamily = _viewerFontCombo.Text;
         _settings.Fonts.ViewerFontSize = (float)_viewerFontSizeBox.Value;
 
@@ -1825,8 +1939,10 @@ public class SettingsForm : Form
         _settings.FileOperations.EnableDragArchiveHandoff = _enableDragArchiveHandoffCheckBox.Checked;
         _settings.FileOperations.IncludeDragZipManifest = _includeDragZipManifestCheckBox.Checked;
 
-        _settings.Session.RestoreLastPath = _restoreLastPathCheckBox.Checked;
+        _settings.Session.RestoreStartupState = _restoreStartupStateCheckBox.Checked;
         _settings.Session.RestoreTabsOnStartup = _restoreTabsOnStartupCheckBox.Checked;
+        _settings.Session.RestoreLastPath = _restoreLastPathCheckBox.Checked;
+        _settings.Session.RestoreDisplayState = _restoreDisplayStateCheckBox.Checked;
         _settings.Session.RestoreWindowBounds = _restoreWindowBoundsCheckBox.Checked;
         _settings.Session.RestoreColumnCount = _restoreColumnCountCheckBox.Checked;
         _settings.Session.RestoreSort = _restoreSortCheckBox.Checked;
@@ -1843,6 +1959,28 @@ public class SettingsForm : Form
         {
             _includeDragZipManifestCheckBox.Enabled = _enableDragArchiveHandoffCheckBox?.Checked ?? false;
         }
+    }
+
+    private void UpdateStartupRestoreControlsEnabledState()
+    {
+        bool enabled = _restoreStartupStateCheckBox.Checked;
+        _restoreTabsOnStartupCheckBox.Enabled = enabled;
+        _restoreLastPathCheckBox.Enabled = enabled;
+        _restoreWindowBoundsCheckBox.Enabled = enabled;
+        _restoreColumnCountCheckBox.Enabled = enabled;
+        _restoreSortCheckBox.Enabled = enabled;
+    }
+
+    private void ApplyFirstLaunchRestoreStartupState(bool enabled)
+    {
+        _restoreStartupStateCheckBox.Checked = enabled;
+        _restoreTabsOnStartupCheckBox.Checked = enabled;
+        _restoreLastPathCheckBox.Checked = enabled;
+        _restoreDisplayStateCheckBox.Checked = enabled;
+        _restoreWindowBoundsCheckBox.Checked = enabled;
+        _restoreColumnCountCheckBox.Checked = enabled;
+        _restoreSortCheckBox.Checked = enabled;
+        UpdateStartupRestoreControlsEnabledState();
     }
 
     private void PersistEditedFileListColorsAsPresetIfNeeded()
@@ -1924,13 +2062,57 @@ public class SettingsForm : Form
         return $"color {DateTime.Now:yyyyMMddHHmmss}";
     }
 
+    private bool ValidateFontSettings()
+    {
+        string filerFamily = _filerFontCombo.Text.Trim();
+        if (string.IsNullOrWhiteSpace(filerFamily))
+        {
+            MessageBox.Show(this, "一覧表示フォント名を入力してください。", "設定エラー", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            _filerFontCombo.Focus();
+            return false;
+        }
+        if (!MidFD.Helpers.FontResolver.IsFontInstalled(filerFamily, out string normalizedFiler))
+        {
+            MessageBox.Show(this, $"一覧表示フォント「{filerFamily}」はシステムにインストールされていません。\n有効なフォント名を指定してください。", "設定エラー", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            _filerFontCombo.Focus();
+            return false;
+        }
+
+        string viewerFamily = _viewerFontCombo.Text.Trim();
+        if (string.IsNullOrWhiteSpace(viewerFamily))
+        {
+            MessageBox.Show(this, "Viewerフォント名を入力してください。", "設定エラー", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            _viewerFontCombo.Focus();
+            return false;
+        }
+        if (!MidFD.Helpers.FontResolver.IsFontInstalled(viewerFamily, out string normalizedViewer))
+        {
+            MessageBox.Show(this, $"Viewerフォント「{viewerFamily}」はシステムにインストールされていません。\n有効なフォント名を指定してください。", "設定エラー", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            _viewerFontCombo.Focus();
+            return false;
+        }
+
+        _filerFontCombo.Text = normalizedFiler;
+        _viewerFontCombo.Text = normalizedViewer;
+        return true;
+    }
+
     private void BtnOk_Click(object? sender, EventArgs e)
     {
+        if (!ValidateFontSettings())
+        {
+            this.DialogResult = DialogResult.None;
+            return;
+        }
         SaveCurrentSettings();
     }
 
     private void BtnApply_Click(object? sender, EventArgs e)
     {
+        if (!ValidateFontSettings())
+        {
+            return;
+        }
         SaveCurrentSettings();
         SettingsApplied?.Invoke(this, EventArgs.Empty);
     }
@@ -1938,12 +2120,18 @@ public class SettingsForm : Form
     private void OpenFirstLaunchSetupDialog()
     {
         var setupSettings = _settings.Clone();
-        setupSettings.Profile = ToFeatureProfileSettingValue(_enableWorkspaceSnapshotCheckBox.Checked);
         setupSettings.Input.FunctionKeyProfile = _embeddedInputAssignmentView.SelectedProfileValue;
         setupSettings.Preview.VideoEnterPlaysExternal = _videoEnterPlaysExternalCheckBox.Checked;
         setupSettings.SevenZip.ExePath = NullIfEmpty(_sevenZipPathBox.Text);
         setupSettings.Preview.VideoToolDirectory = NullIfEmpty(_videoStillPreviewFfmpegPathBox.Text);
         setupSettings.ExternalTools.ExternalEditorPath = NullIfEmpty(_editorPathBox.Text);
+        setupSettings.Session.RestoreStartupState = _restoreStartupStateCheckBox.Checked;
+        setupSettings.Session.RestoreTabsOnStartup = _restoreTabsOnStartupCheckBox.Checked;
+        setupSettings.Session.RestoreLastPath = _restoreLastPathCheckBox.Checked;
+        setupSettings.Session.RestoreDisplayState = _restoreDisplayStateCheckBox.Checked;
+        setupSettings.Session.RestoreWindowBounds = _restoreWindowBoundsCheckBox.Checked;
+        setupSettings.Session.RestoreColumnCount = _restoreColumnCountCheckBox.Checked;
+        setupSettings.Session.RestoreSort = _restoreSortCheckBox.Checked;
 
         using var dialog = new FeatureProfileSelectionDialog(setupSettings);
         if (dialog.ShowDialog(this) != DialogResult.OK)
@@ -1951,14 +2139,13 @@ public class SettingsForm : Form
             return;
         }
 
-        _enableWorkspaceSnapshotCheckBox.Checked = dialog.EnableWorkspaceSnapshotFeatures;
         _embeddedInputAssignmentView.SelectedProfileValue = dialog.UseFdCompatibleFunctionKeys ? InputSettings.FdCompatibleProfileValue : InputSettings.StandardProfileValue;
         _videoEnterPlaysExternalCheckBox.Checked = dialog.VideoEnterPlaysExternal;
         _enableMouseGesturesCheckBox.Checked = dialog.EnableMouseGestures;
         _showFunctionBarTooltipsCheckBox!.Checked = dialog.ShowFunctionBarTooltips;
         _enableDragArchiveHandoffCheckBox.Checked = dialog.EnableDragArchiveHandoff;
         _includeDragZipManifestCheckBox.Checked = dialog.IncludeDragZipManifest;
-        _restoreLastPathCheckBox.Checked = dialog.RestoreLastPath;
+        ApplyFirstLaunchRestoreStartupState(dialog.RestoreStartupState);
         _sevenZipPathBox.Text = dialog.SevenZipPath ?? string.Empty;
         _videoStillPreviewFfmpegPathBox.Text = dialog.VideoToolDirectory ?? string.Empty;
         _editorPathBox.Text = dialog.ExternalEditorPath ?? string.Empty;
@@ -2049,18 +2236,6 @@ public class SettingsForm : Form
         return string.Join(Environment.NewLine, lines);
     }
 
-    private static bool IsAdvancedWorkspaceFeaturesEnabled(string? settingValue)
-    {
-        return FeatureProfileService.TryResolveProfile(settingValue, out FeatureProfile parsed) && parsed == FeatureProfile.Full;
-    }
-
-    private static string ToFeatureProfileSettingValue(bool enabled)
-    {
-        return enabled
-            ? FeatureProfile.Full.ToString()
-            : FeatureProfile.PracticalStable.ToString();
-    }
-
     private sealed class ColorTabResult
     {
         public required CheckBox EnableColorAssistCheckBox;
@@ -2080,8 +2255,8 @@ public class SettingsForm : Form
 
     private ColorTabResult BuildColorTab(TabPage tab)
     {
-        var groupCustom = new GroupBox { Text = "一覧配色カスタマイズ", Location = new Point(8, 6), Size = new Size(492, 372) };
-        var groupPreview = new GroupBox { Text = "プレビュー", Location = new Point(508, 6), Size = new Size(492, 372) };
+        var groupCustom = new GroupBox { Text = "一覧配色カスタマイズ", Location = new Point(8, 6), Size = new Size(540, 372) };
+        var groupPreview = new GroupBox { Text = "プレビュー", Location = new Point(556, 6), Size = new Size(492, 372) };
         tab.Controls.Add(groupCustom);
         tab.Controls.Add(groupPreview);
 
@@ -2142,21 +2317,21 @@ public class SettingsForm : Form
         var fileListColorFieldListBox = new ListBox
         {
             Location = new Point(12, top),
-            Size = new Size(165, 120),
+            Size = new Size(255, 120),
             DrawMode = DrawMode.OwnerDrawFixed,
             ItemHeight = 22,
             IntegralHeight = false
         };
         fileListColorFieldListBox.Items.AddRange(ColorFieldItems.Select(x => x.DisplayName).ToArray());
         int fileListColorListHeight = (fileListColorFieldListBox.ItemHeight * fileListColorFieldListBox.Items.Count) + 10;
-        fileListColorFieldListBox.Size = new Size(165, fileListColorListHeight);
+        fileListColorFieldListBox.Size = new Size(255, fileListColorListHeight);
         groupCustom.Controls.Add(fileListColorFieldListBox);
 
-        int adjX = 196;
+        int adjX = 278;
         var fileListColorCurrentPreviewPanel = new Panel
         {
             Location = new Point(adjX, top),
-            Size = new Size(190, 36),
+            Size = new Size(148, 36),
             BorderStyle = BorderStyle.FixedSingle
         };
 
@@ -2164,7 +2339,7 @@ public class SettingsForm : Form
         {
             Text = "色選択...",
             Location = new Point(adjX, top + 42),
-            Size = new Size(188, 28)
+            Size = new Size(146, 28)
         };
 
         var lblHex = new Label
@@ -2177,7 +2352,7 @@ public class SettingsForm : Form
         var fileListColorHexTextBox = new TextBox
         {
             Location = new Point(adjX + 44, top + 75),
-            Size = new Size(144, 24)
+            Size = new Size(102, 24)
         };
 
         var lblR = new Label
@@ -2190,7 +2365,7 @@ public class SettingsForm : Form
         var fileListColorRedBox = new NumericUpDown
         {
             Location = new Point(adjX + 44, top + 105),
-            Size = new Size(144, 24),
+            Size = new Size(102, 24),
             Minimum = 0,
             Maximum = 255
         };
@@ -2205,7 +2380,7 @@ public class SettingsForm : Form
         var fileListColorGreenBox = new NumericUpDown
         {
             Location = new Point(adjX + 44, top + 135),
-            Size = new Size(144, 24),
+            Size = new Size(102, 24),
             Minimum = 0,
             Maximum = 255
         };
@@ -2220,7 +2395,7 @@ public class SettingsForm : Form
         var fileListColorBlueBox = new NumericUpDown
         {
             Location = new Point(adjX + 44, top + 165),
-            Size = new Size(144, 24),
+            Size = new Size(102, 24),
             Minimum = 0,
             Maximum = 255
         };
@@ -2522,10 +2697,25 @@ public class SettingsForm : Form
 
     private FunctionPreviewPalette ResolveDefaultFunctionPreviewPalette(AppSettings previewSettings)
     {
+        if (previewSettings.Appearance == null)
+        {
+            return new FunctionPreviewPalette(Color.Black, Color.Gray, Color.White, Color.Black);
+        }
         var resolved = FileListColorResolver.ResolveColors(previewSettings);
         string themeNormalized = FileListColorResolver.NormalizeCoreTheme(previewSettings.Appearance.ColorTheme, previewSettings);
         bool isLightTheme = themeNormalized == "Light";
         bool isWinFdCompatible = FunctionKeyProfileService.ResolveProfile(previewSettings.Input.FunctionKeyProfile) == FunctionKeyProfile.FDCompatible;
+
+        string theme = previewSettings.Appearance?.ColorTheme ?? string.Empty;
+        if (string.Equals(theme, "WinFdCompatible", StringComparison.OrdinalIgnoreCase))
+        {
+            isWinFdCompatible = true;
+        }
+        else if (string.Equals(theme, "MidFdStandard", StringComparison.OrdinalIgnoreCase))
+        {
+            isWinFdCompatible = false;
+        }
+
         Color accentColor = resolved.Directory;
 
         if (isWinFdCompatible)
@@ -2569,7 +2759,7 @@ public class SettingsForm : Form
                 Color.FromArgb(198, 198, 198));
         }
 
-        (Color previewButtonBack, Color previewButtonFore, Color previewButtonBorder) = ResolveDarkStandardFunctionPreviewColors(previewSettings.Appearance.ColorTheme, resolved);
+        (Color previewButtonBack, Color previewButtonFore, Color previewButtonBorder) = ResolveDarkStandardFunctionPreviewColors(previewSettings.Appearance!.ColorTheme, resolved);
         return new FunctionPreviewPalette(
             resolved.Background,
             previewButtonBack,
@@ -2654,6 +2844,9 @@ public class SettingsForm : Form
             nameof(CustomFileListColorSettings.Marked) => defaultColors.Marked,
             nameof(CustomFileListColorSettings.SelectedBackground) => defaultColors.SelectedBackground,
             nameof(CustomFileListColorSettings.SelectedForeground) => defaultColors.SelectedForeground,
+            nameof(CustomFileListColorSettings.StatusNormal) => defaultColors.StatusNormal,
+            nameof(CustomFileListColorSettings.StatusResult) => defaultColors.StatusResult,
+            nameof(CustomFileListColorSettings.StatusError) => defaultColors.StatusError,
             _ => Color.White
         };
     }
@@ -2711,7 +2904,7 @@ public class SettingsForm : Form
 
         foreach (var key in FileListColorResolver.BuiltInPresetKeys)
         {
-            _colorThemeCombo.Items.Add(key);
+            _colorThemeCombo.Items.Add(FileListColorResolver.GetPresetDisplayName(key));
         }
 
         foreach (var preset in _settings.Appearance.CustomFileListColorPresets)
@@ -2720,7 +2913,7 @@ public class SettingsForm : Form
         }
 
         string target = FileListColorResolver.CanonicalizePresetKey(selectPresetKey ?? _settings.Appearance.ColorTheme);
-        int idx = _colorThemeCombo.FindStringExact(target);
+        int idx = _colorThemeCombo.FindStringExact(FileListColorResolver.GetPresetDisplayName(target));
         if (idx >= 0)
         {
             _colorThemeCombo.SelectedIndex = idx;
@@ -2741,6 +2934,19 @@ public class SettingsForm : Form
 
     private void ApplyDefaultFunctionColorsFromCurrentTheme()
     {
+        if (_settings?.Appearance == null)
+        {
+            return;
+        }
+        string theme = _settings.Appearance.ColorTheme ?? string.Empty;
+        if (string.Equals(theme, "MidFdStandard", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(theme, "WinFdCompatible", StringComparison.OrdinalIgnoreCase))
+        {
+            _settings.Appearance.CustomFunctionBarBackColor = null;
+            _settings.Appearance.CustomFunctionBarForeColor = null;
+            return;
+        }
+
         FunctionPreviewPalette palette = ResolveDefaultFunctionPreviewPalette(BuildColorTabPreviewSettings());
         _settings.Appearance.CustomFunctionBarBackColor = UiThemeResolver.ToHexString(palette.ButtonBackColor);
         _settings.Appearance.CustomFunctionBarForeColor = UiThemeResolver.ToHexString(palette.ButtonForeColor);
@@ -2751,7 +2957,8 @@ public class SettingsForm : Form
         if (_suppressColorUiEvents || _colorThemeCombo == null) return;
 
         string selectedPreset = _colorThemeCombo.Text;
-        _settings.Appearance.ColorTheme = FileListColorResolver.CanonicalizePresetKey(selectedPreset);
+        string presetKey = FileListColorResolver.GetPresetKeyFromDisplayName(selectedPreset);
+        _settings.Appearance.ColorTheme = FileListColorResolver.CanonicalizePresetKey(presetKey);
         _fileListCustomColorsEnabledForSave = false;
 
         var resolved = FileListColorResolver.ResolvePresetColors(selectedPreset, _settings.Appearance.CustomFileListColorPresets);
@@ -2765,6 +2972,9 @@ public class SettingsForm : Form
         _settings.Appearance.CustomFileListColors.Marked = FileListColorResolver.ToHexColor(resolved.Marked);
         _settings.Appearance.CustomFileListColors.SelectedBackground = FileListColorResolver.ToHexColor(resolved.SelectedBackground);
         _settings.Appearance.CustomFileListColors.SelectedForeground = FileListColorResolver.ToHexColor(resolved.SelectedForeground);
+        _settings.Appearance.CustomFileListColors.StatusNormal = FileListColorResolver.ToHexColor(resolved.StatusNormal);
+        _settings.Appearance.CustomFileListColors.StatusResult = FileListColorResolver.ToHexColor(resolved.StatusResult);
+        _settings.Appearance.CustomFileListColors.StatusError = FileListColorResolver.ToHexColor(resolved.StatusError);
         ApplyDefaultFunctionColorsFromCurrentTheme();
 
         UpdateDeleteButtonState();
@@ -3103,6 +3313,9 @@ public class SettingsForm : Form
         _settings.Appearance.CustomFileListColors.Marked = FileListColorResolver.ToHexColor(resolved.Marked);
         _settings.Appearance.CustomFileListColors.SelectedBackground = FileListColorResolver.ToHexColor(resolved.SelectedBackground);
         _settings.Appearance.CustomFileListColors.SelectedForeground = FileListColorResolver.ToHexColor(resolved.SelectedForeground);
+        _settings.Appearance.CustomFileListColors.StatusNormal = FileListColorResolver.ToHexColor(resolved.StatusNormal);
+        _settings.Appearance.CustomFileListColors.StatusResult = FileListColorResolver.ToHexColor(resolved.StatusResult);
+        _settings.Appearance.CustomFileListColors.StatusError = FileListColorResolver.ToHexColor(resolved.StatusError);
         ApplyDefaultFunctionColorsFromCurrentTheme();
 
         UpdateColorTabUiFromModel();
@@ -3127,11 +3340,15 @@ public class SettingsForm : Form
         _settings.Appearance.CustomFileListColors.Marked = FileListColorResolver.ToHexColor(resolved.Marked);
         _settings.Appearance.CustomFileListColors.SelectedBackground = FileListColorResolver.ToHexColor(resolved.SelectedBackground);
         _settings.Appearance.CustomFileListColors.SelectedForeground = FileListColorResolver.ToHexColor(resolved.SelectedForeground);
+        _settings.Appearance.CustomFileListColors.StatusNormal = FileListColorResolver.ToHexColor(resolved.StatusNormal);
+        _settings.Appearance.CustomFileListColors.StatusResult = FileListColorResolver.ToHexColor(resolved.StatusResult);
+        _settings.Appearance.CustomFileListColors.StatusError = FileListColorResolver.ToHexColor(resolved.StatusError);
         ApplyDefaultFunctionColorsFromCurrentTheme();
         _fileListCustomColorsEnabledForSave = false;
 
         UpdateColorTabUiFromModel();
         UpdatePreview();
+        ForceRefreshColorTabControls(); // リスト色見本を即時再描画 (OwnerDraw Invalidate漏れ修正)
     }
 
     private void UpdatePreview()
@@ -3439,6 +3656,9 @@ public class SettingsForm : Form
         new ColorFieldItem("マーク記号色", nameof(CustomFileListColorSettings.Marked)),
         new ColorFieldItem("選択行背景色", nameof(CustomFileListColorSettings.SelectedBackground)),
         new ColorFieldItem("選択行文字色", nameof(CustomFileListColorSettings.SelectedForeground)),
+        new ColorFieldItem("ステータス通常文字色", nameof(CustomFileListColorSettings.StatusNormal)),
+        new ColorFieldItem("ステータス操作結果文字色", nameof(CustomFileListColorSettings.StatusResult)),
+        new ColorFieldItem("ステータス警告/エラー文字色", nameof(CustomFileListColorSettings.StatusError)),
         new ColorFieldItem("ファンクション背景色", nameof(AppearanceSettings.CustomFunctionBarBackColor), true),
         new ColorFieldItem("ファンクション文字色", nameof(AppearanceSettings.CustomFunctionBarForeColor), true)
     };

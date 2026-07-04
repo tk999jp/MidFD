@@ -5,6 +5,7 @@ using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Windows.Forms;
+using MidFD.Configuration.Storage;
 
 namespace MidFD.Services
 {
@@ -15,6 +16,10 @@ namespace MidFD.Services
     public static class StartupExceptionLogger
     {
         private const string LogFileName = "startup_error.log";
+        private static readonly AppStoragePaths StoragePaths = LegacyStoragePathProvider.CreateDefault().GetPaths();
+
+        internal static string PrimaryLogDirectory => StoragePaths.LogDirectory;
+        internal static string FallbackLogDirectory => StoragePaths.StartupLogFallbackDirectory;
 
         public static string Write(string source, Exception? ex)
         {
@@ -44,9 +49,8 @@ namespace MidFD.Services
 
         private static string GetLogDirectory()
         {
-            // 優先順位 1: AppContext.BaseDirectory/logs (既存の LogService と同じ)
-            string baseDir = AppContext.BaseDirectory;
-            string logsDir = Path.Combine(baseDir, "logs");
+            // 優先順位 1: provider 経由の AppContext.BaseDirectory/logs (既存の LogService と同じ)
+            string logsDir = PrimaryLogDirectory;
 
             try
             {
@@ -56,11 +60,10 @@ namespace MidFD.Services
             }
             catch
             {
-                // 優先順位 2: %LOCALAPPDATA%/MidFD/Logs
+                // 優先順位 2: provider 経由の %LOCALAPPDATA%/MidFD/Logs
                 try
                 {
-                    string localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
-                    string midfdDir = Path.Combine(localAppData, "MidFD", "Logs");
+                    string midfdDir = FallbackLogDirectory;
                     if (!Directory.Exists(midfdDir)) Directory.CreateDirectory(midfdDir);
                     return midfdDir;
                 }

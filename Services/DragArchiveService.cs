@@ -3,6 +3,7 @@ using System.IO;
 using System.IO.Compression;
 using System.Collections.Generic;
 using System.Text;
+using MidFD.Configuration.Storage;
 
 namespace MidFD.Services;
 
@@ -10,6 +11,7 @@ public static class DragArchiveService
 {
     private const string DragArchivePrefix = "MidFD-drag-";
     private static readonly TimeSpan DragArchiveRetention = TimeSpan.FromMinutes(30);
+    private static readonly AppStoragePaths StoragePaths = LegacyStoragePathProvider.CreateDefault().GetPaths();
 
     public sealed class DragArchiveInfo
     {
@@ -28,7 +30,7 @@ public static class DragArchiveService
 
     public static string GetDragArchiveTempDirectory()
     {
-        return Path.Combine(Path.GetTempPath(), "MidFD", "DragArchive");
+        return Path.Combine(StoragePaths.TempRoot, "MidFD", "DragArchive");
     }
 
     public static void CleanupDragArchivesOnStartup(string tempDir)

@@ -5,6 +5,7 @@ namespace MidFD.Services;
 public static class QuickAccessService
 {
     private const int MaxRecentCount = 20;
+    private const string UncategorizedCategoryLabel = "未分類";
     public static int RecentLimit => MaxRecentCount;
 
     public static QuickAccessStore LoadOrMigrate(IEnumerable<string>? legacyPaths)
@@ -356,6 +357,68 @@ public static class QuickAccessService
         return true;
     }
 
+    public static bool CanMoveManagedEntry(QuickAccessStore store, QuickAccessEntry entry, bool moveUp)
+    {
+        List<QuickAccessEntry>? list = GetManagedList(store, entry.Kind);
+        if (list == null)
+        {
+            return false;
+        }
+
+        QuickAccessEntry? existing = FindManagedEntry(store, entry);
+        if (existing == null)
+        {
+            return false;
+        }
+
+        int index = list.IndexOf(existing);
+        if (index < 0)
+        {
+            return false;
+        }
+
+        return TryGetCategoryMoveTargetIndex(list, existing, index, moveUp, out _);
+    }
+
+    public static bool TryMoveManagedEntry(QuickAccessStore store, QuickAccessEntry entry, bool moveUp)
+    {
+        List<QuickAccessEntry>? list = GetManagedList(store, entry.Kind);
+        if (list == null)
+        {
+            return false;
+        }
+
+        QuickAccessEntry? existing = FindManagedEntry(store, entry);
+        if (existing == null)
+        {
+            return false;
+        }
+
+        int index = list.IndexOf(existing);
+        if (index < 0)
+        {
+            return false;
+        }
+
+        if (!TryGetCategoryMoveTargetIndex(list, existing, index, moveUp, out int targetIndex))
+        {
+            return false;
+        }
+
+        (list[index], list[targetIndex]) = (list[targetIndex], list[index]);
+        return true;
+    }
+
+    public static bool CanMoveRegisteredCategory(QuickAccessStore store, string categoryName, bool moveUp)
+    {
+        return TryMoveRegisteredCategoryCore(store, categoryName, moveUp, apply: false);
+    }
+
+    public static bool TryMoveRegisteredCategory(QuickAccessStore store, string categoryName, bool moveUp)
+    {
+        return TryMoveRegisteredCategoryCore(store, categoryName, moveUp, apply: true);
+    }
+
     public static bool RecordRecent(QuickAccessStore store, string path)
     {
         string? normalized = NormalizePath(path, null);
@@ -426,6 +489,33 @@ public static class QuickAccessService
         }
 
         return categories;
+    }
+
+    public static IReadOnlyList<string> GetRegisteredCategoryOrder(IEnumerable<QuickAccessEntry> entries)
+    {
+        var ordered = new List<string>();
+        bool hasUncategorized = false;
+        foreach (QuickAccessEntry entry in entries)
+        {
+            string category = GetEntryCategoryLabel(entry);
+            if (string.Equals(category, UncategorizedCategoryLabel, StringComparison.OrdinalIgnoreCase))
+            {
+                hasUncategorized = true;
+                continue;
+            }
+
+            if (!ordered.Contains(category, StringComparer.OrdinalIgnoreCase))
+            {
+                ordered.Add(category);
+            }
+        }
+
+        if (hasUncategorized)
+        {
+            ordered.Add(UncategorizedCategoryLabel);
+        }
+
+        return ordered;
     }
 
     public static string? FindAliasDisplayName(QuickAccessStore? store, string? path)
@@ -1059,6 +1149,128 @@ public static class QuickAccessService
                     ? PathsEqual(item.ExecutablePath, entry.ExecutablePath) &&
                       string.Equals(item.DisplayName, entry.DisplayName, StringComparison.Ordinal)
                     : PathsEqual(item.Path, entry.Path)));
+    }
+
+    private static List<QuickAccessEntry>? GetManagedList(QuickAccessStore store, QuickAccessEntryKind kind)
+    {
+        return kind switch
+        {
+            QuickAccessEntryKind.Bookmark => store.Bookmarks,
+            QuickAccessEntryKind.Alias => store.Aliases,
+            _ => null
+        };
+    }
+
+    private static bool TryGetCategoryMoveTargetIndex(
+        List<QuickAccessEntry> list,
+        QuickAccessEntry entry,
+        int index,
+        bool moveUp,
+        out int targetIndex)
+    {
+        string category = GetEntryCategoryLabel(entry);
+        int step = moveUp ? -1 : 1;
+        for (int candidate = index + step; candidate >= 0 && candidate < list.Count; candidate += step)
+        {
+            if (!string.Equals(GetEntryCategoryLabel(list[candidate]), category, StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            targetIndex = candidate;
+            return true;
+        }
+
+        targetIndex = -1;
+        return false;
+    }
+
+    private static bool TryMoveRegisteredCategoryCore(QuickAccessStore store, string categoryName, bool moveUp, bool apply)
+    {
+        string? normalizedCategory = NormalizeCategoryName(categoryName);
+        if (string.IsNullOrWhiteSpace(normalizedCategory) ||
+            string.Equals(normalizedCategory, UncategorizedCategoryLabel, StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        IReadOnlyList<string> categories = GetRegisteredCategoryOrder(store.Bookmarks.Concat(store.Aliases));
+        int categoryIndex = -1;
+        for (int index = 0; index < categories.Count; index++)
+        {
+            if (string.Equals(categories[index], normalizedCategory, StringComparison.OrdinalIgnoreCase))
+            {
+                categoryIndex = index;
+                break;
+            }
+        }
+
+        if (categoryIndex < 0)
+        {
+            return false;
+        }
+
+        int movableCount = categories.Count;
+        bool appendUncategorized = movableCount > 0 &&
+            string.Equals(categories[movableCount - 1], UncategorizedCategoryLabel, StringComparison.OrdinalIgnoreCase);
+        if (appendUncategorized)
+        {
+            movableCount--;
+        }
+
+        if (categoryIndex >= movableCount)
+        {
+            return false;
+        }
+
+        int targetIndex = moveUp ? categoryIndex - 1 : categoryIndex + 1;
+        if (targetIndex < 0 || targetIndex >= movableCount)
+        {
+            return false;
+        }
+
+        if (!apply)
+        {
+            return true;
+        }
+
+        var reorderedCategories = categories.Take(movableCount).ToList();
+        (reorderedCategories[categoryIndex], reorderedCategories[targetIndex]) = (reorderedCategories[targetIndex], reorderedCategories[categoryIndex]);
+        ReorderEntriesByCategoryOrder(store.Bookmarks, reorderedCategories, appendUncategorized);
+        ReorderEntriesByCategoryOrder(store.Aliases, reorderedCategories, appendUncategorized);
+        return true;
+    }
+
+    private static void ReorderEntriesByCategoryOrder(List<QuickAccessEntry> list, IReadOnlyList<string> categoryOrder, bool appendUncategorized)
+    {
+        if (list.Count == 0)
+        {
+            return;
+        }
+
+        var grouped = list
+            .GroupBy(entry => GetEntryCategoryLabel(entry), StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(group => group.Key, group => group.ToList(), StringComparer.OrdinalIgnoreCase);
+
+        var reordered = new List<QuickAccessEntry>(list.Count);
+        foreach (string category in categoryOrder)
+        {
+            if (grouped.TryGetValue(category, out List<QuickAccessEntry>? categoryEntries))
+            {
+                reordered.AddRange(categoryEntries);
+            }
+        }
+
+        if (appendUncategorized && grouped.TryGetValue(UncategorizedCategoryLabel, out List<QuickAccessEntry>? uncategorizedEntries))
+        {
+            reordered.AddRange(uncategorizedEntries);
+        }
+
+        if (reordered.Count == list.Count)
+        {
+            list.Clear();
+            list.AddRange(reordered);
+        }
     }
 
     private static bool TryResolveCommandTarget(QuickAccessCommandTargetMode targetMode, QuickAccessCommandContext context, out string message)

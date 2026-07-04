@@ -74,8 +74,8 @@ public static class FunctionKeyProfileService
         {
             FunctionKeyAction.Help => CommandIds.BrowserShowHelp,
             FunctionKeyAction.Execute => CommandIds.BrowserExecute,
-            FunctionKeyAction.Rename => "file.rename",
-            FunctionKeyAction.Copy => "file.copy",
+            FunctionKeyAction.Rename => CommandIds.FileRename,
+            FunctionKeyAction.Copy => CommandIds.FileCopy,
             FunctionKeyAction.Edit => CommandIds.BrowserOpenExternalEditor,
             FunctionKeyAction.Reload => CommandIds.BrowserReload,
             FunctionKeyAction.Sort => CommandIds.BrowserSort,
@@ -142,8 +142,8 @@ public static class FunctionKeyProfileService
                 {
                     1 => CommandIds.BrowserChangeAttributes,
                     2 => CommandIds.AppOpenSystemInformation,
-                    3 => "file.move",
-                    4 => "file.delete",
+                    3 => CommandIds.FileMove,
+                    4 => CommandIds.FileDelete,
                     5 => CommandIds.BrowserCreateDirectory,
                     6 => CommandIds.BrowserOpenShell,
                     7 => CommandIds.BrowserReload,
@@ -160,9 +160,9 @@ public static class FunctionKeyProfileService
             {
                 1 => CommandIds.BrowserShowHelp,
                 2 => CommandIds.BrowserExecute,
-                3 => "file.copy",
-                4 => "file.delete",
-                5 => "file.rename",
+                3 => CommandIds.FileCopy,
+                4 => CommandIds.FileDelete,
+                5 => CommandIds.FileRename,
                 6 => CommandIds.BrowserSort,
                 7 => CommandIds.BrowserFilter,
                 8 => CommandIds.BrowserTree,
@@ -203,7 +203,7 @@ public static class FunctionKeyProfileService
                 string? defaultShiftCmd = slot switch
                 {
                     1 => CommandIds.AppOpenSystemInformation, // Info (replaces KeyH)
-                    2 => "file.rename", // Ren (supports bulk rename or standard rename)
+                    2 => CommandIds.FileRename, // Ren (supports bulk rename or standard rename)
                     3 => CommandIds.BrowserFilter, // Filt (clear/adjust filter)
                     4 => CommandIds.BrowserOpenExternalEditor, // Edit
                     5 => CommandIds.BrowserReload, // Rld
@@ -223,8 +223,8 @@ public static class FunctionKeyProfileService
             string? defaultCmd = slot switch
             {
                 1 => CommandIds.BrowserShowHelp, // F1 Help
-                2 => "file.rename", // F2 Ren
-                3 => "file.copy", // F3 Copy
+                2 => CommandIds.FileRename, // F2 Ren
+                3 => CommandIds.FileCopy, // F3 Copy
                 4 => CommandIds.BrowserOpenExternalEditor, // F4 Edit
                 5 => CommandIds.BrowserReload, // F5 Rld
                 6 => CommandIds.BrowserSort, // F6 Sort
@@ -260,6 +260,7 @@ public static class FunctionKeyProfileService
             CommandIds.BrowserOpenExplorer => "expl",
             CommandIds.BrowserOpenShell => "psh",
             CommandIds.BrowserOpenExternalEditor => "edit",
+            CommandIds.BrowserOpenCommandPrompt => "cmdp",
             CommandIds.BrowserChangeAttributes => "attr",
             CommandIds.BrowserSort => "sort",
             CommandIds.BrowserFilter => "filt",
@@ -268,21 +269,28 @@ public static class FunctionKeyProfileService
             CommandIds.BrowserLogdisk => "logd",
             CommandIds.ArchiveUnpack => "unpk",
             CommandIds.BrowserCreateDirectory => "mkdir",
+            CommandIds.BrowserCreateFile => "newf",
+            CommandIds.BrowserPathEntryOpen => "path",
             CommandIds.BrowserPreview => "view",
             CommandIds.ArchivePack => "pack",
             CommandIds.BrowserCopyFullPath => "path",
             CommandIds.BrowserTabNew => "tabn",
             CommandIds.BrowserTabNext => "tab>",
             CommandIds.BrowserTabPrevious => "tab<",
+            CommandIds.BrowserTabCategoryAdd => "cat+",
+            CommandIds.BrowserTabCategoryRename => "catr",
+            CommandIds.BrowserTabCategoryDelete => "catd",
+            CommandIds.BrowserTabCategoryMoveLeft => "cat<",
+            CommandIds.BrowserTabCategoryMoveRight => "cat>",
             CommandIds.BrowserTabCategoryNext => "cat>",
             CommandIds.BrowserTabCategoryPrevious => "cat<",
             CommandIds.BrowserTabClose => "tabc",
             CommandIds.BrowserTabRestoreClosed => "tabr",
             CommandIds.ClipboardPaste => "pst",
-            "file.copy" => "copy",
-            "file.move" => "move",
-            "file.rename" => "ren",
-            "file.delete" => "del",
+            CommandIds.FileCopy => "copy",
+            CommandIds.FileMove => "move",
+            CommandIds.FileRename => "ren",
+            CommandIds.FileDelete => "del",
             CommandIds.EditUndo => "undo",
             CommandIds.EditRedo => "redo",
             CommandIds.BrowserShowHelp => "help",
@@ -317,14 +325,14 @@ public static class FunctionKeyProfileService
                 CommandIds.BrowserReload => "rld",
                 CommandIds.BrowserQuickAccess => "qacc",
                 CommandIds.BrowserCreateDirectory => "mkdr",
-                "file.rename" => "ren",
+                CommandIds.FileRename => "ren",
                 _ => ResolveFunctionBarShortLabel(commandId)
             }
             : commandId switch
             {
-                "file.rename" => "rena",
+                CommandIds.FileRename => "rena",
                 CommandIds.BrowserReload => "relo",
-                CommandIds.BrowserQuickAccess => "qiqa",
+                CommandIds.BrowserQuickAccess => "qacc",
                 CommandIds.BrowserCreateDirectory => "mkdr",
                 _ => ResolveFunctionBarShortLabel(commandId)
             };

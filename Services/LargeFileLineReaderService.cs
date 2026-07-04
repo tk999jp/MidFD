@@ -76,6 +76,23 @@ public static class LargeFileLineReaderService
         }, token);
     }
 
+    private static int ReadFully(FileStream fs, byte[] buffer, int count)
+    {
+        int totalRead = 0;
+        while (totalRead < count)
+        {
+            int read = fs.Read(buffer, totalRead, count - totalRead);
+            if (read <= 0)
+            {
+                break;
+            }
+
+            totalRead += read;
+        }
+
+        return totalRead;
+    }
+
     public sealed record LargeFileLineIndexResult(
         IReadOnlyList<long> LineOffsets,
         long TotalBytes);
@@ -190,7 +207,11 @@ public static class LargeFileLineReaderService
 
                 byte[] lineBuf = new byte[lineByteLen];
                 fs.Seek(startOffset, SeekOrigin.Begin);
-                fs.Read(lineBuf, 0, lineByteLen);
+                int bytesRead = ReadFully(fs, lineBuf, lineByteLen);
+                if (bytesRead < lineBuf.Length)
+                {
+                    Array.Resize(ref lineBuf, bytesRead);
+                }
 
                 // 改行文字（CRLF, LF, CR）を除去して文字列化
                 string lineText = encoding.GetString(lineBuf);
@@ -236,7 +257,11 @@ public static class LargeFileLineReaderService
                 {
                     byte[] buf = new byte[len];
                     fs.Seek(offset, SeekOrigin.Begin);
-                    fs.Read(buf, 0, len);
+                    int bytesRead = ReadFully(fs, buf, len);
+                    if (bytesRead < buf.Length)
+                    {
+                        Array.Resize(ref buf, bytesRead);
+                    }
                     
                     string lineText = encoding.GetString(buf).TrimEnd('\r', '\n');
                     int hitColumn = FindInLine(lineText, query, current == startLine ? startColumn : (backward ? int.MaxValue : 0), backward);

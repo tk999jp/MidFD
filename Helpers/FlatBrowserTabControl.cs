@@ -1,14 +1,26 @@
 ﻿using System.Drawing;
 using System.Windows.Forms;
 
+using System.ComponentModel;
+
 namespace MidFD.Helpers;
 
 public sealed class FlatBrowserTabControl : TabControl
 {
+    [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
+    [Browsable(false)]
     public Color ActiveTabBackColor { get; set; } = Color.FromArgb(0, 64, 80);
+    [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
+    [Browsable(false)]
     public Color InactiveTabBackColor { get; set; } = Color.Black;
+    [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
+    [Browsable(false)]
     public Color TabBorderColor { get; set; } = Color.Cyan;
+    [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
+    [Browsable(false)]
     public Color ActiveTabTextColor { get; set; } = Color.Yellow;
+    [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
+    [Browsable(false)]
     public Color InactiveTabTextColor { get; set; } = Color.Cyan;
 
     public FlatBrowserTabControl()

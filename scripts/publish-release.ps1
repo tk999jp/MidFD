@@ -104,6 +104,11 @@ if ($LASTEXITCODE -ne 0) {
     exit 1
 }
 
+# Remove PDB files to keep release package clean
+Write-Host "Removing PDB files from publish output..."
+Get-ChildItem $tempPublishDir -Filter *.pdb -Recurse | Remove-Item -Force
+
+
 # 5.5 Include public documentation and license in package
 $docsToCopy = @("README.md", "CHANGELOG.md", "LICENSE")
 foreach ($doc in $docsToCopy) {
@@ -119,6 +124,13 @@ if (Test-Path $userDocsSource) {
     Remove-Item $userDocsDest -Recurse -Force -ErrorAction SilentlyContinue
     Copy-Item $userDocsSource -Destination $userDocsDest -Recurse -Force
 }
+
+# 5.6 Copy runtime guidance files
+$readmeFirstSource = Join-Path $rootDir "packaging\runtime-guidance\README_FIRST.txt"
+if (Test-Path $readmeFirstSource) {
+    Copy-Item $readmeFirstSource -Destination $tempPublishDir -Force
+}
+
 
 # 6. Create ZIP archive
 $zipPath = Join-Path $releaseDir "MidFD-win-x64.zip"

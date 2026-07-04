@@ -1,5 +1,7 @@
 ﻿using MidFD.Helpers;
 
+using System.ComponentModel;
+
 namespace MidFD.Dialogs;
 
 internal static class DeleteConfirmDialog
@@ -132,6 +134,8 @@ internal static class DeleteConfirmDialog
 
     private sealed class DeleteConfirmForm : Form
     {
+        [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
+        [Browsable(false)]
         public bool RequireAltYes { get; set; }
 
         protected override bool ProcessCmdKey(ref Message msg, Keys keyData)

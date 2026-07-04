@@ -1,7 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
-    <TargetFramework>net8.0-windows</TargetFramework>
+    <TargetFramework>net10.0-windows</TargetFramework>
     <UseWindowsForms>true</UseWindowsForms>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
@@ -27,10 +27,10 @@
   </ItemGroup>
 
   <ItemGroup>
-    <Compile Remove="artifacts\**\*;scratch\**\*" />
-    <EmbeddedResource Remove="artifacts\**\*;scratch\**\*" />
-    <Content Remove="artifacts\**\*;scratch\**\*" />
-    <None Remove="artifacts\**\*;scratch\**\*" />
+    <Compile Remove="artifacts\**\*;scratch\**\*;tests\**\*" />
+    <EmbeddedResource Remove="artifacts\**\*;scratch\**\*;tests\**\*" />
+    <Content Remove="artifacts\**\*;scratch\**\*;tests\**\*" />
+    <None Remove="artifacts\**\*;scratch\**\*;tests\**\*" />
   </ItemGroup>
 
 </Project>

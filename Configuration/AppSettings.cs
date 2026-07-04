@@ -126,6 +126,7 @@ public class SessionSettings
     public string? LastPath { get; set; }
     public bool RestoreLastPath { get; set; } = true;
     public bool RestoreTabsOnStartup { get; set; } = false;
+    public bool RestoreStartupState { get; set; } = true;
     // Browser tab restore の永続化正本。通常 save ではこの snapshot のみを保存対象にする。
     public BrowserTabRestoreSnapshot? BrowserTabRestoreSnapshot { get; set; }
     // 互換 mirror。古い設定の取り込みと load 後の互換参照用で、通常 save では永続化しない。
@@ -138,6 +139,7 @@ public class SessionSettings
     public bool RestoreWindowBounds { get; set; } = true;
     public bool RestoreColumnCount { get; set; } = true;
     public bool RestoreSort { get; set; } = true;
+    public bool RestoreDisplayState { get; set; } = true;
     public int LastColumnCount { get; set; } = 3;
     public SortKind LastSortKind { get; set; } = SortKind.Name;
     public bool LastSortAscending { get; set; } = true;
@@ -210,8 +212,23 @@ public class BrowserTabSettings
     public const string DefaultCategoryId = "default";
     public const int DefaultMaxTabsPerCategory = 30;
     public const int SafetyMaxTabsPerCategory = 100;
+    public const float DefaultTabFontSize = 9.0f;
+    public const int DefaultTabWidth = 140;
 
     public int MaxTabsPerCategory { get; set; } = DefaultMaxTabsPerCategory;
+    private float _tabFontSize = DefaultTabFontSize;
+    public float TabFontSize
+    {
+        get => _tabFontSize;
+        set => _tabFontSize = value;
+    }
+
+    private int _tabWidth = DefaultTabWidth;
+    public int TabWidth
+    {
+        get => _tabWidth;
+        set => _tabWidth = value;
+    }
     public List<BrowserTabCategoryDefinition> Categories { get; set; } = new();
 
     public BrowserTabSettings Clone()
@@ -219,6 +236,8 @@ public class BrowserTabSettings
         return new BrowserTabSettings
         {
             MaxTabsPerCategory = MaxTabsPerCategory,
+            TabFontSize = TabFontSize,
+            TabWidth = TabWidth,
             Categories = Categories.Select(static category => category.Clone()).ToList()
         };
     }
@@ -299,9 +318,9 @@ public class BrowserTabSessionState
 
 public class FontSettings
 {
-    public string FileListFontFamily { get; set; } = "Consolas";
+    public string FileListFontFamily { get; set; } = MidFD.Helpers.FontResolver.ResolveMonospaceFontFamily();
     public float FileListFontSize { get; set; } = 11.0f;
-    public string ViewerFontFamily { get; set; } = "Consolas";
+    public string ViewerFontFamily { get; set; } = MidFD.Helpers.FontResolver.ResolveMonospaceFontFamily();
     public float ViewerFontSize { get; set; } = 10.0f;
 
     public FontSettings Clone() => (FontSettings)MemberwiseClone();
@@ -404,6 +423,9 @@ public class CustomFileListColorSettings
     public string? Marked { get; set; }
     public string? SelectedBackground { get; set; }
     public string? SelectedForeground { get; set; }
+    public string? StatusNormal { get; set; }
+    public string? StatusResult { get; set; }
+    public string? StatusError { get; set; }
 
     public CustomFileListColorSettings Clone() => (CustomFileListColorSettings)MemberwiseClone();
 }

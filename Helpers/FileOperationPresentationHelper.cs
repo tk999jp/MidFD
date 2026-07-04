@@ -46,6 +46,24 @@ namespace MidFD.Helpers
             };
         }
 
+        public static string GetUndoReadyMessage(string operationLabel, int successCount, int totalCount)
+        {
+            return successCount == totalCount
+                ? $"{successCount} 件{operationLabel}しました。Ctrl+Z で元に戻せます。"
+                : $"{successCount} 件{operationLabel}しました。Ctrl+Z で成功分を元に戻せます。";
+        }
+
+        public static FileOperationItemProgressKind ResolveItemProgressKind(string operationDisplayName)
+        {
+            return operationDisplayName switch
+            {
+                "Copy" or "コピー" or "貼り付け(コピー)" => FileOperationItemProgressKind.Copy,
+                "Move" or "移動" or "貼り付け(移動)" => FileOperationItemProgressKind.Move,
+                "Delete" or "削除" or "完全削除" => FileOperationItemProgressKind.Delete,
+                _ => FileOperationItemProgressKind.Other
+            };
+        }
+
         public static string GetBusyBlockedMessage(string? operationLabel = null, bool canCancel = false, bool isCancelRequested = false)
         {
             if (isCancelRequested)

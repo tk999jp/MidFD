@@ -3,9 +3,16 @@ using System.Text;
 
 namespace MidFD.Helpers;
 
+internal enum CompletionMode
+{
+    Directory,
+    History
+}
+
 internal sealed class DirectoryPathCompletionOptions
 {
     public bool ShowOnTextChanged { get; init; } = true;
+    public Func<string, System.Threading.CancellationToken, System.Threading.Tasks.Task<List<string>>>? CustomCandidateProvider { get; init; }
 }
 
 internal sealed class DirectoryPathCompletionController : IDisposable
@@ -23,6 +30,7 @@ internal sealed class DirectoryPathCompletionController : IDisposable
     private string? _lastHandledText;
     private bool _isUpdating;
     private bool _isTabCycling;
+    private CompletionMode _currentCompletionMode = CompletionMode.Directory;
     private const int MaxCandidates = 30;
 
     private bool _disposed;
@@ -112,6 +120,15 @@ internal sealed class DirectoryPathCompletionController : IDisposable
         DirectoryPathCompletionOptions? options = null)
     {
         return new DirectoryPathCompletionController(control, options ?? new DirectoryPathCompletionOptions());
+    }
+
+    public void ShowHistoryCandidates()
+    {
+        if (_disposed)
+        {
+            return;
+        }
+        _ = UpdateCandidatesAsync(CompletionMode.History);
     }
 
     private string ControlText => _editor.Text;
@@ -208,6 +225,12 @@ internal sealed class DirectoryPathCompletionController : IDisposable
             return;
         }
 
+        if (e.KeyCode == Keys.Down && (e.Alt || e.Control))
+        {
+            e.IsInputKey = true;
+            return;
+        }
+
         if (!IsPopupVisible)
         {
             return;
@@ -231,9 +254,9 @@ internal sealed class DirectoryPathCompletionController : IDisposable
             e.Handled = true;
             e.SuppressKeyPress = true;
 
-            if (!IsPopupVisible)
+            if (!IsPopupVisible || _currentCompletionMode == CompletionMode.History)
             {
-                bool opened = await UpdateCandidatesAsync();
+                bool opened = await UpdateCandidatesAsync(CompletionMode.Directory);
                 if (!opened || !IsPopupVisible || _disposed)
                 {
                     return; // 候補なし
@@ -242,6 +265,14 @@ internal sealed class DirectoryPathCompletionController : IDisposable
 
             int direction = e.Shift ? -1 : 1;
             CycleCompletion(direction);
+            return;
+        }
+
+        if (e.KeyCode == Keys.Down && (e.Alt || e.Control))
+        {
+            e.Handled = true;
+            e.SuppressKeyPress = true;
+            _ = UpdateCandidatesAsync(CompletionMode.History);
             return;
         }
 
@@ -342,9 +373,21 @@ internal sealed class DirectoryPathCompletionController : IDisposable
             _listBox.SelectedIndex = next;
         }
 
-        if (_listBox.SelectedItem is PopupItem item && item.Value != null && _currentDirPath != null)
+        if (_listBox.SelectedItem is PopupItem item && item.Value != null)
         {
-            string result = Path.Combine(_currentDirPath, item.Value) + Path.DirectorySeparatorChar;
+            string result;
+            if (item.IsFullPath)
+            {
+                result = item.Value;
+            }
+            else if (_currentDirPath != null)
+            {
+                result = Path.Combine(_currentDirPath, item.Value) + Path.DirectorySeparatorChar;
+            }
+            else
+            {
+                result = item.Value;
+            }
             SetControlText(result);
         }
     }
@@ -426,7 +469,7 @@ internal sealed class DirectoryPathCompletionController : IDisposable
             .ToList();
     }
 
-    private async Task<bool> UpdateCandidatesAsync()
+    private async Task<bool> UpdateCandidatesAsync(CompletionMode mode = CompletionMode.Directory)
     {
         if (_disposed)
         {
@@ -450,19 +493,52 @@ internal sealed class DirectoryPathCompletionController : IDisposable
         int requestVersion = _candidateRequestVersion;
         string textSnapshot = ControlText;
 
-        if (!TryBuildCandidateQuery(textSnapshot, out string dirPath, out string filter))
-        {
-            ClosePopup();
-            return false;
-        }
-
         try
         {
-            List<string> dirs = await Task.Run(() => EnumerateDirectoryCandidates(dirPath, filter, token), token);
+            _currentCompletionMode = mode;
+            List<PopupItem> popupItems = new();
+            bool isCustomCandidatesLoaded = false;
 
-            if (token.IsCancellationRequested || _disposed)
+            // 1. History Mode
+            if (mode == CompletionMode.History && _options.CustomCandidateProvider != null)
             {
-                return false;
+                List<string> customCandidates = await _options.CustomCandidateProvider(textSnapshot, token);
+                if (token.IsCancellationRequested || _disposed)
+                {
+                    return false;
+                }
+
+                foreach (string c in customCandidates)
+                {
+                    popupItems.Add(new PopupItem(c, c) { IsFullPath = true });
+                }
+                isCustomCandidatesLoaded = true;
+            }
+
+            // 2. Directory Mode (Fallback to Local Directories)
+            if (!isCustomCandidatesLoaded && popupItems.Count == 0)
+            {
+                if (!TryBuildCandidateQuery(textSnapshot, out string dirPath, out string filter))
+                {
+                    ClosePopup();
+                    return false;
+                }
+
+                List<string> dirs = await Task.Run(() => EnumerateDirectoryCandidates(dirPath, filter, token), token);
+                if (token.IsCancellationRequested || _disposed)
+                {
+                    return false;
+                }
+
+                _currentDirPath = dirPath;
+                foreach (string dir in dirs)
+                {
+                    popupItems.Add(new PopupItem(dir, dir) { IsFullPath = false });
+                }
+            }
+            else
+            {
+                _currentDirPath = null;
             }
 
             if (requestVersion != _candidateRequestVersion ||
@@ -474,14 +550,24 @@ internal sealed class DirectoryPathCompletionController : IDisposable
                 return false;
             }
 
-            if (dirs.Count == 0 || (dirs.Count == 1 && string.Equals(dirs[0], filter, StringComparison.OrdinalIgnoreCase)))
+            if (mode == CompletionMode.History)
             {
-                ClosePopup();
-                return false;
+                if (popupItems.Count == 0)
+                {
+                    ClosePopup();
+                    return false;
+                }
+            }
+            else
+            {
+                if (popupItems.Count == 0 || (popupItems.Count == 1 && string.Equals(popupItems[0].Value, textSnapshot, StringComparison.OrdinalIgnoreCase)))
+                {
+                    ClosePopup();
+                    return false;
+                }
             }
 
-            _currentDirPath = dirPath;
-            ShowPopup(dirs.Cast<string?>().ToList());
+            ShowPopup(popupItems, textSnapshot);
             return true;
         }
         catch (OperationCanceledException)
@@ -495,25 +581,51 @@ internal sealed class DirectoryPathCompletionController : IDisposable
         }
     }
 
-    private void ShowPopup(List<string?> candidates)
+    private void ShowPopup(List<PopupItem> items, string textSnapshot)
     {
         if (_disposed)
         {
             return;
         }
 
+        if (_currentCompletionMode == CompletionMode.History)
+        {
+            _listBox.BackColor = Color.FromArgb(225, 225, 225);
+            _listBox.ForeColor = Color.FromArgb(30, 30, 30);
+        }
+        else
+        {
+            _listBox.BackColor = Color.FromArgb(40, 40, 40);
+            _listBox.ForeColor = Color.White;
+        }
+
         _listBox.BeginUpdate();
         _listBox.Items.Clear();
         _listBox.Items.Add(EmptyPopupItem);
-        foreach (string? candidate in candidates)
+        foreach (PopupItem item in items)
         {
-            if (candidate != null)
+            _listBox.Items.Add(item);
+        }
+
+        int selectedIndex = 0;
+        if (!string.IsNullOrWhiteSpace(textSnapshot))
+        {
+            int exactIndex = items.FindIndex(item => string.Equals(item.Value, textSnapshot, StringComparison.OrdinalIgnoreCase));
+            if (exactIndex >= 0)
             {
-                _listBox.Items.Add(new PopupItem(candidate, candidate));
+                selectedIndex = exactIndex + 1;
+            }
+            else
+            {
+                int prefixIndex = items.FindIndex(item => item.Value != null && item.Value.StartsWith(textSnapshot, StringComparison.OrdinalIgnoreCase));
+                if (prefixIndex >= 0)
+                {
+                    selectedIndex = prefixIndex + 1;
+                }
             }
         }
 
-        _listBox.SelectedIndex = 0;
+        _listBox.SelectedIndex = selectedIndex;
         _listBox.EndUpdate();
 
         int itemHeight = _listBox.ItemHeight;
@@ -533,9 +645,21 @@ internal sealed class DirectoryPathCompletionController : IDisposable
             return;
         }
 
-        if (_listBox.SelectedItem is PopupItem selectedItem && selectedItem.Value is string selected && _currentDirPath != null)
+        if (_listBox.SelectedItem is PopupItem selectedItem && selectedItem.Value is string selected)
         {
-            string result = Path.Combine(_currentDirPath, selected) + Path.DirectorySeparatorChar;
+            string result;
+            if (selectedItem.IsFullPath)
+            {
+                result = selected;
+            }
+            else if (_currentDirPath != null)
+            {
+                result = Path.Combine(_currentDirPath, selected) + Path.DirectorySeparatorChar;
+            }
+            else
+            {
+                result = selected;
+            }
             SetControlText(result);
             _ = UpdateCandidatesAsync();
             return;
@@ -1123,5 +1247,7 @@ internal sealed class DirectoryPathCompletionController : IDisposable
         public string DisplayText { get; }
 
         public string? Value { get; }
+
+        public bool IsFullPath { get; set; }
     }
 }

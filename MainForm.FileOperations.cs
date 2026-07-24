@@ -16,6 +16,7 @@ namespace MidFD;
 public partial class MainForm
 {    private void ExecuteRename(SelectionResult? selectionSnapshot = null)
     {
+        if (GuardMutationBusy()) return;
         if (GuardReadOnlyBrowserTab())
         {
             return;
@@ -103,6 +104,7 @@ public partial class MainForm
     }
     private async void ExecuteBatchRename(SelectionResult selection)
     {
+        if (GuardMutationBusy()) return;
         string initialTemplate = "$F$E";
         if (_settings.Rename.RememberLastTemplate && !string.IsNullOrWhiteSpace(_settings.Rename.LastTemplate))
         {
@@ -118,6 +120,7 @@ public partial class MainForm
             ShowStatusMessage("リネームはキャンセルされました。");
             return;
         }
+        if (GuardMutationBusy()) return;
         if (dialogResult.RememberTemplate)
         {
             _settings.Rename.RememberLastTemplate = true;
@@ -128,7 +131,6 @@ public partial class MainForm
             _settings.Rename.RememberLastTemplate = false;
         }
         SettingsManager.Save(_settings);
-        if (GuardClipboardBusy()) return;
         var token = PrepareFileOperation("一括リネーム");
         int renameTotal = dialogResult.Preview.Items.Count(item => item.WillRename);
         var progressForm = Presentation.FileOperationFallbackUiPresenter.ShowReadyProgressFallback(
@@ -666,7 +668,7 @@ public partial class MainForm
     }
     private static bool PathExists(string path)
     {
-        return File.Exists(path) || Directory.Exists(path);
+        return ReparsePointHelper.Exists(path);
     }
     private static List<string> CreatePersistableMarkedPaths(IEnumerable<string>? paths, out int skippedCount)
     {
@@ -718,6 +720,7 @@ public partial class MainForm
     }
     private async Task ExecuteDelete(bool permanent = false, SelectionResult? selectionSnapshot = null)
     {
+        if (GuardMutationBusy()) return;
         if (GuardReadOnlyBrowserTab())
         {
             return;
@@ -763,6 +766,7 @@ public partial class MainForm
         {
             return;
         }
+        if (GuardMutationBusy()) return;
         confirmSw.Stop();
         long confirmDialogMs = confirmSw.ElapsedMilliseconds;
         var focusPrepSw = Stopwatch.StartNew();
@@ -1778,15 +1782,16 @@ public partial class MainForm
                 string.Equals(itemPath, deletedPath, StringComparison.OrdinalIgnoreCase))
             {
                 fileListView.Items.RemoveAt(i);
+                int pageLocalCursorIndex = GetBrowserPageLocalCursorIndex();
                 if (fileListView.Items.Count == 0)
                 {
                     _browserCursorIndex = 0;
                 }
-                else if (_browserCursorIndex >= fileListView.Items.Count)
+                else if (pageLocalCursorIndex >= fileListView.Items.Count)
                 {
-                    _browserCursorIndex = fileListView.Items.Count - 1;
+                    _browserCursorIndex = _browserPageStartIndex + fileListView.Items.Count - 1;
                 }
-                else if (i < _browserCursorIndex)
+                else if (i < pageLocalCursorIndex)
                 {
                     _browserCursorIndex--;
                 }
@@ -1854,15 +1859,16 @@ public partial class MainForm
             if (fileListView.Items[i].Tag is string itemPath && targets.Contains(itemPath))
             {
                 fileListView.Items.RemoveAt(i);
+                int pageLocalCursorIndex = GetBrowserPageLocalCursorIndex();
                 if (fileListView.Items.Count == 0)
                 {
                     _browserCursorIndex = 0;
                 }
-                else if (_browserCursorIndex >= fileListView.Items.Count)
+                else if (pageLocalCursorIndex >= fileListView.Items.Count)
                 {
-                    _browserCursorIndex = fileListView.Items.Count - 1;
+                    _browserCursorIndex = _browserPageStartIndex + fileListView.Items.Count - 1;
                 }
-                else if (i < _browserCursorIndex)
+                else if (i < pageLocalCursorIndex)
                 {
                     _browserCursorIndex--;
                 }
@@ -2037,6 +2043,7 @@ public partial class MainForm
     }
     private async void ExecuteClipboardPaste()
     {
+        if (GuardMutationBusy()) return;
         if (GuardReadOnlyBrowserTab())
         {
             return;
@@ -2111,7 +2118,37 @@ public partial class MainForm
                 ShowStatusMessage("貼り付け(移動)はキャンセルされました。");
                 return;
             }
+            if (!TryBuildPasteFinalPlan(
+                    validPaths,
+                    destDir,
+                    isCut,
+                    out IReadOnlyList<PasteFinalAction> finalPastePlan,
+                    out int plannedRenamedCount,
+                    out string? plannedFirstRenamedName,
+                    out bool plannedCanRecordMoveUndoBatch,
+                    out bool plannedCanRecordCreatedFilesUndoBatch))
+            {
+                ShowStatusMessage("貼り付けはキャンセルされました。");
+                return;
+            }
+            IReadOnlyList<LinkOperationRoot> pasteLinkRoots = finalPastePlan
+                .Where(action => !action.Skip)
+                .Select(action => new LinkOperationRoot(action.SourcePath, action.DestinationPath))
+                .ToList();
+            IReadOnlyList<LinkOperationRoot> helperPasteLinkRoots = isCut
+                ? LinkOperationPreparationService.BuildCrossVolumeMoveRoots(pasteLinkRoots)
+                : pasteLinkRoots;
+            LinkPreparation linkPreparation = await PreparePasteLinksAsync(
+                helperPasteLinkRoots,
+                allowHelper: helperPasteLinkRoots.Count > 0,
+                CancellationToken.None);
+            if (linkPreparation.Canceled)
+            {
+                ShowStatusMessage("リンク処理のキャンセルにより貼り付けを中止しました。");
+                return;
+            }
             string pasteOperationDisplayName = isCut ? "貼り付け(移動)" : "貼り付け(コピー)";
+            if (GuardMutationBusy()) return;
             CancellationToken token = PrepareFileOperation(pasteOperationDisplayName);
             int pasteStatusVersion = _fileOpUiState.StatusVersion;
             ShowStatusMessage(FileOperationPresentationHelper.GetOperationStartingMessage("Paste", validPaths.Count, destDir));
@@ -2136,209 +2173,129 @@ public partial class MainForm
                 int skipCount = 0;
                 int failCount = 0;
                 int renamedCount = 0;
+                int linkSuccessCount = linkPreparation.SuccessfulTopLevelSources.Count;
+                int linkSkipCount = linkPreparation.SkipCount;
+                int linkFailCount = linkPreparation.FailCount;
                 bool wasCancelled = false;
-                bool canRecordMoveUndoBatch = isCut;
-                bool canRecordCreatedFilesUndoBatch = !isCut;
-                bool applyRenameCopyToAllSameDirectory = false;
-                CopyCollisionDecision? applyToAllDecision = null;
-                DirectoryMergeDecision? directoryApplyToAllDecision = null;
+                bool canRecordMoveUndoBatch = plannedCanRecordMoveUndoBatch;
+                bool canRecordCreatedFilesUndoBatch = plannedCanRecordCreatedFilesUndoBatch;
+                int plannedSkipCount = finalPastePlan.Count(action => action.Skip);
                 var successfulMoveUndoItems = new List<(string SourcePath, string DestinationPath)>();
                 var successfulCreatedFilePaths = new List<string>();
-                foreach (var sourcePath in validPaths)
+                foreach (PasteFinalAction action in finalPastePlan)
                 {
                     if (token.IsCancellationRequested)
                     {
                         wasCancelled = true;
                         break;
                     }
-                    string fileName = Path.GetFileName(sourcePath);
-                    string destPath = Path.Combine(destDir, fileName);
+                    string sourcePath = action.SourcePath;
+                    string destPath = action.DestinationPath;
+                    string fileName = Path.GetFileName(destPath);
+                    if (linkPreparation.ExcludedSources.Contains(sourcePath))
+                    {
+                        if (isCut && linkPreparation.SuccessfulTopLevelSources.Contains(sourcePath))
+                        {
+                            FileOperationService.Delete(sourcePath);
+                        }
+                        continue;
+                    }
                     progress.Report(new FileOperationProgress(successCount + skipCount + failCount + 1, validPaths.Count, fileName));
-                    if (string.Equals(
-                        NavigationService.NormalizeDirectoryForCompare(Path.GetDirectoryName(sourcePath) ?? string.Empty),
-                        NavigationService.NormalizeDirectoryForCompare(destDir),
-                        StringComparison.OrdinalIgnoreCase))
+                    if (action.Skip)
                     {
-                        if (!isCut)
+                        skipCount++;
+                        continue;
+                    }
+                    if (action.Merge)
+                    {
+                        try
                         {
-                            string originalDestPath = destPath;
-                            if (!applyRenameCopyToAllSameDirectory)
+                            if (isCut)
                             {
-                                string suggestedPath = FileOperationService.GetUniquePath(destPath);
-                                string suggestedName = Path.GetFileName(suggestedPath);
-                                var sameDirDecision = (PasteSameDirectoryConfirmAction)this.Invoke(new Func<PasteSameDirectoryConfirmAction>(() =>
-                                {
-                                    ShowStatusMessage(FileOperationPresentationHelper.GetSameDirectoryAliasCopyConfirmationMessage(fileName, suggestedName));
-                                    return _fileOperationDialogCoordinator.ConfirmPasteSameDirectory(this, fileName, suggestedName, validPaths.Count > 1);
-                                }));
-                                if (sameDirDecision == PasteSameDirectoryConfirmAction.Cancel)
+                                CopyCollisionDecision? mergeFileDecision = null;
+                                PasteMoveDirectoryIntoExisting(
+                                    sourcePath,
+                                    destPath,
+                                    ref mergeFileDecision,
+                                    out bool directoryShouldCancel,
+                                    out int directorySkipCount,
+                                    out int directoryFailCount,
+                                    linkPreparation.ExcludedSources,
+                                    linkPreparation.SuccessfulSources);
+                                if (directoryShouldCancel)
                                 {
                                     wasCancelled = true;
                                     break;
                                 }
-                                if (sameDirDecision == PasteSameDirectoryConfirmAction.No)
-                                {
-                                    skipCount++;
-                                    continue;
-                                }
-                                if (sameDirDecision == PasteSameDirectoryConfirmAction.All)
-                                {
-                                    applyRenameCopyToAllSameDirectory = true;
-                                }
+                                skipCount += directorySkipCount;
+                                failCount += directoryFailCount;
+                                if (directorySkipCount > 0 || directoryFailCount > 0)
+                                    canRecordMoveUndoBatch = false;
                             }
-                            ShowFileOperationProgressIfCurrent(
-                                pasteStatusVersion,
-                                pasteOperationDisplayName,
-                                successCount + skipCount + failCount + 1,
-                                validPaths.Count,
-                                fileName,
-                                usePasteProgress: true,
-                                isCut: isCut);
-                            destPath = FileOperationService.GetUniquePath(destPath);
-                            fileName = Path.GetFileName(destPath);
-                            if (!string.Equals(originalDestPath, destPath, StringComparison.OrdinalIgnoreCase))
+                            else
                             {
-                                renamedCount++;
-                                firstRenamedName ??= fileName;
-                            }
-                        }
-                        else
-                        {
-                            skipCount++;
-                            continue;
-                        }
-                    }
-                    bool sourceIsDir = Directory.Exists(sourcePath);
-                    if (!isCut && sourceIsDir)
-                    {
-                        canRecordCreatedFilesUndoBatch = false;
-                    }
-                    bool destExists = File.Exists(destPath) || Directory.Exists(destPath);
-                    bool overwriteMove = false;
-                    if (destExists)
-                    {
-                        bool destIsDir = Directory.Exists(destPath);
-                        if (sourceIsDir != destIsDir)
-                        {
-                            string conflictPath = destPath;
-                            this.Invoke(() => _fileOperationDialogCoordinator.ShowTypeMismatchConflict(this, conflictPath));
-                            failCount++;
-                            canRecordMoveUndoBatch = false;
-                            continue;
-                        }
-                        if (sourceIsDir)
-                        {
-                            canRecordMoveUndoBatch = false;
-                            canRecordCreatedFilesUndoBatch = false;
-                            if (!TryResolvePasteDirectoryMerge(sourcePath, destPath, isCut, ref directoryApplyToAllDecision, out bool pasteShouldSkip, out bool pasteShouldCancel))
-                            {
-                                if (pasteShouldCancel)
+                                CopyCollisionDecision? mergeFileDecision = null;
+                                PasteCopyDirectoryIntoExisting(
+                                    sourcePath,
+                                    destPath,
+                                    ref mergeFileDecision,
+                                    out bool directoryShouldCancel,
+                                    linkPreparation.ExcludedSources);
+                                if (directoryShouldCancel)
                                 {
                                     wasCancelled = true;
                                     break;
                                 }
-                                if (pasteShouldSkip)
-                                {
-                                    skipCount++;
-                                    continue;
-                                }
                             }
-                            try
-                            {
-                                if (isCut)
-                                {
-                                    PasteMoveDirectoryIntoExisting(
-                                        sourcePath,
-                                        destPath,
-                                        ref applyToAllDecision,
-                                        out bool directoryShouldCancel,
-                                        out int directorySkipCount,
-                                        out int directoryFailCount);
-                                    if (directoryShouldCancel)
-                                    {
-                                        wasCancelled = true;
-                                        break;
-                                    }
-                                    skipCount += directorySkipCount;
-                                    failCount += directoryFailCount;
-                                }
-                                else
-                                {
-                                    PasteCopyDirectoryIntoExisting(sourcePath, destPath, ref applyToAllDecision, out bool directoryShouldCancel);
-                                    if (directoryShouldCancel)
-                                    {
-                                        wasCancelled = true;
-                                        break;
-                                    }
-                                }
-                                firstSuccessName ??= fileName;
-                                successCount++;
-                            }
-                            catch (OperationCanceledException)
-                            {
-                                wasCancelled = true;
-                                break;
-                            }
-                            catch (Exception ex)
-                            {
-                                string opErrName = isCut ? "貼り付け(移動)" : "貼り付け(コピー)";
-                                LogService.Error($"{opErrName}フォルダ統合失敗: {fileName}", ex);
-                                failCount++;
-                            }
-                            continue;
+                            firstSuccessName ??= fileName;
+                            successCount++;
                         }
-                        var collisionResolution = (PasteCollisionResolution)this.Invoke(() =>
-                        {
-                            ShowStatusMessage(FileOperationPresentationHelper.GetConflictConfirmationMessage(
-                                isCut ? "貼り付け(移動)" : "貼り付け(コピー)",
-                                fileName));
-                            return _fileOperationDialogCoordinator.ResolvePasteCollision(
-                                this,
-                                sourcePath,
-                                destPath,
-                                allowRename: !isCut,
-                                isCut: isCut,
-                                ref applyToAllDecision);
-                        });
-                        if (collisionResolution.ShouldCancel)
+                        catch (OperationCanceledException)
                         {
                             wasCancelled = true;
                             break;
                         }
-                        if (collisionResolution.ShouldSkip)
+                        catch (Exception ex)
                         {
-                            skipCount++;
-                            canRecordMoveUndoBatch = false;
-                            canRecordCreatedFilesUndoBatch = false;
-                            continue;
+                            string opErrName = isCut ? "貼り付け(移動)" : "貼り付け(コピー)";
+                            LogService.Error($"{opErrName}フォルダ統合失敗: {fileName}", ex);
+                            failCount++;
                         }
-                        ShowFileOperationProgressIfCurrent(
-                            pasteStatusVersion,
-                            pasteOperationDisplayName,
-                            successCount + skipCount + failCount + 1,
-                            validPaths.Count,
-                            fileName,
-                            usePasteProgress: true,
-                            isCut: isCut);
-                        destPath = collisionResolution.DestinationPath;
-                        fileName = Path.GetFileName(destPath);
-                        overwriteMove = collisionResolution.OverwriteExisting;
-                        if (overwriteMove)
-                        {
-                            canRecordMoveUndoBatch = false;
-                            canRecordCreatedFilesUndoBatch = false;
-                        }
-                        if (collisionResolution.UsedRenameCopy)
-                        {
-                            renamedCount++;
-                            firstRenamedName ??= collisionResolution.RenameTargetName ?? fileName;
-                        }
+                        continue;
                     }
                     try
                     {
                         if (isCut)
                         {
-                            FileOperationService.Move(sourcePath, destPath, overwriteMove, suppressLogging: validPaths.Count > 100);
+                            if (!action.OverwriteMove &&
+                                FileOperationService.IsDirectoryContainerPath(sourcePath) &&
+                                !FileOperationService.HaveSameStorageRoot(sourcePath, destPath) &&
+                                Directory.Exists(destPath))
+                            {
+                                CopyCollisionDecision? mergeFileDecision = null;
+                                PasteMoveDirectoryIntoExisting(
+                                    sourcePath,
+                                    destPath,
+                                    ref mergeFileDecision,
+                                    out bool directoryShouldCancel,
+                                    out int directorySkipCount,
+                                    out int directoryFailCount,
+                                    linkPreparation.ExcludedSources,
+                                    linkPreparation.SuccessfulSources);
+                                if (directoryShouldCancel)
+                                {
+                                    wasCancelled = true;
+                                    break;
+                                }
+                                skipCount += directorySkipCount;
+                                failCount += directoryFailCount;
+                                if (directorySkipCount > 0 || directoryFailCount > 0)
+                                    canRecordMoveUndoBatch = false;
+                            }
+                            else
+                            {
+                                FileOperationService.Move(sourcePath, destPath, action.OverwriteMove, suppressLogging: validPaths.Count > 100);
+                            }
                             if (canRecordMoveUndoBatch)
                             {
                                 successfulMoveUndoItems.Add((sourcePath, destPath));
@@ -2346,7 +2303,7 @@ public partial class MainForm
                         }
                         else
                         {
-                            FileOperationService.Copy(sourcePath, destPath);
+                            FileOperationService.Copy(sourcePath, destPath, linkPreparation.ExcludedSources);
                             if (canRecordCreatedFilesUndoBatch && File.Exists(destPath))
                             {
                                 successfulCreatedFilePaths.Add(destPath);
@@ -2364,13 +2321,15 @@ public partial class MainForm
                         canRecordCreatedFilesUndoBatch = false;
                     }
                 }
+                renamedCount = plannedRenamedCount;
+                firstRenamedName = plannedFirstRenamedName;
                 IReadOnlyList<FileOperationUndoRedoItem> moveUndoItems =
                     canRecordMoveUndoBatch &&
                     !wasCancelled &&
                     failCount == 0 &&
                     skipCount == 0 &&
-                    successCount == validPaths.Count &&
-                    successfulMoveUndoItems.Count == validPaths.Count
+                    successCount + linkSuccessCount == validPaths.Count &&
+                    successfulMoveUndoItems.Count == validPaths.Count - linkSuccessCount - plannedSkipCount
                         ? FileOperationUndoRedoService.CreateMoveBatch(successfulMoveUndoItems)
                         : Array.Empty<FileOperationUndoRedoItem>();
                 IReadOnlyList<FileOperationUndoRedoItem> createdFilesUndoItems =
@@ -2378,11 +2337,12 @@ public partial class MainForm
                     !wasCancelled &&
                     failCount == 0 &&
                     skipCount == 0 &&
-                    successCount == validPaths.Count &&
-                    successfulCreatedFilePaths.Count == validPaths.Count
+                    successCount + linkSuccessCount == validPaths.Count &&
+                    successfulCreatedFilePaths.Count == validPaths.Count - linkSuccessCount - plannedSkipCount
                         ? FileOperationUndoRedoService.CreateCreatedFilesBatch(successfulCreatedFilePaths)
                         : Array.Empty<FileOperationUndoRedoItem>();
-                return (successCount, skipCount, failCount, wasCancelled, firstSuccessName, renamedCount, firstRenamedName, moveUndoItems, createdFilesUndoItems);
+                return (successCount: successCount + linkSuccessCount, skipCount: skipCount + linkSkipCount, failCount: failCount + linkFailCount,
+                    wasCancelled, firstSuccessName, renamedCount, firstRenamedName, moveUndoItems, createdFilesUndoItems);
             }, token);
             if (isCut && !result.wasCancelled && result.successCount > 0 && result.failCount == 0 && result.skipCount == 0 && beforeSnapshot != null)
             {
@@ -2636,8 +2596,8 @@ public partial class MainForm
         appliedPolicy = CopyCollisionPolicy.Cancel;
         shouldSkip = false;
         shouldCancel = false;
-        bool sourceIsDir = Directory.Exists(sourcePath);
-        bool destIsDir = Directory.Exists(destPath);
+        bool sourceIsDir = FileOperationService.IsDirectoryContainerPath(sourcePath);
+        bool destIsDir = FileOperationService.IsDirectoryContainerPath(destPath);
         if (sourceIsDir != destIsDir)
         {
             string conflictPath = destPath;
@@ -2981,18 +2941,23 @@ public partial class MainForm
         string sourceDir,
         string destinationDir,
         ref CopyCollisionDecision? fileApplyToAllDecision,
-        CancellationToken token)
+        CancellationToken token,
+        ISet<string>? excludedReparsePaths = null)
     {
         foreach (var entry in FileOperationService.BuildDirectoryCopyPlan(sourceDir, destinationDir))
         {
             token.ThrowIfCancellationRequested();
+            if (excludedReparsePaths?.Contains(entry.SourcePath) == true)
+            {
+                continue;
+            }
             if (entry.IsDirectory)
             {
                 Directory.CreateDirectory(entry.DestinationPath);
                 continue;
             }
             string destinationPath = entry.DestinationPath;
-            bool destExists = File.Exists(destinationPath) || Directory.Exists(destinationPath);
+            bool destExists = PathExists(destinationPath);
             if (destExists)
             {
                 if (!TryResolveCopyCollision(entry.SourcePath, ref destinationPath, ref fileApplyToAllDecision, out _, out bool shouldSkip, out bool shouldCancel))
@@ -3007,25 +2972,30 @@ public partial class MainForm
                     }
                 }
             }
-            FileOperationService.Copy(entry.SourcePath, destinationPath);
+            FileOperationService.Copy(entry.SourcePath, destinationPath, excludedReparsePaths);
         }
     }
     private void PasteCopyDirectoryIntoExisting(
         string sourceDir,
         string destinationDir,
         ref CopyCollisionDecision? fileApplyToAllDecision,
-        out bool shouldCancel)
+        out bool shouldCancel,
+        ISet<string>? excludedReparsePaths = null)
     {
         shouldCancel = false;
         foreach (var entry in FileOperationService.BuildDirectoryCopyPlan(sourceDir, destinationDir))
         {
+            if (excludedReparsePaths?.Contains(entry.SourcePath) == true)
+            {
+                continue;
+            }
             if (entry.IsDirectory)
             {
                 Directory.CreateDirectory(entry.DestinationPath);
                 continue;
             }
             string destinationPath = entry.DestinationPath;
-            bool destExists = File.Exists(destinationPath) || Directory.Exists(destinationPath);
+            bool destExists = PathExists(destinationPath);
             if (destExists)
             {
                 var collisionResolution = _fileOperationDialogCoordinator.ResolvePasteCollision(
@@ -3046,7 +3016,7 @@ public partial class MainForm
                 }
                 destinationPath = collisionResolution.DestinationPath;
             }
-            FileOperationService.Copy(entry.SourcePath, destinationPath);
+            FileOperationService.Copy(entry.SourcePath, destinationPath, excludedReparsePaths);
         }
     }
     private void PasteMoveDirectoryIntoExisting(
@@ -3055,7 +3025,9 @@ public partial class MainForm
         ref CopyCollisionDecision? fileApplyToAllDecision,
         out bool shouldCancel,
         out int skipCount,
-        out int failCount)
+        out int failCount,
+        ISet<string>? excludedReparsePaths = null,
+        ISet<string>? successfulPreparedReparsePaths = null)
     {
         MoveDirectoryIntoExistingWithCollisionResolution(
             sourceDir,
@@ -3064,7 +3036,9 @@ public partial class MainForm
             "貼り付け(移動)",
             out shouldCancel,
             out skipCount,
-            out failCount);
+            out failCount,
+            excludedReparsePaths,
+            successfulPreparedReparsePaths);
     }
     private void DirectMoveDirectoryIntoExisting(
         string sourceDir,
@@ -3072,7 +3046,9 @@ public partial class MainForm
         ref CopyCollisionDecision? fileApplyToAllDecision,
         out bool shouldCancel,
         out int skipCount,
-        out int failCount)
+        out int failCount,
+        ISet<string>? excludedReparsePaths = null,
+        ISet<string>? successfulPreparedReparsePaths = null)
     {
         MoveDirectoryIntoExistingWithCollisionResolution(
             sourceDir,
@@ -3081,7 +3057,9 @@ public partial class MainForm
             "移動",
             out shouldCancel,
             out skipCount,
-            out failCount);
+            out failCount,
+            excludedReparsePaths,
+            successfulPreparedReparsePaths);
     }
     private void MoveDirectoryIntoExistingWithCollisionResolution(
         string sourceDir,
@@ -3090,7 +3068,9 @@ public partial class MainForm
         string operationLogLabel,
         out bool shouldCancel,
         out int skipCount,
-        out int failCount)
+        out int failCount,
+        ISet<string>? excludedReparsePaths = null,
+        ISet<string>? successfulPreparedReparsePaths = null)
     {
         shouldCancel = false;
         skipCount = 0;
@@ -3099,6 +3079,10 @@ public partial class MainForm
         bool suppressItemSuccessLogs = copyPlan.Count > 100;
         foreach (var entry in copyPlan)
         {
+            if (excludedReparsePaths?.Contains(entry.SourcePath) == true)
+            {
+                continue;
+            }
             if (entry.IsDirectory)
             {
                 Directory.CreateDirectory(entry.DestinationPath);
@@ -3106,7 +3090,7 @@ public partial class MainForm
             }
             string destinationPath = entry.DestinationPath;
             bool overwriteMove = false;
-            bool destExists = File.Exists(destinationPath) || Directory.Exists(destinationPath);
+            bool destExists = PathExists(destinationPath);
             if (destExists)
             {
                 var collisionResolution = PasteCollisionResolver.Resolve(
@@ -3139,26 +3123,12 @@ public partial class MainForm
                 failCount++;
             }
         }
-        DeleteEmptyDirectoriesBottomUp(sourceDir);
-    }
-    private static void DeleteEmptyDirectoriesBottomUp(string rootDir)
-    {
-        if (!Directory.Exists(rootDir))
-        {
-            return;
-        }
-        foreach (string directoryPath in Directory.EnumerateDirectories(rootDir, "*", SearchOption.AllDirectories)
-                     .OrderByDescending(path => path.Length))
-        {
-            if (!Directory.EnumerateFileSystemEntries(directoryPath).Any())
-            {
-                Directory.Delete(directoryPath, false);
-            }
-        }
-        if (Directory.Exists(rootDir) && !Directory.EnumerateFileSystemEntries(rootDir).Any())
-        {
-            Directory.Delete(rootDir, false);
-        }
+        failCount += FileOperationService.DeleteSuccessfulPreparedReparsePointsUnderSource(
+            sourceDir,
+            excludedReparsePaths,
+            successfulPreparedReparsePaths,
+            operationLogLabel);
+        FileOperationService.DeleteEmptyDirectoriesBottomUp(sourceDir);
     }
     private bool TryExtractSevenZipProgress(string line, out string percent)
     {

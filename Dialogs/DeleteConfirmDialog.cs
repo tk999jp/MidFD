@@ -13,7 +13,8 @@ internal static class DeleteConfirmDialog
         MessageBoxIcon icon,
         string? summaryText,
         string? warningText,
-        bool requireAltYes = false)
+        bool requireAltYes = false,
+        bool usePermanentDelete = false)
     {
         using DeleteConfirmForm form = new()
         {
@@ -94,7 +95,9 @@ internal static class DeleteConfirmDialog
 
         Button yesButton = new()
         {
-            Text = requireAltYes ? "完全削除(Alt+Y)" : "はい(&Y)",
+            Text = requireAltYes
+                ? (usePermanentDelete ? "完全削除(Alt+Y)" : "はい(Alt+Y)")
+                : "はい(&Y)",
             MinimumSize = new Size(96, 30),
             DialogResult = DialogResult.Yes,
             TabIndex = 0

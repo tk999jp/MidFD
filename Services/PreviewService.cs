@@ -14,6 +14,30 @@ public sealed class LargeTextEncodingDetectionResult
     public string Reason { get; init; } = string.Empty;
 }
 
+public sealed class TextPreviewProbeResult
+{
+    public long ObservedLength { get; init; }
+    public int RequestedBytes { get; init; }
+    public int ReadCount { get; init; }
+    public byte[] Sample { get; init; } = Array.Empty<byte>();
+    public bool HasBom { get; init; }
+    public Encoding Encoding { get; init; } = Encoding.UTF8;
+    public string EncodingLabel { get; init; } = "UTF-8";
+    public bool Utf8StrictValid { get; init; }
+    public int NulCount { get; init; }
+    public double NulRatio { get; init; }
+    public int ControlCount { get; init; }
+    public double ControlRatio { get; init; }
+    public bool HasLongLine { get; init; }
+    public bool UseLargeText { get; init; }
+    public bool IsBinaryLike { get; init; }
+    public bool TextPositive { get; init; }
+    public bool ReadFailed { get; init; }
+    public int RetryCount { get; init; }
+    public bool ObservationInconsistent { get; init; }
+    public string Reason { get; init; } = string.Empty;
+}
+
 public static class PreviewService
 {
     internal const int LargeTextThresholdBytes = 2 * 1024 * 1024; // 2MB
@@ -43,6 +67,12 @@ public static class PreviewService
 
     public static PreviewKind GetPreviewKind(string path)
     {
+        return GetPreviewKind(path, out _);
+    }
+
+    public static PreviewKind GetPreviewKind(string path, out TextPreviewProbeResult? probe)
+    {
+        probe = null;
         if (string.IsNullOrEmpty(path)) return PreviewKind.None;
         if (Directory.Exists(path)) return PreviewKind.None;
         if (!File.Exists(path)) return PreviewKind.None;
@@ -75,17 +105,26 @@ public static class PreviewService
 
         if (ExternalToolService.IsEditorTargetExtension(path))
         {
-            return (IsLargeFile(path) || HasLongLine(path)) ? PreviewKind.LargeText : PreviewKind.Text;
+            probe = ProbeTextPreviewWithRetry(path);
+            return ResolveTextPreviewKind(probe);
         }
 
         // Phase 3-viewer-fix2: 未知の拡張子でも内容からテキストか判定を試みる
-        if (IsLikelyText(path))
+        probe = ProbeTextPreviewWithRetry(path);
+        if (probe.TextPositive)
         {
-            return (IsLargeFile(path) || HasLongLine(path)) ? PreviewKind.LargeText : PreviewKind.Text;
+            return ResolveTextPreviewKind(probe);
         }
 
         // 依然として不明な場合はバイナリ扱い
         return PreviewKind.Binary;
+    }
+
+    public static PreviewKind ResolveTextPreviewKind(TextPreviewProbeResult probe)
+    {
+        return probe.ReadFailed || !probe.TextPositive
+            ? PreviewKind.Binary
+            : probe.UseLargeText ? PreviewKind.LargeText : PreviewKind.Text;
     }
 
     public static PreviewKind GetPreviewKindShallow(string path, bool isDirectory)
@@ -176,100 +215,222 @@ public static class PreviewService
     /// </summary>
     public static LargeTextEncodingDetectionResult DetectLargeTextEncoding(string path, int sampleBytes = 128 * 1024)
     {
-        Encoding.RegisterProvider(CodePagesEncodingProvider.Instance);
-
-        using var fs = File.OpenRead(path);
-        if (fs.Length == 0)
-        {
-            return new LargeTextEncodingDetectionResult
-            {
-                Encoding = Encoding.UTF8,
-                EncodingLabel = "UTF-8",
-                HasBom = false,
-                Reason = "empty-file"
-            };
-        }
-
-        int readSize = (int)Math.Min(fs.Length, sampleBytes);
-        byte[] buffer = new byte[readSize];
-        int readCount = fs.Read(buffer, 0, readSize);
-        if (readCount <= 0)
-        {
-            return new LargeTextEncodingDetectionResult
-            {
-                Encoding = Encoding.UTF8,
-                EncodingLabel = "UTF-8",
-                HasBom = false,
-                Reason = "empty-sample"
-            };
-        }
-
-        if (readCount >= 3 && buffer[0] == 0xEF && buffer[1] == 0xBB && buffer[2] == 0xBF)
-        {
-            return new LargeTextEncodingDetectionResult
-            {
-                Encoding = Encoding.UTF8,
-                EncodingLabel = "UTF-8 BOM",
-                HasBom = true,
-                IsLongLineDetected = HasLongLine(path),
-                Reason = "bom-utf8"
-            };
-        }
-
-        if (readCount >= 2 && buffer[0] == 0xFF && buffer[1] == 0xFE)
-        {
-            return new LargeTextEncodingDetectionResult
-            {
-                Encoding = Encoding.Unicode,
-                EncodingLabel = "UTF-16 LE",
-                HasBom = true,
-                IsLongLineDetected = HasLongLine(path),
-                Reason = "bom-utf16le"
-            };
-        }
-
-        if (readCount >= 2 && buffer[0] == 0xFE && buffer[1] == 0xFF)
-        {
-            return new LargeTextEncodingDetectionResult
-            {
-                Encoding = Encoding.BigEndianUnicode,
-                EncodingLabel = "UTF-16 BE",
-                HasBom = true,
-                IsLongLineDetected = HasLongLine(path),
-                Reason = "bom-utf16be"
-            };
-        }
-
-        if (IsBinaryLikeSample(buffer, readCount))
-        {
-            return new LargeTextEncodingDetectionResult
-            {
-                Encoding = Encoding.UTF8,
-                EncodingLabel = "Binary-like",
-                IsBinaryLike = true,
-                Reason = "binary-like-sample"
-            };
-        }
-
-        if (TryDecodeAsUtf8Strict(buffer, readCount))
-        {
-            return new LargeTextEncodingDetectionResult
-            {
-                Encoding = Encoding.UTF8,
-                EncodingLabel = "UTF-8",
-                HasBom = false,
-                IsLongLineDetected = HasLongLine(path),
-                Reason = "utf8-strict-ok"
-            };
-        }
-
+        TextPreviewProbeResult probe = ProbeTextPreview(path, sampleBytes);
         return new LargeTextEncodingDetectionResult
         {
-            Encoding = Encoding.GetEncoding(932),
-            EncodingLabel = "CP932",
-            HasBom = false,
-            IsLongLineDetected = HasLongLine(path),
-            Reason = "cp932-fallback"
+            Encoding = probe.Encoding,
+            EncodingLabel = probe.EncodingLabel,
+            HasBom = probe.HasBom,
+            IsBinaryLike = probe.IsBinaryLike,
+            IsLongLineDetected = probe.HasLongLine,
+            Reason = probe.Reason
+        };
+    }
+
+    public static TextPreviewProbeResult ProbeTextPreview(string path, int requestedBytes = 512 * 1024)
+    {
+        try
+        {
+            using FileStream stream = new(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+            return ProbeTextPreview(stream, stream.Length, requestedBytes);
+        }
+        catch (Exception ex) when (ex is IOException || ex is UnauthorizedAccessException)
+        {
+            return new TextPreviewProbeResult
+            {
+                RequestedBytes = Math.Max(1, requestedBytes),
+                ReadFailed = true,
+                Reason = ex is UnauthorizedAccessException ? "read-unauthorized" : "read-error"
+            };
+        }
+    }
+
+    private static TextPreviewProbeResult ProbeTextPreviewWithRetry(string path)
+    {
+        TextPreviewProbeResult first = ProbeTextPreview(path);
+        if (first.ReadFailed || !first.TextPositive || first.ObservedLength <= LargeTextThresholdBytes
+            || first.ReadCount >= first.RequestedBytes)
+        {
+            return first;
+        }
+
+        TextPreviewProbeResult second = ProbeTextPreview(path);
+        if (second.TextPositive && second.ReadCount == first.ReadCount && second.ReadCount < second.RequestedBytes
+            && second.ObservedLength <= LargeTextThresholdBytes)
+        {
+            return CloneProbe(second, useLargeText: false, retryCount: 1, observationInconsistent: false, reason: "reprobe-stable-small-text");
+        }
+
+        if (second.IsBinaryLike && second.ReadCount == first.ReadCount)
+        {
+            return CloneProbe(second, useLargeText: false, retryCount: 1, observationInconsistent: false, reason: "reprobe-stable-binary-like");
+        }
+
+        return CloneProbe(first, useLargeText: false, retryCount: 1, observationInconsistent: true, reason: "reprobe-observation-inconsistent");
+    }
+
+    private static TextPreviewProbeResult CloneProbe(
+        TextPreviewProbeResult source,
+        bool useLargeText,
+        int retryCount,
+        bool observationInconsistent,
+        string reason)
+    {
+        return new TextPreviewProbeResult
+        {
+            ObservedLength = source.ObservedLength,
+            RequestedBytes = source.RequestedBytes,
+            ReadCount = source.ReadCount,
+            Sample = source.Sample,
+            HasBom = source.HasBom,
+            Encoding = source.Encoding,
+            EncodingLabel = source.EncodingLabel,
+            Utf8StrictValid = source.Utf8StrictValid,
+            NulCount = source.NulCount,
+            NulRatio = source.NulRatio,
+            ControlCount = source.ControlCount,
+            ControlRatio = source.ControlRatio,
+            HasLongLine = source.HasLongLine,
+            UseLargeText = useLargeText,
+            IsBinaryLike = source.IsBinaryLike,
+            TextPositive = source.TextPositive,
+            ReadFailed = source.ReadFailed,
+            RetryCount = retryCount,
+            ObservationInconsistent = observationInconsistent,
+            Reason = reason
+        };
+    }
+
+    internal static TextPreviewProbeResult ProbeTextPreview(Stream stream, long observedLength, int requestedBytes)
+    {
+        Encoding.RegisterProvider(CodePagesEncodingProvider.Instance);
+        int requested = Math.Max(1, requestedBytes);
+        byte[] buffer = new byte[(int)Math.Min(observedLength, requested)];
+        int totalRead = 0;
+        try
+        {
+            totalRead = ReadUpTo(stream, buffer, CancellationToken.None);
+        }
+        catch (IOException)
+        {
+            return new TextPreviewProbeResult
+            {
+                ObservedLength = observedLength,
+                RequestedBytes = requested,
+                ReadCount = totalRead,
+                Sample = buffer[..totalRead],
+                ReadFailed = true,
+                Reason = "read-error"
+            };
+        }
+
+        byte[] sample = buffer[..totalRead];
+        return AnalyzeTextPreviewSample(observedLength, requested, sample);
+    }
+
+    private static TextPreviewProbeResult AnalyzeTextPreviewSample(long observedLength, int requestedBytes, byte[] sample)
+    {
+        int length = sample.Length;
+        bool utf8Bom = length >= 3 && sample[0] == 0xEF && sample[1] == 0xBB && sample[2] == 0xBF;
+        bool utf16LeBom = length >= 2 && sample[0] == 0xFF && sample[1] == 0xFE;
+        bool utf16BeBom = length >= 2 && sample[0] == 0xFE && sample[1] == 0xFF;
+        bool utf16Bom = utf16LeBom || utf16BeBom;
+        int nulCount = 0;
+        int controlCount = 0;
+        int currentLineLength = 0;
+        bool hasLongLine = false;
+        for (int i = 0; i < length; i++)
+        {
+            byte value = sample[i];
+            if (value == 0) nulCount++;
+            if (value < 0x20 && value != 0x09 && value != 0x0A && value != 0x0D && (!utf16Bom || value != 0)) controlCount++;
+            if (value == 0x0A)
+            {
+                currentLineLength = 0;
+            }
+            else if (value != 0x0D)
+            {
+                currentLineLength++;
+                if (currentLineLength > 32 * 1024)
+                {
+                    hasLongLine = true;
+                }
+            }
+        }
+        if (length >= 32 * 1024 && currentLineLength >= 32 * 1024)
+        {
+            hasLongLine = true;
+        }
+
+        double nulRatio = length == 0 ? 0 : (double)nulCount / length;
+        double controlRatio = length == 0 ? 0 : (double)controlCount / length;
+        bool utf8Strict = !utf8Bom && !utf16LeBom && !utf16BeBom && TryDecodeAsUtf8Strict(sample, length);
+        Encoding encoding = Encoding.UTF8;
+        string encodingLabel = "UTF-8";
+        string reason = "empty-file";
+        bool bom = utf8Bom || utf16LeBom || utf16BeBom;
+        bool utf16Valid = true;
+        bool utf16ContentBinary = false;
+        if (utf8Bom)
+        {
+            encodingLabel = "UTF-8 BOM";
+            reason = "bom-utf8";
+        }
+        else if (utf16LeBom)
+        {
+            encoding = new UnicodeEncoding(false, true, true);
+            encodingLabel = "UTF-16 LE";
+            reason = "bom-utf16le";
+            utf16Valid = TryDecodeUtf16(sample, 2, length - 2, observedLength > length, encoding, out string decoded);
+            utf16ContentBinary = utf16Valid && IsBinaryTextContent(decoded);
+        }
+        else if (utf16BeBom)
+        {
+            encoding = new UnicodeEncoding(true, true, true);
+            encodingLabel = "UTF-16 BE";
+            reason = "bom-utf16be";
+            utf16Valid = TryDecodeUtf16(sample, 2, length - 2, observedLength > length, encoding, out string decoded);
+            utf16ContentBinary = utf16Valid && IsBinaryTextContent(decoded);
+        }
+        else if (utf8Strict)
+        {
+            reason = "utf8-strict-ok";
+        }
+        else
+        {
+            encoding = Encoding.GetEncoding(932);
+            encodingLabel = "CP932";
+            reason = "cp932-fallback";
+        }
+
+        bool rawBinaryEvidence = nulRatio >= 0.02 || controlRatio >= 0.20;
+        bool binarySignature = HasKnownBinarySignature(sample, 0, length)
+            || (utf16Bom && HasKnownBinarySignature(sample, 2, length - 2));
+        bool binaryEvidence = binarySignature || (utf16Bom ? !utf16Valid || utf16ContentBinary : rawBinaryEvidence);
+        bool lowBinaryRatios = nulRatio < 0.02 && controlRatio < 0.20;
+        bool textPositive = length == 0 || (!binarySignature && utf16Bom && utf16Valid && !utf16ContentBinary)
+            || (!utf16Bom && bom && lowBinaryRatios)
+            || (!binarySignature && !utf16Bom && lowBinaryRatios && (utf8Strict || encoding.CodePage == 932));
+        bool useLargeText = observedLength > LargeTextThresholdBytes || hasLongLine;
+        return new TextPreviewProbeResult
+        {
+            ObservedLength = observedLength,
+            RequestedBytes = requestedBytes,
+            ReadCount = length,
+            Sample = sample,
+            HasBom = bom,
+            Encoding = encoding,
+            EncodingLabel = encodingLabel,
+            Utf8StrictValid = utf8Strict,
+            NulCount = nulCount,
+            NulRatio = nulRatio,
+            ControlCount = controlCount,
+            ControlRatio = controlRatio,
+            HasLongLine = hasLongLine,
+            UseLargeText = useLargeText,
+            IsBinaryLike = binaryEvidence && !textPositive,
+            TextPositive = textPositive,
+            Reason = reason
         };
     }
 
@@ -403,7 +564,7 @@ public static class PreviewService
 
                 int bytesToRead = (int)Math.Min(fs.Length, maxBytes);
                 byte[] buffer = new byte[bytesToRead];
-                int readCount = fs.Read(buffer, 0, bytesToRead);
+                int readCount = ReadUpTo(fs, buffer, token);
 
                 token.ThrowIfCancellationRequested();
 
@@ -416,7 +577,16 @@ public static class PreviewService
                 }
                 if (readCount >= 2 && buffer[0] == 0xFF && buffer[1] == 0xFE)
                 {
-                    return NormalizeNewlinesForViewer(System.Text.Encoding.Unicode.GetString(buffer, 2, readCount - 2))
+                    Encoding encoding = new UnicodeEncoding(false, true, true);
+                    if (!TryDecodeUtf16(buffer, 2, readCount - 2, fs.Length > readCount, encoding, out string decoded)) throw new InvalidDataException("Invalid UTF-16 LE preview payload.");
+                    return NormalizeNewlinesForViewer(decoded)
+                        + (fs.Length > maxBytes ? $"{Environment.NewLine}{Environment.NewLine}[... 表示節減されました ...]" : "");
+                }
+                if (readCount >= 2 && buffer[0] == 0xFE && buffer[1] == 0xFF)
+                {
+                    Encoding encoding = new UnicodeEncoding(true, true, true);
+                    if (!TryDecodeUtf16(buffer, 2, readCount - 2, fs.Length > readCount, encoding, out string decoded)) throw new InvalidDataException("Invalid UTF-16 BE preview payload.");
+                    return NormalizeNewlinesForViewer(decoded)
                         + (fs.Length > maxBytes ? $"{Environment.NewLine}{Environment.NewLine}[... 表示節減されました ...]" : "");
                 }
 
@@ -453,6 +623,85 @@ public static class PreviewService
         text = text.Replace("\r\n", "\n");
         text = text.Replace('\r', '\n');
         return text.Replace("\n", Environment.NewLine);
+    }
+
+    private static int ReadUpTo(Stream stream, byte[] buffer, CancellationToken token)
+    {
+        int totalRead = 0;
+        while (totalRead < buffer.Length)
+        {
+            token.ThrowIfCancellationRequested();
+            int read = stream.Read(buffer, totalRead, buffer.Length - totalRead);
+            if (read == 0)
+            {
+                break;
+            }
+            totalRead += read;
+        }
+        return totalRead;
+    }
+
+    private static bool TryDecodeUtf16(byte[] buffer, int offset, int byteCount, bool allowTruncatedTail, Encoding encoding, out string decoded)
+    {
+        decoded = string.Empty;
+        int safeLength = byteCount - (byteCount % 2);
+        if (safeLength != byteCount && !allowTruncatedTail) return false;
+        if (allowTruncatedTail && safeLength >= 2)
+        {
+            int last = offset + safeLength - 2;
+            ushort codeUnit = encoding.CodePage == 1201
+                ? (ushort)((buffer[last] << 8) | buffer[last + 1])
+                : (ushort)(buffer[last] | (buffer[last + 1] << 8));
+            if (char.IsHighSurrogate((char)codeUnit)) safeLength -= 2;
+        }
+        try
+        {
+            decoded = encoding.GetString(buffer, offset, safeLength);
+            return true;
+        }
+        catch (DecoderFallbackException)
+        {
+            return false;
+        }
+    }
+
+    private static bool IsBinaryTextContent(string text)
+    {
+        if (text.Length == 0) return false;
+        int binaryCount = text.Count(static c => c == '\0' || (c < 0x20 && c != '\t' && c != '\n' && c != '\r') || (c >= 0x7F && c <= 0x9F));
+        return (double)binaryCount / text.Length >= 0.20;
+    }
+
+    private static bool HasKnownBinarySignature(byte[] buffer, int offset, int length)
+    {
+        if (offset < 0 || length <= 0 || offset + length > buffer.Length) return false;
+        ReadOnlySpan<byte> sample = buffer.AsSpan(offset, length);
+        return HasPrefix(sample, [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A])
+            || HasPrefix(sample, [0x50, 0x4B, 0x03, 0x04])
+            || HasPrefix(sample, [0x50, 0x4B, 0x05, 0x06])
+            || HasPrefix(sample, [0x50, 0x4B, 0x07, 0x08])
+            || HasPrefix(sample, [0x25, 0x50, 0x44, 0x46, 0x2D])
+            || IsPeHeader(sample);
+    }
+
+    private static bool HasPrefix(ReadOnlySpan<byte> sample, byte[] prefix)
+    {
+        return sample.Length >= prefix.Length && sample[..prefix.Length].SequenceEqual(prefix);
+    }
+
+    private static bool IsPeHeader(ReadOnlySpan<byte> sample)
+    {
+        if (!HasPrefix(sample, [0x4D, 0x5A]) || sample.Length < 0x40) return false;
+        int peOffset = sample[0x3C]
+            | (sample[0x3D] << 8)
+            | (sample[0x3E] << 16)
+            | (sample[0x3F] << 24);
+        return peOffset >= 0
+            && peOffset <= sample.Length - 4
+            && sample[peOffset] == 0x50
+            && sample[peOffset + 1] == 0x45
+            && sample[peOffset + 2] == 0x00
+            && sample[peOffset + 3] == 0x00;
     }
 
     /// <summary>

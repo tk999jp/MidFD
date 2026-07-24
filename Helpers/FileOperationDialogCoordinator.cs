@@ -157,7 +157,7 @@ public sealed class FileOperationDialogCoordinator
         string? summaryText = FileOperationPresentationHelper.GetSelectionSummaryText(selection);
         string? warningText = FileOperationPresentationHelper.GetSelectionOutsideCurrentDirectoryWarning(selection, currentPath);
 
-        bool requireAltYes = usePermanentDelete && selection.Count > 1;
+        bool requireAltYes = RequiresAltYes(usePermanentDelete, selection.Count, warningText);
 
         DialogResult result = DeleteConfirmDialog.Show(
             owner,
@@ -166,7 +166,8 @@ public sealed class FileOperationDialogCoordinator
             dialog.Icon,
             summaryText,
             warningText,
-            requireAltYes);
+            requireAltYes,
+            usePermanentDelete);
         if (result == DialogResult.Yes)
         {
             return true;
@@ -174,6 +175,11 @@ public sealed class FileOperationDialogCoordinator
 
         showStatusMessage("削除はキャンセルされました。");
         return false;
+    }
+
+    public static bool RequiresAltYes(bool usePermanentDelete, int selectionCount, string? warningText)
+    {
+        return (usePermanentDelete && selectionCount > 1) || warningText != null;
     }
 
     public DeleteCancelResolution ShowDeleteCancelResolution(

@@ -4,12 +4,20 @@ namespace MidFD.Services;
 
 internal static class BrowserPathEntryCandidateService
 {
-    public static IReadOnlyList<string> BuildCandidates(NavigationService navigationService, QuickAccessStore? quickAccessStore)
+    public static IReadOnlyList<string> BuildCandidates(
+        NavigationService navigationService,
+        QuickAccessStore? quickAccessStore,
+        IEnumerable<string>? directoryMoveHistory = null)
     {
         var candidates = new List<string>();
         var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
         AddCandidate(candidates, seen, navigationService.CurrentPath);
+
+        foreach (string path in directoryMoveHistory ?? Enumerable.Empty<string>())
+        {
+            AddCandidate(candidates, seen, path);
+        }
 
         foreach (QuickAccessEntry entry in QuickAccessService.GetRegisteredEntries(quickAccessStore ?? new QuickAccessStore()))
         {

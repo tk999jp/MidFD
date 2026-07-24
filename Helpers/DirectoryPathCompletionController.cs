@@ -13,6 +13,9 @@ internal sealed class DirectoryPathCompletionOptions
 {
     public bool ShowOnTextChanged { get; init; } = true;
     public Func<string, System.Threading.CancellationToken, System.Threading.Tasks.Task<List<string>>>? CustomCandidateProvider { get; init; }
+    public bool UseNativeHistoryDropdown { get; init; }
+    public Func<Point, bool>? IsInsideExternalControl { get; init; }
+    public Action? OutsideClick { get; init; }
 }
 
 internal sealed class DirectoryPathCompletionController : IDisposable
@@ -137,6 +140,11 @@ internal sealed class DirectoryPathCompletionController : IDisposable
 
     public bool IsCompletionPopupVisible => IsPopupVisible;
 
+    public void CloseCompletionPopup()
+    {
+        ClosePopup();
+    }
+
     private void SetControlText(string text)
     {
         _isUpdating = true;
@@ -227,6 +235,11 @@ internal sealed class DirectoryPathCompletionController : IDisposable
 
         if (e.KeyCode == Keys.Down && (e.Alt || e.Control))
         {
+            if (_options.UseNativeHistoryDropdown)
+            {
+                e.IsInputKey = true;
+                return;
+            }
             e.IsInputKey = true;
             return;
         }
@@ -270,6 +283,10 @@ internal sealed class DirectoryPathCompletionController : IDisposable
 
         if (e.KeyCode == Keys.Down && (e.Alt || e.Control))
         {
+            if (_options.UseNativeHistoryDropdown)
+            {
+                return;
+            }
             e.Handled = true;
             e.SuppressKeyPress = true;
             _ = UpdateCandidatesAsync(CompletionMode.History);
@@ -629,7 +646,7 @@ internal sealed class DirectoryPathCompletionController : IDisposable
         _listBox.EndUpdate();
 
         int itemHeight = _listBox.ItemHeight;
-        int visibleCount = Math.Min(_listBox.Items.Count, 15);
+        int visibleCount = Math.Min(_listBox.Items.Count, 10);
         int height = (itemHeight * visibleCount) + 2;
         Rectangle popupBounds = _editor.GetPopupBounds(_control.Width, height);
         Form? owner = _control.FindForm();
@@ -969,6 +986,10 @@ internal sealed class DirectoryPathCompletionController : IDisposable
     {
         private const int WM_KEYDOWN = 0x0100;
         private const int WM_SYSKEYDOWN = 0x0104;
+        private const int WM_LBUTTONDOWN = 0x0201;
+        private const int WM_RBUTTONDOWN = 0x0204;
+        private const int WM_MBUTTONDOWN = 0x0207;
+        private const int WM_NCLBUTTONDOWN = 0x00A1;
         private readonly DirectoryPathCompletionController _owner;
 
         public CompletionMessageFilter(DirectoryPathCompletionController owner)
@@ -983,8 +1004,28 @@ internal sealed class DirectoryPathCompletionController : IDisposable
                 return false;
             }
 
-            if (!_owner.IsPopupVisible)
+            bool isMouseDown = m.Msg is WM_LBUTTONDOWN or WM_RBUTTONDOWN or WM_MBUTTONDOWN or WM_NCLBUTTONDOWN;
+            if (!_owner.IsPopupVisible && !isMouseDown)
             {
+                return false;
+            }
+
+            if (isMouseDown && _owner._options.OutsideClick != null)
+            {
+                Point point = Cursor.Position;
+                bool insideEditor = _owner._control.IsHandleCreated &&
+                    _owner._control.RectangleToScreen(_owner._control.ClientRectangle).Contains(point);
+                bool insidePopup = _owner._popupForm.Visible && _owner._popupForm.Bounds.Contains(point);
+                bool insideExternal = _owner._options.IsInsideExternalControl?.Invoke(point) == true;
+                if (BrowserPathEntryInteractionPolicy.ShouldDismissForBrowserClick(
+                        editorActive: _owner._control.Visible,
+                        clickInsideInput: insideEditor,
+                        clickInsideGoButton: insideExternal,
+                        clickInsidePopup: insidePopup))
+                {
+                    _owner.ClosePopup();
+                    _owner._options.OutsideClick?.Invoke();
+                }
                 return false;
             }
 

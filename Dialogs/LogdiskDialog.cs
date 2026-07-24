@@ -92,7 +92,9 @@ public static class LogdiskDialog
             Width = contentWidth,
             Font = new Font("Consolas", 11F),
             DropDownStyle = ComboBoxStyle.DropDown,
-            Text = defaultPath
+            Text = defaultPath,
+            MaxDropDownItems = Helpers.LogdiskDropdownLayoutPolicy.MaxVisibleRows,
+            IntegralHeight = true
         };
 
         var normalizedHistory = new List<string>();
@@ -145,6 +147,13 @@ public static class LogdiskDialog
             inputBox.SelectedIndex = foundIndex >= 0 ? foundIndex : -1;
         }
 
+        void OpenNativeHistoryDropdown()
+        {
+            completionController?.CloseCompletionPopup();
+            SyncHistoryIndexFromText();
+            inputBox.DroppedDown = true;
+        }
+
         inputBox.DropDown += (_, _) => SyncHistoryIndexFromText();
 
         inputBox.SelectionChangeCommitted += (_, _) =>
@@ -159,13 +168,22 @@ public static class LogdiskDialog
                 inputBox,
                 new Helpers.DirectoryPathCompletionOptions
                 {
-                    ShowOnTextChanged = false
+                    ShowOnTextChanged = false,
+                    UseNativeHistoryDropdown = true
                 });
 
             inputBox.KeyDown += (s, e) =>
             {
                 if (e.Handled || e.SuppressKeyPress)
                 {
+                    return;
+                }
+
+                if (Helpers.LogdiskDropdownLayoutPolicy.IsNativeHistoryShortcut(e.KeyData))
+                {
+                    OpenNativeHistoryDropdown();
+                    e.Handled = true;
+                    e.SuppressKeyPress = true;
                     return;
                 }
 
@@ -251,6 +269,13 @@ public static class LogdiskDialog
 
             form.Shown += (s, e) =>
             {
+                Rectangle workingArea = Screen.FromControl(form).WorkingArea;
+                int itemHeight = Math.Max(inputBox.ItemHeight, inputBox.Font.Height + 4);
+                inputBox.DropDownHeight = Helpers.LogdiskDropdownLayoutPolicy.CalculateDropDownHeight(
+                    itemHeight,
+                    workingArea.Bottom,
+                    inputBox.PointToScreen(new Point(0, inputBox.Height)).Y);
+
                 // 入力欄にフォーカス（全選択状態で）
                 inputBox.SelectAll();
                 inputBox.Focus();

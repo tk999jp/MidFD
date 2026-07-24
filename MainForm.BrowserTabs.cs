@@ -378,27 +378,33 @@ public partial class MainForm
         int tabCount = activeCategoryState?.OpenTabs?.Count ?? 0;
         LogService.Info($"[BrowserTabs] Saved Category={activeCategoryId} Tabs={tabCount} ActiveIndex={activeTabIndex}");
     }
-    private void SaveWorkspaceStateStore()
+    private bool SaveWorkspaceStateStore(bool captureActiveState = true)
     {
         if (_workspaceStateStore == null)
         {
-            return;
+            return true;
         }
         try
         {
+            if (captureActiveState)
+            {
+                CaptureActiveBrowserTabState(validateMarks: true);
+            }
             if (!_settings.Session.RestoreTabsOnStartup)
             {
                 _workspaceStateStore.Clear();
                 LogService.Info("[WorkspaceStore] Cleared because workspace restore is disabled.");
-                return;
+                return true;
             }
             BrowserTabRestoreSnapshot snapshot = EnsureBrowserTabRestoreSnapshot().Clone();
             _workspaceStateStore.Save(WorkspaceStateMigrationService.FromSessionSnapshot(snapshot));
             LogService.Info($"[WorkspaceStore] Saved categories={snapshot.Categories.Count} active={snapshot.ActiveCategoryId}");
+            return true;
         }
         catch (Exception ex)
         {
             LogService.Error("Workspace state save failed. Session snapshot fallback remains available.", ex);
+            return false;
         }
     }
     private bool TryLoadWorkspaceStateStore(out BrowserTabRestoreSnapshot? snapshot)
@@ -541,7 +547,7 @@ public partial class MainForm
         }
         return mergedStates;
     }
-    private static BrowserTabSessionState CreateBrowserTabSessionState(BrowserTabState tabState)
+    private BrowserTabSessionState CreateBrowserTabSessionState(BrowserTabState tabState)
     {
         NavigationService.NavigationSnapshot navigation = tabState.Navigation ?? new NavigationService.NavigationSnapshot();
         return new BrowserTabSessionState
@@ -552,7 +558,7 @@ public partial class MainForm
             StartupPath = tabState.StartupPath,
             IsReadOnly = tabState.IsReadOnly,
             FilterLock = tabState.FilterLock?.Clone() ?? new TabFilterLockState(),
-            MarkedPaths = CreatePersistableMarkedPaths(tabState.MarkedPaths, out _),
+            MarkedPaths = PersistBrowserTabMarkedPaths(tabState),
             BackHistory = navigation.BackHistory.ToList(),
             ForwardHistory = navigation.ForwardHistory.ToList(),
             LastVisitedPathByDrive = navigation.LastVisitedPathByDrive.ToDictionary(
@@ -565,6 +571,18 @@ public partial class MainForm
             SortKind = tabState.SortKind,
             SortAscending = tabState.SortAscending
         };
+    }
+    private List<string> PersistBrowserTabMarkedPaths(BrowserTabState tabState)
+    {
+        if (!tabState.MarksDirty)
+        {
+            return tabState.MarkedPaths.ToList();
+        }
+
+        List<string> persisted = CreatePersistableMarkedPaths(tabState.MarkedPaths, out _);
+        tabState.MarkedPaths = persisted;
+        tabState.MarksDirty = false;
+        return persisted;
     }
     private bool TryRestoreBrowserTabsOnStartup(out int restoredTabCount, out int skippedTabCount, out bool hadSavedTabs)
     {
@@ -1262,7 +1280,9 @@ public partial class MainForm
             Math.Max(1, hostWidth),
             Math.Max(1, _browserTabHostPanel.ClientSize.Height));
     }
-    private BrowserTabState BuildBrowserTabStateFromCurrentUi()
+    private BrowserTabState BuildBrowserTabStateFromCurrentUi(
+        bool validateMarks = false,
+        IReadOnlyList<string>? markSourceOverride = null)
     {
         string currentPath = _navigationService.CurrentPath;
         BrowserTabState? activeState = _browserTabViewState.ActiveTabIndex >= 0 && _browserTabViewState.ActiveTabIndex < _browserTabViewState.Count
@@ -1277,7 +1297,9 @@ public partial class MainForm
             StartupPath = activeState?.StartupPath ?? string.Empty,
             IsReadOnly = activeState?.IsReadOnly ?? false,
             FilterLock = activeState?.FilterLock?.Clone() ?? new TabFilterLockState(),
-            MarkedPaths = CreatePersistableMarkedPaths(_markedFiles.Snapshot(), out _),
+            MarkedPaths = validateMarks && (activeState?.MarksDirty ?? false)
+                ? CreatePersistableMarkedPaths(markSourceOverride ?? _markedFiles.Snapshot(), out _)
+                : (markSourceOverride ?? _markedFiles.Snapshot()).ToList(),
             Navigation = _navigationService.CaptureState(),
             FocusTargetName = GetCurrentBrowserItem() is ListViewItem item ? GetItemFullName(item) : null,
             CursorIndex = _browserCursorIndex,
@@ -1286,14 +1308,19 @@ public partial class MainForm
             SortAscending = _sortAscending
         };
     }
-    private void CaptureActiveBrowserTabState(bool captureMarks = true)
+    private void CaptureActiveBrowserTabState(
+        bool captureMarks = true,
+        bool validateMarks = false,
+        IReadOnlyList<string>? markSourceOverride = null,
+        bool markValidationSucceeded = false)
     {
         if (_browserTabViewState.ActiveTabIndex < 0 || _browserTabViewState.ActiveTabIndex >= _browserTabViewState.Count)
         {
             return;
         }
         BrowserTabState currentState = _browserTabViewState.Tabs[_browserTabViewState.ActiveTabIndex];
-        BrowserTabState latestState = BuildBrowserTabStateFromCurrentUi();
+        bool shouldValidateMarks = validateMarks && captureMarks && currentState.MarksDirty;
+        BrowserTabState latestState = BuildBrowserTabStateFromCurrentUi(shouldValidateMarks, markSourceOverride);
         currentState.Title = latestState.Title;
         currentState.CurrentPath = latestState.CurrentPath;
         currentState.Navigation = latestState.Navigation;
@@ -1313,6 +1340,10 @@ public partial class MainForm
         if (captureMarks)
         {
             currentState.MarkedPaths = latestState.MarkedPaths;
+            if (shouldValidateMarks || markValidationSucceeded)
+            {
+                currentState.MarksDirty = false;
+            }
         }
         RefreshBrowserTabHeaders();
     }
@@ -1325,6 +1356,7 @@ public partial class MainForm
         }
         state.MarkedPaths = restoredMarks;
         RestoreMarks(restoredMarks, invalidateRedo: false);
+        state.MarksDirty = false;
         RefreshMarkUi();
     }
     private void RefreshBrowserTabHeaders()
@@ -1767,7 +1799,7 @@ public partial class MainForm
             browserPanel.Focus();
             return;
         }
-        CaptureActiveBrowserTabState();
+        CaptureActiveBrowserTabState(validateMarks: true);
         _isSwitchingBrowserTab = true;
         try
         {

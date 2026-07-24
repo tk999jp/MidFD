@@ -18,6 +18,7 @@ using MidFD.Models;
 using MidFD.Helpers;
 using MidFD.Commands;
 using MidFD.Presentation;
+using MidFD.Controls;
 using MidFD.Services.TrashManifestStore;
 using MidFD.Services.Workspace;
 namespace MidFD;
@@ -35,7 +36,7 @@ public partial class MainForm : Form, ICommandPaletteLayerHost
     private const int LargeTextClipboardCopyMaxLines = 100_000;
     private const int LargeTextClipboardCopyMaxChars = 10_000_000;
     private const long LargeTextClipboardCopyMaxBytesEstimate = 32L * 1024 * 1024; // 32MB
-    private const int CurrentDirectoryRefreshDebounceMilliseconds = 300;
+    private const int CurrentDirectoryRefreshDebounceMilliseconds = 750;
     private const int CurrentDirectoryRefreshRetryDelayMilliseconds = 100;
     private const int ExternalDirectoryRefreshBulkThreshold = 64;
     private const int MinimumNormalWindowWidth = 980;
@@ -67,6 +68,7 @@ public partial class MainForm : Form, ICommandPaletteLayerHost
         ".exe", ".com", ".lnk"
     };
     private readonly NavigationService _navigationService;
+    private BreadcrumbPathControl? _breadcrumbPathControl;
     private readonly BrowserInputRouter _browserInputRouter = new();
     private readonly BrowserMarkInteractionController _browserMarkInteractionController = new();
     private readonly ViewerInputRouter _viewerInputRouter = new();
@@ -129,13 +131,22 @@ public partial class MainForm : Form, ICommandPaletteLayerHost
     // Browser モード用（多列表示）プロパティ
     private int _columnCount = 3; // 1〜9列 (数字/テンキーで切替)
     private int _lastColumnCountKey = 0; // WinFD互換モードでの連続押下判定用
-    private int _browserCursorIndex = 0; // 現在フォーカスを持つアイテムのインデックス
-    private bool _markSummaryDirty = true;
+    private int _browserCursorIndex = 0; // directory全体に対するglobal index
+    private int _browserPageStartIndex;
+    private int _browserTotalItemCount;
+    private MarkSummaryCacheState _markSummaryCacheState = MarkSummaryCacheState.Invalid;
     private string _markSummaryCache = string.Empty;
     private string _markSummaryCachePath = string.Empty;
     private int _markSummaryCacheCount = -1;
     private string _markSummaryCacheSizeText = string.Empty;
     private string _markSummaryCacheCompact = string.Empty;
+    private long _markSummaryCacheTotalSize;
+    private int _markSummaryCacheFileCount;
+    private int _markSummaryCacheOutsideCount;
+    private readonly MarkSummaryRebuildCoordinator _markSummaryRebuildCoordinator;
+    private readonly MarkSummaryBulkEffectCoordinator _markSummaryBulkEffectCoordinator = new();
+    private readonly MarkPersistenceBoundaryCoordinator _markPersistenceBoundaryCoordinator = new();
+    private readonly MarkOperationEffectCoordinator _markOperationEffectCoordinator = new();
     private bool _recentMultiMarkIntentActive;
     private string _recentMultiMarkIntentDirectory = string.Empty;
     private int _recentMultiMarkIntentCursorIndex = -1;
@@ -148,6 +159,7 @@ public partial class MainForm : Form, ICommandPaletteLayerHost
     // 選択状態・操作対象は即時維持し、UpdateInfoPanel 系の表示更新だけを遅延予約する。
     private System.Windows.Forms.Timer? _updateInfoPanelDebounceTimer;
     private long _updateInfoPanelDebounceSeq = 0;
+    private readonly UncDriveInfoResolver _uncDriveInfoResolver = new();
     private Font? _headerPaintFont; // titleHeaderPanel_Paint で使用するフォント保持用
     private Font? _headerStatusResponsiveOwnedFont;
     private Size _lastHeaderStatusResponsiveClientSize = Size.Empty;
@@ -162,7 +174,27 @@ public partial class MainForm : Form, ICommandPaletteLayerHost
     private const string InternalDragArchiveMarkerValue = "1";
     private Point _dragStartPoint = Point.Empty;
     private int _dragCandidateIndex = -1;
+    private bool _blankDragCandidate;
     private bool _dragArchiveHandoffRequested = false;
+    private enum BrowserRightInteractionState
+    {
+        Idle,
+        BlankRightPending,
+        ItemRightPending,
+        HeaderRightPending,
+        GestureTracking,
+        FileDragTracking
+    }
+
+    private BrowserRightInteractionState _browserRightInteractionState;
+    private Point _browserRightStartPoint = Point.Empty;
+    private int _browserRightItemIndex = -1;
+    private string? _browserRightItemPath;
+    private IReadOnlyList<string> _browserRightSelectionSnapshot = Array.Empty<string>();
+    private Control? _browserRightCaptureControl;
+    private readonly HashSet<Control> _headerGestureControls = new();
+    private bool _suppressNextHeaderContextMenu;
+    private DateTime _suppressHeaderContextMenuUntilUtc = DateTime.MinValue;
     private BrowserIncomingDragDecision? _currentIncomingDragDecision;
     private bool _isClipboardBusy = false;
     private bool _isFileOperationUndoRedoBusy = false;
@@ -193,6 +225,13 @@ public partial class MainForm : Form, ICommandPaletteLayerHost
     private string _commandHintContextLine2 = string.Empty;
     private readonly System.Windows.Forms.Timer _commandHintOverlayTimer = new();
     private readonly System.Windows.Forms.Timer _directoryRefreshDebounceTimer = new();
+    private readonly System.Windows.Forms.Timer _directoryCountAuditTimer = new();
+    private CancellationTokenSource? _directoryCountAuditCts;
+    private readonly DirectoryCountAuditGate _directoryCountAuditGate = new();
+    private readonly DirectoryCountAuditSchedule _directoryCountAuditSchedule = new();
+    private long _directoryNavigationGeneration;
+    private long _directoryContentGeneration;
+    private int _browserItemsPerPage;
     private int _functionBarPreferredHeight = 24;
     private int _lastLoggedCommandHintRowCount = -1;
     private Rectangle _lastLoggedCommandHintBounds = Rectangle.Empty;
@@ -240,10 +279,14 @@ public partial class MainForm : Form, ICommandPaletteLayerHost
     private readonly Coordinators.NavigationRefreshCoordinator _navigationRefreshCoordinator = new();
     private readonly PreviewDiagnosticDelayService _previewDiagnosticDelayService = new();
     private bool _currentDirectoryRefreshRetryPending;
+    private bool _isApplyingDirectoryList;
+    private bool _suppressBrowserSelectionChanged;
+    private readonly BrowserSelectionIdentityGate _browserSelectionIdentityGate = new();
     private BrowserTabStripCategoryItemKind _browserTabCategoryContextKind = BrowserTabStripCategoryItemKind.Category;
     private DateTime _lastBrowserTabLimitBeepUtc = DateTime.MinValue;
     private List<string>? _pendingEscExitPersistedMarks;
     private bool _isClosingFromEscExitPath;
+    private bool _isExitConfirmationPending;
     private IWorkspaceStateStore? _workspaceStateStore;
     private WorkspaceSnapshotStorage? _workspaceSnapshotStorage;
     private bool _restoredBrowserTabsFromWorkspaceStore;
@@ -262,24 +305,38 @@ public partial class MainForm : Form, ICommandPaletteLayerHost
     private int _browserFileNameToolTipIndex = -1;
     private string? _browserFileNameToolTipText;
     private string _lastHeaderRightDiagSnapshot = string.Empty;
+    private readonly SettingsRecoveryNoticeScheduler _settingsRecoveryNoticeScheduler = new();
     private DateTime _lastHeaderRightDiagUtc = DateTime.MinValue;
     private readonly ToolTip _fKeyToolTip = new();
     private int _fKeyToolTipIndex = -1;
     private ContextMenuStrip? _headerPathContextMenu;
     private ContextMenuStrip? _headerItemContextMenu;
+    private ContextMenuStrip? _headerSortContextMenu;
+    private readonly Dictionary<SortKind, ToolStripMenuItem> _headerSortKeyItems = new();
+    private ToolStripMenuItem? _headerSortAscendingItem;
+    private ToolStripMenuItem? _headerSortDescendingItem;
     private ContextMenuStrip? _browserItemContextMenu;
     private ContextMenuStrip? _browserBlankContextMenu;
     private readonly CommandRegistry _commandRegistry = new();
     private readonly CommandDispatcher _commandDispatcher;
-    public MainForm(string? startupProfileOverride = null)
+    internal bool AuthorToolsEnabled { get; }
+    public MainForm(string? startupProfileOverride = null, bool authorToolsEnabled = false)
     {
         _startupProfileOverride = startupProfileOverride;
+        AuthorToolsEnabled = authorToolsEnabled;
         _commandDispatcher = new CommandDispatcher(_commandRegistry, TryExecuteRegisteredCommand);
         InitializeCoreWindowChrome();
+        SettingsManager.SaveFailed += HandleSettingsSaveFailed;
         InitializeBrowserFileNameToolTip();
         InitializeFunctionBarToolTip();
         _notificationService = new NotificationService(this.statusLabel, this.messageTimer, ResolveStatusColor);
         _navigationService = new NavigationService();
+        _markSummaryRebuildCoordinator = new MarkSummaryRebuildCoordinator(
+            BuildMarkSummaryAsync,
+            () => NavigationService.NormalizeDirectoryForCompare(_navigationService.CurrentPath),
+            () => IsDisposed || Disposing || _isExitConfirmationPending || _isClosingFromEscExitPath,
+            action => BeginInvoke(action),
+            ApplyCompletedMarkSummary);
         LoadSettingsAndApplyProfile();
         InitializePersistenceStores();
         InitializeStartupStoresAndHints();
@@ -291,6 +348,7 @@ public partial class MainForm : Form, ICommandPaletteLayerHost
         InitializeRuntimeTimersAndOverlay();
         string startupPath = ResolveStartupPath();
         InitializeMainUiSurface();
+        ShowSettingsRecoveryNoticeIfNeeded();
         RestoreBrowserStartupState(startupPath);
         WireBrowserInputEvents();
         // SettingsForm entry route regression corrective: Ensure KeyDown is wired and KeyPreview is active
@@ -477,6 +535,7 @@ public partial class MainForm : Form, ICommandPaletteLayerHost
         KeyUp += MainForm_KeyUp;
         Deactivate += (_, _) =>
         {
+            CleanupBrowserRightInteraction(clearContextMenuSuppression: true);
             LogAltHintContext("Deactivate");
             _isAltHintHeld = false;
             HideCommandHintOverlay();
@@ -491,8 +550,11 @@ public partial class MainForm : Form, ICommandPaletteLayerHost
         _directoryRefreshDebounceTimer.Tick += (_, _) =>
         {
             _directoryRefreshDebounceTimer.Stop();
+            _navigationRefreshCoordinator.MarkRefreshDelayCompleted();
             TryProcessPendingCurrentDirectoryRefresh("DebounceTimer");
         };
+        _directoryCountAuditTimer.Interval = DirectoryCountAuditSchedule.ActiveIntervalMilliseconds;
+        _directoryCountAuditTimer.Tick += (_, _) => RunCurrentDirectoryCountAudit();
     }
     private string ResolveStartupPath()
     {
@@ -522,6 +584,7 @@ public partial class MainForm : Form, ICommandPaletteLayerHost
         this.functionBarPanel.Resize += (s, e) => LayoutFunctionBar();
         InitializeHeaderDeclutterLayout();
         InitializeHeaderInteractionPolish();
+        InitializeHeaderGestureInteraction();
         ApplyFontSettings();
         ApplyColorSettings();
         InitializeBrowserTabControl();
@@ -590,6 +653,7 @@ public partial class MainForm : Form, ICommandPaletteLayerHost
         this.browserPanel.MouseMove += BrowserPanel_MouseMove;
         this.browserPanel.MouseUp += BrowserPanel_MouseUp;
         this.browserPanel.MouseLeave += BrowserPanel_MouseLeave;
+        this.browserPanel.MouseCaptureChanged += BrowserPanel_CaptureChanged;
         // Phase 3-layout-fix1: BrowserPanel のリサイズ再描画
         this.browserPanel.Resize += BrowserPanel_Resize;
     }
@@ -612,13 +676,19 @@ public partial class MainForm : Form, ICommandPaletteLayerHost
         };
         this.FormClosing += (s, e) =>
         {
+            CleanupBrowserRightInteraction(clearContextMenuSuppression: true);
+            _isExitConfirmationPending = true;
+            SettingsManager.SaveFailed -= HandleSettingsSaveFailed;
             _directoryRefreshDebounceTimer.Stop();
+            StopDirectoryCountAudit(dispose: true);
             _headerStatusResizeDebounceTimer?.Stop();
             _headerStatusResizeDebounceTimer?.Dispose();
             _headerStatusResizeDebounceTimer = null;
             _updateInfoPanelDebounceTimer?.Stop();
             _updateInfoPanelDebounceTimer?.Dispose();
             _updateInfoPanelDebounceTimer = null;
+            _uncDriveInfoResolver.Dispose();
+            _markSummaryRebuildCoordinator.Dispose();
             _headerStatusResponsiveOwnedFont?.Dispose();
             _headerStatusResponsiveOwnedFont = null;
             CloseFileOperationProgressDialog();
@@ -798,45 +868,78 @@ public partial class MainForm : Form, ICommandPaletteLayerHost
         }
         _settings.Window.State = (this.WindowState == FormWindowState.Minimized)
             ? FormWindowState.Normal : this.WindowState;
-        CaptureActiveBrowserTabState();
-        // Apply pending ESC‑exit marks before persisting workspace state
-        ApplyPendingEscExitMarksForWorkspaceSave();
+        BrowserTabState? activeTabState = _browserTabViewState.ActiveTabIndex >= 0
+            && _browserTabViewState.ActiveTabIndex < _browserTabViewState.Count
+                ? _browserTabViewState.Tabs[_browserTabViewState.ActiveTabIndex]
+                : null;
+        List<BrowserTabState> dirtyTabsBeforeSave = _browserTabViewState.Tabs
+            .Where(static tab => tab.MarksDirty)
+            .ToList();
+        IReadOnlyList<string>? pendingEscMarks = _isClosingFromEscExitPath
+            ? _pendingEscExitPersistedMarks
+            : null;
+        MarkPersistencePreparation markPreparation = _markPersistenceBoundaryCoordinator.Prepare(
+            activeTabState?.MarksDirty ?? false,
+            _markedFiles.Snapshot(),
+            pendingEscMarks,
+            PathExists);
+        bool activeMarksWereDirty = activeTabState?.MarksDirty == true || markPreparation.UsedPendingEscSnapshot;
+        CaptureActiveBrowserTabState(
+            captureMarks: true,
+            validateMarks: false,
+            markSourceOverride: markPreparation.MarkedPaths,
+            markValidationSucceeded: markPreparation.ValidationCount == 1);
         _settings.Session.LastPath = _navigationService.CurrentPath;
         if (!SessionRestorePolicy.ShouldRestoreStartupWorkspace(_settings.Session))
         {
-            SavePersistedMarksToSettings();
+            SavePersistedMarksToSettings(markPreparation.MarkedPaths, markPreparation.UsedPendingEscSnapshot);
         }
         else
         {
             LogService.Info("[MarkPersistence] Legacy persisted marks save skipped because workspace restore is enabled.");
         }
         SaveBrowserTabsToSettings();
-        SaveWorkspaceStateStore();
+        bool workspaceSaveSucceeded = SaveWorkspaceStateStore(captureActiveState: false);
         _settings.Session.LastColumnCount = _columnCount;
         _settings.Session.LastSortKind = _currentSort;
         _settings.Session.LastSortAscending = _sortAscending;
         LogService.Info($"[WindowVisibility] SaveWindowSettings State={this.WindowState} Bounds={FormatBoundsForLog(this.Bounds)} RestoreBounds={FormatBoundsForLog(this.RestoreBounds)} Saved=({_settings.Window.X},{_settings.Window.Y},{_settings.Window.Width},{_settings.Window.Height})");
-        SettingsManager.Save(_settings);
+        SettingsSqliteStore.SettingsSaveResult settingsSaveResult = SettingsManager.TrySave(_settings);
+        bool markPersistenceSucceeded = workspaceSaveSucceeded && settingsSaveResult.Succeeded;
+        if (activeTabState != null)
+        {
+            activeTabState.MarksDirty = _markPersistenceBoundaryCoordinator.ShouldRemainDirty(
+                activeMarksWereDirty,
+                markPreparation.ValidationCount,
+                markPersistenceSucceeded);
+        }
+        if (markPersistenceSucceeded)
+        {
+            ClearPendingEscExitMarkPersistence();
+        }
+        else
+        {
+            foreach (BrowserTabState dirtyTab in dirtyTabsBeforeSave)
+            {
+                dirtyTab.MarksDirty = true;
+            }
+            if (!settingsSaveResult.Succeeded)
+            {
+                HandleSettingsSaveFailed(settingsSaveResult);
+            }
+        }
+        int browserTabsSavedMarkCount = _settings.Session.RestoreTabsOnStartup && settingsSaveResult.Succeeded
+            ? markPreparation.MarkedPaths.Count
+            : 0;
+        int workspaceSavedMarkCount = _settings.Session.RestoreTabsOnStartup && workspaceSaveSucceeded
+            ? markPreparation.MarkedPaths.Count
+            : 0;
+        LogService.Info(
+            $"[MarkPersistenceBoundary] source={markPreparation.SourceCount} persisted={markPreparation.MarkedPaths.Count} " +
+            $"pendingEsc={markPreparation.UsedPendingEscSnapshot} validation={markPreparation.ValidationCount} " +
+            $"browserTabs={browserTabsSavedMarkCount} workspace={workspaceSavedMarkCount} succeeded={markPersistenceSucceeded}");
     }
-    // Helper: apply pending ESC‑exit marks to active tab before workspace save
-private void ApplyPendingEscExitMarksForWorkspaceSave()
-{
-    if (!_isClosingFromEscExitPath) return;
-    if (_pendingEscExitPersistedMarks == null || _pendingEscExitPersistedMarks.Count == 0) return;
-    if (!SessionRestorePolicy.ShouldRestoreStartupWorkspace(_settings.Session)) return;
-    if (_browserTabViewState.ActiveTabIndex < 0 || _browserTabViewState.ActiveTabIndex >= _browserTabViewState.Count) return;
-
-    var activeTab = _browserTabViewState.Tabs[_browserTabViewState.ActiveTabIndex];
-    var existing = activeTab.MarkedPaths?.ToHashSet(StringComparer.OrdinalIgnoreCase) ?? new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-    foreach (var path in _pendingEscExitPersistedMarks)
-    {
-        existing.Add(path);
-    }
-    activeTab.MarkedPaths = existing.ToList();
-    LogService.Info($"[EscExitSnapshot] Applied {_pendingEscExitPersistedMarks.Count} pending marks to active tab for workspace persistence.");
-}
-
-private void SavePersistedMarksToSettings()
+    private void SavePersistedMarksToSettings(IReadOnlyList<string> persistedPaths, bool usedPendingEscSnapshot)
     {
         _settings.Session ??= new SessionSettings();
         if (!_settings.Session.PersistMarksAcrossRestart)
@@ -844,15 +947,8 @@ private void SavePersistedMarksToSettings()
             LogService.Info("[MarkPersistence] Save skipped because persistence is disabled.");
             return;
         }
-        var sourcePaths = (_isClosingFromEscExitPath && _pendingEscExitPersistedMarks is { Count: > 0 })
-            ? _pendingEscExitPersistedMarks
-            : _markedFiles.Snapshot();
-        var persistedPaths = sourcePaths
-            .Where(PathExists)
-            .Distinct(StringComparer.OrdinalIgnoreCase)
-            .ToList();
-        _settings.Session.PersistedMarkedPaths = persistedPaths;
-        string saveMode = (_isClosingFromEscExitPath && _pendingEscExitPersistedMarks is { Count: > 0 })
+        _settings.Session.PersistedMarkedPaths = persistedPaths.ToList();
+        string saveMode = usedPendingEscSnapshot
             ? "EscExitSnapshot"
             : "CurrentMarks";
         LogService.Info($"[MarkPersistence] Saved={persistedPaths.Count} Mode={saveMode}");
@@ -1054,7 +1150,10 @@ private void SavePersistedMarksToSettings()
                     browserPanel.Focus();
                 }
             });
-            TryProcessPendingCurrentDirectoryRefresh("Activated");
+            if (!_isExitConfirmationPending && !_isClosingFromEscExitPath)
+            {
+                TryProcessPendingCurrentDirectoryRefresh("Activated");
+            }
         }
         // Window bounds collapse guard: Activated 譎ゅ↓ collapsed 迥ｶ諷九↑繧牙屓蠕ｩ
         if (this.WindowState == FormWindowState.Normal && !_isApplyingWindowBoundsRecovery)
@@ -1355,6 +1454,7 @@ private void SavePersistedMarksToSettings()
             OpenWorkspaceSnapshotDialog = () => OpenWorkspaceSnapshotDialog(),
             ShowSystemInformation = () => OpenSystemInformationFromUi("Menu.Tools.SystemInformation"),
             OpenSettings = () => ExecuteCommandFromUi(CommandIds.AppOpenSettings, CommandScope.Global, "Menu.Tools.Settings"),
+            OpenManagedTrashDialog = () => ExecuteCommandFromUi(CommandIds.AppOpenManagedTrash, CommandScope.Global, "Menu.Tools.ManagedTrash"),
             ShowMenuKeyHint = () => ShowMenuKeyHint(),
             ShowCommandList = () => ShowCommandList(),
             ShowVersionInfo = () => ShowVersionInfo()
@@ -1838,6 +1938,7 @@ private void SavePersistedMarksToSettings()
     }
     private void ExecuteCreateDirectory()
     {
+        if (GuardMutationBusy("フォルダ作成")) return;
         if (GuardReadOnlyBrowserTab("フォルダ作成"))
         {
             return;
@@ -1850,7 +1951,7 @@ private void SavePersistedMarksToSettings()
         try
         {
             string target = Path.Combine(_navigationService.CurrentPath, newDir);
-            Directory.CreateDirectory(target);
+            FileOperationService.CreateDirectoryForUserMutation(target);
             LoadDirectory(_navigationService.CurrentPath, GetCreatedItemFocusTarget(newDir));
         }
         catch (Exception ex)
@@ -2086,6 +2187,10 @@ private void SavePersistedMarksToSettings()
     }
     private void SwitchUIMode(UIMode mode)
     {
+        if (mode != UIMode.Browser)
+        {
+            CleanupBrowserRightInteraction(clearContextMenuSuppression: true);
+        }
         HideCommandHintOverlay();
         if (mode == UIMode.Browser)
         {
@@ -2186,6 +2291,44 @@ private void SavePersistedMarksToSettings()
             return true;
         }
         return false;
+    }
+    private bool GuardMutationBusy(string? message = null)
+    {
+        if (GuardClipboardBusy(message)) return true;
+        return false;
+    }
+    private void HandleSettingsSaveFailed(SettingsSqliteStore.SettingsSaveResult result)
+    {
+        void ShowFailure() => ShowStatusMessage(result.UserMessage);
+        if (IsHandleCreated && InvokeRequired) BeginInvoke((Action)ShowFailure);
+        else ShowFailure();
+    }
+    private void ShowSettingsRecoveryNoticeIfNeeded()
+    {
+        SettingsRecoveryState? recovery = SettingsManager.CurrentRecoveryState;
+        SettingsRecoveryNoticeAction action = _settingsRecoveryNoticeScheduler.Evaluate(recovery != null, IsHandleCreated, IsDisposed || Disposing);
+        if (action == SettingsRecoveryNoticeAction.ScheduleShown)
+        {
+            Shown += HandleDeferredSettingsRecoveryNotice;
+            return;
+        }
+        if (action == SettingsRecoveryNoticeAction.Show) ShowSettingsRecoveryNotice(recovery!);
+    }
+
+    private void HandleDeferredSettingsRecoveryNotice(object? sender, EventArgs e)
+    {
+        Shown -= HandleDeferredSettingsRecoveryNotice;
+        ShowSettingsRecoveryNoticeIfNeeded();
+    }
+
+    private void ShowSettingsRecoveryNotice(SettingsRecoveryState recovery)
+    {
+        if (IsDisposed || Disposing || !IsHandleCreated) return;
+        ShowStatusMessage(recovery.UserMessage);
+        BeginInvoke((Action)(() =>
+        {
+            if (!IsDisposed && !Disposing && IsHandleCreated) MessageBox.Show(this, recovery.UserMessage, "設定の復旧", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+        }));
     }
     private bool RequestActiveFileOperationCancel(string source)
     {
@@ -2359,7 +2502,7 @@ private void SavePersistedMarksToSettings()
             // 通常（Shiftなし）の F4 を Delet (削除) として特別扱いする
             if (fKey == 4)
             {
-                if (GuardClipboardBusy()) return true;
+                if (GuardMutationBusy()) return true;
 
                 // ガード条件の確認
                 var snapshot = _cachedCommandUiSnapshot;
@@ -2431,8 +2574,7 @@ private void SavePersistedMarksToSettings()
         {
             return;
         }
-        _browserCursorIndex = 0;
-        SyncBrowserSelection();
+        SetBrowserGlobalCursorIndex(0);
     }
     private void MoveBrowserCursorToBottom()
     {
@@ -2440,8 +2582,7 @@ private void SavePersistedMarksToSettings()
         {
             return;
         }
-        _browserCursorIndex = fileListView.Items.Count - 1;
-        SyncBrowserSelection();
+        SetBrowserGlobalCursorIndex(Math.Max(0, _browserTotalItemCount - 1));
     }
     /// <summary>
     /// Phase 3-input-viewer1: Viewer モード専用の KeyDown 処理を helper 化。
@@ -2484,6 +2625,8 @@ private void SavePersistedMarksToSettings()
             else
             {
                 // プレビュー非表示中のみ終了確認 (ESCでキャンセル可能にする)
+                _isExitConfirmationPending = true;
+                _directoryRefreshDebounceTimer.Stop();
                 LogService.Warn(
                     $"[CancelProvenance] MidFD browser ESC exit confirm shown. " +
                     $"activeContext={HasActiveFileOperationCancelContext()}, busy={_isClipboardBusy}, " +
@@ -2504,6 +2647,7 @@ private void SavePersistedMarksToSettings()
                 }
                 else
                 {
+                    _isExitConfirmationPending = false;
                     ClearPendingEscExitMarkPersistence();
                 }
             }
@@ -2589,7 +2733,7 @@ private void SavePersistedMarksToSettings()
         }
         if (e.KeyCode == Keys.P)
         {
-            if (GuardClipboardBusy()) { e.Handled = true; return true; }
+            if (GuardMutationBusy()) { e.Handled = true; return true; }
             _ = ExecutePack();
             e.Handled = true;
             e.SuppressKeyPress = true;
@@ -2597,7 +2741,7 @@ private void SavePersistedMarksToSettings()
         }
         if (e.KeyCode == Keys.U)
         {
-            if (GuardClipboardBusy()) { e.Handled = true; return true; }
+            if (GuardMutationBusy()) { e.Handled = true; return true; }
             _ = ExecuteUnpack();
             e.Handled = true;
             e.SuppressKeyPress = true;
@@ -2606,7 +2750,7 @@ private void SavePersistedMarksToSettings()
         // E キーで外部エディタ起動を復活。F4+Edit profile の場合も同様。
         if ((e.KeyCode == Keys.E && !e.Shift && !e.Alt && !e.Control) || (e.KeyCode == Keys.F4 && !e.Shift && !e.Alt && !e.Control && IsFunctionKeyAssignedToAction(4, FunctionKeyAction.Edit)))
         {
-            if (GuardClipboardBusy()) { e.Handled = true; return true; }
+            if (GuardMutationBusy()) { e.Handled = true; return true; }
             ExecuteOpenWithEditor();
             e.Handled = true;
             e.SuppressKeyPress = true;
@@ -2637,7 +2781,7 @@ private void SavePersistedMarksToSettings()
         }
         if (e.KeyCode == Keys.K)
         {
-            if (GuardClipboardBusy()) { e.Handled = true; return true; }
+            if (GuardMutationBusy()) { e.Handled = true; return true; }
             ExecuteCreateDirectory();
             e.Handled = true;
             e.SuppressKeyPress = true;
@@ -2661,7 +2805,7 @@ private void SavePersistedMarksToSettings()
         }
         if (e.KeyCode == Keys.N)
         {
-            if (GuardClipboardBusy()) { e.Handled = true; return true; }
+            if (GuardMutationBusy()) { e.Handled = true; return true; }
             ExecuteCreateFile();
             e.Handled = true;
             e.SuppressKeyPress = true;
@@ -2685,7 +2829,7 @@ private void SavePersistedMarksToSettings()
         }
         if (e.KeyCode == Keys.H && e.Modifiers == Keys.None)
         {
-            if (GuardClipboardBusy()) { e.Handled = true; return true; }
+            if (GuardMutationBusy()) { e.Handled = true; return true; }
             OpenTerminalInCurrentDirectory(ShellKind.PowerShell);
             e.Handled = true;
             e.SuppressKeyPress = true;
@@ -2693,7 +2837,7 @@ private void SavePersistedMarksToSettings()
         }
         if (e.KeyCode == Keys.H && e.Modifiers == Keys.Shift)
         {
-            if (GuardClipboardBusy()) { e.Handled = true; return true; }
+            if (GuardMutationBusy()) { e.Handled = true; return true; }
             OpenTerminalInCurrentDirectory(ShellKind.CommandPrompt);
             e.Handled = true;
             e.SuppressKeyPress = true;
@@ -2701,7 +2845,7 @@ private void SavePersistedMarksToSettings()
         }
         if (e.KeyCode == Keys.X)
         {
-            if (GuardClipboardBusy()) { e.Handled = true; return true; }
+            if (GuardMutationBusy()) { e.Handled = true; return true; }
             ExecuteShellDialog();
             e.Handled = true;
             e.SuppressKeyPress = true;
@@ -2709,7 +2853,7 @@ private void SavePersistedMarksToSettings()
         }
         if (e.KeyCode == Keys.A)
         {
-            if (GuardClipboardBusy()) { e.Handled = true; return true; }
+            if (GuardMutationBusy()) { e.Handled = true; return true; }
             ExecuteAttribute();
             e.Handled = true;
             e.SuppressKeyPress = true;
@@ -2805,22 +2949,13 @@ private void SavePersistedMarksToSettings()
     }
     private IReadOnlyList<string> CollectBulkMarkTargetPaths(bool includeDirectories)
     {
-        var paths = new List<string>(fileListView.Items.Count);
-        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        foreach (ListViewItem item in fileListView.Items)
+        if (!_browserLoadCoordinator.TryGetCurrentSnapshotTargetPaths(
+                _navigationService.CurrentPath,
+                includeDirectories,
+                out IReadOnlyList<string> paths))
         {
-            if (item.Text == ".." || item.Tag is not string path || string.IsNullOrWhiteSpace(path))
-            {
-                continue;
-            }
-            if (!includeDirectories && !IsBrowserFileItem(item))
-            {
-                continue;
-            }
-            if (seen.Add(path))
-            {
-                paths.Add(path);
-            }
+            ShowStatusMessage("現在の一覧情報を取得できないため、一括Markを実行できません。再読込してください。");
+            return Array.Empty<string>();
         }
         return paths;
     }
@@ -2837,7 +2972,14 @@ private void SavePersistedMarksToSettings()
     {
         var restoreStopwatch = Stopwatch.StartNew();
         RestoreMarks(nextMarks);
-        SetCountOnlyMarkSummaryCache();
+        bool deferSizeResolution = NetworkPathResolutionPolicy.IsAuxiliaryResolutionDeferred(_navigationService.CurrentPath)
+            || _markedFiles.Any(NetworkPathResolutionPolicy.IsUncPath);
+        MarkSummaryBulkEffectResult summaryEffects = _markSummaryBulkEffectCoordinator.Execute(
+            _markedFiles.Count,
+            deferSizeResolution,
+            SetCountOnlyMarkSummaryCache,
+            ScheduleMarkSummaryRebuild,
+            CancelPendingMarkSummaryRebuild);
         restoreStopwatch.Stop();
         var repaintStopwatch = Stopwatch.StartNew();
         browserPanel.Invalidate();
@@ -2858,6 +3000,7 @@ private void SavePersistedMarksToSettings()
             $"buildNext={buildNextMarksMs}ms restore={restoreStopwatch.ElapsedMilliseconds}ms " +
             $"invalidate={repaintStopwatch.ElapsedMilliseconds}ms info={infoStopwatch.ElapsedMilliseconds}ms " +
             $"menu={menuStopwatch.ElapsedMilliseconds}ms intent={intentStopwatch.ElapsedMilliseconds}ms " +
+            $"summaryCountOnly={summaryEffects.CountOnlyApplyCount} summarySchedule={summaryEffects.SummaryScheduleCount} summaryInvalidate={summaryEffects.PendingInvalidationCount} " +
             $"total={totalStopwatch.ElapsedMilliseconds}ms");
     }
 
@@ -2885,25 +3028,25 @@ private void SavePersistedMarksToSettings()
 
         if (keyData == (Keys.Shift | Keys.F1))
         {
-            if (GuardClipboardBusy()) return true;
+            if (GuardMutationBusy()) return true;
             ExecuteAttribute();
             return true;
         }
         if (keyData == (Keys.Shift | Keys.F3))
         {
-            if (GuardClipboardBusy()) return true;
+            if (GuardMutationBusy()) return true;
             _ = ExecuteMove();
             return true;
         }
         if (keyData == (Keys.Shift | Keys.F5))
         {
-            if (GuardClipboardBusy()) return true;
+            if (GuardMutationBusy()) return true;
             ExecuteCreateDirectory();
             return true;
         }
         if (keyData == (Keys.Shift | Keys.F6))
         {
-            if (GuardClipboardBusy()) return true;
+            if (GuardMutationBusy()) return true;
             OpenTerminalInCurrentDirectory(ShellKind.PowerShell);
             return true;
         }
@@ -2913,7 +3056,7 @@ private void SavePersistedMarksToSettings()
         }
         if (keyData == (Keys.Shift | Keys.F8) || keyData == (Keys.Shift | Keys.Enter))
         {
-            if (GuardClipboardBusy()) return true;
+            if (GuardMutationBusy()) return true;
             ExecuteOpenWithEditor();
             return true;
         }
@@ -2925,7 +3068,7 @@ private void SavePersistedMarksToSettings()
         }
         if (keyData == (Keys.Shift | Keys.F10))
         {
-            if (GuardClipboardBusy()) return true;
+            if (GuardMutationBusy()) return true;
             _ = ExecutePack();
             return true;
         }
@@ -2961,6 +3104,7 @@ private void SavePersistedMarksToSettings()
         browserPanel.Invalidate();
         CaptureActiveBrowserTabState();
         UpdateFileDisplayModeMenuChecks();
+        RematerializeBrowserPageIfCapacityChanged();
         ShowStatusMessage(mode switch
         {
             BrowserFileDisplayMode.NameSize => "表示モード: サイズ",
@@ -3048,16 +3192,31 @@ private void SavePersistedMarksToSettings()
     private void UpdateInfoPanel()
     {
         LogFontRouteDiag("UpdateInfoPanel:START");
+        string currentPath = _navigationService.CurrentPath;
+        if (NetworkPathResolutionPolicy.TryGetUncRoot(currentPath, out string uncRoot))
+        {
+            _uncDriveInfoResolver.Schedule(uncRoot, _directoryNavigationGeneration, ApplyUncDriveInfo);
+        }
+        else
+        {
+            _uncDriveInfoResolver.CancelPending();
+        }
         // 1. 表示項目の取得
         var currentItem = GetCurrentBrowserItem();
         int itemsPerPage = GetBrowserItemsPerPage(out _, out int rowsPerColumn);
+        bool hasCachedDriveInfo = false;
+        UncDriveInfoResolver.Result driveInfo = default;
+        if (NetworkPathResolutionPolicy.TryGetUncRoot(currentPath, out string inputRoot))
+        {
+            hasCachedDriveInfo = _uncDriveInfoResolver.TryGetCached(inputRoot, out driveInfo);
+        }
         // 2. 状態を InputState にまとめる
         var state = new HeaderPresentationHelper.InputState
         {
-            CurrentPath = _navigationService.CurrentPath,
-            CurrentPathKind = NetworkPathResolutionPolicy.GetPathKind(_navigationService.CurrentPath),
+            CurrentPath = currentPath,
+            CurrentPathKind = NetworkPathResolutionPolicy.GetPathKind(currentPath),
             CursorIndex = _browserCursorIndex,
-            ItemCount = fileListView.Items.Count,
+            ItemCount = _browserTotalItemCount > 0 ? _browserTotalItemCount : fileListView.Items.Count,
             ItemsPerPage = itemsPerPage,
             RowsPerColumn = rowsPerColumn,
             ColumnCount = _columnCount,
@@ -3066,6 +3225,14 @@ private void SavePersistedMarksToSettings()
             CachedMarkCount = _markSummaryCacheCount,
             CachedMarkSizeText = _markSummaryCacheSizeText,
             CachedMarkSummaryCompact = _markSummaryCacheCompact,
+            HasCurrentMarkSummaryCache = _markSummaryCacheState != MarkSummaryCacheState.Invalid
+                && _markSummaryCacheCount == _markedFiles.Count
+                && string.Equals(
+                    _markSummaryCachePath,
+                    NavigationService.NormalizeDirectoryForCompare(_navigationService.CurrentPath),
+                    StringComparison.OrdinalIgnoreCase),
+            IsMarkSummaryPending = _markSummaryCacheState == MarkSummaryCacheState.CountOnly
+                || _markSummaryRebuildCoordinator.HasPending,
             CurrentItemText = currentItem?.Text,
             CurrentItemPath = currentItem?.Tag as string,
             CurrentItemExtensionText = currentItem != null && currentItem.SubItems.Count > 1 ? currentItem.SubItems[1].Text : null,
@@ -3081,7 +3248,10 @@ private void SavePersistedMarksToSettings()
             ShowDirectoryMarker = _settings.Appearance?.ShowDirectoryMarker ?? true,
             ShowItemIcons = _settings.Appearance?.ShowItemIcons ?? true,
             DateFormat = _settings.Appearance?.DateFormat ?? "yyyy-MM-dd HH:mm",
-            SizeFormat = _settings.Appearance?.SizeFormat ?? "HumanReadable"
+            SizeFormat = _settings.Appearance?.SizeFormat ?? "HumanReadable",
+            HasCachedDriveInfo = hasCachedDriveInfo,
+            CachedDriveUsed = driveInfo.Used,
+            CachedDriveFree = driveInfo.Free
         };
         // 3. 表示文字列の生成をヘルパーに委譲
         var display = HeaderPresentationHelper.Build(state);
@@ -3093,11 +3263,10 @@ private void SavePersistedMarksToSettings()
         //   FitMarkSummaryCompact によるMarkSize省略を廃止し、実測幅優先・省略禁止に変更。
         //   右側blockは実文字列測定幅+paddingで確保し、pathRightMaxWidthで切り詰めない。
         bool hasMarks = display.MarkCount > 0 && !string.IsNullOrWhiteSpace(display.MarkSizeText);
-        string pathRightText = hasMarks
-            ? $"Mark: {display.MarkCount} MarkSize: {display.MarkSizeText}"
-            : display.SortFilter;
+        string pathRightText = BuildHeaderRightText(display, hasMarks);
         lblSort.Text = pathRightText;
         lblSort.Visible = !string.IsNullOrWhiteSpace(pathRightText);
+        lblSort.Cursor = IsHeaderSortText(pathRightText) ? Cursors.Hand : Cursors.Default;
         // 【Item行右端】 (lblFileStatsEx): Attr Timestamp (常に選択アイテムの情報)
         string itemRightText = display.ItemMetaWithoutSize;
         lblFileStatsEx.Text = itemRightText;
@@ -3118,6 +3287,7 @@ private void SavePersistedMarksToSettings()
         int nameAvailableWidth = infoRow4Panel.ClientSize.Width - (lblFileStatsEx.Visible ? lblFileStatsEx.Width : 0) - 8;
         // Path行左
         lblPath.Text = HeaderLayoutHelper.FitTextWithEllipsis(display.Path, lblPath.Font, pathAvailableWidth);
+        ApplyPathDisplayMode();
         // Item行左
         if (display.SelectedItemIsDirectory)
         {
@@ -3146,16 +3316,63 @@ private void SavePersistedMarksToSettings()
         LogHeaderRightDiag("UpdateInfoPanel", display.MarkCount, display.MarkSizeText, pathRightText, itemRightText);
         LogFontRouteDiag("UpdateInfoPanel:END");
     }
+    private static string BuildHeaderRightText(HeaderPresentationHelper.DisplayStrings display, bool hasMarks)
+    {
+        if (!hasMarks)
+        {
+            return display.SortFilter;
+        }
+
+        string markText = $"Mark: {display.MarkCount} MarkSize: {display.MarkSizeText}";
+        int sortIndex = display.SortFilter.IndexOf("S:", StringComparison.Ordinal);
+        if (sortIndex < 0)
+        {
+            return string.IsNullOrWhiteSpace(display.SortFilter)
+                ? markText
+                : $"{display.SortFilter} {markText}";
+        }
+
+        string filterText = display.SortFilter[..sortIndex].TrimEnd();
+        string sortText = display.SortFilter[sortIndex..].TrimStart();
+        return string.IsNullOrWhiteSpace(filterText)
+            ? $"{markText} {sortText}"
+            : $"{filterText} {markText} {sortText}";
+    }
+
+    private void ApplyUncDriveInfo(string root, long generation, UncDriveInfoResolver.Result result, bool succeeded)
+    {
+        if (IsDisposed || Disposing || _isExitConfirmationPending || !succeeded)
+        {
+            return;
+        }
+
+        try
+        {
+            BeginInvoke(new Action(() =>
+            {
+                if (IsDisposed || Disposing || generation != _directoryNavigationGeneration ||
+                    !NetworkPathResolutionPolicy.TryGetUncRoot(_navigationService.CurrentPath, out string currentRoot) ||
+                    !string.Equals(root, currentRoot, StringComparison.OrdinalIgnoreCase))
+                {
+                    return;
+                }
+
+                UpdateInfoPanel();
+            }));
+        }
+        catch (InvalidOperationException)
+        {
+        }
+    }
     private string GetMarkSummaryForHeader()
     {
         if (_markedFiles.Count == 0)
         {
-            _markSummaryCache = string.Empty;
-            _markSummaryCacheCount = 0;
-            _markSummaryCacheSizeText = string.Empty;
-            _markSummaryCacheCompact = string.Empty;
-            _markSummaryCachePath = NavigationService.NormalizeDirectoryForCompare(_navigationService.CurrentPath);
-            _markSummaryDirty = false;
+            if (_markSummaryCacheState != MarkSummaryCacheState.Complete || _markSummaryCacheCount != 0)
+            {
+                SetCountOnlyMarkSummaryCache();
+            }
+            CancelPendingMarkSummaryRebuild();
             return string.Empty;
         }
         string currentDir = NavigationService.NormalizeDirectoryForCompare(_navigationService.CurrentPath);
@@ -3163,83 +3380,122 @@ private void SavePersistedMarksToSettings()
             _markedFiles.Any(NetworkPathResolutionPolicy.IsUncPath);
         if (deferAuxiliaryResolution)
         {
-            if (_markSummaryCacheCount > 0 && !string.IsNullOrWhiteSpace(_markSummaryCache))
+            if (_markSummaryCacheState != MarkSummaryCacheState.CountOnly
+                || _markSummaryCacheCount != _markedFiles.Count
+                || !string.Equals(_markSummaryCachePath, currentDir, StringComparison.OrdinalIgnoreCase))
             {
-                NetworkPathResolutionPolicy.LogDecision(
-                    "NetworkPathResolutionDeferral.AuxiliaryUseCached",
-                    "HeaderInfo.MarkSummary",
-                    nameof(GetMarkSummaryForHeader),
-                    _navigationService.CurrentPath,
-                    usedCached: true,
-                    resolvedSync: false,
-                    reason: "cached-mark-summary");
-                return _markSummaryCache;
+                SetCountOnlyMarkSummaryCache();
             }
-
-            _markSummaryCacheCount = _markedFiles.Count;
-            _markSummaryCacheSizeText = string.Empty;
-            _markSummaryCacheCompact = _markSummaryCacheCount > 0
-                ? $"Mark: {_markSummaryCacheCount} MarkSize: ?"
-                : string.Empty;
-            if (string.IsNullOrWhiteSpace(_markSummaryCache))
-            {
-                _markSummaryCache = string.Empty;
-            }
+            CancelPendingMarkSummaryRebuild();
 
             NetworkPathResolutionPolicy.LogDecision(
                 "NetworkPathResolutionDeferral.Skip",
                 "HeaderInfo.MarkSummary",
                 nameof(GetMarkSummaryForHeader),
                 _navigationService.CurrentPath,
-                usedCached: false,
+                usedCached: true,
                 resolvedSync: false,
                 reason: "unc-path");
-            return string.Empty;
+            return _markSummaryCache;
         }
-        if (!_markSummaryDirty
+        if (_markSummaryCacheState == MarkSummaryCacheState.Complete
             && _markSummaryCacheCount == _markedFiles.Count
             && string.Equals(_markSummaryCachePath, currentDir, StringComparison.OrdinalIgnoreCase))
         {
             return _markSummaryCache;
         }
-        long totalSize = 0;
-        int fileCount = 0;
-        int outsideCurrentDirectoryCount = 0;
-        foreach (string path in _markedFiles)
+        if (_markSummaryCacheState == MarkSummaryCacheState.Invalid
+            || _markSummaryCacheCount != _markedFiles.Count
+            || !string.Equals(_markSummaryCachePath, currentDir, StringComparison.OrdinalIgnoreCase))
         {
-            string? parentDir = Path.GetDirectoryName(path);
-            if (!string.Equals(
-                NavigationService.NormalizeDirectoryForCompare(parentDir ?? string.Empty),
-                currentDir,
-                StringComparison.OrdinalIgnoreCase))
-            {
-                outsideCurrentDirectoryCount++;
-            }
-            if (File.Exists(path))
-            {
-                try
-                {
-                    totalSize += new FileInfo(path).Length;
-                    fileCount++;
-                }
-                catch
-                {
-                    // Mark summary は表示補助なので、アクセス不能な項目は集計から外す。
-                }
-            }
+            SetCountOnlyMarkSummaryCache();
         }
-        string outsideInfo = outsideCurrentDirectoryCount > 0 ? $" Out:{outsideCurrentDirectoryCount}" : "";
-        _markSummaryCacheSizeText = FileOperationService.FormatSize(totalSize);
-        _markSummaryCache = $"Mark:{_markedFiles.Count,3} ({fileCount} Files){outsideInfo} {_markSummaryCacheSizeText}";
-        _markSummaryCacheCompact = $"Mark: {_markedFiles.Count} MarkSize: {_markSummaryCacheSizeText}";
-        _markSummaryCacheCount = _markedFiles.Count;
-        _markSummaryCachePath = currentDir;
-        _markSummaryDirty = false;
+        if (!_markSummaryRebuildCoordinator.HasPending)
+        {
+            ScheduleMarkSummaryRebuild();
+        }
         return _markSummaryCache;
     }
     private void InvalidateMarkSummaryCache()
     {
-        _markSummaryDirty = true;
+        _markSummaryCacheState = MarkSummaryCacheState.Invalid;
+        _markSummaryRebuildCoordinator.Invalidate();
+    }
+
+    private void ScheduleMarkSummaryRebuild()
+    {
+        if (_markedFiles.Count == 0 || NetworkPathResolutionPolicy.IsAuxiliaryResolutionDeferred(_navigationService.CurrentPath) ||
+            _markedFiles.Any(NetworkPathResolutionPolicy.IsUncPath) ||
+            _markSummaryRebuildCoordinator.HasPending ||
+            IsDisposed || Disposing || _isExitConfirmationPending || _isClosingFromEscExitPath)
+        {
+            return;
+        }
+        string currentDir = NavigationService.NormalizeDirectoryForCompare(_navigationService.CurrentPath);
+        IReadOnlyList<string> paths = _markedFiles.Snapshot();
+        _ = _markSummaryRebuildCoordinator.Schedule(currentDir, paths);
+    }
+    private void CancelPendingMarkSummaryRebuild()
+    {
+        if (_markSummaryRebuildCoordinator.HasPending)
+        {
+            _markSummaryRebuildCoordinator.Invalidate();
+        }
+    }
+    private static async Task<MarkSummaryBuildResult> BuildMarkSummaryAsync(
+        string currentDir,
+        IReadOnlyList<string> paths,
+        CancellationToken token)
+    {
+        await Task.Delay(150, token).ConfigureAwait(false);
+        long totalSize = 0;
+        int fileCount = 0;
+        int outsideCount = 0;
+        foreach (string path in paths)
+        {
+            token.ThrowIfCancellationRequested();
+            if (!string.Equals(
+                NavigationService.NormalizeDirectoryForCompare(Path.GetDirectoryName(path) ?? string.Empty),
+                currentDir,
+                StringComparison.OrdinalIgnoreCase))
+            {
+                outsideCount++;
+            }
+            try
+            {
+                if (File.Exists(path))
+                {
+                    totalSize += new FileInfo(path).Length;
+                    fileCount++;
+                }
+            }
+            catch
+            {
+            }
+        }
+        return new MarkSummaryBuildResult(totalSize, fileCount, outsideCount);
+    }
+    private void ApplyCompletedMarkSummary(
+        string currentDir,
+        IReadOnlyList<string> paths,
+        MarkSummaryBuildResult result)
+    {
+        _markSummaryCacheTotalSize = result.TotalSize;
+        _markSummaryCacheFileCount = result.FileCount;
+        _markSummaryCacheOutsideCount = result.OutsideCount;
+        string size = FileOperationService.FormatSize(result.TotalSize);
+        string outside = result.OutsideCount > 0 ? $" Out:{result.OutsideCount}" : string.Empty;
+        _markSummaryCache = $"Mark:{paths.Count,3} ({result.FileCount} Files){outside} {size}";
+        _markSummaryCacheCount = paths.Count;
+        _markSummaryCacheSizeText = size;
+        _markSummaryCacheCompact = $"Mark: {paths.Count} MarkSize: {size}";
+        _markSummaryCachePath = currentDir;
+        _markSummaryCacheState = MarkSummaryCacheState.Complete;
+        MarkSummaryOrchestrationMetrics metrics = _markSummaryRebuildCoordinator.GetMetrics();
+        LogService.Info(
+            $"[MarkSummaryOrchestration] marks={paths.Count} schedule={metrics.ScheduleCount} build={metrics.BuildCount} " +
+            $"cancel={metrics.CancelCount} superseded={metrics.SupersededCount} apply={metrics.ApplyCount + 1}");
+        UpdateInfoPanel();
     }
     private void SetCountOnlyMarkSummaryCache()
     {
@@ -3252,7 +3508,46 @@ private void SavePersistedMarksToSettings()
             ? $"Mark: {_markedFiles.Count} MarkSize: ?"
             : string.Empty;
         _markSummaryCachePath = NavigationService.NormalizeDirectoryForCompare(_navigationService.CurrentPath);
-        _markSummaryDirty = false;
+        _markSummaryCacheState = _markedFiles.Count > 0
+            ? MarkSummaryCacheState.CountOnly
+            : MarkSummaryCacheState.Complete;
+    }
+    private void SetZeroMarkSummaryCache()
+    {
+        _markSummaryCacheTotalSize = 0;
+        _markSummaryCacheFileCount = 0;
+        _markSummaryCacheOutsideCount = 0;
+        _markSummaryCache = string.Empty;
+        _markSummaryCacheCount = 0;
+        _markSummaryCacheSizeText = string.Empty;
+        _markSummaryCacheCompact = string.Empty;
+        _markSummaryCachePath = NavigationService.NormalizeDirectoryForCompare(_navigationService.CurrentPath);
+        _markSummaryCacheState = MarkSummaryCacheState.Complete;
+    }
+    private bool TryCarryMarkSummaryAcrossDirectoryChange(string previousDirectory)
+    {
+        string previousDir = NavigationService.NormalizeDirectoryForCompare(previousDirectory);
+        string currentDir = NavigationService.NormalizeDirectoryForCompare(_navigationService.CurrentPath);
+        if (_markedFiles.Count == 0)
+        {
+            SetZeroMarkSummaryCache();
+            return true;
+        }
+        if (_markSummaryCacheState != MarkSummaryCacheState.Complete ||
+            _markSummaryRebuildCoordinator.HasPending ||
+            _markSummaryCacheCount != _markedFiles.Count ||
+            !string.Equals(_markSummaryCachePath, previousDir, StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        MarkSummaryExactCache carried = new(
+            _markSummaryCacheTotalSize,
+            _markSummaryCacheFileCount,
+            MarkSummaryOutsideCountCalculator.Count(_markedFiles, currentDir),
+            _markedFiles.Count);
+        SetCompleteMarkSummaryCache(currentDir, carried);
+        return true;
     }
     private void ApplyMarkColor(ListViewItem item, string fullPath)
     {
@@ -3284,6 +3579,30 @@ private void SavePersistedMarksToSettings()
     {
         _ = preferredColor;
         return FileListColorResolver.GetRelativeLuminance(background) > 0.5 ? Color.Black : Color.White;
+    }
+    private static Color ResolveMouseGestureTrailColor(FileListColorResolver.ResolvedColors resolved)
+    {
+        Color source = HasColorHue(resolved.Marked) ? resolved.Marked : resolved.Directory;
+        if (!HasColorHue(source))
+        {
+            source = Color.Cyan;
+        }
+
+        double backgroundLuminance = FileListColorResolver.GetRelativeLuminance(resolved.Background);
+        double sourceLuminance = FileListColorResolver.GetRelativeLuminance(source);
+        if (Math.Abs(backgroundLuminance - sourceLuminance) < 0.28)
+        {
+            source = backgroundLuminance > 0.5
+                ? ControlPaint.Dark(source, 0.35f)
+                : ControlPaint.Light(source, 0.45f);
+        }
+
+        return source;
+    }
+    private static bool HasColorHue(Color color)
+    {
+        int range = Math.Max(color.R, Math.Max(color.G, color.B)) - Math.Min(color.R, Math.Min(color.G, color.B));
+        return range >= 24 && color.A > 0;
     }
     private Color ResolveAttributeColor(FileAttributes attrs, bool isDirectory)
     {
@@ -3363,9 +3682,10 @@ private void SavePersistedMarksToSettings()
             return fileListView.FocusedItem;
         }
         // 3. 内部カーソル位置 (_browserCursorIndex)
-        if (_browserCursorIndex >= 0 && _browserCursorIndex < fileListView.Items.Count)
+        int pageLocalCursorIndex = GetBrowserPageLocalCursorIndex();
+        if (pageLocalCursorIndex >= 0 && pageLocalCursorIndex < fileListView.Items.Count)
         {
-            return fileListView.Items[_browserCursorIndex];
+            return fileListView.Items[pageLocalCursorIndex];
         }
         // 万が一のフォールバック
         return fileListView.Items[0];
@@ -3446,8 +3766,8 @@ private void SavePersistedMarksToSettings()
         g.Clear(resolved.Background);
         if (fileListView.Items.Count == 0)
         {
-            DrawMouseGestureTrail(g);
             DrawCommandHintOverlay(g);
+            DrawMouseGestureTrail(g);
             return;
         }
         int totalItems = fileListView.Items.Count;
@@ -3456,10 +3776,9 @@ private void SavePersistedMarksToSettings()
         int effectiveColumnCount = GetEffectiveBrowserColumnCount();
         // 列幅の計算
         int colWidth = Math.Max(1, browserPanel.Width / effectiveColumnCount);
-        // 現在のページをカーソル位置から計算
-        int currentPage = _browserCursorIndex / itemsPerPage;
-        int startIndex = currentPage * itemsPerPage;
-        int endIndex = Math.Min(startIndex + itemsPerPage, totalItems);
+        int startIndex = 0;
+        int endIndex = fileListView.Items.Count;
+        int pageLocalCursorIndex = GetBrowserPageLocalCursorIndex();
         // ページ内のアイテムを描画
         for (int i = startIndex; i < endIndex; i++)
         {
@@ -3469,7 +3788,7 @@ private void SavePersistedMarksToSettings()
             int x = col * colWidth + 5;
             int y = row * itemHeight + 5;
             var item = fileListView.Items[i];
-            bool isSelected = (i == _browserCursorIndex);
+            bool isSelected = (i == pageLocalCursorIndex);
             // 描画領域の矩形
             Rectangle rect = new Rectangle(x, y, colWidth - 10, itemHeight);
             // 描画設定の決定
@@ -3530,10 +3849,15 @@ private void SavePersistedMarksToSettings()
                 DrawCursorUnderline(g, rect, fg);
             }
         }
-        DrawMouseGestureTrail(g);
         DrawCommandHintOverlay(g);
+        DrawMouseGestureTrail(g);
     }
     private void DrawMouseGestureTrail(Graphics g)
+    {
+        DrawMouseGestureTrail(g, browserPanel);
+    }
+
+    private void DrawMouseGestureTrail(Graphics g, Control surface)
     {
         if (!_isMouseGestureTrailVisible || _mouseGestureTrailPoints.Count < 2)
         {
@@ -3544,14 +3868,22 @@ private void SavePersistedMarksToSettings()
         try
         {
             g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
-            using var pen = new Pen(Color.FromArgb(220, Color.Cyan), 2f)
+            var resolved = _resolvedColors ?? FileListColorResolver.ResolveColors(_settings);
+            Color trailColor = ResolveMouseGestureTrailColor(resolved);
+            using var pen = new Pen(Color.FromArgb(220, trailColor), 2f)
             {
                 StartCap = System.Drawing.Drawing2D.LineCap.Round,
                 EndCap = System.Drawing.Drawing2D.LineCap.Round,
                 LineJoin = System.Drawing.Drawing2D.LineJoin.Round
             };
 
-            g.DrawLines(pen, _mouseGestureTrailPoints.ToArray());
+            Point[] points = _mouseGestureTrailPoints
+                .Select(point => surface.PointToClient(PointToScreen(point)))
+                .ToArray();
+            if (points.Length >= 2)
+            {
+                g.DrawLines(pen, points);
+            }
         }
         finally
         {
@@ -3826,53 +4158,11 @@ private void SavePersistedMarksToSettings()
             new Size(int.MaxValue, int.MaxValue),
             TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix | TextFormatFlags.NoPadding).Width;
     }
-    private static string FormatBrowserCompactSize(long bytes)
+    internal static string BuildBrowserFileSizeTextCompact(ListViewItem item)
     {
-        if (bytes < 1024)
-        {
-            return $"{bytes}B";
-        }
-
-        string[] units = { "B", "KB", "MB", "GB", "TB", "PB" };
-        double value = bytes / 1024d;
-        int unitIndex = 1;
-        while (unitIndex < units.Length - 1 && value >= 999.95d)
-        {
-            value /= 1024d;
-            unitIndex++;
-        }
-
-        value = Math.Round(value, 1, MidpointRounding.AwayFromZero);
-        if (value >= 1000d && unitIndex < units.Length - 1)
-        {
-            value /= 1024d;
-            unitIndex++;
-            value = Math.Round(value, 1, MidpointRounding.AwayFromZero);
-        }
-
-        return $"{value:0.0}{units[unitIndex]}";
-    }
-    private string BuildBrowserFileSizeTextCompact(ListViewItem item)
-    {
-        if (item.Tag is not string fullPath || string.IsNullOrWhiteSpace(fullPath))
-        {
-            return item.SubItems.Count > 2 ? item.SubItems[2].Text : string.Empty;
-        }
-
-        try
-        {
-            if (!File.Exists(fullPath))
-            {
-                return item.SubItems.Count > 2 ? item.SubItems[2].Text : string.Empty;
-            }
-
-            long length = new FileInfo(fullPath).Length;
-            return FormatBrowserCompactSize(length);
-        }
-        catch
-        {
-            return item.SubItems.Count > 2 ? item.SubItems[2].Text : string.Empty;
-        }
+        return item.SubItems.Count > 2
+            ? item.SubItems[2].Text
+            : string.Empty;
     }
     private string GetBrowserDateFieldSample()
     {
@@ -3900,6 +4190,7 @@ private void SavePersistedMarksToSettings()
     {
         if (_uiMode == UIMode.Browser)
         {
+            RematerializeBrowserPageIfCapacityChanged();
             UpdateInfoPanel();
             browserPanel.Invalidate();
         }
@@ -3909,16 +4200,23 @@ private void SavePersistedMarksToSettings()
     /// </summary>
     private void SyncBrowserSelection()
     {
-        if (fileListView.Items.Count == 0 || _browserCursorIndex < 0 || _browserCursorIndex >= fileListView.Items.Count)
+        int pageLocalCursorIndex = GetBrowserPageLocalCursorIndex();
+        if (pageLocalCursorIndex < 0 || pageLocalCursorIndex >= fileListView.Items.Count)
             return;
-        // 裏側のListViewの状態をリセットして再設定
-        fileListView.SelectedItems.Clear();
-        var item = fileListView.Items[_browserCursorIndex];
-        item.Selected = true;
-        item.Focused = true;
-        item.EnsureVisible();
-        // プレビューと上部情報欄の更新を発火
-        FileListView_SelectedIndexChanged(this, EventArgs.Empty);
+        _suppressBrowserSelectionChanged = true;
+        try
+        {
+            fileListView.SelectedItems.Clear();
+            var item = fileListView.Items[pageLocalCursorIndex];
+            item.Selected = true;
+            item.Focused = true;
+            item.EnsureVisible();
+        }
+        finally
+        {
+            _suppressBrowserSelectionChanged = false;
+        }
+        ApplyBrowserSelectionChanged();
         // UI描画更新
         browserPanel.Invalidate();
         CaptureActiveBrowserTabState();
@@ -3933,34 +4231,35 @@ private void SavePersistedMarksToSettings()
         if (_uiMode != UIMode.Browser) return;
         ClearPendingEscExitMarkPersistence();
         int newIndex = CalculateBrowserIndexFromPoint(e.X, e.Y);
+        int newPageLocalIndex = newIndex - _browserPageStartIndex;
         if (e.Button == MouseButtons.Left)
         {
-            if (newIndex >= 0 && newIndex < fileListView.Items.Count)
+            if (newPageLocalIndex >= 0 && newPageLocalIndex < fileListView.Items.Count)
             {
                 bool shiftPressed = (ModifierKeys & Keys.Shift) == Keys.Shift;
                 bool ctrlPressed = (ModifierKeys & Keys.Control) == Keys.Control;
-                int previousCursorIndex = _browserCursorIndex;
+                int previousCursorIndex = GetBrowserPageLocalCursorIndex();
                 BrowserMarkClickDecision clickDecision = _browserMarkInteractionController.ResolveLeftClick(
-                    newIndex,
+                    newPageLocalIndex,
                     previousCursorIndex,
                     fileListView.Items.Count,
                     ctrlPressed,
                     shiftPressed,
                     _markedFiles.Count > 0);
-                _browserCursorIndex = newIndex;
+                _browserCursorIndex = _browserPageStartIndex + newPageLocalIndex;
                 SyncBrowserSelection();
                 if (clickDecision.Kind == BrowserMarkClickKind.AddRange)
                 {
-                    AddBrowserMouseMarkRange(clickDecision.AnchorIndex, newIndex);
+                    AddBrowserMouseMarkRange(clickDecision.AnchorIndex, newPageLocalIndex);
                 }
                 else if (clickDecision.Kind == BrowserMarkClickKind.PromotePendingAndToggleSingle)
                 {
                     AddBrowserMouseMarkRange(clickDecision.PendingPromotionIndex, clickDecision.PendingPromotionIndex);
-                    ToggleBrowserMouseMarkByIndex(newIndex);
+                    ToggleBrowserMouseMarkByIndex(newPageLocalIndex);
                 }
                 else if (clickDecision.Kind == BrowserMarkClickKind.ToggleSingle)
                 {
-                    ToggleBrowserMouseMarkByIndex(newIndex);
+                    ToggleBrowserMouseMarkByIndex(newPageLocalIndex);
                 }
             }
             else
@@ -3971,18 +4270,23 @@ private void SavePersistedMarksToSettings()
         else if (e.Button == MouseButtons.Right)
         {
             if (TryConsumeBrowserContextMenuSuppress()) return;
-            if (newIndex >= 0 && newIndex < fileListView.Items.Count)
+            bool itemHit = newIndex >= 0
+                && TryGetBrowserItemLayoutBounds(newIndex, out Rectangle contextItemBounds, out _)
+                && contextItemBounds.Contains(e.Location)
+                && newPageLocalIndex >= 0
+                && newPageLocalIndex < fileListView.Items.Count;
+            if (itemHit)
             {
-                var item = fileListView.Items[newIndex];
+                var item = fileListView.Items[newPageLocalIndex];
                 var targetResolution = BrowserContextMenuTargetResolver.Resolve(
                     _markedFiles.Snapshot(),
-                    newIndex,
+                    newPageLocalIndex,
                     fileListView.Items.Count,
                     item.Tag as string,
                     item.Text == "..");
-                if (_browserCursorIndex != targetResolution.TargetIndex)
+                if (GetBrowserPageLocalCursorIndex() != targetResolution.TargetIndex)
                 {
-                    _browserCursorIndex = targetResolution.TargetIndex;
+                    _browserCursorIndex = _browserPageStartIndex + targetResolution.TargetIndex;
                     SyncBrowserSelection();
                 }
                 ShowBrowserItemContextMenu(e.Location, item, targetResolution);
@@ -4205,7 +4509,8 @@ private void SavePersistedMarksToSettings()
         if (_uiMode != UIMode.Browser) return;
         if (e.Button != MouseButtons.Left) return;
         int newIndex = CalculateBrowserIndexFromPoint(e.X, e.Y);
-        if (newIndex >= 0 && newIndex < fileListView.Items.Count)
+        int newPageLocalIndex = newIndex - _browserPageStartIndex;
+        if (newPageLocalIndex >= 0 && newPageLocalIndex < fileListView.Items.Count)
         {
             _browserCursorIndex = newIndex;
             SyncBrowserSelection();
@@ -4236,7 +4541,7 @@ private void SavePersistedMarksToSettings()
     {
         int start = Math.Max(0, Math.Min(anchorIndex, clickedIndex));
         int end = Math.Min(fileListView.Items.Count - 1, Math.Max(anchorIndex, clickedIndex));
-        bool changed = false;
+        var paths = new List<string>(end - start + 1);
         for (int i = start; i <= end; i++)
         {
             string? path = TryGetMarkableBrowserPathByIndex(i);
@@ -4245,11 +4550,12 @@ private void SavePersistedMarksToSettings()
                 continue;
             }
 
-            changed |= MarkPath(path);
+            paths.Add(path);
         }
 
-        if (changed)
+        if (_markedFiles.AddRange(paths) > 0)
         {
+            CommitMarkStateChange();
             RefreshMarkUi();
             PrimeRecentMultiMarkIntent();
         }
@@ -4275,7 +4581,7 @@ private void SavePersistedMarksToSettings()
         if (_uiMode != UIMode.Browser || fileListView.Items.Count == 0) return;
         int itemsPerPage = GetBrowserItemsPerPage();
         if (itemsPerPage <= 0) return;
-        int totalItems = fileListView.Items.Count;
+        int totalItems = _browserTotalItemCount > 0 ? _browserTotalItemCount : fileListView.Items.Count;
         int currentPage = _browserCursorIndex / itemsPerPage;
         int offsetInPage = _browserCursorIndex % itemsPerPage;
         int totalPages = (totalItems + itemsPerPage - 1) / itemsPerPage;
@@ -4284,16 +4590,14 @@ private void SavePersistedMarksToSettings()
             if (currentPage <= 0) return; // 境界 no-op
             int targetPage = currentPage - 1;
             int targetIndex = targetPage * itemsPerPage + offsetInPage;
-            _browserCursorIndex = Math.Min(totalItems - 1, targetIndex);
-            SyncBrowserSelection();
+            SetBrowserGlobalCursorIndex(Math.Min(totalItems - 1, targetIndex));
         }
         else if (e.Delta < 0) // 下ホイール: 次ページへ
         {
             if (currentPage >= totalPages - 1) return; // 境界 no-op
             int targetPage = currentPage + 1;
             int targetIndex = targetPage * itemsPerPage + offsetInPage;
-            _browserCursorIndex = Math.Min(totalItems - 1, targetIndex);
-            SyncBrowserSelection();
+            SetBrowserGlobalCursorIndex(Math.Min(totalItems - 1, targetIndex));
         }
     }
     // ─── Phase 3-fix2a: 外部 → MidFD Drag-in ───
@@ -4490,28 +4794,180 @@ private void SavePersistedMarksToSettings()
         RefreshBrowserStatusSummary();
     }
     // ─── Phase 3-fix2b: MidFD → 外部 Drag-out (Copy限定) ───
+    private void InitializeHeaderGestureInteraction()
+    {
+        Control[] controls =
+        {
+            titleHeaderPanel, lblTitle, topPanel, infoRow2Panel, infoRow4Panel,
+            lblPath, lblSort, lblName, lblFileStatsEx, headerPanel,
+            headerZone1, headerZone2, headerZone3, headerZone4,
+            lblPage, lblTotal, lblUsed, lblFree
+        };
+        foreach (Control control in controls)
+        {
+            WireHeaderGestureControl(control);
+        }
+        if (_breadcrumbPathControl != null)
+        {
+            WireHeaderGestureControl(_breadcrumbPathControl);
+        }
+    }
+
+    private void WireHeaderGestureControl(Control control)
+    {
+        if (!_headerGestureControls.Add(control))
+        {
+            return;
+        }
+        control.MouseDown += HeaderGesture_MouseDown;
+        control.MouseMove += HeaderGesture_MouseMove;
+        control.MouseUp += HeaderGesture_MouseUp;
+        control.MouseLeave += HeaderGesture_MouseLeave;
+        control.MouseCaptureChanged += HeaderGesture_MouseCaptureChanged;
+        control.Paint += HeaderGestureSurface_Paint;
+    }
+
+    private void HeaderGesture_MouseDown(object? sender, MouseEventArgs e)
+    {
+        if (_uiMode != UIMode.Browser || e.Button != MouseButtons.Right || sender is not Control control)
+        {
+            return;
+        }
+
+        _browserRightStartPoint = ToMainFormClient(control, e.Location);
+        _browserRightInteractionState = BrowserRightInteractionState.HeaderRightPending;
+        _browserRightCaptureControl = control;
+    }
+
+    private void HeaderGesture_MouseMove(object? sender, MouseEventArgs e)
+    {
+        if (sender is not Control control || e.Button != MouseButtons.Right)
+        {
+            return;
+        }
+
+        Point formPoint = ToMainFormClient(control, e.Location);
+        if (_browserRightInteractionState == BrowserRightInteractionState.HeaderRightPending)
+        {
+            if (HasExceededBrowserDragThreshold(formPoint))
+            {
+                BeginBrowserGestureTracking(formPoint, control);
+            }
+            else
+            {
+                return;
+            }
+        }
+
+        if (_browserRightInteractionState == BrowserRightInteractionState.GestureTracking)
+        {
+            _mouseGestureRecognizer.Update(formPoint);
+            AppendMouseGestureTrailPoint(formPoint);
+            InvalidateMouseGestureSurfaces();
+            ShowMouseGestureInputStatus(_mouseGestureRecognizer.GestureText);
+        }
+    }
+
+    private void HeaderGesture_MouseUp(object? sender, MouseEventArgs e)
+    {
+        if (e.Button != MouseButtons.Right || sender is not Control control)
+        {
+            return;
+        }
+
+        if (_browserRightInteractionState == BrowserRightInteractionState.GestureTracking)
+        {
+            string gesture = _mouseGestureRecognizer.End(ToMainFormClient(control, e.Location));
+            ClearMouseGestureTrail();
+            if (!string.IsNullOrEmpty(gesture))
+            {
+                TryExecuteBrowserMouseGesture(gesture);
+            }
+        }
+
+        if (_browserRightInteractionState == BrowserRightInteractionState.HeaderRightPending
+            || _browserRightInteractionState == BrowserRightInteractionState.GestureTracking)
+        {
+            CleanupBrowserRightInteraction();
+        }
+    }
+
+    private void HeaderGesture_MouseLeave(object? sender, EventArgs e)
+    {
+        if (_browserRightInteractionState == BrowserRightInteractionState.GestureTracking
+            && _browserRightCaptureControl?.Capture != true)
+        {
+            CleanupBrowserRightInteraction(clearContextMenuSuppression: true);
+        }
+    }
+
+    private void HeaderGesture_MouseCaptureChanged(object? sender, EventArgs e)
+    {
+        if (_browserRightInteractionState == BrowserRightInteractionState.GestureTracking
+            && _browserRightCaptureControl?.Capture != true)
+        {
+            CleanupBrowserRightInteraction(clearContextMenuSuppression: true);
+        }
+    }
+
+    private void HeaderGestureSurface_Paint(object? sender, PaintEventArgs e)
+    {
+        if (sender is Control control)
+        {
+            DrawMouseGestureTrail(e.Graphics, control);
+        }
+    }
+
     private void BrowserPanel_MouseDown(object? sender, MouseEventArgs e)
     {
         if (_uiMode != UIMode.Browser) return;
         if (e.Button == MouseButtons.Right)
         {
-            if (_settings.Input?.EnableMouseGestures == true)
-            {
-                _mouseGestureRecognizer.Begin(e.Location);
-                _mouseGestureTrailPoints.Clear();
-                _mouseGestureTrailPoints.Add(e.Location);
-                _isMouseGestureTrailVisible = true;
-                browserPanel.Invalidate();
-            }
+            _browserRightStartPoint = ToMainFormClient(browserPanel, e.Location);
+            _browserRightItemIndex = -1;
+            _browserRightItemPath = null;
+            _browserRightSelectionSnapshot = _markedFiles.Snapshot();
         }
         if (e.Button != MouseButtons.Left && e.Button != MouseButtons.Right) return;
         // ドラッグ開始の「候補」座標とインデックスを保持
         _dragStartPoint = e.Location;
         _dragCandidateIndex = CalculateBrowserIndexFromPoint(e.X, e.Y);
+        if (e.Button == MouseButtons.Left)
+        {
+            bool itemHit = _dragCandidateIndex >= 0
+                && TryGetBrowserItemLayoutBounds(_dragCandidateIndex, out Rectangle itemHoverBounds, out _)
+                && itemHoverBounds.Contains(e.Location);
+            if (!itemHit)
+            {
+                _dragCandidateIndex = -1;
+            }
+            _blankDragCandidate = !itemHit;
+        }
+        else
+        {
+            bool itemHit = _dragCandidateIndex >= 0
+                && TryGetBrowserItemLayoutBounds(_dragCandidateIndex, out Rectangle rightItemBounds, out _)
+                && rightItemBounds.Contains(e.Location);
+            _blankDragCandidate = !itemHit;
+            if (itemHit)
+            {
+                _browserRightInteractionState = BrowserRightInteractionState.ItemRightPending;
+                _browserRightItemIndex = _dragCandidateIndex;
+                int localIndex = _dragCandidateIndex - _browserPageStartIndex;
+                _browserRightItemPath = localIndex >= 0 && localIndex < fileListView.Items.Count
+                    ? fileListView.Items[localIndex].Tag as string
+                    : null;
+            }
+            else
+            {
+                _browserRightInteractionState = BrowserRightInteractionState.BlankRightPending;
+            }
+        }
         // MouseDown時点での修飾キー状態（Shift/Ctrl）をキャプチャ
         var mods = Control.ModifierKeys;
         _dragArchiveHandoffRequested = (mods & (Keys.Shift | Keys.Control)) != 0;
-        if (_dragCandidateIndex >= 0 && _dragCandidateIndex < fileListView.Items.Count && _browserCursorIndex != _dragCandidateIndex)
+        int dragCandidateLocalIndex = _dragCandidateIndex - _browserPageStartIndex;
+        if (dragCandidateLocalIndex >= 0 && dragCandidateLocalIndex < fileListView.Items.Count && _browserCursorIndex != _dragCandidateIndex)
         {
             InvalidateRecentMultiMarkIntent();
             _browserCursorIndex = _dragCandidateIndex;
@@ -4715,67 +5171,71 @@ private void SavePersistedMarksToSettings()
         {
             HideBrowserFileNameToolTip();
         }
-        if ((e.Button != MouseButtons.Left && e.Button != MouseButtons.Right) || _dragStartPoint == Point.Empty || _dragCandidateIndex == -1) return;
-        // 右ドラッグ時はジェスチャーではないこと（＝しきい値を超えてドラッグと判定された場合）を優先し、コンテキストメニューとジェスチャートラッキングをキャンセルする
-        if (e.Button == MouseButtons.Right && _mouseGestureRecognizer.IsTracking)
+        if ((e.Button != MouseButtons.Left && e.Button != MouseButtons.Right)
+            || _dragStartPoint == Point.Empty
+            || (_dragCandidateIndex == -1 && !_blankDragCandidate)) return;
+        if (e.Button == MouseButtons.Right && _browserRightInteractionState == BrowserRightInteractionState.BlankRightPending)
         {
-            bool exceededThreshold = Math.Abs(e.X - _dragStartPoint.X) > SystemInformation.DragSize.Width ||
-                                     Math.Abs(e.Y - _dragStartPoint.Y) > SystemInformation.DragSize.Height;
-            if (!exceededThreshold)
+            if (HasExceededBrowserDragThreshold(ToMainFormClient(browserPanel, e.Location)))
             {
-                // しきい値未満なのでジェスチャー処理を継続
-                _mouseGestureRecognizer.Update(e.Location);
-                AppendMouseGestureTrailPoint(e.Location);
-                browserPanel.Invalidate();
-                ShowMouseGestureInputStatus(_mouseGestureRecognizer.GestureText);
-                return;
+                BeginBrowserGestureTracking(ToMainFormClient(browserPanel, e.Location), browserPanel);
             }
             else
             {
-                // ドラッグ開始とみなすため、ジェスチャートラッキングを停止しコンテキストメニューを抑制
-                _mouseGestureRecognizer.End(e.Location);
-                ClearMouseGestureTrail();
-                SuppressNextBrowserContextMenu();
+                return;
             }
+        }
+        if (e.Button == MouseButtons.Right && _browserRightInteractionState == BrowserRightInteractionState.GestureTracking)
+        {
+            Point formPoint = ToMainFormClient(browserPanel, e.Location);
+            _mouseGestureRecognizer.Update(formPoint);
+            AppendMouseGestureTrailPoint(formPoint);
+            browserPanel.Invalidate();
+            ShowMouseGestureInputStatus(_mouseGestureRecognizer.GestureText);
+            return;
+        }
+        if (e.Button == MouseButtons.Right && _browserRightInteractionState == BrowserRightInteractionState.ItemRightPending
+            && HasExceededBrowserDragThreshold(ToMainFormClient(browserPanel, e.Location)))
+        {
+            _browserRightInteractionState = BrowserRightInteractionState.FileDragTracking;
+            SuppressNextBrowserContextMenu();
         }
         // OS標準のドラッグ開始しきい値判定 (SystemInformation.DragSize)
         bool exceeded = Math.Abs(e.X - _dragStartPoint.X) > SystemInformation.DragSize.Width ||
                         Math.Abs(e.Y - _dragStartPoint.Y) > SystemInformation.DragSize.Height;
         if (exceeded)
         {
+            if (e.Button == MouseButtons.Right && _browserRightInteractionState != BrowserRightInteractionState.FileDragTracking)
+            {
+                return;
+            }
+            if (e.Button == MouseButtons.Right)
+            {
+                _browserRightInteractionState = BrowserRightInteractionState.FileDragTracking;
+            }
             // ドラッグ対象の確定
             List<string> dragPaths = new List<string>();
-            string? dragCandidatePath = (_dragCandidateIndex >= 0 && _dragCandidateIndex < fileListView.Items.Count)
-                ? fileListView.Items[_dragCandidateIndex].Tag as string
+            List<string> archiveDragPaths = new List<string>();
+            IReadOnlyList<string> dragSelection = e.Button == MouseButtons.Right
+                ? _browserRightSelectionSnapshot
+                : _markedFiles.Snapshot();
+            bool isBlankDrag = _blankDragCandidate && _dragCandidateIndex == -1;
+            int dragCandidateLocalIndex = _dragCandidateIndex - _browserPageStartIndex;
+            string? dragCandidatePath = (dragCandidateLocalIndex >= 0 && dragCandidateLocalIndex < fileListView.Items.Count)
+                ? fileListView.Items[dragCandidateLocalIndex].Tag as string
                 : null;
-            // 1. 複数 mark 中に未mark の current row をつかんだ場合は、その行だけを優先する
-            if (!string.IsNullOrWhiteSpace(dragCandidatePath)
-                && _markedFiles.Count > 1
-                && !_markedFiles.Contains(dragCandidatePath)
-                && (File.Exists(dragCandidatePath) || Directory.Exists(dragCandidatePath)))
+            if (e.Button == MouseButtons.Right && !string.IsNullOrWhiteSpace(_browserRightItemPath))
             {
-                dragPaths.Add(dragCandidatePath);
+                dragCandidatePath = _browserRightItemPath;
             }
-            // 2. mark 済み行または単体 mark は従来どおり mark 集合優先
-            else if (_markedFiles.Count > 0)
-            {
-                foreach (var path in _markedFiles)
-                {
-                    if (File.Exists(path) || Directory.Exists(path))
-                    {
-                        dragPaths.Add(path);
-                    }
-                }
-            }
-            // 3. マークなし時は直下のカーソル候補
-            else if (_dragCandidateIndex >= 0 && _dragCandidateIndex < fileListView.Items.Count)
+            if (dragSelection.Count == 0 && dragCandidateLocalIndex >= 0 && dragCandidateLocalIndex < fileListView.Items.Count)
             {
                 if (_browserCursorIndex != _dragCandidateIndex)
                 {
                     _browserCursorIndex = _dragCandidateIndex;
                     SyncBrowserSelection();
                 }
-                var item = fileListView.Items[_dragCandidateIndex];
+                var item = fileListView.Items[dragCandidateLocalIndex];
                 string name = item.Text;
                 string? fullPath = item.Tag as string;
                 // 親ディレクトリ(..)や無効なパスは除外
@@ -4783,22 +5243,67 @@ private void SavePersistedMarksToSettings()
                 {
                     if (File.Exists(fullPath) || Directory.Exists(fullPath))
                     {
-                        dragPaths.Add(fullPath);
+                        dragCandidatePath = fullPath;
                     }
                 }
             }
-                if (dragPaths.Count > 0)
+            // 通常 FileDrop は既存の対象選択契約を維持する。
+            if (!string.IsNullOrWhiteSpace(dragCandidatePath)
+                && dragSelection.Count > 1
+                && !dragSelection.Contains(dragCandidatePath))
+            {
+                dragPaths.Add(dragCandidatePath);
+            }
+            else if (dragSelection.Count > 0)
+            {
+                dragPaths.AddRange(dragSelection.Where(path => File.Exists(path) || Directory.Exists(path)));
+            }
+            else if (!string.IsNullOrWhiteSpace(dragCandidatePath))
+            {
+                dragPaths.Add(dragCandidatePath);
+            }
+            bool isShiftOrCtrl = _dragArchiveHandoffRequested || (Control.ModifierKeys & (Keys.Shift | Keys.Control)) != 0;
+            if (isShiftOrCtrl)
+            {
+                archiveDragPaths.AddRange(DragTargetResolver.Resolve(dragSelection, dragCandidatePath));
+            }
+                if (isBlankDrag && (dragSelection.Count == 0 || !isShiftOrCtrl))
+                {
+                    _dragStartPoint = Point.Empty;
+                    _dragCandidateIndex = -1;
+                    _blankDragCandidate = false;
+                    _dragArchiveHandoffRequested = false;
+                    return;
+                }
+                if (dragPaths.Count > 0 || (isBlankDrag && archiveDragPaths.Count > 0))
                 {
                     // Phase 3-keybind-cleanup1.3: Clipboard処理中は開始しない
-                if (_isClipboardBusy) return;
+                if (_isClipboardBusy)
+                {
+                    if (isBlankDrag)
+                    {
+                        _dragStartPoint = Point.Empty;
+                        _dragCandidateIndex = -1;
+                        _blankDragCandidate = false;
+                        _dragArchiveHandoffRequested = false;
+                    }
+                    return;
+                }
 
                 var fileOperations = _settings.FileOperations;
-                bool isShiftOrCtrl = _dragArchiveHandoffRequested || (Control.ModifierKeys & (Keys.Shift | Keys.Control)) != 0;
                 bool isDragArchiveEnabled = fileOperations.EnableDragArchiveHandoff;
+                if (isBlankDrag && !isDragArchiveEnabled)
+                {
+                    _dragStartPoint = Point.Empty;
+                    _dragCandidateIndex = -1;
+                    _blankDragCandidate = false;
+                    _dragArchiveHandoffRequested = false;
+                    return;
+                }
                 string logMsg = $"[DragArchive] dragPaths.Count={dragPaths.Count}, _markedFiles.Count={_markedFiles.Count}, enableDragArchiveHandoff={isDragArchiveEnabled}, includeManifest={fileOperations.IncludeDragZipManifest}, mouseDownModifier={_dragArchiveHandoffRequested}, currentModifier={((Control.ModifierKeys & (Keys.Shift | Keys.Control)) != 0)}, archiveDragRequested={isShiftOrCtrl}, candidatePath='{dragCandidatePath}'";
                 LogService.Info(logMsg);
 
-                if (isDragArchiveEnabled && isShiftOrCtrl && dragPaths.Count >= 2)
+                if (isDragArchiveEnabled && isShiftOrCtrl && archiveDragPaths.Count > 0)
                 {
                     string? zipPath = null;
                     string? archiveBaseDirectory = null;
@@ -4813,7 +5318,7 @@ private void SavePersistedMarksToSettings()
                         DragArchiveService.CleanupDragArchivesBeforeCreation(tempDir);
                         DragArchiveService.DragArchiveInfo archiveInfo = DragArchiveService.GetOrCreateInfoZip(
                             tempDir,
-                            dragPaths,
+                            archiveDragPaths,
                             fileOperations.IncludeDragZipManifest);
                         zipPath = archiveInfo.ArchivePath;
                         archiveBaseDirectory = archiveInfo.BaseDirectory;
@@ -4876,14 +5381,103 @@ private void SavePersistedMarksToSettings()
                 }
             }
             // 開始した（または条件に合わず開始できなかった）ので状態をクリア
-            _dragStartPoint = Point.Empty;
-            _dragCandidateIndex = -1;
-            _dragArchiveHandoffRequested = false;
+            if (e.Button == MouseButtons.Right)
+            {
+                CleanupBrowserRightInteraction();
+            }
+            else
+            {
+                _dragStartPoint = Point.Empty;
+                _dragCandidateIndex = -1;
+                _blankDragCandidate = false;
+                _dragArchiveHandoffRequested = false;
+            }
         }
     }
+    private bool HasExceededBrowserDragThreshold(Point point)
+    {
+        return Math.Abs(point.X - _browserRightStartPoint.X) > SystemInformation.DragSize.Width
+            || Math.Abs(point.Y - _browserRightStartPoint.Y) > SystemInformation.DragSize.Height;
+    }
+
+    private Point ToMainFormClient(Control control, Point point)
+    {
+        return PointToClient(control.PointToScreen(point));
+    }
+
+    private void BeginBrowserGestureTracking(Point point, Control captureControl)
+    {
+        bool isHeaderGesture = _browserRightInteractionState == BrowserRightInteractionState.HeaderRightPending;
+        _browserRightInteractionState = BrowserRightInteractionState.GestureTracking;
+        _mouseGestureRecognizer.Begin(_browserRightStartPoint);
+        _mouseGestureTrailPoints.Clear();
+        _mouseGestureTrailPoints.Add(_browserRightStartPoint);
+        _isMouseGestureTrailVisible = true;
+        _browserRightCaptureControl = captureControl;
+        captureControl.Capture = true;
+        if (isHeaderGesture)
+        {
+            SuppressNextHeaderContextMenu();
+        }
+        else
+        {
+            SuppressNextBrowserContextMenu();
+        }
+        _mouseGestureRecognizer.Update(point);
+        AppendMouseGestureTrailPoint(point);
+        InvalidateMouseGestureSurfaces();
+    }
+
+    private void CleanupBrowserRightInteraction(bool clearContextMenuSuppression = false)
+    {
+        _mouseGestureRecognizer.Cancel();
+        ClearMouseGestureTrail();
+        _browserRightInteractionState = BrowserRightInteractionState.Idle;
+        if (_browserRightCaptureControl?.Capture == true)
+        {
+            _browserRightCaptureControl.Capture = false;
+        }
+        _browserRightCaptureControl = null;
+        _browserRightStartPoint = Point.Empty;
+        _browserRightItemIndex = -1;
+        _browserRightItemPath = null;
+        _browserRightSelectionSnapshot = Array.Empty<string>();
+        _dragStartPoint = Point.Empty;
+        _dragCandidateIndex = -1;
+        _blankDragCandidate = false;
+        _dragArchiveHandoffRequested = false;
+        if (clearContextMenuSuppression)
+        {
+            _suppressNextBrowserContextMenu = false;
+            _suppressBrowserContextMenuUntilUtc = DateTime.MinValue;
+            _suppressNextHeaderContextMenu = false;
+            _suppressHeaderContextMenuUntilUtc = DateTime.MinValue;
+        }
+        InvalidateMouseGestureSurfaces();
+    }
+
     private void BrowserPanel_MouseLeave(object? sender, EventArgs e)
     {
         HideBrowserFileNameToolTip();
+        if (_browserRightInteractionState == BrowserRightInteractionState.GestureTracking && _browserRightCaptureControl?.Capture != true)
+        {
+            CleanupBrowserRightInteraction(clearContextMenuSuppression: true);
+        }
+    }
+    private void BrowserPanel_CaptureChanged(object? sender, EventArgs e)
+    {
+        if (_browserRightCaptureControl?.Capture != true && _browserRightInteractionState == BrowserRightInteractionState.GestureTracking)
+        {
+            CleanupBrowserRightInteraction(clearContextMenuSuppression: true);
+        }
+    }
+    private void InvalidateMouseGestureSurfaces()
+    {
+        browserPanel.Invalidate();
+        foreach (Control control in _headerGestureControls)
+        {
+            control.Invalidate();
+        }
     }
     private void BrowserPanel_MouseUp(object? sender, MouseEventArgs e)
     {
@@ -4897,24 +5491,19 @@ private void SavePersistedMarksToSettings()
             ExecuteCommandFromUi(CommandIds.BrowserNavigateForward, CommandScope.Browser, "Mouse.XButton2");
             return;
         }
-        if (e.Button == MouseButtons.Right && _mouseGestureRecognizer.IsTracking)
+        if (e.Button == MouseButtons.Right && _browserRightInteractionState == BrowserRightInteractionState.GestureTracking)
         {
-            string gesture = _mouseGestureRecognizer.End(e.Location);
+            string gesture = _mouseGestureRecognizer.End(ToMainFormClient(browserPanel, e.Location));
             ClearMouseGestureTrail();
-            if (!string.IsNullOrEmpty(gesture) && TryExecuteBrowserMouseGesture(gesture))
+            if (!string.IsNullOrEmpty(gesture))
             {
-                SuppressNextBrowserContextMenu();
-                return;
+                TryExecuteBrowserMouseGesture(gesture);
             }
         }
         if (e.Button == MouseButtons.Right)
         {
-            ClearMouseGestureTrail();
+            CleanupBrowserRightInteraction();
         }
-        // ボタンを離した時点で候補をリセット（クリックとして成立したか、ドラッグせずに離した）
-        _dragStartPoint = Point.Empty;
-        _dragCandidateIndex = -1;
-        _dragArchiveHandoffRequested = false;
     }
     private void AppendMouseGestureTrailPoint(Point point)
     {
@@ -4946,17 +5535,37 @@ private void SavePersistedMarksToSettings()
 
         _isMouseGestureTrailVisible = false;
         _mouseGestureTrailPoints.Clear();
-        browserPanel.Invalidate();
+        InvalidateMouseGestureSurfaces();
     }
     private void SuppressNextBrowserContextMenu()
     {
         _suppressNextBrowserContextMenu = true;
         _suppressBrowserContextMenuUntilUtc = DateTime.UtcNow.AddMilliseconds(800);
     }
+    private void SuppressNextHeaderContextMenu()
+    {
+        _suppressNextHeaderContextMenu = true;
+        _suppressHeaderContextMenuUntilUtc = DateTime.UtcNow.AddMilliseconds(800);
+    }
+    private bool TryConsumeHeaderContextMenuSuppress()
+    {
+        if (!_suppressNextHeaderContextMenu || DateTime.UtcNow > _suppressHeaderContextMenuUntilUtc)
+        {
+            _suppressNextHeaderContextMenu = false;
+            _suppressHeaderContextMenuUntilUtc = DateTime.MinValue;
+            return false;
+        }
+
+        _suppressNextHeaderContextMenu = false;
+        _suppressHeaderContextMenuUntilUtc = DateTime.MinValue;
+        return true;
+    }
     private bool TryConsumeBrowserContextMenuSuppress()
     {
-        if (!_suppressNextBrowserContextMenu && DateTime.UtcNow > _suppressBrowserContextMenuUntilUtc)
+        if (!_suppressNextBrowserContextMenu || DateTime.UtcNow > _suppressBrowserContextMenuUntilUtc)
         {
+            _suppressNextBrowserContextMenu = false;
+            _suppressBrowserContextMenuUntilUtc = DateTime.MinValue;
             return false;
         }
         _suppressNextBrowserContextMenu = false;
@@ -5121,8 +5730,7 @@ private void SavePersistedMarksToSettings()
         if (targetCol < 0 || targetCol >= effectiveColumnCount || targetRow < 0 || targetRow >= rowsPerColumn)
             return -1;
         int pageIndex = targetCol * rowsPerColumn + targetRow;
-        int currentPage = _browserCursorIndex / itemsPerPage;
-        return (currentPage * itemsPerPage) + pageIndex;
+        return BrowserPageIndex.ToGlobal(pageIndex, _browserPageStartIndex, fileListView.Items.Count);
     }
     private void UpdateBrowserFileNameToolTip(Point location)
     {
@@ -5133,7 +5741,8 @@ private void SavePersistedMarksToSettings()
         }
 
         int index = CalculateBrowserIndexFromPoint(location.X, location.Y);
-        if (index < 0 || index >= fileListView.Items.Count)
+        int pageLocalIndex = index - _browserPageStartIndex;
+        if (pageLocalIndex < 0 || pageLocalIndex >= fileListView.Items.Count)
         {
             HideBrowserFileNameToolTip();
             return;
@@ -5151,7 +5760,7 @@ private void SavePersistedMarksToSettings()
             return;
         }
 
-        ListViewItem item = fileListView.Items[index];
+        ListViewItem item = fileListView.Items[pageLocalIndex];
         if (!IsBrowserItemNameEllipsized(item, nameBounds))
         {
             HideBrowserFileNameToolTip();
@@ -5258,7 +5867,8 @@ private void SavePersistedMarksToSettings()
     {
         hoverBounds = Rectangle.Empty;
         nameBounds = Rectangle.Empty;
-        if (index < 0 || index >= fileListView.Items.Count)
+        int pageLocalIndex = index - _browserPageStartIndex;
+        if (pageLocalIndex < 0 || pageLocalIndex >= fileListView.Items.Count)
         {
             return false;
         }
@@ -5269,15 +5879,7 @@ private void SavePersistedMarksToSettings()
             return false;
         }
 
-        int currentPage = _browserCursorIndex / itemsPerPage;
-        int startIndex = currentPage * itemsPerPage;
-        int endIndex = Math.Min(startIndex + itemsPerPage, fileListView.Items.Count);
-        if (index < startIndex || index >= endIndex)
-        {
-            return false;
-        }
-
-        int pageIndex = index - startIndex;
+        int pageIndex = pageLocalIndex;
         int col = pageIndex / rowsPerColumn;
         int row = pageIndex % rowsPerColumn;
         int effectiveColumnCount = GetEffectiveBrowserColumnCount();
@@ -5307,10 +5909,10 @@ private void SavePersistedMarksToSettings()
         }
 
         using Graphics g = browserPanel.CreateGraphics();
-        if (!TryCalculateBrowserNameRectForDetail(g, fileListView.Items[index], textRect, browserPanel.Font, mode, out Rectangle detailNameRect))
+        if (!TryCalculateBrowserNameRectForDetail(g, fileListView.Items[pageLocalIndex], textRect, browserPanel.Font, mode, out Rectangle detailNameRect))
         {
             if (mode == BrowserFileDisplayMode.NameSizeDate
-                && TryCalculateBrowserNameRectForDetail(g, fileListView.Items[index], textRect, browserPanel.Font, BrowserFileDisplayMode.NameSize, out detailNameRect))
+                && TryCalculateBrowserNameRectForDetail(g, fileListView.Items[pageLocalIndex], textRect, browserPanel.Font, BrowserFileDisplayMode.NameSize, out detailNameRect))
             {
                 nameBounds = detailNameRect;
                 return true;
@@ -5515,7 +6117,7 @@ private void SavePersistedMarksToSettings()
                 return true;
             case CommandIds.BrowserOpenShell:
                 if (_uiMode != UIMode.Browser || IsCurrentDirectoryBusy()) return false;
-                if (GuardClipboardBusy()) return false;
+                if (GuardMutationBusy()) return false;
                 OpenTerminalInCurrentDirectory(ShellKind.PowerShell);
                 return true;
             case CommandIds.BrowserOpenExternalEditor:
@@ -5647,7 +6249,7 @@ private void SavePersistedMarksToSettings()
                 return true;
             case CommandIds.AppOpenNewInstance:
                 if (_uiMode != UIMode.Browser || IsCurrentDirectoryBusy()) return false;
-                if (GuardClipboardBusy()) return false;
+                if (GuardMutationBusy()) return false;
                 try
                 {
                     var startInfo = new System.Diagnostics.ProcessStartInfo
@@ -5665,7 +6267,7 @@ private void SavePersistedMarksToSettings()
                 return true;
             case CommandIds.AppOpenControlPanel:
                 if (_uiMode != UIMode.Browser || IsCurrentDirectoryBusy()) return false;
-                if (GuardClipboardBusy()) return false;
+                if (GuardMutationBusy()) return false;
                 try
                 {
                     System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo("control.exe") { UseShellExecute = true });
@@ -5690,10 +6292,19 @@ private void SavePersistedMarksToSettings()
             case CommandIds.AppOpenCommandList:
                 ShowCommandList();
                 return true;
+            case CommandIds.AppOpenManagedTrash:
+                OpenManagedTrashDialog();
+                return true;
             default:
                 return false;
         }
     }
+    private void OpenManagedTrashDialog()
+    {
+        using var dialog = new Dialogs.ManagedTrashDialog(_settings, _fileOperationUndoRedoService);
+        dialog.ShowDialog(this);
+    }
+
     private void ShowCommandList()
     {
         using var dialog = new Dialogs.CommandListDialog(_commandRegistry.GetAll());
@@ -5754,7 +6365,7 @@ private void SavePersistedMarksToSettings()
     internal MarkSlotStore InvokeGetMarkSlotStoreClone() => _markSlotStore.Clone();
     internal SelectionResult InvokeResolveSelection() => ResolveSelection();
     internal void InvokeNavigateToPath(string path) => NavigateToPathSafe(path);
-    internal void InvokeRestoreMarksFromSlot(int slotNumber) => RestoreMarksFromSlot(slotNumber);
+    internal MarkSlotActionResult InvokeRestoreMarksFromSlot(int slotNumber) => RestoreMarksFromSlot(slotNumber);
     internal void InvokeShowArchiveContents(string archivePath) => ShowArchiveContentsOrFallback(archivePath);
     internal Task InvokeExecuteArchiveHashAsync(SevenZipHashAlgorithm algorithm) => ExecuteHashAsync(algorithm);
     internal BrowserTabRestoreSnapshot InvokeGetBrowserTabRestoreSnapshot() => EnsureBrowserTabRestoreSnapshot().Clone();
@@ -5767,7 +6378,7 @@ private void SavePersistedMarksToSettings()
     internal void InvokeOpenControlPanel()
     {
         if (_uiMode != UIMode.Browser || IsCurrentDirectoryBusy()) return;
-        if (GuardClipboardBusy()) return;
+        if (GuardMutationBusy()) return;
         try
         {
             System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo("control.exe") { UseShellExecute = true });
@@ -6697,11 +7308,10 @@ private void SavePersistedMarksToSettings()
         {
             if (moveNext && _uiMode == UIMode.Browser)
             {
-                int total = fileListView.Items.Count;
+                int total = _browserTotalItemCount > 0 ? _browserTotalItemCount : fileListView.Items.Count;
                 if (_browserCursorIndex < total - 1)
                 {
-                    _browserCursorIndex++;
-                    SyncBrowserSelection();
+                    SetBrowserGlobalCursorIndex(_browserCursorIndex + 1);
                 }
             }
             return;
@@ -6722,11 +7332,10 @@ private void SavePersistedMarksToSettings()
         }
         if (moveNext && _uiMode == UIMode.Browser)
         {
-            int total = fileListView.Items.Count;
+            int total = _browserTotalItemCount > 0 ? _browserTotalItemCount : fileListView.Items.Count;
             if (_browserCursorIndex < total - 1)
             {
-                _browserCursorIndex++;
-                SyncBrowserSelection();
+                SetBrowserGlobalCursorIndex(_browserCursorIndex + 1);
             }
         }
         PrimeRecentMultiMarkIntent();
@@ -6734,7 +7343,6 @@ private void SavePersistedMarksToSettings()
     private void RefreshMarkUi()
     {
         browserPanel.Invalidate();
-        UpdateInfoPanel();
     }
     private void RefreshHeaderDisplay()
     {
@@ -6750,29 +7358,169 @@ private void SavePersistedMarksToSettings()
     }
     private bool MarkPath(string path)
     {
+        MarkSummaryDelta? summaryDelta = TryPrepareMarkSummaryDelta(path, adding: true, out MarkSummaryDelta delta)
+            ? delta
+            : null;
         bool changed = _markedFiles.Add(path);
         if (changed)
         {
-            InvalidateMarkSummaryCache();
-            InvalidateRecentMultiMarkIntent();
-            ClearPendingEscExitMarkPersistence();
-            _browserMarkInteractionController.SyncMarkState(hasMarks: true);
-            SyncActiveBrowserTabMarksFromCurrentSelection();
+            CommitMarkStateChange(summaryDelta: summaryDelta);
         }
         return changed;
     }
     private bool UnmarkPath(string path)
     {
+        MarkSummaryDelta? summaryDelta = TryPrepareMarkSummaryDelta(path, adding: false, out MarkSummaryDelta delta)
+            ? delta
+            : null;
         bool changed = _markedFiles.Remove(path);
         if (changed)
         {
-            InvalidateMarkSummaryCache();
-            InvalidateRecentMultiMarkIntent();
-            ClearPendingEscExitMarkPersistence();
-            _browserMarkInteractionController.SyncMarkState(hasMarks: _markedFiles.Count > 0);
-            SyncActiveBrowserTabMarksFromCurrentSelection();
+            CommitMarkStateChange(summaryDelta: summaryDelta);
         }
         return changed;
+    }
+
+    private bool TryPrepareMarkSummaryDelta(string path, bool adding, out MarkSummaryDelta delta)
+    {
+        delta = default;
+        string currentDir = NavigationService.NormalizeDirectoryForCompare(_navigationService.CurrentPath);
+        if (NetworkPathResolutionPolicy.IsAuxiliaryResolutionDeferred(_navigationService.CurrentPath) ||
+            NetworkPathResolutionPolicy.IsUncPath(path))
+        {
+            return false;
+        }
+
+        MarkSummaryExactCache current = _markedFiles.Count == 0
+            ? new MarkSummaryExactCache(0, 0, 0, 0)
+            : _markSummaryCacheState == MarkSummaryCacheState.Complete &&
+              _markSummaryCacheCount == _markedFiles.Count &&
+              string.Equals(_markSummaryCachePath, currentDir, StringComparison.OrdinalIgnoreCase)
+                ? new MarkSummaryExactCache(
+                    _markSummaryCacheTotalSize,
+                    _markSummaryCacheFileCount,
+                    _markSummaryCacheOutsideCount,
+                    _markSummaryCacheCount)
+                : default;
+        if (_markedFiles.Count > 0 && current.MarkCount != _markedFiles.Count)
+        {
+            return false;
+        }
+
+        bool isFile = File.Exists(path);
+        if (isFile)
+        {
+            try
+            {
+                long fileSize = new FileInfo(path).Length;
+                bool isOutside = !string.Equals(
+                    NavigationService.NormalizeDirectoryForCompare(Path.GetDirectoryName(path) ?? string.Empty),
+                    currentDir,
+                    StringComparison.OrdinalIgnoreCase);
+                int direction = adding ? 1 : -1;
+                delta = new MarkSummaryDelta(
+                    checked(fileSize * direction),
+                    direction,
+                    isOutside ? direction : 0,
+                    direction);
+                return true;
+            }
+            catch (IOException)
+            {
+                return false;
+            }
+            catch (UnauthorizedAccessException)
+            {
+                return false;
+            }
+        }
+
+        if (!Directory.Exists(path))
+        {
+            return false;
+        }
+
+        bool directoryOutside = !string.Equals(
+            NavigationService.NormalizeDirectoryForCompare(Path.GetDirectoryName(path) ?? string.Empty),
+            currentDir,
+            StringComparison.OrdinalIgnoreCase);
+        int directoryDirection = adding ? 1 : -1;
+        delta = new MarkSummaryDelta(
+            0,
+            0,
+            directoryOutside ? directoryDirection : 0,
+            directoryDirection);
+        return true;
+    }
+
+    private bool TryApplyMarkSummaryDelta(MarkSummaryDelta delta)
+    {
+        MarkSummaryExactCache current = _markedFiles.Count == 0
+            ? new MarkSummaryExactCache(0, 0, 0, 0)
+            : new MarkSummaryExactCache(
+                _markSummaryCacheTotalSize,
+                _markSummaryCacheFileCount,
+                _markSummaryCacheOutsideCount,
+                _markSummaryCacheCount);
+        if (!MarkSummaryDeltaGate.TryApply(current, delta, _markedFiles.Count, out MarkSummaryExactCache updated))
+        {
+            return false;
+        }
+
+        string currentDir = NavigationService.NormalizeDirectoryForCompare(_navigationService.CurrentPath);
+        SetCompleteMarkSummaryCache(currentDir, updated);
+        return true;
+    }
+
+    private void SetCompleteMarkSummaryCache(string currentDir, MarkSummaryExactCache updated)
+    {
+        _markSummaryCacheTotalSize = updated.TotalSize;
+        _markSummaryCacheFileCount = updated.FileCount;
+        _markSummaryCacheOutsideCount = updated.OutsideCount;
+        _markSummaryCache = updated.MarkCount == 0
+            ? string.Empty
+            : $"Mark:{updated.MarkCount,3} ({updated.FileCount} Files)" +
+              (updated.OutsideCount > 0 ? $" Out:{updated.OutsideCount}" : string.Empty) +
+              $" {FileOperationService.FormatSize(updated.TotalSize)}";
+        _markSummaryCacheCount = updated.MarkCount;
+        _markSummaryCacheSizeText = updated.MarkCount == 0
+            ? string.Empty
+            : FileOperationService.FormatSize(updated.TotalSize);
+        _markSummaryCacheCompact = updated.MarkCount == 0
+            ? string.Empty
+            : $"Mark: {updated.MarkCount} MarkSize: {_markSummaryCacheSizeText}";
+        _markSummaryCachePath = currentDir;
+        _markSummaryCacheState = MarkSummaryCacheState.Complete;
+    }
+
+    private void CommitMarkStateChange(int changedCount = 1, MarkSummaryDelta? summaryDelta = null)
+    {
+        bool exactDeltaApplied = false;
+        _ = _markOperationEffectCoordinator.ExecuteMutation(
+            changedCount: changedCount,
+            markCommit: () =>
+            {
+                InvalidateMarkSummaryCache();
+                if (summaryDelta.HasValue)
+                {
+                    exactDeltaApplied = TryApplyMarkSummaryDelta(summaryDelta.Value);
+                }
+                InvalidateRecentMultiMarkIntent();
+                ClearPendingEscExitMarkPersistence();
+                _browserMarkInteractionController.SyncMarkState(hasMarks: _markedFiles.Count > 0);
+            },
+            activeTabSync: SyncActiveBrowserTabMarksFromCurrentSelection,
+            infoUpdateSchedule: () =>
+            {
+                if (exactDeltaApplied)
+                {
+                    UpdateInfoPanel();
+                }
+                else
+                {
+                    ScheduleUpdateInfoPanelDebounced();
+                }
+            });
     }
     private void UnmarkPathsInBulk(IReadOnlyList<string> paths, string reason)
     {
@@ -6790,9 +7538,13 @@ private void SavePersistedMarksToSettings()
         ClearPendingEscExitMarkPersistence();
         _browserMarkInteractionController.SyncMarkState(hasMarks: _markedFiles.Count > 0);
         SyncActiveBrowserTabMarksFromCurrentSelection();
+        UpdateInfoPanel();
         LogService.Info($"[MoveHotpath] BulkUnmark reason={reason} requested={paths.Count} removed={removedCount}");
     }
-    private void ClearMarks(bool invalidateRedo = true, bool preservePendingEscExitState = false)
+    private void ClearMarks(
+        bool invalidateRedo = true,
+        bool preservePendingEscExitState = false,
+        bool updateInfoPanel = true)
     {
         if (_markedFiles.Count == 0) return;
         _markedFiles.Clear();
@@ -6804,6 +7556,11 @@ private void SavePersistedMarksToSettings()
         }
         _browserMarkInteractionController.SyncMarkState(hasMarks: false);
         SyncActiveBrowserTabMarksFromCurrentSelection();
+        SetZeroMarkSummaryCache();
+        if (updateInfoPanel)
+        {
+            UpdateInfoPanel();
+        }
     }
     private void RestoreMarks(IEnumerable<string> paths, bool invalidateRedo = true)
     {
@@ -6820,11 +7577,9 @@ private void SavePersistedMarksToSettings()
         {
             return;
         }
-        _browserTabViewState.Tabs[_browserTabViewState.ActiveTabIndex].MarkedPaths = CreatePersistableMarkedPaths(_markedFiles.Snapshot(), out int skippedCount);
-        if (skippedCount > 0)
-        {
-            LogService.Info($"[BrowserTabs] Pruned stale active tab marks during sync. TabId={_browserTabViewState.Tabs[_browserTabViewState.ActiveTabIndex].Id} Missing={skippedCount}");
-        }
+        BrowserTabState activeState = _browserTabViewState.Tabs[_browserTabViewState.ActiveTabIndex];
+        activeState.MarkedPaths = _markedFiles.Snapshot().ToList();
+        activeState.MarksDirty = true;
     }
     private int CountMarksOutsideCurrentDirectory()
     {
@@ -6878,10 +7633,12 @@ private void SavePersistedMarksToSettings()
             RestoreMarksFromSlot,
             RenameMarkSlot,
             DeleteMarkSlot,
+            RemoveMarkSlotItems,
             BuildMarkGlobalSummary,
             ClearCategoryMarksFromDialog,
             ClearGlobalMarksFromDialog,
-            ClearCurrentTabMarksFromDialog);
+             ClearCurrentTabMarksFromDialog,
+             AuthorToolsEnabled ? ImportClipboardPathsToCurrentMarks : null);
         dialog.ShowDialog(this);
     }
     private sealed record MarkSlotSaveAggregationResult(
@@ -7277,12 +8034,17 @@ private void SavePersistedMarksToSettings()
         ShowStatusMessage(message);
         return message;
     }
-    private string RestoreMarksFromSlot(int slotNumber)
+    private MarkSlotActionResult RestoreMarksFromSlot(int slotNumber)
     {
         MarkSlotEntry slot = GetOrCreateMarkSlot(slotNumber);
         List<string> slotPaths = slot.Paths
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .ToList();
+        if (slotPaths.Count == 0)
+        {
+            string emptyMessage = $"マークスロット {slotNumber} は空です。";
+            return new MarkSlotActionResult(false, emptyMessage);
+        }
         List<string> restoredPaths = new();
         int missingCount = 0;
         foreach (string path in slotPaths)
@@ -7296,8 +8058,9 @@ private void SavePersistedMarksToSettings()
                 missingCount++;
             }
         }
-        ClearMarks();
+        ClearMarks(updateInfoPanel: false);
         RestoreMarks(restoredPaths);
+        UpdateInfoPanel();
         RefreshVisibleMarkColors();
         RefreshMarkUi();
         PrimeRecentMultiMarkIntent();
@@ -7308,7 +8071,112 @@ private void SavePersistedMarksToSettings()
             : $"マークスロット {slotNumber} を復元しました ({restoredPaths.Count}件)";
         LogService.Info($"[MarkSlots] Restored Slot={slotNumber} Count={restoredPaths.Count} Missing={missingCount}");
         ShowStatusMessage(message);
-        return message;
+        return new MarkSlotActionResult(true, message);
+    }
+    private MarkSlotClipboardActionResult ImportClipboardPathsToCurrentMarks()
+    {
+        string text;
+        try
+        {
+            if (!Clipboard.ContainsText(TextDataFormat.UnicodeText))
+            {
+                return ImportFailure("Clipboardにテキストがありません。", null);
+            }
+            text = Clipboard.GetText(TextDataFormat.UnicodeText);
+        }
+        catch (Exception ex)
+        {
+            LogService.Error("Clipboard path import failed.", ex);
+            return ImportFailure("Clipboardを読み取れませんでした。", null);
+        }
+
+        string? repositoryRoot = FindRepositoryRoot(_navigationService.CurrentPath);
+        MarkSlotClipboardImportResult importResult = MarkSlotClipboardImportService.Extract(
+            text,
+            _navigationService.CurrentPath,
+            repositoryRoot,
+            AppContext.BaseDirectory);
+        if (!importResult.IsSuccess)
+        {
+            string failMessage;
+            if (importResult.FatalCount > 0)
+            {
+                failMessage = "変更entryに構文不正またはrepo外pathがあります。現在MarkとMarkSlotは変更していません。";
+            }
+            else if (importResult.Paths.Count == 0)
+            {
+                failMessage = $"Mark可能な既存fileがありません（削除・不存在{importResult.MissingFileCount}件、directory{importResult.DirectoryPathCount}件）。現在MarkとMarkSlotは変更していません。";
+            }
+            else
+            {
+                string reason = importResult.FailureReason switch
+                {
+                    MarkSlotClipboardImportFailureReason.KdslResultNotFound => "KDSL_RESULT未検出",
+                    MarkSlotClipboardImportFailureReason.KdslResultFenceUnclosed => "KDSL_RESULT fence未閉鎖",
+                    MarkSlotClipboardImportFailureReason.ChangeSectionNotFound => "変更section未検出",
+                    _ => "取込条件不適合"
+                };
+                failMessage = $"{reason}。現在MarkとMarkSlotは変更していません。";
+            }
+
+            LogService.Warn($"[MarkSlots] KdslResultImportFailed Reason={importResult.FailureReason} Valid={importResult.Paths.Count} Missing={importResult.MissingFileCount} Directory={importResult.DirectoryPathCount} Duplicate={importResult.DuplicatePathCount} Fatal={importResult.FatalCount} IgnoredEarlier={importResult.IgnoredEarlierResultCount}");
+            return new MarkSlotClipboardActionResult(
+                false,
+                failMessage,
+                Array.Empty<string>(),
+                repositoryRoot,
+                importResult.MissingFileCount,
+                importResult.DirectoryPathCount,
+                importResult.DuplicatePathCount,
+                importResult.IgnoredEarlierResultCount);
+        }
+
+        IReadOnlyList<string> mergedPaths = _markedFiles.Snapshot()
+            .Concat(importResult.Paths)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+        ApplyBulkMarkState(mergedPaths, "KdslResultAddToCurrentMarks", importResult.Paths.Count, 0, Stopwatch.StartNew());
+        RefreshBrowserTabHeaders();
+        int unresolvedCount = importResult.UnresolvedPaths?.Count ?? 0;
+        string unresolvedInfo = unresolvedCount > 0 ? $"（未解決{unresolvedCount}件）" : string.Empty;
+        string message = $"RESULTのpathを現在Markへ追加しました（合計{mergedPaths.Count}件）{unresolvedInfo}。MarkSlotは変更していません。";
+        LogService.Info($"[MarkSlots] KdslResultAdded CurrentMark Count={mergedPaths.Count} Imported={importResult.Paths.Count} Missing={importResult.MissingFileCount} Directory={importResult.DirectoryPathCount} Duplicate={importResult.DuplicatePathCount} Fatal={importResult.FatalCount} IgnoredEarlier={importResult.IgnoredEarlierResultCount}");
+        return new MarkSlotClipboardActionResult(
+            true,
+            message,
+            mergedPaths,
+            repositoryRoot,
+            importResult.MissingFileCount,
+            importResult.DirectoryPathCount,
+            importResult.DuplicatePathCount,
+            importResult.IgnoredEarlierResultCount,
+            importResult.UnresolvedPaths);
+    }
+
+    private static MarkSlotClipboardActionResult ImportFailure(string message, string? repositoryRoot) =>
+        new(false, message, Array.Empty<string>(), repositoryRoot, 0, 0, 0, 0);
+
+    private void ShowMarkSlotImportResult(MarkSlotClipboardActionResult result)
+    {
+        if (!result.Success || result.Paths.Count == 0) return;
+        using var dialog = new MarkSlotImportResultDialog(result);
+        dialog.ShowDialog(this);
+    }
+    private static string? FindRepositoryRoot(string startPath)
+    {
+        string fullPath = Path.GetFullPath(startPath);
+        DirectoryInfo? directory = File.Exists(fullPath)
+            ? Directory.GetParent(fullPath)
+            : new DirectoryInfo(fullPath);
+        while (directory != null)
+        {
+            if (Directory.Exists(Path.Combine(directory.FullName, ".git")) || File.Exists(Path.Combine(directory.FullName, ".git")))
+            {
+                return directory.FullName;
+            }
+            directory = directory.Parent;
+        }
+        return null;
     }
     private void OpenMarkSlotSetOperationDialog(int preferredSlotNumber)
     {
@@ -7522,8 +8390,9 @@ private void SavePersistedMarksToSettings()
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .ToList();
         int missingCount = preview.ResultPaths.Count - restoredPaths.Count;
-        ClearMarks();
+        ClearMarks(updateInfoPanel: false);
         RestoreMarks(restoredPaths);
+        UpdateInfoPanel();
         RefreshVisibleMarkColors();
         RefreshMarkUi();
         RefreshBrowserTabHeaders();
@@ -7668,6 +8537,33 @@ private void SavePersistedMarksToSettings()
         LogService.Info($"[MarkSlots] Deleted Slot={slotNumber}");
         ShowStatusMessage(message);
         return message;
+    }
+    private MarkSlotActionResult RemoveMarkSlotItems(int slotNumber, IReadOnlyCollection<string> fullPaths)
+    {
+        if (fullPaths == null || fullPaths.Count == 0)
+        {
+            return new MarkSlotActionResult(false, "削除対象のパスが指定されていません。");
+        }
+
+        MarkSlotEntry slot = GetOrCreateMarkSlot(slotNumber);
+        var targetSet = new HashSet<string>(fullPaths, StringComparer.OrdinalIgnoreCase);
+        int initialCount = slot.Paths.Count;
+
+        slot.Paths.RemoveAll(path => targetSet.Contains(path));
+
+        int removedCount = initialCount - slot.Paths.Count;
+        if (removedCount == 0)
+        {
+            return new MarkSlotActionResult(false, "削除対象のパスがスロット内に見つかりません。");
+        }
+
+        slot.SavedAtUtc = DateTime.UtcNow;
+        MarkSlotStorage.Save(_markSlotStore, MarkSlotCount);
+
+        string message = $"マークスロット {slotNumber} から {removedCount} 件の項目を削除しました。";
+        LogService.Info($"[MarkSlots] Removed items from Slot={slotNumber} Count={removedCount}");
+        ShowStatusMessage(message);
+        return new MarkSlotActionResult(true, message);
     }
     private MarkSlotSetOperationPreviewResult BuildMarkSlotSetOperationPreview(int slotANumber, int slotBNumber, string operationKind)
     {
@@ -8312,7 +9208,7 @@ private void SavePersistedMarksToSettings()
     }
     private void ExecuteZLaunch()
     {
-        if (GuardClipboardBusy()) return;
+        if (GuardMutationBusy()) return;
         var item = GetCurrentBrowserItem();
         if (item == null || item.Text == "..") return;
         string? fullPath = item.Tag as string;
@@ -8473,34 +9369,17 @@ private void SavePersistedMarksToSettings()
         string defaultPath = string.IsNullOrWhiteSpace(_navigationService.CurrentPath)
             ? (Path.GetPathRoot(_navigationService.CurrentPath) ?? "C:\\")
             : _navigationService.CurrentPath;
-        string? selected = LogdiskDialog.Show(defaultPath, GetSharedDirectoryMoveHistory());
+        string? selected = LogdiskDialog.Show(defaultPath, GetSharedLocationCandidates());
         if (!string.IsNullOrWhiteSpace(selected))
         {
-            if (TryNormalizeDriveOnlyInputToRoot(selected, out string driveRoot))
+            BrowserPathEntryNavigationResult result = BrowserPathEntryNavigationService.Resolve(selected, _navigationService);
+            if (result.TargetKind == BrowserPathEntryTargetKind.Directory)
             {
-                selected = driveRoot;
+                NavigateToLocationDirectory(result.ResolvedPath);
             }
-
-            string resolved = _navigationService.NormalizeDestinationDirectory(selected);
-            try
+            else if (result.TargetKind == BrowserPathEntryTargetKind.None)
             {
-                if (Directory.Exists(resolved))
-                {
-                    if (!PrepareUnlockedTabForLocationChange(resolved))
-                    {
-                        return;
-                    }
-                    LoadDirectory(resolved);
-                    AddDirectoryMoveHistory(resolved);
-                }
-                else
-                {
-                    MessageBox.Show($"指定されたパスが見つかりません: {resolved}", "エラー", MessageBoxButtons.OK, MessageBoxIcon.Error);
-                }
-            }
-            catch (Exception ex)
-            {
-                MessageBox.Show(ex.Message, "エラー", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                MessageBox.Show(result.StatusMessage, "エラー", MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
         }
     }
@@ -8532,6 +9411,14 @@ private void SavePersistedMarksToSettings()
     {
         MigrateLegacyMoveDestinationHistory();
         return _settings.Session.DirectoryMoveHistory;
+    }
+
+    private IReadOnlyList<string> GetSharedLocationCandidates()
+    {
+        return BrowserPathEntryCandidateService.BuildCandidates(
+            _navigationService,
+            _quickAccessStore,
+            GetSharedDirectoryMoveHistory());
     }
 
     private void MigrateLegacyMoveDestinationHistory()
@@ -8626,7 +9513,7 @@ private void SavePersistedMarksToSettings()
         var result = SortDialog.Show(kindStr, _sortAscending);
         if (result != null)
         {
-            _currentSort = result.Kind switch
+            SortKind selectedKind = result.Kind switch
             {
                 "Name" => SortKind.Name,
                 "Ext" => SortKind.Ext,
@@ -8636,11 +9523,16 @@ private void SavePersistedMarksToSettings()
                 "DateAccessed" => SortKind.DateAccessed,
                 _ => _currentSort
             };
-            _sortAscending = result.Ascending;
-            _settings.Session.LastSortKind = _currentSort;
-            _settings.Session.LastSortAscending = _sortAscending;
-            LoadDirectory(_navigationService.CurrentPath);
+            ApplySortState(selectedKind, result.Ascending);
         }
+    }
+    private void ApplySortState(SortKind sortKind, bool ascending)
+    {
+        _currentSort = sortKind;
+        _sortAscending = ascending;
+        _settings.Session.LastSortKind = _currentSort;
+        _settings.Session.LastSortAscending = _sortAscending;
+        LoadDirectory(_navigationService.CurrentPath);
     }
     private void ExecuteFilter()
     {
@@ -8737,6 +9629,32 @@ private void SavePersistedMarksToSettings()
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .OrderBy(static path => path, StringComparer.OrdinalIgnoreCase)
             .ToList();
+    }
+    private IReadOnlySet<string> CaptureVisibleBrowserPathSet()
+    {
+        return fileListView.Items
+            .Cast<ListViewItem>()
+            .Select(item => item.Tag as string)
+            .Where(path => !string.IsNullOrWhiteSpace(path))
+            .Select(path => PathTextIntakeService.CanonicalIdentity(path!))
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+    }
+    private void RestoreMarksAfterOperation(
+        IReadOnlyList<string> snapshot,
+        IReadOnlySet<string> visibleBefore,
+        FileOpExitStatus status)
+    {
+        IReadOnlySet<string> visibleAfter = CaptureVisibleBrowserPathSet();
+        IReadOnlyList<string> restored = MarkOperationLifecycleResolver.Reconcile(
+            snapshot,
+            visibleBefore,
+            visibleAfter,
+            status,
+            PathExists);
+        RestoreMarks(restored, invalidateRedo: false);
+        RefreshVisibleMarkColors();
+        RefreshMarkUi();
+        PrimeRecentMultiMarkIntent();
     }
     private void PrimeRecentMultiMarkIntent()
     {
@@ -9140,6 +10058,10 @@ private void SavePersistedMarksToSettings()
     {
         lblClock.Font = font;
         lblPath.Font = font;
+        if (_breadcrumbPathControl != null)
+        {
+            _breadcrumbPathControl.Font = font;
+        }
         lblSort.Font = font;
         lblItemAttr.Font = font;
         lblFileDate.Font = font;
@@ -10072,7 +10994,7 @@ private void SavePersistedMarksToSettings()
     private async Task ExecuteArchiveExtractAsync(ArchiveExtractRequest request)
     {
         if (GuardReadOnlyBrowserTab("解凍")) return;
-        if (GuardClipboardBusy())
+        if (GuardMutationBusy("解凍"))
         {
             return;
         }
@@ -10134,6 +11056,7 @@ private void SavePersistedMarksToSettings()
     }
     private async Task ExecuteCopy(SelectionResult? selectionSnapshot = null)
     {
+        if (GuardMutationBusy("コピー")) return;
         var entryPlan = _fileOperationEntryCoordinator.CreateSelectionEntryPlan(
             _isClipboardBusy,
             _fileOpUiState.ActiveOperationName,
@@ -10175,12 +11098,94 @@ private void SavePersistedMarksToSettings()
         {
             return;
         }
+        if (!TryBuildCopyFinalPlan(selection.FullPaths, destDir, out IReadOnlyList<CopyFinalAction> finalCopyPlan))
+        {
+            ShowStatusMessage("コピーはキャンセルされました。");
+            return;
+        }
+        LinkOperationPlan linkPlan = LinkOperationPlanService.BuildCopyPlan(
+            finalCopyPlan.Select(action => new LinkOperationRoot(action.SourcePath, action.DestinationPath)));
+        LinkOperationPlan helperLinkPlan = LinkOperationPlanService.BuildCopyPlan(
+            finalCopyPlan
+                .Where(action => !action.Skip)
+                .Select(action => new LinkOperationRoot(action.SourcePath, action.DestinationPath)));
+        LinkOperationDecision linkDecision = LinkOperationDecision.Preserve;
+        if (helperLinkPlan.Items.Count > 0)
+        {
+            linkDecision = LinkOperationDecisionDialog.Show(this, linkPlan);
+            if (linkDecision == LinkOperationDecision.Cancel)
+            {
+                ShowStatusMessage("コピーはキャンセルされました。");
+                return;
+            }
+        }
+        var excludedLinkSources = linkPlan.Items.Select(item => item.SourcePath).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var partialTopLevelSources = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var successfulTopLevelLinks = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        int preSuccessfulTopLevelLinkCount = 0;
+        int preSkippedLinkCount = linkDecision == LinkOperationDecision.Skip
+            ? linkPlan.Items.Count(item => item.IsTopLevel) + (linkPlan.Items.Any(item => !item.IsTopLevel) ? 1 : 0)
+            : 0;
+        int preFailedLinkCount = 0;
+        foreach (LinkOperationPlanItem item in linkPlan.Items.Where(item =>
+                     linkDecision == LinkOperationDecision.Skip ||
+                     finalCopyPlan.Any(action => action.Skip && string.Equals(action.SourcePath, item.SourcePath, StringComparison.OrdinalIgnoreCase))))
+        {
+            partialTopLevelSources.Add(item.TopLevelSourcePath);
+        }
+        List<string> createdLinkParents = new();
+        if (helperLinkPlan.Items.Count > 0 && linkDecision == LinkOperationDecision.Preserve)
+        {
+            createdLinkParents = LinkOperationPreparationService.EnsureDestinationParents(helperLinkPlan);
+            try
+            {
+                var helperItems = helperLinkPlan.Items.Select((item, index) => new MidFD.FileOperationHelperProtocol.ElevatedLinkCopyItem
+                {
+                    ItemId = $"link-{index}",
+                    SourcePath = item.SourcePath,
+                    DestinationPath = item.DestinationPath,
+                    ExpectedKind = item.Kind.ToString()
+                }).ToList();
+                MidFD.FileOperationHelperProtocol.ElevatedLinkCopyResponse helperResponse = await new ElevatedLinkCopyClient().CopyAsync(helperItems, CancellationToken.None);
+                var helperById = helperResponse.Results.ToDictionary(result => result.ItemId, StringComparer.Ordinal);
+                for (int index = 0; index < helperLinkPlan.Items.Count; index++)
+                {
+                    LinkOperationPlanItem item = helperLinkPlan.Items[index];
+                    MidFD.FileOperationHelperProtocol.ElevatedLinkCopyResult result = helperById[$"link-{index}"];
+                    if (result.Status == "success" && item.IsTopLevel)
+                    {
+                        successfulTopLevelLinks.Add(item.SourcePath);
+                        preSuccessfulTopLevelLinkCount++;
+                    }
+                    if (result.Status != "success")
+                    {
+                        partialTopLevelSources.Add(item.TopLevelSourcePath);
+                        if (item.IsTopLevel) preFailedLinkCount++;
+                        else preFailedLinkCount = Math.Max(1, preFailedLinkCount);
+                    }
+                }
+            }
+            catch (ElevatedLinkCopyCanceledException)
+            {
+                LinkOperationPreparationService.CleanupCreatedParents(createdLinkParents);
+                ShowStatusMessage("リンク保持処理はUACキャンセルにより中止されました。");
+                return;
+            }
+            catch (Exception ex)
+            {
+                LinkOperationPreparationService.CleanupCreatedParents(createdLinkParents);
+                _fileOperationDialogCoordinator.ShowOperationError(this, "コピー", "リンク", ex.Message);
+                return;
+            }
+        }
         if (copyNeedsCreateDirectory && GuardReadOnlyBrowserTab("フォルダ作成"))
         {
+            LinkOperationPreparationService.CleanupCreatedParents(createdLinkParents);
             return;
         }
         if (!_fileOperationDialogCoordinator.EnsureDestinationDirectory(this, destDir, copyNeedsCreateDirectory))
         {
+            LinkOperationPreparationService.CleanupCreatedParents(createdLinkParents);
             return;
         }
         // サブディレクトリや別ディレクトリへのコピーの場合、元ファイルはカレントに残るため
@@ -10201,6 +11206,7 @@ private void SavePersistedMarksToSettings()
         int skipCount = 0;
         int failCount = 0;
         // 非同期実行の準備
+        if (GuardMutationBusy("コピー")) return;
         var token = PrepareFileOperation(entryPlan.BusyOperationName);
         int copyStatusVersion = _fileOpUiState.StatusVersion;
         ShowStatusMessage(FileOperationPresentationHelper.GetOperationStartingMessage("Copy", totalCount, destDir));
@@ -10219,118 +11225,57 @@ private void SavePersistedMarksToSettings()
             {
                 int currentSuccess = 0;
                 FileOpExitStatus status = FileOpExitStatus.Success;
-                CopyCollisionDecision? fileApplyToAllDecision = null;
-                DirectoryMergeDecision? directoryApplyToAllDecision = null;
-                bool applyRenameCopyToAllSameDirectory = false;
                 int currentSkipCount = 0;
                 int currentFailCount = 0;
-                foreach (var sourcePath in selection.FullPaths)
+                foreach (CopyFinalAction action in finalCopyPlan)
                 {
                     if (token.IsCancellationRequested)
                     {
                         status = FileOpExitStatus.Canceled;
                         break;
                     }
-                    string fileName = Path.GetFileName(sourcePath);
-                    string destPath = Path.Combine(destDir, fileName);
-                    progress.Report(new FileOperationProgress(currentSuccess + 1, totalCount, fileName));
-                    bool sourceIsDir = Directory.Exists(sourcePath);
-                    bool destExists = File.Exists(destPath) || Directory.Exists(destPath);
-                    bool isSameDirectoryCopy = string.Equals(
-                        NavigationService.NormalizeDirectoryForCompare(Path.GetDirectoryName(sourcePath) ?? string.Empty),
-                        NavigationService.NormalizeDirectoryForCompare(destDir),
-                        StringComparison.OrdinalIgnoreCase);
-                    if (isSameDirectoryCopy)
+                    string sourcePath = action.SourcePath;
+                    string fileName = Path.GetFileName(action.DestinationPath);
+                    if (excludedLinkSources.Contains(sourcePath))
                     {
-                        string originalDestPath = destPath;
-                        if (!applyRenameCopyToAllSameDirectory)
-                        {
-                            string suggestedPath = FileOperationService.GetUniquePath(destPath);
-                            string suggestedName = Path.GetFileName(suggestedPath);
-                            var sameDirDecision = (PasteSameDirectoryConfirmAction)this.Invoke(new Func<PasteSameDirectoryConfirmAction>(() =>
-                            {
-                                ShowStatusMessage(FileOperationPresentationHelper.GetSameDirectoryAliasCopyConfirmationMessage(fileName, suggestedName));
-                                return _fileOperationDialogCoordinator.ConfirmPasteSameDirectory(this, fileName, suggestedName, selection.Count > 1);
-                            }));
-                            if (sameDirDecision == PasteSameDirectoryConfirmAction.Cancel)
-                            {
-                                status = FileOpExitStatus.Canceled;
-                                break;
-                            }
-                            if (sameDirDecision == PasteSameDirectoryConfirmAction.No)
-                            {
-                                currentSkipCount++;
-                                continue;
-                            }
-                            if (sameDirDecision == PasteSameDirectoryConfirmAction.All)
-                            {
-                                applyRenameCopyToAllSameDirectory = true;
-                            }
-                        }
-                        destPath = FileOperationService.GetUniquePath(destPath);
-                        fileName = Path.GetFileName(destPath);
-                        if (!string.Equals(originalDestPath, destPath, StringComparison.OrdinalIgnoreCase))
-                        {
-                            destExists = false;
-                        }
+                        continue;
                     }
-                    if (destExists)
+                    string destPath = action.DestinationPath;
+                    progress.Report(new FileOperationProgress(currentSuccess + 1, totalCount, fileName));
+                    if (action.Skip)
                     {
-                        bool destIsDir = Directory.Exists(destPath);
-                        if (sourceIsDir && destIsDir)
+                        currentSkipCount++;
+                        continue;
+                    }
+                    if (action.Merge)
+                    {
+                        try
                         {
-                            if (!TryResolveCopyDirectoryMerge(sourcePath, destPath, ref directoryApplyToAllDecision, out bool mergeShouldSkip, out bool mergeShouldCancel))
-                            {
-                                if (mergeShouldCancel)
-                                {
-                                    status = FileOpExitStatus.Canceled;
-                                    break;
-                                }
-                                if (mergeShouldSkip)
-                                {
-                                    currentSkipCount++;
-                                    continue;
-                                }
-                            }
-                            try
-                            {
-                                CopyDirectoryIntoExisting(sourcePath, destPath, ref fileApplyToAllDecision, token);
-                                currentSuccess++;
-                                this.Invoke(() => UnmarkPath(sourcePath)); // 成功した分だけマークを外す
-                            }
-                            catch (OperationCanceledException)
-                            {
-                                status = FileOpExitStatus.Canceled;
-                                break;
-                            }
-                            catch (Exception ex)
-                            {
-                                this.Invoke(() => _fileOperationDialogCoordinator.ShowOperationError(this, "コピー", fileName, ex.Message));
-                                currentFailCount++;
-                                status = FileOpExitStatus.Error;
-                                break;
-                            }
-                            continue;
+                            CopyCollisionDecision? mergeFileDecision = null;
+                            CopyDirectoryIntoExisting(sourcePath, destPath, ref mergeFileDecision, token, excludedLinkSources);
+                            currentSuccess++;
+                            if (!partialTopLevelSources.Contains(sourcePath))
+                                this.Invoke(() => UnmarkPath(sourcePath));
                         }
-                        if (!TryResolveCopyCollision(sourcePath, ref destPath, ref fileApplyToAllDecision, out _, out bool shouldSkip, out bool shouldCancel))
+                        catch (OperationCanceledException)
                         {
-                            if (shouldCancel)
-                            {
-                                status = FileOpExitStatus.Canceled;
-                                break;
-                            }
-                            if (shouldSkip)
-                            {
-                                currentSkipCount++;
-                                continue;
-                            }
+                            status = FileOpExitStatus.Canceled;
+                            break;
                         }
+                        catch (Exception ex)
+                        {
+                            this.Invoke(() => _fileOperationDialogCoordinator.ShowOperationError(this, "コピー", fileName, ex.Message));
+                            currentFailCount++;
+                            status = FileOpExitStatus.Error;
+                        }
+                        continue;
                     }
                     try
                     {
-                        FileOperationService.Copy(sourcePath, destPath);
+                        FileOperationService.Copy(sourcePath, destPath, excludedLinkSources);
                         currentSuccess++;
-                        this.Invoke(() => UnmarkPath(sourcePath)); // 成功した分だけマークを外す
+                        if (!partialTopLevelSources.Contains(sourcePath))
+                            this.Invoke(() => UnmarkPath(sourcePath)); // 成功した分だけマークを外す
                     }
                     catch (Exception ex)
                     {
@@ -10342,9 +11287,14 @@ private void SavePersistedMarksToSettings()
                 }
                 return (currentSuccess, status, currentSkipCount, currentFailCount);
             }, token);
-            successCount = result.currentSuccess;
-            skipCount = result.currentSkipCount;
-            failCount = result.currentFailCount;
+            successCount = result.currentSuccess + preSuccessfulTopLevelLinkCount;
+            skipCount = result.currentSkipCount + preSkippedLinkCount;
+            failCount = result.currentFailCount + preFailedLinkCount;
+            foreach (string sourcePath in successfulTopLevelLinks)
+            {
+                if (!partialTopLevelSources.Contains(sourcePath))
+                    UnmarkPath(sourcePath);
+            }
             exitStatus = FileOperationPresentationHelper.NormalizeExitStatus(result.status, successCount, selection.Count, skipCount, failCount);
             if (exitStatus == FileOpExitStatus.Success && successCount > 0)
             {
@@ -10367,8 +11317,360 @@ private void SavePersistedMarksToSettings()
                 skipCount: skipCount, failCount: failCount));
         }
     }
+
+    private sealed record LinkPreparation(
+        LinkOperationPlan Plan,
+        HashSet<string> ExcludedSources,
+        HashSet<string> SuccessfulSources,
+        HashSet<string> SuccessfulTopLevelSources,
+        HashSet<string> PartialTopLevelSources,
+        int SkipCount,
+        int FailCount,
+        bool Canceled);
+
+    private async Task<LinkPreparation> PreparePasteLinksAsync(
+        IReadOnlyList<LinkOperationRoot> roots,
+        bool allowHelper,
+        CancellationToken cancellationToken)
+    {
+        LinkOperationPreparationResult result = await LinkOperationPreparationService.PrepareAsync(
+            roots,
+            allowHelper,
+            plan => LinkOperationDecisionDialog.Show(this, plan),
+            LinkOperationPreparationService.EnsureDestinationParents,
+            LinkOperationPreparationService.CleanupCreatedParents,
+            (items, token) => new ElevatedLinkCopyClient().CopyAsync(items, token),
+            "paste-link",
+            cancellationToken);
+        return new LinkPreparation(
+            result.Plan,
+            result.ExcludedSources,
+            result.SuccessfulSources,
+            result.SuccessfulTopLevelSources,
+            result.PartialTopLevelSources,
+            result.SkipCount,
+            result.FailCount,
+            result.Canceled);
+    }
+
+    private sealed record CopyFinalAction(string SourcePath, string DestinationPath, bool Merge, bool Skip);
+
+    private sealed record PasteFinalAction(
+        string SourcePath,
+        string DestinationPath,
+        bool Merge,
+        bool Skip,
+        bool OverwriteMove,
+        bool UsedRenameCopy,
+        string? RenameTargetName);
+
+    private sealed record MoveFinalAction(
+        string SourcePath,
+        string DestinationPath,
+        bool Merge,
+        bool Skip,
+        bool Overwrite);
+
+    private bool TryBuildCopyFinalPlan(
+        IReadOnlyList<string> sources,
+        string destinationDirectory,
+        out IReadOnlyList<CopyFinalAction> actions)
+    {
+        var result = new List<CopyFinalAction>();
+        CopyCollisionDecision? fileDecision = null;
+        DirectoryMergeDecision? directoryDecision = null;
+        bool renameSameDirectoryToAll = false;
+        foreach (string sourcePath in sources)
+        {
+            string fileName = Path.GetFileName(sourcePath);
+            string destinationPath = Path.Combine(destinationDirectory, fileName);
+            bool sourceIsDirectory = !ReparsePointHelper.IsReparsePoint(sourcePath)
+                && FileOperationService.IsDirectoryPath(sourcePath);
+            bool destinationExists = PathExists(destinationPath);
+            bool sameDirectory = string.Equals(
+                NavigationService.NormalizeDirectoryForCompare(Path.GetDirectoryName(sourcePath) ?? string.Empty),
+                NavigationService.NormalizeDirectoryForCompare(destinationDirectory),
+                StringComparison.OrdinalIgnoreCase);
+            if (sameDirectory)
+            {
+                string originalPath = destinationPath;
+                if (!renameSameDirectoryToAll)
+                {
+                    string suggestedPath = FileOperationService.GetUniquePath(destinationPath);
+                    var decision = _fileOperationDialogCoordinator.ConfirmPasteSameDirectory(
+                        this,
+                        fileName,
+                        Path.GetFileName(suggestedPath),
+                        sources.Count > 1);
+                    if (decision == PasteSameDirectoryConfirmAction.Cancel)
+                    {
+                        actions = Array.Empty<CopyFinalAction>();
+                        return false;
+                    }
+                    if (decision == PasteSameDirectoryConfirmAction.No)
+                    {
+                        result.Add(new CopyFinalAction(sourcePath, destinationPath, false, true));
+                        continue;
+                    }
+                    renameSameDirectoryToAll = decision == PasteSameDirectoryConfirmAction.All;
+                }
+                destinationPath = FileOperationService.GetUniquePath(destinationPath);
+                destinationExists = false;
+                _ = originalPath;
+            }
+            if (destinationExists)
+            {
+                bool destinationIsDirectory = FileOperationService.IsDirectoryPath(destinationPath);
+                if (sourceIsDirectory && destinationIsDirectory)
+                {
+                    if (!TryResolveCopyDirectoryMerge(sourcePath, destinationPath, ref directoryDecision, out bool skipMerge, out bool cancelMerge))
+                    {
+                        if (cancelMerge)
+                        {
+                            actions = Array.Empty<CopyFinalAction>();
+                            return false;
+                        }
+                        if (skipMerge)
+                        {
+                            result.Add(new CopyFinalAction(sourcePath, destinationPath, true, true));
+                            continue;
+                        }
+                    }
+                    result.Add(new CopyFinalAction(sourcePath, destinationPath, true, false));
+                    continue;
+                }
+                if (!TryResolveCopyCollision(sourcePath, ref destinationPath, ref fileDecision, out _, out bool skip, out bool cancel))
+                {
+                    if (cancel)
+                    {
+                        actions = Array.Empty<CopyFinalAction>();
+                        return false;
+                    }
+                    if (skip)
+                    {
+                        result.Add(new CopyFinalAction(sourcePath, destinationPath, false, true));
+                        continue;
+                    }
+                }
+            }
+            result.Add(new CopyFinalAction(sourcePath, destinationPath, false, false));
+        }
+        actions = result;
+        return true;
+    }
+
+    private bool TryBuildPasteFinalPlan(
+        IReadOnlyList<string> sources,
+        string destinationDirectory,
+        bool isCut,
+        out IReadOnlyList<PasteFinalAction> actions,
+        out int renamedCount,
+        out string? firstRenamedName,
+        out bool canRecordMoveUndoBatch,
+        out bool canRecordCreatedFilesUndoBatch)
+    {
+        var result = new List<PasteFinalAction>();
+        CopyCollisionDecision? fileDecision = null;
+        DirectoryMergeDecision? directoryDecision = null;
+        bool renameSameDirectoryToAll = false;
+        renamedCount = 0;
+        firstRenamedName = null;
+        canRecordMoveUndoBatch = isCut;
+        canRecordCreatedFilesUndoBatch = !isCut;
+        foreach (string sourcePath in sources)
+        {
+            string fileName = Path.GetFileName(sourcePath);
+            string destinationPath = Path.Combine(destinationDirectory, fileName);
+            bool sameDirectory = string.Equals(
+                NavigationService.NormalizeDirectoryForCompare(Path.GetDirectoryName(sourcePath) ?? string.Empty),
+                NavigationService.NormalizeDirectoryForCompare(destinationDirectory),
+                StringComparison.OrdinalIgnoreCase);
+            if (sameDirectory)
+            {
+                if (!isCut)
+                {
+                    if (!renameSameDirectoryToAll)
+                    {
+                        string suggestedPath = FileOperationService.GetUniquePath(destinationPath);
+                        var sameDirDecision = _fileOperationDialogCoordinator.ConfirmPasteSameDirectory(
+                            this,
+                            fileName,
+                            Path.GetFileName(suggestedPath),
+                            sources.Count > 1);
+                        if (sameDirDecision == PasteSameDirectoryConfirmAction.Cancel)
+                        {
+                            actions = Array.Empty<PasteFinalAction>();
+                            return false;
+                        }
+                        if (sameDirDecision == PasteSameDirectoryConfirmAction.No)
+                        {
+                            result.Add(new PasteFinalAction(sourcePath, destinationPath, false, true, false, false, null));
+                            continue;
+                        }
+                        renameSameDirectoryToAll = sameDirDecision == PasteSameDirectoryConfirmAction.All;
+                    }
+                    destinationPath = FileOperationService.GetUniquePath(destinationPath);
+                    renamedCount++;
+                    firstRenamedName ??= Path.GetFileName(destinationPath);
+                }
+                else
+                {
+                    result.Add(new PasteFinalAction(sourcePath, destinationPath, false, true, false, false, null));
+                    canRecordMoveUndoBatch = false;
+                    continue;
+                }
+            }
+            bool sourceIsDir = FileOperationService.IsDirectoryContainerPath(sourcePath);
+            if (!isCut && sourceIsDir)
+            {
+                canRecordCreatedFilesUndoBatch = false;
+            }
+            bool destExists = PathExists(destinationPath);
+            if (destExists)
+            {
+                bool destIsDir = FileOperationService.IsDirectoryContainerPath(destinationPath);
+                if (sourceIsDir != destIsDir)
+                {
+                    _fileOperationDialogCoordinator.ShowTypeMismatchConflict(this, destinationPath);
+                    result.Add(new PasteFinalAction(sourcePath, destinationPath, false, true, false, false, null));
+                    canRecordMoveUndoBatch = false;
+                    canRecordCreatedFilesUndoBatch = false;
+                    continue;
+                }
+                if (sourceIsDir)
+                {
+                    canRecordMoveUndoBatch = false;
+                    canRecordCreatedFilesUndoBatch = false;
+                    if (!TryResolvePasteDirectoryMerge(sourcePath, destinationPath, isCut, ref directoryDecision, out bool shouldSkip, out bool shouldCancel))
+                    {
+                        if (shouldCancel)
+                        {
+                            actions = Array.Empty<PasteFinalAction>();
+                            return false;
+                        }
+                        if (shouldSkip)
+                        {
+                            result.Add(new PasteFinalAction(sourcePath, destinationPath, true, true, false, false, null));
+                            continue;
+                        }
+                    }
+                    result.Add(new PasteFinalAction(sourcePath, destinationPath, true, false, false, false, null));
+                    continue;
+                }
+                var collisionResolution = _fileOperationDialogCoordinator.ResolvePasteCollision(
+                    this,
+                    sourcePath,
+                    destinationPath,
+                    allowRename: !isCut,
+                    isCut: isCut,
+                    ref fileDecision);
+                if (collisionResolution.ShouldCancel)
+                {
+                    actions = Array.Empty<PasteFinalAction>();
+                    return false;
+                }
+                if (collisionResolution.ShouldSkip)
+                {
+                    result.Add(new PasteFinalAction(sourcePath, destinationPath, false, true, false, false, null));
+                    canRecordMoveUndoBatch = false;
+                    canRecordCreatedFilesUndoBatch = false;
+                    continue;
+                }
+                destinationPath = collisionResolution.DestinationPath;
+                bool overwriteMove = collisionResolution.OverwriteExisting;
+                if (overwriteMove)
+                {
+                    canRecordMoveUndoBatch = false;
+                    canRecordCreatedFilesUndoBatch = false;
+                }
+                if (collisionResolution.UsedRenameCopy)
+                {
+                    renamedCount++;
+                    firstRenamedName ??= collisionResolution.RenameTargetName ?? Path.GetFileName(destinationPath);
+                }
+                result.Add(new PasteFinalAction(
+                    sourcePath,
+                    destinationPath,
+                    false,
+                    false,
+                    overwriteMove,
+                    collisionResolution.UsedRenameCopy,
+                    collisionResolution.RenameTargetName));
+                continue;
+            }
+            result.Add(new PasteFinalAction(sourcePath, destinationPath, false, false, false, false, null));
+        }
+        actions = result;
+        return true;
+    }
+
+    private bool TryBuildMoveFinalPlan(
+        IReadOnlyList<string> sources,
+        string destinationDirectory,
+        out IReadOnlyList<MoveFinalAction> actions,
+        out bool canRecordUndoBatch)
+    {
+        var result = new List<MoveFinalAction>();
+        CopyCollisionDecision? fileDecision = null;
+        DirectoryMergeDecision? directoryDecision = null;
+        canRecordUndoBatch = true;
+        foreach (string sourcePath in sources)
+        {
+            string destinationPath = Path.Combine(destinationDirectory, Path.GetFileName(sourcePath));
+            bool sourceIsDir = Directory.Exists(sourcePath);
+            bool destIsDir = Directory.Exists(destinationPath);
+            bool destExists = File.Exists(destinationPath) || Directory.Exists(destinationPath);
+            CopyCollisionPolicy appliedPolicy = CopyCollisionPolicy.Skip;
+            if (destExists)
+            {
+                if (sourceIsDir && destIsDir)
+                {
+                    canRecordUndoBatch = false;
+                    if (!TryResolveMoveDirectoryMerge(sourcePath, destinationPath, ref directoryDecision, out bool shouldSkip, out bool shouldCancel))
+                    {
+                        if (shouldCancel)
+                        {
+                            actions = Array.Empty<MoveFinalAction>();
+                            return false;
+                        }
+                        if (shouldSkip)
+                        {
+                            result.Add(new MoveFinalAction(sourcePath, destinationPath, true, true, false));
+                            continue;
+                        }
+                    }
+                    result.Add(new MoveFinalAction(sourcePath, destinationPath, true, false, false));
+                    continue;
+                }
+                if (!TryResolveCopyCollision(sourcePath, ref destinationPath, ref fileDecision, out appliedPolicy, out bool collisionShouldSkip, out bool collisionShouldCancel))
+                {
+                    if (collisionShouldCancel)
+                    {
+                        actions = Array.Empty<MoveFinalAction>();
+                        return false;
+                    }
+                    if (collisionShouldSkip)
+                    {
+                        result.Add(new MoveFinalAction(sourcePath, destinationPath, false, true, false));
+                        canRecordUndoBatch = false;
+                        continue;
+                    }
+                }
+            }
+            bool overwrite = appliedPolicy == CopyCollisionPolicy.Overwrite;
+            if (overwrite)
+            {
+                canRecordUndoBatch = false;
+            }
+            result.Add(new MoveFinalAction(sourcePath, destinationPath, false, false, overwrite));
+        }
+        actions = result;
+        return true;
+    }
+
     private async Task ExecuteMove(SelectionResult? selectionSnapshot = null)
     {
+        if (GuardMutationBusy("移動")) return;
         if (GuardReadOnlyBrowserTab())
         {
             return;
@@ -10417,6 +11719,25 @@ private void SavePersistedMarksToSettings()
         {
             return;
         }
+        if (!TryBuildMoveFinalPlan(selection.FullPaths, normalizedDestDir, out IReadOnlyList<MoveFinalAction> finalMovePlan, out bool plannedCanRecordUndoBatch))
+        {
+            ShowStatusMessage("移動はキャンセルされました。");
+            return;
+        }
+        IReadOnlyList<LinkOperationRoot> moveLinkRoots = finalMovePlan
+            .Where(action => !action.Skip)
+            .Select(action => new LinkOperationRoot(action.SourcePath, action.DestinationPath))
+            .ToList();
+        IReadOnlyList<LinkOperationRoot> helperMoveLinkRoots = LinkOperationPreparationService.BuildCrossVolumeMoveRoots(moveLinkRoots);
+        LinkPreparation moveLinkPreparation = await PreparePasteLinksAsync(
+            helperMoveLinkRoots,
+            allowHelper: helperMoveLinkRoots.Count > 0,
+            CancellationToken.None);
+        if (moveLinkPreparation.Canceled)
+        {
+            ShowStatusMessage("リンク処理のキャンセルにより移動を中止しました。");
+            return;
+        }
         // 操作後に一気に一番上まで戻るのを防ぐため、あらかじめ次にフォーカスすべき対象を見つけておく
         string? nextTargetName = GetNextFocusTarget(selection.FullPaths.ToList());
         int successCount = 0;
@@ -10424,10 +11745,14 @@ private void SavePersistedMarksToSettings()
         FileOpExitStatus exitStatus = FileOpExitStatus.Success;
         int aggregateSkipCount = 0;
         int aggregateFailCount = 0;
+        int preMoveLinkSuccessCount = moveLinkPreparation.SuccessfulTopLevelSources.Count;
+        int preMoveLinkSkipCount = moveLinkPreparation.SkipCount;
+        int preMoveLinkFailCount = moveLinkPreparation.FailCount;
         bool shouldClearMarks = true;
         IReadOnlyList<FileOperationUndoRedoItem> moveUndoItems = Array.Empty<FileOperationUndoRedoItem>();
         string? moveResultMessage = null;
         // 非同期実行の準備
+        if (GuardMutationBusy("移動")) return;
         var token = PrepareFileOperation(entryPlan.BusyOperationName);
         int moveStatusVersion = _fileOpUiState.StatusVersion;
         ShowStatusMessage(FileOperationPresentationHelper.GetOperationStartingMessage("Move", totalCount, normalizedDestDir));
@@ -10446,12 +11771,12 @@ private void SavePersistedMarksToSettings()
             {
                 int currentSuccess = 0;
                 FileOpExitStatus status = FileOpExitStatus.Success;
-                CopyCollisionDecision? fileApplyToAllDecision = null;
-                DirectoryMergeDecision? directoryApplyToAllDecision = null;
                 int currentSkipCount = 0;
                 int currentFailCount = 0;
                 bool clearMarks = true;
-                bool canRecordUndoBatch = true;
+                bool canRecordUndoBatch = plannedCanRecordUndoBatch;
+                if (moveLinkPreparation.Plan.Items.Count > 0)
+                    canRecordUndoBatch = false;
                 var successfulUndoMoves = new List<(string SourcePath, string DestinationPath)>();
                 var unmarkPaths = new List<string>();
                 var progressThrottleSw = Stopwatch.StartNew();
@@ -10464,15 +11789,35 @@ private void SavePersistedMarksToSettings()
                 int progressReportCount = 0;
                 int collisionCheckCount = 0;
                 int collisionDialogCount = 0;
-                foreach (var sourcePath in selection.FullPaths)
+                foreach (MoveFinalAction action in finalMovePlan)
                 {
                     if (token.IsCancellationRequested)
                     {
                         status = FileOpExitStatus.Canceled;
                         break;
                     }
+                    string sourcePath = action.SourcePath;
                     string fileName = Path.GetFileName(sourcePath);
-                    string destPath = Path.Combine(normalizedDestDir, fileName);
+                    string destPath = action.DestinationPath;
+                    if (moveLinkPreparation.ExcludedSources.Contains(sourcePath))
+                    {
+                        if (moveLinkPreparation.SuccessfulTopLevelSources.Contains(sourcePath))
+                        {
+                            FileOperationService.Delete(sourcePath);
+                        }
+                        else
+                        {
+                            clearMarks = false;
+                        }
+                        continue;
+                    }
+                    if (action.Skip)
+                    {
+                        currentSkipCount++;
+                        clearMarks = false;
+                        canRecordUndoBatch = false;
+                        continue;
+                    }
                     int processedCount = currentSuccess + currentSkipCount + currentFailCount;
                     bool shouldReportProgress =
                         processedCount == 0 ||
@@ -10487,52 +11832,75 @@ private void SavePersistedMarksToSettings()
                         progressReportCount++;
                         progressThrottleSw.Restart();
                     }
-                    var destinationCheckSw = Stopwatch.StartNew();
-                    bool sourceIsDir = Directory.Exists(sourcePath);
-                    bool destIsDir = Directory.Exists(destPath);
-                    bool destExists = File.Exists(destPath) || Directory.Exists(destPath);
-                    destinationCheckSw.Stop();
-                    destinationCheckTotalMs += destinationCheckSw.ElapsedMilliseconds;
-                    CopyCollisionPolicy appliedPolicy = CopyCollisionPolicy.Skip;
-                    if (destExists)
+                    if (action.Merge)
                     {
-                        collisionCheckCount++;
-                        if (sourceIsDir && destIsDir)
+                        canRecordUndoBatch = false;
+                        var directoryMoveSw = Stopwatch.StartNew();
+                        CopyCollisionDecision? mergeFileDecision = null;
+                        DirectMoveDirectoryIntoExisting(
+                            sourcePath,
+                            destPath,
+                            ref mergeFileDecision,
+                            out bool directoryShouldCancel,
+                            out int directorySkipCount,
+                            out int directoryFailCount,
+                            moveLinkPreparation.ExcludedSources,
+                            moveLinkPreparation.SuccessfulSources);
+                        directoryMoveSw.Stop();
+                        fileMoveCallTotalMs += directoryMoveSw.ElapsedMilliseconds;
+                        if (directoryMoveSw.ElapsedMilliseconds > fileMoveCallMaxMs)
                         {
-                            collisionDialogCount++;
+                            fileMoveCallMaxMs = directoryMoveSw.ElapsedMilliseconds;
+                        }
+                        currentSkipCount += directorySkipCount;
+                        currentFailCount += directoryFailCount;
+                        if (directoryShouldCancel)
+                        {
+                            status = FileOpExitStatus.Canceled;
+                            clearMarks = false;
                             canRecordUndoBatch = false;
-                            if (!TryResolveMoveDirectoryMerge(sourcePath, destPath, ref directoryApplyToAllDecision, out bool mergeShouldSkip, out bool mergeShouldCancel))
-                            {
-                                if (mergeShouldCancel)
-                                {
-                                    status = FileOpExitStatus.Canceled;
-                                    canRecordUndoBatch = false;
-                                    break;
-                                }
-                                if (mergeShouldSkip)
-                                {
-                                    currentSkipCount++;
-                                    clearMarks = false;
-                                    canRecordUndoBatch = false;
-                                    continue;
-                                }
-                            }
-                            var directoryMoveSw = Stopwatch.StartNew();
+                            break;
+                        }
+                        currentSuccess++;
+                        bool sourceStillExists = Directory.Exists(sourcePath) || File.Exists(sourcePath);
+                        if (!sourceStillExists)
+                        {
+                            unmarkPaths.Add(sourcePath);
+                        }
+                        else
+                        {
+                            clearMarks = false;
+                        }
+                        if (directorySkipCount > 0 || directoryFailCount > 0)
+                        {
+                            clearMarks = false;
+                            canRecordUndoBatch = false;
+                        }
+                        continue;
+                    }
+                    try
+                    {
+                        bool overwrite = action.Overwrite;
+                        if (overwrite)
+                        {
+                            canRecordUndoBatch = false;
+                        }
+                        var moveCallSw = Stopwatch.StartNew();
+                        if (!overwrite &&
+                            FileOperationService.IsDirectoryContainerPath(sourcePath) &&
+                            !FileOperationService.HaveSameStorageRoot(sourcePath, destPath) &&
+                            Directory.Exists(destPath))
+                        {
+                            CopyCollisionDecision? mergeFileDecision = null;
                             DirectMoveDirectoryIntoExisting(
                                 sourcePath,
                                 destPath,
-                                ref fileApplyToAllDecision,
+                                ref mergeFileDecision,
                                 out bool directoryShouldCancel,
                                 out int directorySkipCount,
-                                out int directoryFailCount);
-                            directoryMoveSw.Stop();
-                            fileMoveCallTotalMs += directoryMoveSw.ElapsedMilliseconds;
-                            if (directoryMoveSw.ElapsedMilliseconds > fileMoveCallMaxMs)
-                            {
-                                fileMoveCallMaxMs = directoryMoveSw.ElapsedMilliseconds;
-                            }
-                            currentSkipCount += directorySkipCount;
-                            currentFailCount += directoryFailCount;
+                                out int directoryFailCount,
+                                moveLinkPreparation.ExcludedSources,
+                                moveLinkPreparation.SuccessfulSources);
                             if (directoryShouldCancel)
                             {
                                 status = FileOpExitStatus.Canceled;
@@ -10540,50 +11908,19 @@ private void SavePersistedMarksToSettings()
                                 canRecordUndoBatch = false;
                                 break;
                             }
-                            currentSuccess++;
-                            bool sourceStillExists = Directory.Exists(sourcePath) || File.Exists(sourcePath);
-                            if (!sourceStillExists)
-                            {
-                                unmarkPaths.Add(sourcePath);
-                            }
-                            else
-                            {
-                                clearMarks = false;
-                            }
+                            currentSkipCount += directorySkipCount;
+                            currentFailCount += directoryFailCount;
                             if (directorySkipCount > 0 || directoryFailCount > 0)
                             {
                                 clearMarks = false;
                                 canRecordUndoBatch = false;
                             }
-                            continue;
                         }
-                        collisionDialogCount++;
-                        if (!TryResolveCopyCollision(sourcePath, ref destPath, ref fileApplyToAllDecision, out appliedPolicy, out bool shouldSkip, out bool shouldCancel))
+                        else
                         {
-                            if (shouldCancel)
-                            {
-                                status = FileOpExitStatus.Canceled;
-                                canRecordUndoBatch = false;
-                                break;
-                            }
-                            if (shouldSkip)
-                            {
-                                currentSkipCount++;
-                                clearMarks = false;
-                                canRecordUndoBatch = false;
-                                continue;
-                            }
+                            FileOperationService.Move(sourcePath, destPath, overwrite, suppressLogging: suppressItemSuccessLogs,
+                                excludedReparsePaths: moveLinkPreparation.ExcludedSources);
                         }
-                    }
-                    try
-                    {
-                        bool overwrite = appliedPolicy == CopyCollisionPolicy.Overwrite;
-                        if (overwrite)
-                        {
-                            canRecordUndoBatch = false;
-                        }
-                        var moveCallSw = Stopwatch.StartNew();
-                        FileOperationService.Move(sourcePath, destPath, overwrite, suppressLogging: suppressItemSuccessLogs);
                         moveCallSw.Stop();
                         fileMoveCallTotalMs += moveCallSw.ElapsedMilliseconds;
                         if (moveCallSw.ElapsedMilliseconds > fileMoveCallMaxMs)
@@ -10638,11 +11975,14 @@ private void SavePersistedMarksToSettings()
                     collisionDialogCount,
                     undoCreateSw.ElapsedMilliseconds);
             }, token);
-            successCount = result.currentSuccess;
-            exitStatus = FileOperationPresentationHelper.NormalizeExitStatus(result.status, result.currentSuccess, selection.Count, result.currentSkipCount, result.currentFailCount);
-            aggregateSkipCount = result.currentSkipCount;
-            aggregateFailCount = result.currentFailCount;
+            successCount = result.currentSuccess + preMoveLinkSuccessCount;
+            exitStatus = FileOperationPresentationHelper.NormalizeExitStatus(result.status, successCount, selection.Count,
+                result.currentSkipCount + preMoveLinkSkipCount, result.currentFailCount + preMoveLinkFailCount);
+            aggregateSkipCount = result.currentSkipCount + preMoveLinkSkipCount;
+            aggregateFailCount = result.currentFailCount + preMoveLinkFailCount;
             shouldClearMarks = result.clearMarks;
+            if (moveLinkPreparation.PartialTopLevelSources.Count > 0)
+                shouldClearMarks = false;
             moveUndoItems = result.currentMoveUndoItems;
             long unmarkApplyMs = 0;
             if (result.Item7.Count > 0)
@@ -10827,7 +12167,7 @@ private void SavePersistedMarksToSettings()
             }
         }
 
-        if (GuardClipboardBusy()) return;
+        if (GuardMutationBusy("圧縮")) return;
 
         var token = PrepareFileOperation("圧縮");
         ShowArchiveProgressFallback("圧縮", targetsToProcess.Count);
@@ -10970,10 +12310,29 @@ private void SavePersistedMarksToSettings()
             return;
         }
         string defaultName = BuildPackDefaultArchiveName(selection, _navigationService.CurrentPath);
+        string? exePath = SevenZipService.ResolveExecutable(_settings.SevenZip?.ExePath);
+        string nativeArchivePath = Path.Combine(_navigationService.CurrentPath, defaultName);
+        string? cliPath = SevenZipService.ResolveCliExecutable(_settings.SevenZip?.ExePath);
+        string? guiPath = SevenZipService.ResolveGuiExecutable(cliPath ?? exePath ?? string.Empty);
+        PackDialogRouteDecision route = PackDialogRoutingService.Resolve(
+            _settings.SevenZip?.PackDialogMode ?? PackDialogMode.Auto,
+            guiPath,
+            selection.FullPaths.ToList(),
+            nativeArchivePath);
+        if (route.Route == PackDialogRoute.Error)
+        {
+            MessageBox.Show(this, route.ErrorMessage, "圧縮Dialog", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            ShowStatusMessage("7-Zip標準Dialogを起動できませんでした。");
+            return;
+        }
+        if (route.IsNative)
+        {
+            await LaunchNativePackDialogAsync(guiPath!, nativeArchivePath, selection.FullPaths.ToList());
+            return;
+        }
         string selectionSummary = BuildPackSelectionSummary(selection);
         bool canPackEachFolder = CanPackEachFolderIndividually(selection);
         bool canUseSingleFileOnlyFormats = selection.Count == 1 && !string.IsNullOrWhiteSpace(selection.FirstPath) && File.Exists(selection.FirstPath!);
-        string? exePath = SevenZipService.ResolveExecutable(_settings.SevenZip?.ExePath);
         bool hasSevenZip = !string.IsNullOrWhiteSpace(exePath) && File.Exists(exePath);
         IReadOnlyList<PackArchiveFormat> availableFormats;
         string hintText;
@@ -11063,9 +12422,11 @@ private void SavePersistedMarksToSettings()
             ShowStatusMessage("7-Zip が見つからないため、Windows 標準機能 (tar.exe) で圧縮します。");
         }
         string archivePath = request.OutputArchivePath;
+        IReadOnlyList<string> markSnapshot = CaptureCurrentMarkedPathSnapshot();
+        IReadOnlySet<string> visibleBefore = CaptureVisibleBrowserPathSet();
         PackOverwriteBackupSession? overwriteBackup = null;
         string? overwriteCleanupErrorMessage = null;
-        if (GuardClipboardBusy()) return;
+        if (GuardMutationBusy("圧縮")) return;
         if (collisionAction == PackExistingArchiveAction.Overwrite)
         {
             try
@@ -11354,9 +12715,9 @@ private void SavePersistedMarksToSettings()
             {
                 LoadDirectory(_navigationService.CurrentPath, Path.GetFileName(archivePath));
             }
+            RestoreMarksAfterOperation(markSnapshot, visibleBefore, exitStatus);
             if (exitStatus == FileOpExitStatus.Success)
             {
-                ClearMarks();
                 string successMessage = request.PackEachFolderIndividually
                     ? "個別圧縮が完了しました。"
                     : $"圧縮完了: {archiveName}";
@@ -11374,6 +12735,32 @@ private void SavePersistedMarksToSettings()
                     ? "圧縮失敗"
                     : "圧縮失敗（旧 archive の復元に失敗）");
             }
+        }
+    }
+
+    private async Task LaunchNativePackDialogAsync(string guiPath, string archivePath, IReadOnlyList<string> sourcePaths)
+    {
+        string currentDirectory = _navigationService.CurrentPath;
+        try
+        {
+            using Process? process = SevenZipService.StartNativePackDialog(guiPath, archivePath, sourcePaths);
+            if (process == null)
+            {
+                throw new InvalidOperationException("7zG.exe のプロセスを開始できませんでした。");
+            }
+
+            ShowStatusMessage("7-Zip標準の圧縮Dialogを表示しました。");
+            await process.WaitForExitAsync();
+            if (string.Equals(_navigationService.CurrentPath, currentDirectory, StringComparison.OrdinalIgnoreCase))
+            {
+                LoadDirectory(currentDirectory);
+            }
+        }
+        catch (Exception ex)
+        {
+            LogService.Error("Native 7-Zip pack dialog launch error", ex);
+            MessageBox.Show(this, $"7-Zip標準の圧縮Dialogを起動できませんでした。\n{ex.Message}", "起動エラー", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            ShowStatusMessage("7-Zip標準Dialogの起動に失敗しました。");
         }
     }
     private PackExistingArchiveAction ShowPackExistingArchiveActionDialog(IWin32Window owner, string archivePath)
@@ -11566,7 +12953,9 @@ private void SavePersistedMarksToSettings()
             return;
         }
         string destDir = destinationOptions.BaseDirectory;
-        if (GuardClipboardBusy()) return;
+        IReadOnlyList<string> markSnapshot = CaptureCurrentMarkedPathSnapshot();
+        IReadOnlySet<string> visibleBefore = CaptureVisibleBrowserPathSet();
+        if (GuardMutationBusy("解凍")) return;
         // 非同期実行の準備
         var token = PrepareFileOperation("解凍");
         ShowArchiveProgressFallback("解凍", totalCount: archivePaths.Count);
@@ -11699,9 +13088,9 @@ private void SavePersistedMarksToSettings()
             {
                 LoadDirectory(_navigationService.CurrentPath);
             }
+            RestoreMarksAfterOperation(markSnapshot, visibleBefore, exitStatus);
             if (exitStatus == FileOpExitStatus.Success)
             {
-                ClearMarks();
                 ShowStatusMessage($"解凍完了: {successCount} 件");
             }
             else if (exitStatus == FileOpExitStatus.Canceled)
@@ -11997,17 +13386,30 @@ private void SavePersistedMarksToSettings()
     }
     private void FileListView_SelectedIndexChanged(object? sender, EventArgs e)
     {
+        if (_isApplyingDirectoryList || _suppressBrowserSelectionChanged)
+        {
+            return;
+        }
+        ApplyBrowserSelectionChanged();
+    }
+
+    private void ApplyBrowserSelectionChanged(bool scheduleInfoUpdate = true)
+    {
         // マウス操作時の同期: 選択変更を内部状態 (_browserCursorIndex) に書き戻す
         if (fileListView.SelectedIndices.Count > 0)
         {
-            _browserCursorIndex = fileListView.SelectedIndices[0];
+            _browserCursorIndex = _browserPageStartIndex + fileListView.SelectedIndices[0];
         }
         // Info/Name 行を debounce 更新 (カーソル移動に伴う補助表示のみ遅延)
-        ScheduleUpdateInfoPanelDebounced();
+        if (scheduleInfoUpdate)
+        {
+            ScheduleUpdateInfoPanelDebounced();
+        }
         // プレビューエンコーディングを Auto にリセット
         _viewerEncodingOverride = ViewerEncoding.Auto;
         var currentItem = GetCurrentBrowserItem();
         string? currentPath = currentItem?.Tag as string;
+        bool selectionPathChanged = _browserSelectionIdentityGate.TryAccept(currentPath, _directoryContentGeneration);
         PreviewKind currentSelectionKind = GetBrowserSelectionPreviewKind(currentItem, currentPath);
         bool isImageSelection = currentSelectionKind == PreviewKind.Image;
         var viewer = GetReusableImageViewer();
@@ -12020,7 +13422,7 @@ private void SavePersistedMarksToSettings()
             $"[Browser.SelectionChanged.Start] selectionId={selectionId}" +
             $" pathKind={diagPathKind} pathRoot={diagPathRoot} extension={diagExtension}" +
             $" previewKind={currentSelectionKind} isImageSelection={isImageSelection} viewerAvailable={viewer != null}");
-        if (isImageSelection && viewer != null)
+        if (selectionPathChanged && isImageSelection && viewer != null)
         {
             var loadStartTime = Stopwatch.GetTimestamp();
             LogService.Info($"[Browser.SelectionChanged.ImageViewerLoad.Start] selectionId={selectionId}");
@@ -12035,11 +13437,11 @@ private void SavePersistedMarksToSettings()
                 $" loadMediaElapsedMs={loadMediaElapsedMs} ensureVisibleElapsedMs={ensureVisibleElapsedMs}" +
                 $" pathKind={diagPathKind} pathRoot={diagPathRoot} extension={diagExtension}");
         }
-        else if (isImageSelection)
+        else if (selectionPathChanged && isImageSelection)
         {
             LogService.Info($"[Browser.SelectionChanged.ImageViewerLoad.Skip] selectionId={selectionId} reason=NoViewer");
         }
-        else if (!isImageSelection && (_settings.Preview?.CloseImageViewerOnNonImageSelection ?? false))
+        else if (selectionPathChanged && !isImageSelection && (_settings.Preview?.CloseImageViewerOnNonImageSelection ?? false))
         {
             CloseImageViewers();
         }
@@ -12047,12 +13449,15 @@ private void SavePersistedMarksToSettings()
         LogService.Info($"[Browser.SelectionChanged.End] selectionId={selectionId} elapsedMs={selElapsedMs}");
         UpdateMenuStripState();
         // Browser自動preview対象のみ事前クリアし、対象外は不要な再描画を避ける
-        if (IsBrowserAutoPreviewEligible(currentSelectionKind))
+        if (selectionPathChanged && IsBrowserAutoPreviewEligible(currentSelectionKind))
         {
             ResetBrowserAutoPreviewSuppressedState();
             ClearPreview();
         }
-        RequestPreviewRefresh();
+        if (selectionPathChanged)
+        {
+            RequestPreviewRefresh();
+        }
 
         if (functionBarPanel.Visible)
         {
@@ -12247,7 +13652,15 @@ private void SavePersistedMarksToSettings()
                 fullPath,
                 _previewDiagnosticDelayService.PreviewKindDelayMs,
                 token);
-            var kind = GetEffectivePreviewKind(fullPath);
+            TextPreviewProbeResult? previewProbe;
+            (PreviewKind rawKind, previewProbe) = await Task.Run(
+                () =>
+                {
+                    PreviewKind detectedKind = PreviewService.GetPreviewKind(fullPath, out TextPreviewProbeResult? detectedProbe);
+                    return (detectedKind, detectedProbe);
+                },
+                token);
+            var kind = GetEffectivePreviewKind(fullPath, rawKind);
             resolvedKind = kind;
             stage = "KindResolved";
             LogLargeTextEntryTiming(
@@ -12510,13 +13923,13 @@ private void SavePersistedMarksToSettings()
                         _previewDiagnosticDelayService.PreviewOpenDelayMs,
                         token);
                     LogLargeTextEntryTiming("before DetectLargeTextEncoding", entrySw, fullPath, reqId, kind, state);
-                    var detected = await Task.Run(() => PreviewService.DetectLargeTextEncoding(fullPath), token);
+                    TextPreviewProbeResult detected = previewProbe
+                        ?? await Task.Run(() => PreviewService.ProbeTextPreview(fullPath), token);
                     state.DetectedEncoding = detected.Encoding;
                     state.DetectedEncodingLabel = detected.EncodingLabel;
                     state.HasBom = detected.HasBom;
                     state.IsBinaryLike = detected.IsBinaryLike;
-                    state.IsEncodingUnsupportedForLargeText = detected.IsEncodingUnsupportedForLargeText;
-                    state.IsLongLineDetected = detected.IsLongLineDetected;
+                    state.IsLongLineDetected = detected.HasLongLine;
                     LogLargeTextEntryTiming("after DetectLargeTextEncoding", entrySw, fullPath, reqId, kind, state);
                     if (!IsLatestPreviewRequest(reqId, fullPath, token) || _uiMode != UIMode.Viewer)
                     {
@@ -12821,7 +14234,7 @@ private void SavePersistedMarksToSettings()
     private void ExecuteOpenWithEditor()
     {
         if (GuardReadOnlyBrowserTab("外部エディタ起動")) return;
-        if (GuardClipboardBusy()) return;
+        if (GuardMutationBusy("外部エディタ起動")) return;
         var item = GetCurrentBrowserItem();
         if (item == null || item.Text == "..") return;
         string? fullPath = item.Tag as string;
@@ -12991,13 +14404,20 @@ private void SavePersistedMarksToSettings()
             return;
         }
         string firstPath = roots[0];
-        FileAttributes initialAttrs;
+        AttributeAggregateState readOnlyState;
+        AttributeAggregateState hiddenState;
+        AttributeAggregateState systemState;
+        AttributeAggregateState archiveState;
         DateTime initialLastWrite;
         DateTime initialCreation;
         DateTime initialAccess;
         try
         {
-            initialAttrs = File.GetAttributes(firstPath);
+            readOnlyState = AggregateAttributeState(roots, FileAttributes.ReadOnly);
+            hiddenState = AggregateAttributeState(roots, FileAttributes.Hidden);
+            systemState = AggregateAttributeState(roots, FileAttributes.System);
+            archiveState = AggregateAttributeState(roots, FileAttributes.Archive);
+
             if (Directory.Exists(firstPath))
             {
                 initialLastWrite = Directory.GetLastWriteTime(firstPath);
@@ -13021,7 +14441,10 @@ private void SavePersistedMarksToSettings()
             : $"Mark {roots.Count} 件";
         var request = new AttributeDialogRequest(
             targetLabel,
-            initialAttrs,
+            readOnlyState,
+            hiddenState,
+            systemState,
+            archiveState,
             initialLastWrite,
             initialCreation,
             initialAccess);
@@ -13037,6 +14460,35 @@ private void SavePersistedMarksToSettings()
             return;
         }
         RunAttributeUpdate(targets, dialogResult);
+    }
+    private static AttributeAggregateState AggregateAttributeState(IReadOnlyList<string> paths, FileAttributes targetBit)
+    {
+        bool anySet = false;
+        bool anyClear = false;
+        foreach (var path in paths)
+        {
+            try
+            {
+                var attrs = File.GetAttributes(path);
+                if (attrs.HasFlag(targetBit))
+                {
+                    anySet = true;
+                }
+                else
+                {
+                    anyClear = true;
+                }
+            }
+            catch
+            {
+            }
+            if (anySet && anyClear)
+            {
+                return AttributeAggregateState.Mixed;
+            }
+        }
+        if (anySet) return AttributeAggregateState.AllSet;
+        return AttributeAggregateState.AllClear;
     }
     private List<string> ResolveAttributeTargets(IReadOnlyList<string> roots, bool includeSubdirectories)
     {
@@ -13179,16 +14631,16 @@ private void SavePersistedMarksToSettings()
     }
     private static void ApplyAttributesAndTimestamps(string path, AttributeDialogResult options)
     {
-        var attrs = File.GetAttributes(path);
-        if (options.ReadOnly) attrs |= FileAttributes.ReadOnly;
-        else attrs &= ~FileAttributes.ReadOnly;
-        if (options.Hidden) attrs |= FileAttributes.Hidden;
-        else attrs &= ~FileAttributes.Hidden;
-        if (options.System) attrs |= FileAttributes.System;
-        else attrs &= ~FileAttributes.System;
-        if (options.Archive) attrs |= FileAttributes.Archive;
-        else attrs &= ~FileAttributes.Archive;
-        File.SetAttributes(path, attrs);
+        var current = File.GetAttributes(path);
+        var next = current;
+        next = ApplyActionToBit(next, FileAttributes.ReadOnly, options.ReadOnlyAction);
+        next = ApplyActionToBit(next, FileAttributes.Hidden, options.HiddenAction);
+        next = ApplyActionToBit(next, FileAttributes.System, options.SystemAction);
+        next = ApplyActionToBit(next, FileAttributes.Archive, options.ArchiveAction);
+        if (next != current)
+        {
+            File.SetAttributes(path, next);
+        }
         bool isDirectory = Directory.Exists(path);
         if (options.ChangeLastWriteTime)
         {
@@ -13205,6 +14657,16 @@ private void SavePersistedMarksToSettings()
             if (isDirectory) Directory.SetLastAccessTime(path, options.LastAccessTime);
             else File.SetLastAccessTime(path, options.LastAccessTime);
         }
+    }
+    private static FileAttributes ApplyActionToBit(FileAttributes current, FileAttributes bit, AttributeChangeAction action)
+    {
+        return action switch
+        {
+            AttributeChangeAction.Set => current | bit,
+            AttributeChangeAction.Clear => current & ~bit,
+            AttributeChangeAction.Preserve => current,
+            _ => current
+        };
     }
     /// <summary>V キー: プレビューウィンドウの表示/非表示を切り替える。</summary>
     private void TogglePreviewPopup()
@@ -13315,15 +14777,16 @@ private void SavePersistedMarksToSettings()
     /// <summary>O キー: 設定画面を開く。OK 保存後は _settings を再読込して次のコマンドに反映する。</summary>
     private void OpenSettingsForm(SettingsForm.InitialTab initialTab = SettingsForm.InitialTab.Display)
     {
+        bool importedSettingsFlow = false;
         try
         {
             LogService.Info($"Opening SettingsForm. initialTab={initialTab}");
             HideTransientOverlaysBeforeModalDialog();
             BrowserTabRuntimeStateSnapshot runtimeBrowserTabState = CaptureBrowserTabRuntimeStateSnapshot();
             using var form = new SettingsForm(_settings, _featureProfile, initialTab);
-            form.ManualEmptyManagedTrashRequested += (s, e) =>
+            form.OpenManagedTrashDialogRequested += (s, e) =>
             {
-                EmptyMidFdManagedTrash();
+                OpenManagedTrashDialog();
             };
             form.SettingsApplied += (s, e) =>
             {
@@ -13365,6 +14828,7 @@ private void SavePersistedMarksToSettings()
                 ShowStatusMessage("設定を適用しました。");
             };
             var result = form.ShowDialog(this);
+            importedSettingsFlow = form.ImportedSettingsApplied;
             LogService.Info($"SettingsForm closed. result={result}");
             if (result == DialogResult.OK)
             {
@@ -13404,14 +14868,18 @@ private void SavePersistedMarksToSettings()
                 RebuildMenuStripAfterSettingsApply();
                 UpdateFunctionBar();
                 LogFontRouteDiag("SettingsOK:AfterAll");
-                ShowStatusMessage("設定を保存しました。");
+                ShowStatusMessage(importedSettingsFlow
+                    ? "設定をインポートし、現在の設定へ反映しました。"
+                    : "設定を保存しました。");
             }
         }
         catch (Exception ex)
         {
             LogService.Error("SettingsForm open failed.", ex);
             LogService.Error(ex.ToString());
-            ShowStatusMessage($"設定画面を開けませんでした: {ex.Message}");
+            ShowStatusMessage(importedSettingsFlow
+                ? $"設定は保存されましたが、現在の画面への反映に失敗しました: {ex.Message}"
+                : $"設定画面を開けませんでした: {ex.Message}");
         }
     }
     private void HideTransientOverlaysBeforeModalDialog()
@@ -14192,7 +15660,6 @@ private void SavePersistedMarksToSettings()
         if (fileListView.Items.Count == 0)
         {
             _browserCursorIndex = 0;
-            UpdateInfoPanel();
             return;
         }
         ListViewItem targetItem = fileListView.Items[0];
@@ -14223,9 +15690,7 @@ private void SavePersistedMarksToSettings()
             targetItem.Focused = true;
             targetItem.EnsureVisible();
         }
-        _browserCursorIndex = targetItem.Index;
-        // 状態更新
-        UpdateInfoPanel();
+        _browserCursorIndex = _browserPageStartIndex + targetItem.Index;
     }
     /// <summary>
     /// Phase: header declutter - 構造のワンタイム初期化。
@@ -14251,6 +15716,26 @@ private void SavePersistedMarksToSettings()
         lblPath.AutoSize = false;
         lblPath.AutoEllipsis = true;
         lblPath.Dock = DockStyle.Fill;
+        if (_breadcrumbPathControl == null)
+        {
+            _breadcrumbPathControl = new BreadcrumbPathControl
+            {
+                Dock = DockStyle.Fill,
+                Visible = false,
+                Font = lblPath.Font,
+                ForeColor = lblPath.ForeColor
+            };
+            _breadcrumbPathControl.PathSelected += (_, path) =>
+            {
+                if (!string.Equals(path, _navigationService.CurrentPath, StringComparison.OrdinalIgnoreCase))
+                {
+                    NavigateToLocationDirectory(path);
+                }
+            };
+            _breadcrumbPathControl.BackgroundSelected += (_, _) => OpenBrowserPathEntry();
+            infoRow2Panel.Controls.Add(_breadcrumbPathControl);
+            WireHeaderGestureControl(_breadcrumbPathControl);
+        }
         if (lblFileStatsEx.Parent != infoRow4Panel)
         {
             lblFileStatsEx.Parent = infoRow4Panel;
@@ -14278,8 +15763,36 @@ private void SavePersistedMarksToSettings()
         lblFileStatsEx.BringToFront();
         // Fill コントロールを背面へ (残りの領域を占有)
         lblPath.SendToBack();
+        _breadcrumbPathControl?.BringToFront();
         lblName.SendToBack();
         this.PerformLayout();
+    }
+
+    private void ApplyPathDisplayMode()
+    {
+        if (_browserPathEntryTextBox?.Visible == true)
+        {
+            lblPath.Visible = false;
+            if (_breadcrumbPathControl != null)
+            {
+                _breadcrumbPathControl.Visible = false;
+            }
+            return;
+        }
+
+        bool showBreadcrumb = _settings.Appearance?.ShowPathAsBreadcrumb == true;
+        lblPath.Visible = !showBreadcrumb;
+        if (_breadcrumbPathControl != null)
+        {
+            _breadcrumbPathControl.Font = lblPath.Font;
+            _breadcrumbPathControl.ForeColor = lblPath.ForeColor;
+            _breadcrumbPathControl.SetPath(_navigationService.CurrentPath);
+            _breadcrumbPathControl.Visible = showBreadcrumb;
+            if (showBreadcrumb)
+            {
+                _breadcrumbPathControl.BringToFront();
+            }
+        }
     }
     /// <summary>
     /// Px1 header/status font application route diagnostic helper.

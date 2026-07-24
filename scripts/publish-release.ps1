@@ -6,12 +6,19 @@ param (
 
     [switch]$SkipTagCheck = $false,
 
-    [switch]$SelfContained = $false
+    [switch]$SelfContained = $false,
+
+    [string]$ArtifactsRoot = ""
 )
 
 # 1. Validation
 if ($ReleaseTag -notmatch '^v\d{4}\.\d{2}\.\d{2}(\.\d+)?$') {
     Write-Error "ReleaseTag must follow the format 'vYYYY.MM.DD' or 'vYYYY.MM.DD.N' (e.g., v2026.05.20, v2026.05.24.1)."
+    exit 1
+}
+
+if ($SelfContained) {
+    Write-Error "-SelfContained is not supported: framework-dependent release packages only."
     exit 1
 }
 
@@ -61,16 +68,20 @@ Write-Host "FileVersion:          $FileVersion"
 Write-Host "InformationalVersion: $InformationalVersion"
 Write-Host "-----------------------------"
 
-$deploymentType = if ($SelfContained) { "self-contained" } else { "framework-dependent" }
 Write-Host "--- Publish Settings ---"
 Write-Host "Runtime:              win-x64"
-Write-Host "SelfContained:        $($SelfContained.ToString().ToLower())"
-Write-Host "Deployment:           $deploymentType"
+Write-Host "Deployment:           framework-dependent"
 Write-Host "------------------------"
 
 # 4. Resolve directories
 $rootDir = Resolve-Path (Join-Path $PSScriptRoot "..")
-$artifactsDir = Join-Path $rootDir "artifacts"
+$artifactsDir = if ([string]::IsNullOrWhiteSpace($ArtifactsRoot)) {
+    Join-Path $rootDir "artifacts"
+} elseif ([System.IO.Path]::IsPathRooted($ArtifactsRoot)) {
+    [System.IO.Path]::GetFullPath($ArtifactsRoot)
+} else {
+    [System.IO.Path]::GetFullPath((Join-Path $rootDir $ArtifactsRoot))
+}
 $releaseDir = Join-Path $artifactsDir "release"
 $releaseTestDir = Join-Path $artifactsDir "release-test"
 $tempPublishDir = Join-Path $artifactsDir "temp-publish"
@@ -87,12 +98,10 @@ $null = New-Item -ItemType Directory -Path $tempPublishDir -Force
 # 5. Run dotnet publish
 Write-Host "Running dotnet publish..."
 $csprojPath = Join-Path $rootDir "MidFD.csproj"
-$selfContainedValue = if ($SelfContained) { "true" } else { "false" }
-
 dotnet publish $csprojPath `
   -c Release `
   -r win-x64 `
-  --self-contained $selfContainedValue `
+  --self-contained false `
   -o $tempPublishDir `
   /p:Version=$Version `
   /p:AssemblyVersion=$AssemblyVersion `
@@ -131,6 +140,58 @@ if (Test-Path $readmeFirstSource) {
     Copy-Item $readmeFirstSource -Destination $tempPublishDir -Force
 }
 
+function Get-PackageRelativePath([string]$packageRoot, [string]$fullPath) {
+    return [System.IO.Path]::GetRelativePath($packageRoot, $fullPath).Replace([System.IO.Path]::DirectorySeparatorChar, '/')
+}
+
+function Test-ForbiddenPackagePath([string]$relativePath) {
+    $forbiddenSegments = @('.codex', 'tests', 'artifacts', 'scratch')
+    $segments = $relativePath -split '[\\/]'
+    foreach ($segment in $segments) {
+        if ($forbiddenSegments -contains $segment) { return $true }
+    }
+    return $false
+}
+
+function Assert-PackageContents([string]$packageRoot) {
+    $requiredRootFiles = @(
+        "MidFD.exe",
+        "MidFD.FileOperationHelper.exe",
+        "MidFD.FileOperationHelper.dll",
+        "MidFD.FileOperationHelper.deps.json",
+        "MidFD.FileOperationHelper.runtimeconfig.json",
+        "README_FIRST.txt",
+        "README.md",
+        "CHANGELOG.md",
+        "LICENSE"
+    )
+    $requiredUserDocs = @("BUILD.md", "KEYBINDINGS.md", "PROFILES.md", "SUPPORT.md", "USER_GUIDE.md")
+    $missing = [System.Collections.Generic.List[string]]::new()
+    foreach ($relativePath in $requiredRootFiles) {
+        if (-not (Test-Path (Join-Path $packageRoot $relativePath) -PathType Leaf)) { $missing.Add($relativePath) }
+    }
+    if (-not (Test-Path (Join-Path $packageRoot "UserDocs") -PathType Container)) { $missing.Add("UserDocs/") }
+    foreach ($relativePath in $requiredUserDocs) {
+        if (-not (Test-Path (Join-Path $packageRoot "UserDocs\$relativePath") -PathType Leaf)) { $missing.Add("UserDocs\$relativePath") }
+    }
+
+    $forbidden = Get-ChildItem $packageRoot -Recurse -Force -File | ForEach-Object {
+        $relativePath = Get-PackageRelativePath $packageRoot $_.FullName
+        if ($_.Extension -ieq ".pdb" -or (Test-ForbiddenPackagePath $relativePath)) { $relativePath }
+    }
+    $forbiddenDirectories = Get-ChildItem $packageRoot -Recurse -Force -Directory | ForEach-Object {
+        $relativePath = Get-PackageRelativePath $packageRoot $_.FullName
+        if (Test-ForbiddenPackagePath $relativePath) { $relativePath }
+    }
+    if ($missing.Count -gt 0 -or @($forbidden).Count -gt 0 -or @($forbiddenDirectories).Count -gt 0) {
+        $details = @()
+        if ($missing.Count -gt 0) { $details += "missing: $($missing -join ', ')" }
+        if (@($forbidden).Count -gt 0) { $details += "forbidden: $($forbidden -join ', ')" }
+        if (@($forbiddenDirectories).Count -gt 0) { $details += "forbidden directories: $($forbiddenDirectories -join ', ')" }
+        throw "Package gate failed: $($details -join '; ')"
+    }
+}
+
 
 # 6. Create ZIP archive
 $zipPath = Join-Path $releaseDir "MidFD-win-x64.zip"
@@ -147,6 +208,9 @@ $extractedDest = Join-Path $releaseTestDir "MidFD-win-x64"
 Write-Host "Extracting ZIP for verification to: $extractedDest"
 $null = New-Item -ItemType Directory -Path $releaseTestDir -Force
 Expand-Archive -Path $zipPath -DestinationPath $extractedDest -Force
+
+# 7.1 Verify complete package contents and helper runtime dependencies
+Assert-PackageContents $extractedDest
 
 # Verify exe exists
 $exePath = Join-Path $extractedDest "MidFD.exe"
@@ -179,18 +243,16 @@ if ($productVersion -notmatch $shortHash -and $productVersion -notmatch $fullHas
 Write-Host "ProductVersion verification passed successfully!"
 
 # 8.5. Verify absence of self-contained runtime files (for framework-dependent deployment)
-if (-not $SelfContained) {
-    Write-Host "Verifying absence of self-contained runtime files..."
-    $forbiddenFiles = @("coreclr.dll", "hostfxr.dll", "System.Private.CoreLib.dll")
-    foreach ($file in $forbiddenFiles) {
-        $filePath = Join-Path $extractedDest $file
-        if (Test-Path $filePath) {
-            Write-Error "Verification failed: '$file' was found in framework-dependent deployment."
-            exit 1
-        }
+Write-Host "Verifying absence of self-contained runtime files..."
+$forbiddenFiles = @("coreclr.dll", "hostfxr.dll", "System.Private.CoreLib.dll")
+foreach ($file in $forbiddenFiles) {
+    $filePath = Join-Path $extractedDest $file
+    if (Test-Path $filePath) {
+        Write-Error "Verification failed: '$file' was found in framework-dependent deployment."
+        exit 1
     }
-    Write-Host "Runtime files absence verification passed!"
 }
+Write-Host "Runtime files absence verification passed!"
 
 # 9. Generate SHA256 file
 $sha256Path = Join-Path $releaseDir "MidFD-win-x64.zip.sha256"

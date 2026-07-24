@@ -10,12 +10,36 @@ using MidFD.Services;
 namespace MidFD;
 
 public partial class MainForm
-{    private bool LoadDirectory(string targetPath, string? focusTargetName = null, bool isHistoryNavigation = false, bool suppressRecent = false)
+{
+    private long _currentDirectoryWatcherGeneration;
+    private long _lastExternalDirectoryReloadMilliseconds;
+
+    private int GetCurrentDirectoryRefreshQuietWindowMilliseconds() => _lastExternalDirectoryReloadMilliseconds switch
+    {
+        >= 3000 => 3000,
+        >= 1000 => 1500,
+        _ => CurrentDirectoryRefreshDebounceMilliseconds
+    };
+
+    private bool LoadDirectory(string targetPath, string? focusTargetName = null, bool isHistoryNavigation = false, bool suppressRecent = false)
+        => LoadDirectory(targetPath, focusTargetName, isHistoryNavigation, suppressRecent, BrowserLoadCoordinator.SnapshotPolicy.RebuildSnapshot);
+
+    private bool LoadDirectory(
+        string targetPath,
+        string? focusTargetName,
+        bool isHistoryNavigation,
+        bool suppressRecent,
+        BrowserLoadCoordinator.SnapshotPolicy snapshotPolicy)
     {
         HideBrowserFileNameToolTip();
         try
         {
-            var request = CreateDirectoryLoadRequest(targetPath, focusTargetName, isHistoryNavigation, suppressRecent);
+            if (snapshotPolicy == BrowserLoadCoordinator.SnapshotPolicy.RebuildSnapshot)
+            {
+                _directoryContentGeneration++;
+                StopDirectoryCountAudit(dispose: false);
+            }
+            var request = CreateDirectoryLoadRequest(targetPath, focusTargetName, isHistoryNavigation, suppressRecent, snapshotPolicy);
             var result = _browserLoadCoordinator.Execute(
                 request,
                 new BrowserLoadCoordinator.ExecutionContext
@@ -36,7 +60,8 @@ public partial class MainForm
         string targetPath,
         string? focusTargetName,
         bool isHistoryNavigation,
-        bool suppressRecent)
+        bool suppressRecent,
+        BrowserLoadCoordinator.SnapshotPolicy snapshotPolicy)
     {
         string? currentFullName = null;
         var currentItem = GetCurrentBrowserItem();
@@ -60,7 +85,9 @@ public partial class MainForm
             GetActiveTabFilterLock(),
             _settings.Appearance?.DateFormat,
             _settings.Appearance?.SizeFormat,
-            _settings.Appearance?.ShowDirectoryMarker ?? true);
+            _settings.Appearance?.ShowDirectoryMarker ?? true,
+            GetBrowserItemsPerPage(),
+            snapshotPolicy);
     }
     private void PopulateListView(IReadOnlyList<ListViewItem> items)
     {
@@ -89,15 +116,57 @@ public partial class MainForm
         if (directoryChanged)
         {
             InvalidateRecentMultiMarkIntent();
-            InvalidateMarkSummaryCache();
+            ClearPendingCurrentDirectoryRefresh();
+            _navigationRefreshCoordinator.State.IsPassiveRefresh = false;
         }
         // 1. 内部状態とパス表示の更新
         _navigationService.SetCurrentPath(result.NewPath, result.IsHistoryNavigation);
+        if (directoryChanged)
+        {
+            if (!TryCarryMarkSummaryAcrossDirectoryChange(result.PreviousPath))
+            {
+                InvalidateMarkSummaryCache();
+            }
+            _directoryNavigationGeneration++;
+            StopDirectoryCountAudit(dispose: false);
+        }
+        _browserPageStartIndex = result.PageStartIndex;
+        _browserTotalItemCount = result.TotalItemCount;
+        _browserCursorIndex = result.LastIndex;
+        _browserItemsPerPage = GetBrowserItemsPerPage();
         // 2. 一覧項目の再構築
-        PopulateListView(result.Items);
-        // 3. 選択状態の復元
-        RestoreSelectionState(result.FocusTargetName, result.LastIndex, result.IsReload);
-        // 4. パネル再描画 (RestoreSelectionState 内で UpdateInfoPanel も呼ばれるためここでは Invalidate のみ)
+        var listApplyStopwatch = Stopwatch.StartNew();
+        _isApplyingDirectoryList = true;
+        try
+        {
+            PopulateListView(result.Items);
+            listApplyStopwatch.Stop();
+            // 3. 選択状態の復元
+            var selectionRestoreStopwatch = Stopwatch.StartNew();
+            int pageLocalIndex = result.LastIndex - result.PageStartIndex;
+            RestoreSelectionState(result.FocusTargetName, pageLocalIndex, result.IsReload);
+            selectionRestoreStopwatch.Stop();
+            LogService.Info(
+                $"[DirectoryLoadTiming] path='{result.NewPath}' itemCount={result.Items.Count} " +
+                $"enumerationSortMs={result.EnumerationAndSortMilliseconds} itemBuildMs={result.ItemBuildMilliseconds} generatedUiItemCount={result.GeneratedUiItemCount} totalItemCount={result.TotalItemCount} pageStartIndex={result.PageStartIndex} reusedSnapshot={result.ReusedSnapshot} " +
+                $"listApplyMs={listApplyStopwatch.ElapsedMilliseconds} selectionRestoreMs={selectionRestoreStopwatch.ElapsedMilliseconds}");
+        }
+        finally
+        {
+            _isApplyingDirectoryList = false;
+        }
+        if (fileListView.SelectedIndices.Count > 0)
+        {
+            ApplyBrowserSelectionChanged(scheduleInfoUpdate: false);
+        }
+        if (!result.ReusedSnapshot)
+        {
+            _navigationRefreshCoordinator.ConfigureDirectoryCost(
+                result.RawDirectoryEntryCount,
+                result.TotalItemCount,
+                result.ItemBuildMilliseconds);
+        }
+        // 4. パネル再描画。selection反映後、末尾でInfo表示を1回更新する。
         browserPanel.Invalidate();
         if (!result.SuppressRecent)
         {
@@ -105,11 +174,64 @@ public partial class MainForm
         }
         CaptureActiveBrowserTabState(captureMarks: false);
         UpdateCurrentDirectoryWatcher(result.NewPath, "ApplyDirectoryLoadUi");
+        UpdateDirectoryCountAuditLifecycle();
         TryProcessPendingCurrentDirectoryRefresh("ApplyDirectoryLoadUi");
         UpdateMenuStripState();
         // Phase: header stream / initial final relayout corrective follow-up
         // ディレクトリ読み込みとタブ状態確定後の最終レイアウトを保証する
         UpdateInfoPanel();
+    }
+
+    private int GetBrowserPageLocalCursorIndex()
+    {
+        if (fileListView.Items.Count == 0)
+        {
+            return -1;
+        }
+        return BrowserPageIndex.ToLocal(_browserCursorIndex, _browserPageStartIndex, fileListView.Items.Count);
+    }
+
+    private void RematerializeBrowserPageIfCapacityChanged()
+    {
+        if (_uiMode != UIMode.Browser || _isApplyingDirectoryList || IsCurrentDirectoryBusy())
+        {
+            return;
+        }
+        int itemsPerPage = GetBrowserItemsPerPage();
+        if (itemsPerPage <= 0 || itemsPerPage == _browserItemsPerPage || string.IsNullOrWhiteSpace(_navigationService.CurrentPath))
+        {
+            return;
+        }
+        LoadDirectory(
+            _navigationService.CurrentPath,
+            focusTargetName: null,
+            isHistoryNavigation: false,
+            suppressRecent: false,
+            snapshotPolicy: BrowserLoadCoordinator.SnapshotPolicy.ReuseSnapshot);
+    }
+
+    private void SetBrowserGlobalCursorIndex(int globalIndex)
+    {
+        if (_browserTotalItemCount <= 0)
+        {
+            return;
+        }
+        int clamped = Math.Clamp(globalIndex, 0, _browserTotalItemCount - 1);
+        int itemsPerPage = GetBrowserItemsPerPage();
+        int previousPage = itemsPerPage > 0 ? _browserCursorIndex / itemsPerPage : 0;
+        int nextPage = itemsPerPage > 0 ? clamped / itemsPerPage : 0;
+        _browserCursorIndex = clamped;
+        if (previousPage != nextPage && !IsCurrentDirectoryBusy())
+        {
+            LoadDirectory(
+                _navigationService.CurrentPath,
+                focusTargetName: null,
+                isHistoryNavigation: false,
+                suppressRecent: false,
+                snapshotPolicy: BrowserLoadCoordinator.SnapshotPolicy.ReuseSnapshot);
+            return;
+        }
+        SyncBrowserSelection();
     }
     private void RecordQuickAccessRecent(string previousPath, string newPath, bool isReload)
     {
@@ -159,7 +281,12 @@ public partial class MainForm
             ShowStatusMessage("現在ディレクトリが見つかりません。");
             return false;
         }
-        bool loaded = LoadDirectory(currentPath);
+        bool loaded = LoadDirectory(
+            currentPath,
+            focusTargetName: null,
+            isHistoryNavigation: false,
+            suppressRecent: false,
+            snapshotPolicy: BrowserLoadCoordinator.SnapshotPolicy.RebuildSnapshot);
         if (loaded)
         {
             ShowStatusMessage(reason);
@@ -220,12 +347,14 @@ public partial class MainForm
             return true;
         }
         ClearPendingCurrentDirectoryRefresh();
+        ResetDirectoryCountAuditBackoff();
         ReloadCurrentDirectory("現在ディレクトリを再読込しました。");
+        _navigationRefreshCoordinator.ClearPendingRefresh();
         return true;
     }
-    private void QueueCurrentDirectoryRefresh(string watchedDirectoryPath, string reason, Exception? exception = null)
+    private void QueueCurrentDirectoryRefresh(string watchedDirectoryPath, long watcherGeneration, string reason, Exception? exception = null)
     {
-        if (IsDisposed)
+        if (IsDisposed || Disposing || _isExitConfirmationPending || _isClosingFromEscExitPath)
         {
             return;
         }
@@ -233,96 +362,72 @@ public partial class MainForm
         {
             try
             {
-                BeginInvoke(new Action(() => QueueCurrentDirectoryRefresh(watchedDirectoryPath, reason, exception)));
+                BeginInvoke(new Action(() => QueueCurrentDirectoryRefresh(watchedDirectoryPath, watcherGeneration, reason, exception)));
             }
             catch (ObjectDisposedException)
             {
             }
+            catch (InvalidOperationException)
+            {
+            }
             return;
         }
+        ResetDirectoryCountAuditBackoff();
         string normalizedWatchedPath = NormalizeDirectoryWatchPath(watchedDirectoryPath);
         string normalizedCurrentPath = NormalizeDirectoryWatchPath(_navigationService.CurrentPath);
         string normalizedWatcherPath = NormalizeDirectoryWatchPath(_currentDirectoryWatcherPath);
+        _directoryRefreshDebounceTimer.Interval = GetCurrentDirectoryRefreshQuietWindowMilliseconds();
         _navigationRefreshCoordinator.QueueRefresh(
-            watchedDirectoryPath,
+            normalizedWatchedPath,
             reason,
             normalizedWatchedPath,
             normalizedCurrentPath,
             normalizedWatcherPath,
+            watcherGeneration,
+            _currentDirectoryWatcherGeneration,
             exception,
             _directoryRefreshDebounceTimer);
+        if (!_navigationRefreshCoordinator.State.IsPassiveRefresh &&
+            _navigationRefreshCoordinator.State.DelayCompleted)
+        {
+            TryProcessPendingCurrentDirectoryRefresh("BulkThreshold");
+        }
+        if (_navigationRefreshCoordinator.State.IsPassiveRefresh && _navigationRefreshCoordinator.State.EventCount == 1)
+        {
+            ShowStatusMessage("外部変更あり［高頻度フォルダ］ Ctrl+Rで更新できます。");
+        }
     }
     private void TryProcessPendingCurrentDirectoryRefresh(string source)
     {
         string currentPath = _navigationService.CurrentPath;
-        if (!_navigationRefreshCoordinator.CanProcessRefresh(NormalizeDirectoryWatchPath(currentPath)))
+        string normalizedCurrentPath = NormalizeDirectoryWatchPath(currentPath);
+        if (_navigationRefreshCoordinator.State.IsPassiveRefresh || _isExitConfirmationPending || IsDisposed || Disposing || _isClosingFromEscExitPath)
         {
-            if (_navigationRefreshCoordinator.State.IsPending && !_navigationRefreshCoordinator.State.IsApplying)
-            {
-                ClearPendingCurrentDirectoryRefresh();
-            }
             return;
         }
         if (_uiMode != UIMode.Browser || IsCurrentDirectoryBusy())
         {
             return;
         }
-        int externalDelayMs = _previewDiagnosticDelayService.ExternalReloadDelayMs;
-        var state = _navigationRefreshCoordinator.State;
-        if (!state.DelayScheduled
-            && !state.DelayCompleted
-            && _previewDiagnosticDelayService.ShouldDelay(currentPath, externalDelayMs))
+        if (!_navigationRefreshCoordinator.TryBeginRefresh(normalizedCurrentPath, _currentDirectoryWatcherGeneration, out NavigationRefreshBatch? batch))
         {
-            state.DelayScheduled = true;
-            _ = Task.Run(async () =>
+            if (_navigationRefreshCoordinator.ShouldDiscardPending(normalizedCurrentPath, _currentDirectoryWatcherGeneration))
             {
-                try
-                {
-                    using var cts = new CancellationTokenSource();
-                    await _previewDiagnosticDelayService
-                        .DelayAsync("ExternalChangeReload", currentPath, externalDelayMs, cts.Token)
-                        .ConfigureAwait(false);
-                }
-                catch (OperationCanceledException)
-                {
-                }
-                finally
-                {
-                    if (IsDisposed || !IsHandleCreated)
-                    {
-                        state.DelayScheduled = false;
-                    }
-                    else
-                    {
-                        try
-                        {
-                            BeginInvoke(new Action(() =>
-                            {
-                                state.DelayScheduled = false;
-                                state.DelayCompleted = true;
-                                TryProcessPendingCurrentDirectoryRefresh($"{source}:Delayed");
-                            }));
-                        }
-                        catch (ObjectDisposedException)
-                        {
-                            state.DelayScheduled = false;
-                        }
-                    }
-                }
-            });
+                ClearPendingCurrentDirectoryRefresh();
+            }
             return;
         }
-        state.IsApplying = true;
         var sw = Stopwatch.StartNew();
         string statusBefore = statusLabel?.Text ?? "<null>";
-        string reason = _navigationRefreshCoordinator.BuildExternalDirectoryRefreshReason(ExternalDirectoryRefreshBulkThreshold);
+        string reason = batch!.EventCount > ExternalDirectoryRefreshBulkThreshold
+            ? $"Bulk({batch.EventCount})"
+            : string.Join("+", batch.Reasons.OrderBy(static value => value));
         string statusMessage = $"外部変更を反映しました: {reason}";
         string result = "Skipped";
-        string exceptionType = state.ExceptionType ?? "-";
-        string exceptionMessage = state.ExceptionMessage ?? "-";
+        string exceptionType = batch.ExceptionType ?? "-";
+        string exceptionMessage = batch.ExceptionMessage ?? "-";
         try
         {
-            ClearPendingCurrentDirectoryRefresh();
             bool loaded = ReloadCurrentDirectory(statusMessage, force: true);
             result = loaded ? "Success" : "Error";
         }
@@ -343,8 +448,16 @@ public partial class MainForm
                 $"[StatusUpdate] source='ExternalChangeReload' before='{statusBefore}' after='{statusAfter}'");
             LogService.Info(
                 $"[ExternalChangeReload] source={source} path='{currentPath}' reason='{reason}' result={result} " +
-                $"exceptionType='{exceptionType}' message='{exceptionMessage}' elapsedMs={sw.ElapsedMilliseconds}");
-            state.IsApplying = false;
+                $"exceptionType='{exceptionType}' message='{exceptionMessage}' elapsedMs={sw.ElapsedMilliseconds} " +
+                $"itemEvents={batch.EventCount} watcherGeneration={batch.WatcherGeneration} followUpPending={_navigationRefreshCoordinator.State.IsPending}");
+            _lastExternalDirectoryReloadMilliseconds = sw.ElapsedMilliseconds;
+            _navigationRefreshCoordinator.CompleteRefresh();
+            if (_navigationRefreshCoordinator.State.IsPending)
+            {
+                _directoryRefreshDebounceTimer.Interval = GetCurrentDirectoryRefreshQuietWindowMilliseconds();
+                _navigationRefreshCoordinator.State.ScheduleRefreshDelay();
+                _directoryRefreshDebounceTimer.Start();
+            }
         }
     }
     private void ClearPendingCurrentDirectoryRefresh()
@@ -352,11 +465,123 @@ public partial class MainForm
         _navigationRefreshCoordinator.ClearPendingRefresh();
         _directoryRefreshDebounceTimer.Stop();
     }
+
+    private void StopDirectoryCountAudit(bool dispose)
+    {
+        _directoryCountAuditTimer.Stop();
+        _directoryCountAuditCts?.Cancel();
+        _directoryCountAuditCts?.Dispose();
+        _directoryCountAuditCts = null;
+        if (dispose)
+        {
+            _directoryCountAuditTimer.Dispose();
+        }
+    }
+
+    private void UpdateDirectoryCountAuditLifecycle()
+    {
+        if (IsDisposed || Disposing || _isExitConfirmationPending || _isClosingFromEscExitPath ||
+            !_featureGate.IsEnabled(FeatureId.FileSystemWatcherAutoRefresh) ||
+            !_navigationRefreshCoordinator.State.IsPassiveRefresh ||
+            string.IsNullOrWhiteSpace(_navigationService.CurrentPath))
+        {
+            StopDirectoryCountAudit(dispose: false);
+            return;
+        }
+        if (!_directoryCountAuditTimer.Enabled)
+        {
+            ResetDirectoryCountAuditBackoff();
+            _directoryCountAuditTimer.Start();
+        }
+    }
+
+    private void ResetDirectoryCountAuditBackoff()
+    {
+        _directoryCountAuditSchedule.ResetForActivity();
+        string currentPath = _navigationService.CurrentPath;
+        _directoryCountAuditTimer.Interval = _directoryCountAuditSchedule.GetIntervalMilliseconds(
+            !string.IsNullOrWhiteSpace(currentPath) && DirectoryCountAuditService.IsNetworkPath(currentPath));
+    }
+
+    private void RunCurrentDirectoryCountAudit()
+    {
+        if (!_navigationRefreshCoordinator.State.IsPassiveRefresh ||
+            _isExitConfirmationPending || IsDisposed || Disposing ||
+            _isClosingFromEscExitPath || _navigationRefreshCoordinator.State.IsApplying)
+        {
+            return;
+        }
+
+        string currentPath = _navigationService.CurrentPath;
+        if (string.IsNullOrWhiteSpace(currentPath))
+        {
+            return;
+        }
+        if (!_directoryCountAuditGate.TryEnter())
+        {
+            return;
+        }
+
+        _directoryCountAuditCts?.Cancel();
+        _directoryCountAuditCts?.Dispose();
+        var cts = new CancellationTokenSource();
+        _directoryCountAuditCts = cts;
+        long watcherGeneration = _currentDirectoryWatcherGeneration;
+        long navigationGeneration = _directoryNavigationGeneration;
+        long contentGeneration = _directoryContentGeneration;
+        bool showHiddenFiles = _settings.Appearance?.ShowHiddenFiles ?? false;
+        _ = Task.Run(() => DirectoryCountAuditService.CountVisibleEntriesDetailed(currentPath, showHiddenFiles, cts.Token), cts.Token)
+            .ContinueWith(task =>
+            {
+                _directoryCountAuditGate.Exit();
+                if (task.IsCanceled || task.IsFaulted || IsDisposed || Disposing || _isExitConfirmationPending || _isClosingFromEscExitPath)
+                {
+                    return;
+                }
+                try
+                {
+                    BeginInvoke(new Action(() =>
+                    {
+                        if (IsDisposed || Disposing ||
+                            navigationGeneration != _directoryNavigationGeneration ||
+                            contentGeneration != _directoryContentGeneration ||
+                            watcherGeneration != _currentDirectoryWatcherGeneration ||
+                            !string.Equals(
+                                NormalizeDirectoryWatchPath(currentPath),
+                                NormalizeDirectoryWatchPath(_navigationService.CurrentPath),
+                                StringComparison.OrdinalIgnoreCase))
+                        {
+                            return;
+                        }
+                        bool changed = _navigationRefreshCoordinator.ApplyCountAudit(
+                            currentPath,
+                            watcherGeneration,
+                            task.Result.VisibleEntryCount);
+                        _directoryCountAuditSchedule.RecordResult(changed);
+                        _directoryCountAuditTimer.Interval = _directoryCountAuditSchedule.GetIntervalMilliseconds(
+                            DirectoryCountAuditService.IsNetworkPath(currentPath));
+                        if (changed)
+                        {
+                            ShowStatusMessage("外部変更あり［高頻度フォルダ］ Ctrl+Rで更新できます。");
+                            LogService.Info($"[DirectoryCountAudit] path='{currentPath}' rawCount={task.Result.VisibleEntryCount} " +
+                                $"enumerated={task.Result.EnumeratedEntryCount} attributeReads={task.Result.AttributeReadCount} " +
+                                $"dirty=true nextIntervalMs={_directoryCountAuditTimer.Interval} " +
+                                $"filteredTotalItemCount={_navigationRefreshCoordinator.State.FilteredTotalItemCount} generatedUiItemCount=0 listApply=false");
+                        }
+                    }));
+                }
+                catch (InvalidOperationException)
+                {
+                }
+            }, TaskScheduler.Default);
+    }
     private void UpdateCurrentDirectoryWatcher(string? currentPath, string reason)
     {
         if (!_featureGate.IsEnabled(FeatureId.FileSystemWatcherAutoRefresh))
         {
+            StopDirectoryCountAudit(dispose: false);
             DisposeCurrentDirectoryWatcher();
+            _navigationRefreshCoordinator.State.ResetDirectoryBaseline();
             ClearPendingCurrentDirectoryRefresh();
             return;
         }
@@ -364,14 +589,18 @@ public partial class MainForm
         string normalizedWatcherPath = NormalizeDirectoryWatchPath(_currentDirectoryWatcherPath);
         if (!string.IsNullOrWhiteSpace(normalizedCurrentPath) &&
             string.Equals(normalizedCurrentPath, normalizedWatcherPath, StringComparison.OrdinalIgnoreCase) &&
-            _currentDirectoryWatcher != null)
+            _currentDirectoryWatcher != null &&
+            _currentDirectoryWatcher.NotifyFilter == DirectoryWatcherNotifyFilterPolicy.ForSort(_currentSort))
         {
             return;
         }
         DisposeCurrentDirectoryWatcher();
+        StopDirectoryCountAudit(dispose: false);
+        _directoryCountAuditSchedule.ResetForActivity();
         _currentDirectoryWatcherPath = null;
         if (string.IsNullOrWhiteSpace(currentPath) || !Directory.Exists(currentPath))
         {
+            _navigationRefreshCoordinator.State.ResetDirectoryBaseline();
             return;
         }
         try
@@ -379,20 +608,15 @@ public partial class MainForm
             var watcher = new FileSystemWatcher(currentPath)
             {
                 IncludeSubdirectories = false,
-                NotifyFilter = NotifyFilters.FileName |
-                               NotifyFilters.DirectoryName |
-                               NotifyFilters.LastWrite |
-                               NotifyFilters.Size |
-                               NotifyFilters.CreationTime |
-                               NotifyFilters.LastAccess |
-                               NotifyFilters.Attributes,
+                NotifyFilter = DirectoryWatcherNotifyFilterPolicy.ForSort(_currentSort),
                 EnableRaisingEvents = false
             };
-            watcher.Changed += (_, _) => QueueCurrentDirectoryRefresh(currentPath, "Changed");
-            watcher.Created += (_, _) => QueueCurrentDirectoryRefresh(currentPath, "Created");
-            watcher.Deleted += (_, _) => QueueCurrentDirectoryRefresh(currentPath, "Deleted");
-            watcher.Renamed += (_, _) => QueueCurrentDirectoryRefresh(currentPath, "Renamed");
-            watcher.Error += (_, e) => QueueCurrentDirectoryRefresh(currentPath, "Error", e.GetException());
+            long generation = ++_currentDirectoryWatcherGeneration;
+            watcher.Changed += (_, _) => QueueCurrentDirectoryRefresh(currentPath, generation, "Changed");
+            watcher.Created += (_, _) => QueueCurrentDirectoryRefresh(currentPath, generation, "Created");
+            watcher.Deleted += (_, _) => QueueCurrentDirectoryRefresh(currentPath, generation, "Deleted");
+            watcher.Renamed += (_, _) => QueueCurrentDirectoryRefresh(currentPath, generation, "Renamed");
+            watcher.Error += (_, e) => QueueCurrentDirectoryRefresh(currentPath, generation, "Error", e.GetException());
             watcher.EnableRaisingEvents = true;
             _currentDirectoryWatcher = watcher;
             _currentDirectoryWatcherPath = currentPath;
@@ -420,6 +644,7 @@ public partial class MainForm
         }
         finally
         {
+            _currentDirectoryWatcherGeneration++;
             _currentDirectoryWatcher = null;
             _currentDirectoryWatcherPath = null;
         }

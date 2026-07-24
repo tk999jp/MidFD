@@ -515,7 +515,8 @@ public class InputSettings
             [CommandIds.FileRename] = new[] { "R" },
             [CommandIds.FileDelete] = new[] { "D", "Delete" },
             [CommandIds.EditUndo] = new[] { "Ctrl+Z", "Alt+Z" },
-            [CommandIds.EditRedo] = new[] { "Ctrl+Y", "Alt+Y" }
+            [CommandIds.EditRedo] = new[] { "Ctrl+Y", "Alt+Y" },
+            [CommandIds.AppOpenManagedTrash] = Array.Empty<string>()
         };
 
         if (isFdCompatible)

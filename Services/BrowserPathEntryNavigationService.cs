@@ -6,10 +6,15 @@ internal static class BrowserPathEntryNavigationService
 {
     public static BrowserPathEntryNavigationResult Resolve(string? inputPath, NavigationService navigationService)
     {
-        string trimmed = (inputPath ?? string.Empty).Trim().Trim('"');
+        string trimmed = PathTextIntakeService.ExpandAndTrim(inputPath);
         if (string.IsNullOrWhiteSpace(trimmed))
         {
             return Invalid("移動先パスを入力してください。");
+        }
+
+        if (trimmed.Contains('%'))
+        {
+            return Invalid("環境変数を解決できませんでした。");
         }
 
         string resolved;

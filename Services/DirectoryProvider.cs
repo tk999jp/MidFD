@@ -112,7 +112,8 @@ public class DirectoryProvider
         return new DirectoryResult
         {
             SelectedDirs = dirsReq.ToList(),
-            SelectedFiles = filesReq.ToList()
+            SelectedFiles = filesReq.ToList(),
+            RawDirectoryEntryCount = allDirs.Length + allFiles.Length
         };
     }
 

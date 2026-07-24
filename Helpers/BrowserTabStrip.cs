@@ -352,9 +352,9 @@ public sealed class BrowserTabStrip : Control
         }
 
         // 4. overflow navigation と AddTab を配置・描画
-        DrawNavigationButton(e.Graphics, _scrollLeftBounds, "<", baselineY);
-        DrawNavigationButton(e.Graphics, _scrollRightBounds, ">", baselineY);
-        DrawNavigationButton(e.Graphics, _tabListBounds, "∨", baselineY);
+        DrawNavigationButton(e.Graphics, _scrollLeftBounds, NavigationGlyph.Left, baselineY);
+        DrawNavigationButton(e.Graphics, _scrollRightBounds, NavigationGlyph.Right, baselineY);
+        DrawNavigationButton(e.Graphics, _tabListBounds, NavigationGlyph.Down, baselineY);
         DrawAddTabEntry(e.Graphics, _addTabBounds, baselineY, _isHoverAddTabEntry);
 
         DrawDragInsertionIndicator(e.Graphics, tabRowTop, baselineY);
@@ -857,7 +857,14 @@ public sealed class BrowserTabStrip : Control
             TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix);
     }
 
-    private void DrawNavigationButton(Graphics graphics, Rectangle bounds, string text, int baselineY)
+    private enum NavigationGlyph
+    {
+        Left,
+        Right,
+        Down
+    }
+
+    private void DrawNavigationButton(Graphics graphics, Rectangle bounds, NavigationGlyph glyph, int baselineY)
     {
         if (bounds.Width <= 0 || bounds.Height <= 0)
         {
@@ -875,12 +882,39 @@ public sealed class BrowserTabStrip : Control
             graphics.DrawLine(separatorPen, fillBounds.Left, fillBounds.Top + 8, fillBounds.Left, baselineY - 8);
         }
 
+        Color glyphColor = BlendColor(InactiveTabTextColor, ActiveTabTextColor, 0.18);
+        if (glyph == NavigationGlyph.Down)
+        {
+            float dpiScale = graphics.DpiX / 96f;
+            float width = 6f * dpiScale;
+            float height = 4f * dpiScale;
+            float centerX = fillBounds.Left + (fillBounds.Width / 2f);
+            float centerY = fillBounds.Top + (fillBounds.Height / 2f);
+            float halfWidth = width / 2f;
+            float halfHeight = height / 2f;
+            using var glyphPen = new Pen(glyphColor, Math.Max(1f, 1.1f * dpiScale))
+            {
+                StartCap = System.Drawing.Drawing2D.LineCap.Round,
+                EndCap = System.Drawing.Drawing2D.LineCap.Round,
+                LineJoin = System.Drawing.Drawing2D.LineJoin.Round
+            };
+            graphics.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+            graphics.DrawLines(glyphPen,
+            [
+                new PointF(centerX - halfWidth, centerY - halfHeight),
+                new PointF(centerX, centerY + halfHeight),
+                new PointF(centerX + halfWidth, centerY - halfHeight)
+            ]);
+            return;
+        }
+
+        string text = glyph == NavigationGlyph.Left ? "<" : ">";
         TextRenderer.DrawText(
             graphics,
             text,
             Font,
             fillBounds,
-            BlendColor(InactiveTabTextColor, ActiveTabTextColor, 0.18),
+            glyphColor,
             Color.Transparent,
             TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix);
     }

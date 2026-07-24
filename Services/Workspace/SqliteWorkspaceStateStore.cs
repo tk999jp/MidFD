@@ -2,6 +2,7 @@
 using Microsoft.Data.Sqlite;
 using MidFD.Configuration;
 using MidFD.Models;
+using MidFD.Services;
 using SqliteConnection = Microsoft.Data.Sqlite.SqliteConnection;
 using SqliteConnectionStringBuilder = Microsoft.Data.Sqlite.SqliteConnectionStringBuilder;
 using SqliteTransaction = Microsoft.Data.Sqlite.SqliteTransaction;
@@ -13,21 +14,16 @@ public sealed class SqliteWorkspaceStateStore : IWorkspaceStateStore
     private const string SchemaVersion = "1";
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
     private readonly string _dbPath;
-    private readonly string _connectionString;
 
     public SqliteWorkspaceStateStore(string dbPath)
     {
         _dbPath = dbPath;
-        _connectionString = new SqliteConnectionStringBuilder
-        {
-            DataSource = dbPath,
-            Mode = SqliteOpenMode.ReadWriteCreate
-        }.ToString();
     }
 
     public WorkspaceState? Load()
     {
-        using SqliteConnection connection = OpenInitializedConnection();
+        if (!File.Exists(_dbPath)) return null;
+        using SqliteConnection connection = OpenReadOnlyConnection();
 
         string? activeCategoryId = ReadMeta(connection, "active_category_id");
         string? savedAtValue = ReadMeta(connection, "saved_at_utc");
@@ -59,6 +55,11 @@ public sealed class SqliteWorkspaceStateStore : IWorkspaceStateStore
     public void Save(WorkspaceState state)
     {
         ArgumentNullException.ThrowIfNull(state);
+        SaveCore(state);
+    }
+
+    private void SaveCore(WorkspaceState state)
+    {
         using SqliteConnection connection = OpenInitializedConnection();
         using SqliteTransaction transaction = connection.BeginTransaction();
 
@@ -110,11 +111,19 @@ public sealed class SqliteWorkspaceStateStore : IWorkspaceStateStore
             Directory.CreateDirectory(directory);
         }
 
-        var connection = new SqliteConnection(_connectionString);
+        var connection = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = _dbPath, Mode = SqliteOpenMode.ReadWriteCreate }.ToString());
         connection.Open();
         ExecuteNonQuery(connection, null, "PRAGMA journal_mode=WAL;");
         ExecuteNonQuery(connection, null, "PRAGMA synchronous=NORMAL;");
         InitializeSchema(connection);
+        return connection;
+    }
+
+    private SqliteConnection OpenReadOnlyConnection()
+    {
+        string immutableUri = $"file:{Path.GetFullPath(_dbPath).Replace('\\', '/')}?immutable=1";
+        var connection = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = immutableUri, Mode = SqliteOpenMode.ReadOnly, Pooling = false }.ToString());
+        connection.Open();
         return connection;
     }
 

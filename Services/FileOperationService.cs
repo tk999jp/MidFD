@@ -6,11 +6,15 @@ namespace MidFD.Services;
 
 public static class FileOperationService
 {
+    internal static void CreateDirectoryForUserMutation(string path)
+    {
+        Directory.CreateDirectory(path);
+    }
     public static void Rename(string sourcePath, string destPath)
     {
         try
         {
-            if (Directory.Exists(sourcePath))
+            if (ReparsePointHelper.IsDirectory(sourcePath))
             {
                 Directory.Move(sourcePath, destPath);
             }
@@ -29,6 +33,19 @@ public static class FileOperationService
     /// <summary>ゴミ箱へ削除する (Microsoft.VisualBasic.FileIO.FileSystem.DeleteFile/Directory を使用)</summary>
     public static void DeleteToRecycleBin(string path)
     {
+        if (ReparsePointHelper.IsReparsePoint(path))
+        {
+            ShellRecycleBinDeleteService.Result result = ShellRecycleBinDeleteService
+                .DeleteToRecycleBinAsync(new[] { path }, IntPtr.Zero, CancellationToken.None, _ => { })
+                .GetAwaiter()
+                .GetResult();
+            if (result.IsCanceled || result.FailCount != 0 || result.SuccessCount != 1)
+            {
+                throw new IOException($"リンクをゴミ箱へ移動できませんでした: {path}");
+            }
+            return;
+        }
+
         if (Directory.Exists(path))
         {
             Microsoft.VisualBasic.FileIO.FileSystem.DeleteDirectory(path, 
@@ -47,7 +64,12 @@ public static class FileOperationService
     /// <summary>完全に削除する (物理削除)</summary>
     public static void Delete(string path)
     {
-        if (Directory.Exists(path))
+        if (ReparsePointHelper.IsReparsePoint(path))
+        {
+            if (ReparsePointHelper.IsDirectory(path)) Directory.Delete(path, false);
+            else File.Delete(path);
+        }
+        else if (Directory.Exists(path))
         {
             DeleteDirectoryTreeWithoutFollowingReparsePoints(path);
         }
@@ -58,7 +80,7 @@ public static class FileOperationService
         }
     }
 
-    private static void DeleteDirectoryTreeWithoutFollowingReparsePoints(string directoryPath)
+    private static void DeleteDirectoryTreeWithoutFollowingReparsePoints(string directoryPath, ISet<string>? excludedReparsePaths = null)
     {
         if (ReparsePointHelper.IsReparsePoint(directoryPath))
         {
@@ -68,32 +90,51 @@ public static class FileOperationService
 
         foreach (string filePath in Directory.EnumerateFiles(directoryPath))
         {
+            if (excludedReparsePaths?.Contains(filePath) == true)
+            {
+                continue;
+            }
+            if (ReparsePointHelper.IsReparsePoint(filePath))
+            {
+                File.Delete(filePath);
+                continue;
+            }
+
             File.SetAttributes(filePath, FileAttributes.Normal);
             File.Delete(filePath);
         }
 
         foreach (string childDirectory in Directory.EnumerateDirectories(directoryPath))
         {
+            if (excludedReparsePaths?.Contains(childDirectory) == true)
+            {
+                continue;
+            }
             if (ReparsePointHelper.IsReparsePoint(childDirectory))
             {
                 Directory.Delete(childDirectory, false);
                 continue;
             }
 
-            DeleteDirectoryTreeWithoutFollowingReparsePoints(childDirectory);
+            DeleteDirectoryTreeWithoutFollowingReparsePoints(childDirectory, excludedReparsePaths);
         }
 
         File.SetAttributes(directoryPath, FileAttributes.Normal);
         Directory.Delete(directoryPath, false);
     }
 
-    public static void Copy(string sourcePath, string destPath)
+    public static void Copy(string sourcePath, string destPath, ISet<string>? excludedReparsePaths = null)
     {
+        bool destinationExisted = ReparsePointHelper.Exists(destPath);
         try
         {
-            if (Directory.Exists(sourcePath))
+            if (ReparsePointHelper.IsReparsePoint(sourcePath))
             {
-                CopyDirectory(sourcePath, destPath);
+                CopyLinkObject(sourcePath, destPath);
+            }
+            else if (Directory.Exists(sourcePath))
+            {
+                CopyDirectory(sourcePath, destPath, excludedReparsePaths);
             }
             else
             {
@@ -102,14 +143,24 @@ public static class FileOperationService
         }
         catch (Exception ex)
         {
+            TryDeleteEmptyCreatedDirectory(destPath, destinationExisted);
             LogService.Error($"Copy failed: {sourcePath} -> {destPath}", ex);
             throw;
         }
     }
 
-    public static void Move(string sourcePath, string destPath, bool overwrite = false, bool suppressLogging = false)
+    public static void Move(
+        string sourcePath,
+        string destPath,
+        bool overwrite = false,
+        bool suppressLogging = false,
+        CancellationToken cancellationToken = default,
+        ISet<string>? excludedReparsePaths = null)
     {
+        cancellationToken.ThrowIfCancellationRequested();
         if (!suppressLogging) LogService.Info($"[FileOp] Move start: {sourcePath} -> {destPath} (overwrite={overwrite})");
+        bool isDirectory = ReparsePointHelper.IsDirectory(sourcePath);
+        if (!ReparsePointHelper.Exists(sourcePath)) throw new FileNotFoundException("移動元が見つかりません。", sourcePath);
         if (!overwrite && PathExists(destPath))
         {
             throw new IOException($"移動先に同名項目が残っています: {destPath}");
@@ -117,44 +168,24 @@ public static class FileOperationService
 
         try
         {
-            if (Directory.Exists(sourcePath))
+            if (HaveSameStorageRoot(sourcePath, destPath))
             {
-                Directory.Move(sourcePath, destPath);
-                if (!suppressLogging) LogService.Info($"[FileOp] Directory.Move success: {sourcePath}");
-            }
-            else
-            {
-                File.Move(sourcePath, destPath, overwrite);
-                if (!suppressLogging) LogService.Info($"[FileOp] File.Move success: {sourcePath}");
-            }
-        }
-        catch (IOException ex) // ドライブまたぎ等を想定したフォールバック
-        {
-            LogService.Warn($"[FileOp] Move fallback triggered: {sourcePath} -> {destPath} (Exception: {ex.Message})");
-            try
-            {
-                if (Directory.Exists(sourcePath))
+                if (isDirectory)
                 {
-                    if (ReparsePointHelper.IsReparsePoint(sourcePath))
-                    {
-                        throw new IOException($"Reparse point directory move fallback is not allowed: {sourcePath}");
-                    }
-
-                    CopyDirectory(sourcePath, destPath);
-                    DeleteDirectoryTreeWithoutFollowingReparsePoints(sourcePath);
-                    if (!suppressLogging) LogService.Info($"[FileOp] Directory Move fallback (Copy+Delete) success: {sourcePath}");
+                    Directory.Move(sourcePath, destPath);
+                    if (!suppressLogging) LogService.Info($"[FileOp] Same-root Directory.Move success: {sourcePath}");
                 }
                 else
                 {
-                    File.Copy(sourcePath, destPath, true);
-                    File.Delete(sourcePath);
-                    if (!suppressLogging) LogService.Info($"[FileOp] File Move fallback (Copy+Delete) success: {sourcePath}");
+                    File.Move(sourcePath, destPath, overwrite);
+                    if (!suppressLogging) LogService.Info($"[FileOp] Same-root File.Move success: {sourcePath}");
                 }
             }
-            catch (Exception ex2)
+            else
             {
-                LogService.Error($"[FileOp] Move (fallback) failed: {sourcePath} -> {destPath}", ex2);
-                throw;
+                MoveWithCopyFallback(sourcePath, destPath, overwrite, cancellationToken: cancellationToken,
+                    excludedReparsePaths: excludedReparsePaths);
+                if (!suppressLogging) LogService.Info($"[FileOp] Cross-root temporary copy+finalize+delete success: {sourcePath}");
             }
         }
         catch (Exception ex)
@@ -166,18 +197,122 @@ public static class FileOperationService
 
     private static bool PathExists(string path)
     {
-        return Directory.Exists(path) || File.Exists(path);
+        return ReparsePointHelper.Exists(path);
+    }
+
+    internal static bool IsDirectoryPath(string path) => ReparsePointHelper.IsDirectory(path);
+    internal static bool IsDirectoryContainerPath(string path) => ReparsePointHelper.IsDirectoryContainer(path);
+
+    internal static bool HaveSameStorageRoot(string sourcePath, string destinationPath) =>
+        string.Equals(GetStorageRootIdentity(sourcePath), GetStorageRootIdentity(destinationPath), StringComparison.OrdinalIgnoreCase);
+
+    internal static string GetStorageRootIdentity(string path)
+    {
+        string fullPath = Path.GetFullPath(path);
+        string? root = Path.GetPathRoot(fullPath);
+        if (string.IsNullOrWhiteSpace(root)) throw new InvalidOperationException($"storage rootを解決できません: {path}");
+        return root.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+    }
+
+    internal static int DeleteSuccessfulPreparedReparsePointsUnderSource(
+        string sourceDir,
+        ISet<string>? excludedReparsePaths,
+        ISet<string>? successfulPreparedReparsePaths,
+        string operationLogLabel)
+    {
+        if (excludedReparsePaths == null || successfulPreparedReparsePaths == null || successfulPreparedReparsePaths.Count == 0)
+        {
+            return 0;
+        }
+
+        int failCount = 0;
+        string root = Path.GetFullPath(sourceDir);
+        foreach (string sourcePath in successfulPreparedReparsePaths.OrderByDescending(path => path.Length))
+        {
+            if (!excludedReparsePaths.Contains(sourcePath) || !IsSameOrDescendantPath(root, sourcePath))
+            {
+                continue;
+            }
+            if (!ReparsePointHelper.Exists(sourcePath))
+            {
+                continue;
+            }
+            try
+            {
+                if (ReparsePointHelper.IsReparsePoint(sourcePath))
+                {
+                    Delete(sourcePath);
+                }
+            }
+            catch (Exception ex)
+            {
+                LogService.Error($"{operationLogLabel}リンク移動元削除失敗: {Path.GetFileName(sourcePath)}", ex);
+                failCount++;
+            }
+        }
+        return failCount;
+    }
+
+    internal static void DeleteEmptyDirectoriesBottomUp(string rootDir)
+    {
+        if (!IsDirectoryContainerPath(rootDir))
+        {
+            return;
+        }
+
+        var directories = new List<string>();
+        var pending = new Stack<string>();
+        pending.Push(rootDir);
+        while (pending.Count > 0)
+        {
+            string current = pending.Pop();
+            foreach (string directoryPath in Directory.EnumerateDirectories(current))
+            {
+                if (!IsDirectoryContainerPath(directoryPath))
+                {
+                    continue;
+                }
+
+                directories.Add(directoryPath);
+                pending.Push(directoryPath);
+            }
+        }
+
+        foreach (string directoryPath in directories.OrderByDescending(path => path.Length))
+        {
+            if (!Directory.EnumerateFileSystemEntries(directoryPath).Any())
+            {
+                Directory.Delete(directoryPath, false);
+            }
+        }
+
+        if (IsDirectoryContainerPath(rootDir) && !Directory.EnumerateFileSystemEntries(rootDir).Any())
+        {
+            Directory.Delete(rootDir, false);
+        }
+    }
+
+    private static bool IsSameOrDescendantPath(string rootPath, string candidatePath)
+    {
+        string root = Path.GetFullPath(rootPath).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+        string candidate = Path.GetFullPath(candidatePath).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+        return string.Equals(root, candidate, StringComparison.OrdinalIgnoreCase)
+            || candidate.StartsWith(root + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase)
+            || candidate.StartsWith(root + Path.AltDirectorySeparatorChar, StringComparison.OrdinalIgnoreCase);
     }
 
 
-    private static void CopyDirectory(string sourceDir, string destinationDir)
+    private static void CopyDirectory(string sourceDir, string destinationDir, ISet<string>? excludedReparsePaths = null)
     {
         var dir = new DirectoryInfo(sourceDir);
         if (!dir.Exists)
             throw new DirectoryNotFoundException($"Source directory not found: {dir.FullName}");
 
         if (ReparsePointHelper.IsReparsePoint(sourceDir))
-            throw new IOException($"Reparse point directory copy is not allowed: {sourceDir}");
+        {
+            CopyLinkObject(sourceDir, destinationDir);
+            return;
+        }
 
         DirectoryInfo[] dirs = dir.GetDirectories();
         Directory.CreateDirectory(destinationDir);
@@ -185,13 +320,62 @@ public static class FileOperationService
         foreach (FileInfo file in dir.GetFiles())
         {
             string targetFilePath = Path.Combine(destinationDir, file.Name);
-            file.CopyTo(targetFilePath, true);
+            if (ReparsePointHelper.IsReparsePoint(file.FullName))
+            {
+                if (excludedReparsePaths?.Contains(file.FullName) != true)
+                    CopyLinkObject(file.FullName, targetFilePath);
+            }
+            else
+            {
+                file.CopyTo(targetFilePath, true);
+            }
         }
 
         foreach (DirectoryInfo subDir in dirs)
         {
             string newDestinationDir = Path.Combine(destinationDir, subDir.Name);
-            CopyDirectory(subDir.FullName, newDestinationDir);
+            if (ReparsePointHelper.IsReparsePoint(subDir.FullName))
+            {
+                if (excludedReparsePaths?.Contains(subDir.FullName) != true)
+                    CopyLinkObject(subDir.FullName, newDestinationDir);
+            }
+            else
+            {
+                CopyDirectory(subDir.FullName, newDestinationDir, excludedReparsePaths);
+            }
+        }
+    }
+
+    private static void CopyLinkObject(string sourcePath, string destinationPath)
+    {
+        string target = ReparsePointHelper.GetLinkTarget(sourcePath);
+        if (ReparsePointHelper.IsDirectory(sourcePath))
+        {
+            WindowsLinkCopyService.CreateDirectorySymbolicLink(destinationPath, target);
+        }
+        else
+        {
+            WindowsLinkCopyService.CopyFileSymbolicLink(sourcePath, destinationPath);
+        }
+    }
+
+    private static void TryDeleteEmptyCreatedDirectory(string path, bool existedBeforeCopy)
+    {
+        if (existedBeforeCopy || !ReparsePointHelper.IsDirectoryContainer(path))
+        {
+            return;
+        }
+
+        try
+        {
+            if (!Directory.EnumerateFileSystemEntries(path).Any())
+            {
+                Directory.Delete(path, false);
+            }
+        }
+        catch
+        {
+            // The original copy failure remains the operation result.
         }
     }
 
@@ -220,7 +404,7 @@ public static class FileOperationService
                 {
                     SourcePath = directoryPath,
                     DestinationPath = Path.Combine(destinationDir, relativePath),
-                    IsDirectory = true
+                    IsDirectory = !ReparsePointHelper.IsReparsePoint(directoryPath)
                 });
 
                 if (ReparsePointHelper.ShouldRecurseIntoDirectory(directoryPath))
@@ -242,6 +426,133 @@ public static class FileOperationService
         }
 
         return entries;
+    }
+
+    internal static void MoveWithCopyFallback(
+        string sourcePath,
+        string destPath,
+        bool overwrite = false,
+        Action<string>? deleteSourceOverride = null,
+        CancellationToken cancellationToken = default,
+        Action<string>? afterEntryCopied = null,
+        Func<string, bool>? reparsePointProbe = null,
+        ISet<string>? excludedReparsePaths = null)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        bool isDirectory = ReparsePointHelper.IsDirectory(sourcePath);
+        if (!ReparsePointHelper.Exists(sourcePath)) throw new FileNotFoundException("移動元が見つかりません。", sourcePath);
+        Func<string, bool> isReparsePoint = reparsePointProbe ?? ReparsePointHelper.IsReparsePoint;
+        if (!overwrite && PathExists(destPath)) throw new IOException($"移動先に同名項目が残っています: {destPath}");
+
+        string destinationDirectory = Path.GetDirectoryName(Path.GetFullPath(destPath)) ?? throw new InvalidOperationException("移動先directoryを解決できません。");
+        Directory.CreateDirectory(destinationDirectory);
+        string temporaryPath = Path.Combine(destinationDirectory, $".midfd-move-{Guid.NewGuid():N}.tmp");
+        bool finalized = false;
+        try
+        {
+            if (isReparsePoint(sourcePath))
+            {
+                CopyLinkObject(sourcePath, temporaryPath);
+            }
+            else if (isDirectory)
+            {
+                CopyDirectoryForMove(sourcePath, temporaryPath, cancellationToken, afterEntryCopied, isReparsePoint, excludedReparsePaths);
+            }
+            else
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                File.Copy(sourcePath, temporaryPath, overwrite: false);
+                afterEntryCopied?.Invoke(sourcePath);
+            }
+
+            cancellationToken.ThrowIfCancellationRequested();
+            if (PathExists(destPath) && (!overwrite || isDirectory))
+            {
+                throw new IOException($"移動先に同名項目が作成されたため確定できません: {destPath}");
+            }
+
+            if (isDirectory) Directory.Move(temporaryPath, destPath);
+            else File.Move(temporaryPath, destPath, overwrite);
+            finalized = true;
+
+            try
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                if (deleteSourceOverride != null) deleteSourceOverride(sourcePath);
+                else if (isDirectory) DeleteDirectoryTreeWithoutFollowingReparsePoints(sourcePath, excludedReparsePaths);
+                else File.Delete(sourcePath);
+            }
+            catch (Exception ex)
+            {
+                throw new MovePartialException(sourcePath, destPath, ex);
+            }
+        }
+        finally
+        {
+            if (!finalized && PathExists(temporaryPath))
+            {
+                try
+                {
+                    if (Directory.Exists(temporaryPath)) DeleteDirectoryTreeWithoutFollowingReparsePoints(temporaryPath);
+                    else File.Delete(temporaryPath);
+                }
+                catch { }
+            }
+        }
+    }
+
+    private static void CopyDirectoryForMove(
+        string sourceDirectory,
+        string destinationDirectory,
+        CancellationToken cancellationToken,
+        Action<string>? afterEntryCopied,
+        Func<string, bool> isReparsePoint,
+        ISet<string>? excludedReparsePaths)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        if (isReparsePoint(sourceDirectory))
+        {
+            CopyLinkObject(sourceDirectory, destinationDirectory);
+            return;
+        }
+
+        Directory.CreateDirectory(destinationDirectory);
+        foreach (string file in Directory.EnumerateFiles(sourceDirectory))
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            string fileDestination = Path.Combine(destinationDirectory, Path.GetFileName(file));
+            if (isReparsePoint(file))
+            {
+                if (excludedReparsePaths?.Contains(file) != true)
+                    CopyLinkObject(file, fileDestination);
+            }
+            else
+            {
+                File.Copy(file, fileDestination, overwrite: false);
+            }
+            afterEntryCopied?.Invoke(file);
+        }
+
+        foreach (string directory in Directory.EnumerateDirectories(sourceDirectory))
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            string directoryDestination = Path.Combine(destinationDirectory, Path.GetFileName(directory));
+            if (isReparsePoint(directory))
+            {
+                if (excludedReparsePaths?.Contains(directory) != true)
+                    CopyLinkObject(directory, directoryDestination);
+            }
+            else
+            {
+                CopyDirectoryForMove(directory, directoryDestination, cancellationToken, afterEntryCopied, isReparsePoint, excludedReparsePaths);
+            }
+        }
+    }
+
+    internal sealed class MovePartialException : IOException
+    {
+        public MovePartialException(string sourcePath, string destinationPath, Exception innerException)
+            : base($"移動先は確定しましたが移動元を削除できませんでした: {sourcePath} -> {destinationPath}", innerException) { }
     }
 
     public static DirectoryMoveMergeGuardResult AnalyzeDirectoryMoveMerge(string sourceDir, string destinationDir)
@@ -325,19 +636,6 @@ public static class FileOperationService
             };
         }
 
-        string sourceRoot = Path.GetPathRoot(sourceFullPath) ?? string.Empty;
-        string destinationRoot = Path.GetPathRoot(destinationFullPath) ?? string.Empty;
-        if (!string.Equals(sourceRoot, destinationRoot, StringComparison.OrdinalIgnoreCase))
-        {
-            return new DirectoryMoveMergeGuardResult
-            {
-                CanMerge = false,
-                AbortReason = DirectoryMoveMergeAbortReason.DifferentRoot,
-                BlockingPath = destinationDir,
-                Message = "フォルダの統合移動は同一ドライブ内でのみ許可します。"
-            };
-        }
-
         return AnalyzeDirectoryMoveMergePracticalRecursive(sourceDir, destinationDir);
     }
 
@@ -380,19 +678,6 @@ public static class FileOperationService
                     AbortReason = DirectoryPasteMergeAbortReason.PartialStateRisk,
                     BlockingPath = destinationDir,
                     Message = "貼り付け(移動)の同名フォルダ統合は、移動元フォルダの配下へは実行しません。\n途中結果の説明が難しく、source cleanup 契約を保てないためです。"
-                };
-            }
-
-            string sourceRoot = Path.GetPathRoot(Path.GetFullPath(sourceDir)) ?? string.Empty;
-            string destinationRoot = Path.GetPathRoot(Path.GetFullPath(destinationDir)) ?? string.Empty;
-            if (!string.Equals(sourceRoot, destinationRoot, StringComparison.OrdinalIgnoreCase))
-            {
-                return new DirectoryPasteMergeGuardResult
-                {
-                    CanMerge = false,
-                    AbortReason = DirectoryPasteMergeAbortReason.DifferentRoot,
-                    BlockingPath = destinationDir,
-                    Message = "貼り付け(移動)のフォルダ統合は同一ドライブ前提で別フェーズ扱いです。今回は実行しません。"
                 };
             }
 
@@ -453,16 +738,6 @@ public static class FileOperationService
 
             if (ReparsePointHelper.IsReparsePoint(directoryPath))
             {
-                if (Directory.Exists(destinationSubDirectory))
-                {
-                    return new DirectoryPasteMergeGuardResult
-                    {
-                        CanMerge = false,
-                        AbortReason = DirectoryPasteMergeAbortReason.TypeMismatch,
-                        BlockingPath = destinationSubDirectory,
-                        Message = $"移動先に同名フォルダがあるためリンクを安全に移動できません。\n宛先: {destinationSubDirectory}"
-                    };
-                }
                 continue;
             }
 
@@ -632,16 +907,6 @@ public static class FileOperationService
 
             if (ReparsePointHelper.IsReparsePoint(directoryPath))
             {
-                if (Directory.Exists(destinationSubDirectory))
-                {
-                    return new DirectoryMoveMergeGuardResult
-                    {
-                        CanMerge = false,
-                        AbortReason = DirectoryMoveMergeAbortReason.TypeMismatch,
-                        BlockingPath = destinationSubDirectory,
-                        Message = $"移動先に同名フォルダがあるためリンクを安全に移動できません。\n宛先: {destinationSubDirectory}"
-                    };
-                }
                 continue;
             }
 
@@ -696,16 +961,6 @@ public static class FileOperationService
 
             if (ReparsePointHelper.IsReparsePoint(directoryPath))
             {
-                if (Directory.Exists(destinationSubDirectory))
-                {
-                    return new DirectoryMoveMergeGuardResult
-                    {
-                        CanMerge = false,
-                        AbortReason = DirectoryMoveMergeAbortReason.TypeMismatch,
-                        BlockingPath = destinationSubDirectory,
-                        Message = $"移動先に同名フォルダがあるためリンクを安全に移動できません。\n宛先: {destinationSubDirectory}"
-                    };
-                }
                 continue;
             }
 

@@ -265,28 +265,28 @@ public partial class MainForm : Form
             ExecuteHistoryForward();
             return true;
         }
-        int total = fileListView.Items.Count;
+        int total = _browserTotalItemCount > 0 ? _browserTotalItemCount : fileListView.Items.Count;
         if (total <= 0) return false;
         int itemsPerPage = GetBrowserItemsPerPage(out _, out int rowsPerColumn);
         bool moved = false;
         if (keyData == Keys.Up)
         {
-            _browserCursorIndex = (_browserCursorIndex - 1 + total) % total;
+            SetBrowserGlobalCursorIndex((_browserCursorIndex - 1 + total) % total);
             moved = true;
         }
         else if (keyData == Keys.Down)
         {
-            _browserCursorIndex = (_browserCursorIndex + 1) % total;
+            SetBrowserGlobalCursorIndex((_browserCursorIndex + 1) % total);
             moved = true;
         }
         else if (keyData == Keys.Left)
         {
-            _browserCursorIndex = Math.Max(0, _browserCursorIndex - rowsPerColumn);
+            SetBrowserGlobalCursorIndex(Math.Max(0, _browserCursorIndex - rowsPerColumn));
             moved = true;
         }
         else if (keyData == Keys.Right)
         {
-            _browserCursorIndex = Math.Min(total - 1, _browserCursorIndex + rowsPerColumn);
+            SetBrowserGlobalCursorIndex(Math.Min(total - 1, _browserCursorIndex + rowsPerColumn));
             moved = true;
         }
         else if (keyData == (Keys.Control | Keys.Home) || keyData == Keys.F11)
@@ -309,7 +309,7 @@ public partial class MainForm : Form
         {
             if (_browserCursorIndex - itemsPerPage >= 0)
             {
-                _browserCursorIndex -= itemsPerPage;
+                SetBrowserGlobalCursorIndex(_browserCursorIndex - itemsPerPage);
                 moved = true;
             }
         }
@@ -317,14 +317,17 @@ public partial class MainForm : Form
         {
             if (_browserCursorIndex + itemsPerPage < total)
             {
-                _browserCursorIndex += itemsPerPage;
+                SetBrowserGlobalCursorIndex(_browserCursorIndex + itemsPerPage);
                 moved = true;
             }
         }
         if (moved)
         {
             InvalidateRecentMultiMarkIntent();
-            SyncBrowserSelection();
+            if (_browserPageStartIndex == (_browserCursorIndex / Math.Max(1, itemsPerPage)) * Math.Max(1, itemsPerPage))
+            {
+                SyncBrowserSelection();
+            }
             return true;
         }
         return false;
@@ -501,7 +504,7 @@ public partial class MainForm : Form
         }
         if (keyData == (Keys.Control | Keys.Shift | Keys.N))
         {
-            if (GuardClipboardBusy()) return true;
+            if (GuardMutationBusy()) return true;
             ExecuteCommandFromUi(CommandIds.BrowserCreateDirectory, CommandScope.Browser, "Browser.CmdKey.CtrlShiftN");
             return true;
         }
@@ -556,6 +559,7 @@ public partial class MainForm : Form
             }
 
             _settings.Session.LastColumnCount = _columnCount;
+            RematerializeBrowserPageIfCapacityChanged();
             UpdateInfoPanel();
             browserPanel.Invalidate();
             CaptureActiveBrowserTabState();
@@ -650,6 +654,13 @@ public partial class MainForm : Form
         }
         if (IsBrowserPathEntryActive())
         {
+            return;
+        }
+        if (e.KeyCode == Keys.Escape && _browserRightInteractionState != BrowserRightInteractionState.Idle)
+        {
+            CleanupBrowserRightInteraction(clearContextMenuSuppression: true);
+            e.Handled = true;
+            e.SuppressKeyPress = true;
             return;
         }
         if (e.KeyCode == Keys.Escape && TryRouteActiveFileOperationCancel("MainForm.KeyDown"))
@@ -766,7 +777,7 @@ public partial class MainForm : Form
         {
             return false;
         }
-        if (GuardClipboardBusy())
+        if (GuardMutationBusy())
         {
             return true;
         }
@@ -780,22 +791,22 @@ public partial class MainForm : Form
     {
         if (keyData == (Keys.Control | Keys.Z))
         {
-            if (GuardClipboardBusy()) return true;
+            if (GuardMutationBusy()) return true;
             return ExecuteCommandFromUi(CommandIds.EditUndo, CommandScope.Browser, "Browser.CmdKey.CtrlZ");
         }
         if (keyData == (Keys.Control | Keys.Y))
         {
-            if (GuardClipboardBusy()) return true;
+            if (GuardMutationBusy()) return true;
             return ExecuteCommandFromUi(CommandIds.EditRedo, CommandScope.Browser, "Browser.CmdKey.CtrlY");
         }
         if (keyData == (Keys.Alt | Keys.Z))
         {
-            if (GuardClipboardBusy()) return true;
+            if (GuardMutationBusy()) return true;
             return ExecuteCommandFromUi(CommandIds.EditUndo, CommandScope.Browser, "Browser.CmdKey.AltZ");
         }
         if (keyData == (Keys.Alt | Keys.Y))
         {
-            if (GuardClipboardBusy()) return true;
+            if (GuardMutationBusy()) return true;
             return ExecuteCommandFromUi(CommandIds.EditRedo, CommandScope.Browser, "Browser.CmdKey.AltY");
         }
         return false;

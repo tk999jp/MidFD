@@ -23,21 +23,76 @@ public class AppSettings
     {
         return new AppSettings
         {
-            Profile = Profile,
-            Input = Input.Clone(),
-            SevenZip = SevenZip.Clone(),
-            ExternalTools = ExternalTools.Clone(),
-            FileOperations = FileOperations.Clone(),
-            Appearance = Appearance.Clone(),
-            Logging = Logging.Clone(),
-            Preview = Preview.Clone(),
-            Rename = Rename.Clone(),
-            QuickAccess = new List<string>(QuickAccess),
-            BrowserTabs = BrowserTabs.Clone(),
-            Fonts = Fonts.Clone(),
-            Window = Window.Clone(),
-            Session = Session.Clone()
+            Profile = Profile ?? string.Empty,
+            Input = (Input ?? new InputSettings()).Clone(),
+            SevenZip = (SevenZip ?? new SevenZipSettings()).Clone(),
+            ExternalTools = (ExternalTools ?? new ExternalToolsSettings()).Clone(),
+            FileOperations = (FileOperations ?? new FileOperationsSettings()).Clone(),
+            Appearance = (Appearance ?? new AppearanceSettings()).Clone(),
+            Logging = (Logging ?? new LoggingSettings()).Clone(),
+            Preview = (Preview ?? new PreviewSettings()).Clone(),
+            Rename = (Rename ?? new RenameSettings()).Clone(),
+            QuickAccess = new List<string>(QuickAccess ?? []),
+            BrowserTabs = (BrowserTabs ?? new BrowserTabSettings()).Clone(),
+            Fonts = (Fonts ?? new FontSettings()).Clone(),
+            Window = (Window ?? new WindowSettings()).Clone(),
+            Session = (Session ?? new SessionSettings()).Clone()
         };
+    }
+
+    public void NormalizeChildren()
+    {
+        Input ??= new InputSettings();
+        Input.MouseGestureCommandMap ??= new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        Input.BrowserKeyCommandOverrides ??= new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
+        Input.FunctionBarCommandOverridesStandard ??= new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
+        Input.FunctionBarCommandOverridesFdCompatible ??= new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
+        Input.FunctionBarCommandOverridesShiftStandard ??= new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
+        Input.FunctionBarCommandOverridesShiftFdCompatible ??= new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
+        Input.FunctionBarCommandOverridesCtrlStandard ??= new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
+        Input.FunctionBarCommandOverridesCtrlFdCompatible ??= new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
+        Input.FunctionBarCommandOverridesAltStandard ??= new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
+        Input.FunctionBarCommandOverridesAltFdCompatible ??= new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
+        Input.FunctionBarLabelOverridesStandard ??= new Dictionary<string, FunctionBarLabelOverride>(StringComparer.OrdinalIgnoreCase);
+        Input.FunctionBarLabelOverridesFdCompatible ??= new Dictionary<string, FunctionBarLabelOverride>(StringComparer.OrdinalIgnoreCase);
+        Input.FunctionBarLabelOverridesShiftStandard ??= new Dictionary<string, FunctionBarLabelOverride>(StringComparer.OrdinalIgnoreCase);
+        Input.FunctionBarLabelOverridesShiftFdCompatible ??= new Dictionary<string, FunctionBarLabelOverride>(StringComparer.OrdinalIgnoreCase);
+        Input.FunctionBarLabelOverridesCtrlStandard ??= new Dictionary<string, FunctionBarLabelOverride>(StringComparer.OrdinalIgnoreCase);
+        Input.FunctionBarLabelOverridesCtrlFdCompatible ??= new Dictionary<string, FunctionBarLabelOverride>(StringComparer.OrdinalIgnoreCase);
+        Input.FunctionBarLabelOverridesAltStandard ??= new Dictionary<string, FunctionBarLabelOverride>(StringComparer.OrdinalIgnoreCase);
+        Input.FunctionBarLabelOverridesAltFdCompatible ??= new Dictionary<string, FunctionBarLabelOverride>(StringComparer.OrdinalIgnoreCase);
+        SevenZip ??= new SevenZipSettings();
+        if (!Enum.IsDefined(SevenZip.PackDialogMode))
+        {
+            SevenZip.PackDialogMode = PackDialogMode.Auto;
+        }
+        ExternalTools ??= new ExternalToolsSettings();
+        FileOperations ??= new FileOperationsSettings();
+        Appearance ??= new AppearanceSettings();
+        Appearance.CustomFileListColors ??= new CustomFileListColorSettings();
+        Appearance.CustomFileListColorPresets ??= new List<CustomFileListColorPreset>();
+        Logging ??= new LoggingSettings();
+        Preview ??= new PreviewSettings();
+        Rename ??= new RenameSettings();
+        QuickAccess ??= new List<string>();
+        BrowserTabs ??= new BrowserTabSettings();
+        BrowserTabs.Categories ??= new List<BrowserTabCategoryDefinition>();
+        Fonts ??= new FontSettings();
+        Window ??= new WindowSettings();
+        Session ??= new SessionSettings();
+        Session.OpenTabs ??= new List<BrowserTabSessionState>();
+        Session.BrowserTabCategories ??= new List<BrowserTabCategorySessionState>();
+        Session.PersistedMarkedPaths ??= new List<string>();
+        Session.DirectoryMoveHistory ??= new List<string>();
+        Session.MoveDestinationHistory ??= new List<string>();
+        if (Session.BrowserTabRestoreSnapshot != null)
+        {
+            Session.BrowserTabRestoreSnapshot.Categories ??= new List<BrowserTabRestoreCategoryState>();
+            foreach (BrowserTabRestoreCategoryState category in Session.BrowserTabRestoreSnapshot.Categories.Where(static category => category != null))
+            {
+                category.OpenTabs ??= new List<BrowserTabSessionState>();
+            }
+        }
     }
 }
 
@@ -58,6 +113,7 @@ public class AppearanceSettings
     public string SizeFormat { get; set; } = "HumanReadable";
     public bool ShowFunctionBar { get; set; } = true;
     public bool ShowBrowserToolbar { get; set; } = false;
+    public bool ShowPathAsBreadcrumb { get; set; } = false;
 
     public bool UseCustomFileListColors { get; set; } = false;
     public bool EnableSemanticColorAssist { get; set; } = true;
@@ -76,8 +132,8 @@ public class AppearanceSettings
     public AppearanceSettings Clone()
     {
         var clone = (AppearanceSettings)MemberwiseClone();
-        clone.CustomFileListColors = CustomFileListColors.Clone();
-        clone.CustomFileListColorPresets = CustomFileListColorPresets.Select(static preset => preset.Clone()).ToList();
+        clone.CustomFileListColors = (CustomFileListColors ?? new CustomFileListColorSettings()).Clone();
+        clone.CustomFileListColorPresets = (CustomFileListColorPresets ?? []).Where(static preset => preset != null).Select(static preset => preset.Clone()).ToList();
         return clone;
     }
 
@@ -150,11 +206,11 @@ public class SessionSettings
     {
         var clone = (SessionSettings)MemberwiseClone();
         clone.BrowserTabRestoreSnapshot = BrowserTabRestoreSnapshot?.Clone();
-        clone.OpenTabs = OpenTabs.Select(static tab => tab.Clone()).ToList();
-        clone.BrowserTabCategories = BrowserTabCategories.Select(static category => category.Clone()).ToList();
-        clone.PersistedMarkedPaths = new List<string>(PersistedMarkedPaths);
-        clone.DirectoryMoveHistory = new List<string>(DirectoryMoveHistory ?? new List<string>());
-        clone.MoveDestinationHistory = new List<string>(MoveDestinationHistory ?? new List<string>());
+        clone.OpenTabs = (OpenTabs ?? []).Where(static tab => tab != null).Select(static tab => tab.Clone()).ToList();
+        clone.BrowserTabCategories = (BrowserTabCategories ?? []).Where(static category => category != null).Select(static category => category.Clone()).ToList();
+        clone.PersistedMarkedPaths = new List<string>(PersistedMarkedPaths ?? []);
+        clone.DirectoryMoveHistory = new List<string>(DirectoryMoveHistory ?? []);
+        clone.MoveDestinationHistory = new List<string>(MoveDestinationHistory ?? []);
         return clone;
     }
 
@@ -183,7 +239,7 @@ public class BrowserTabRestoreSnapshot
         return new BrowserTabRestoreSnapshot
         {
             ActiveCategoryId = ActiveCategoryId,
-            Categories = Categories.Select(static category => category.Clone()).ToList()
+            Categories = (Categories ?? []).Where(static category => category != null).Select(static category => category.Clone()).ToList()
         };
     }
 }
@@ -202,7 +258,7 @@ public class BrowserTabRestoreCategoryState
             Id = Id,
             DisplayName = DisplayName,
             ActiveTabIndex = ActiveTabIndex,
-            OpenTabs = OpenTabs.Select(static tab => tab.Clone()).ToList()
+            OpenTabs = (OpenTabs ?? []).Where(static tab => tab != null).Select(static tab => tab.Clone()).ToList()
         };
     }
 }
@@ -238,7 +294,7 @@ public class BrowserTabSettings
             MaxTabsPerCategory = MaxTabsPerCategory,
             TabFontSize = TabFontSize,
             TabWidth = TabWidth,
-            Categories = Categories.Select(static category => category.Clone()).ToList()
+            Categories = (Categories ?? []).Where(static category => category != null).Select(static category => category.Clone()).ToList()
         };
     }
 }
@@ -368,6 +424,7 @@ public class RenameSettings
 public class SevenZipSettings
 {
     public string? ExePath { get; set; }
+    public PackDialogMode PackDialogMode { get; set; } = PackDialogMode.Auto;
     public SevenZipSettings Clone() => (SevenZipSettings)MemberwiseClone();
 }
 

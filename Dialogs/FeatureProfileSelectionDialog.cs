@@ -1,5 +1,5 @@
-using MidFD.Models;
 using MidFD.Configuration;
+using MidFD.Models;
 using MidFD.Services;
 
 namespace MidFD.Dialogs;
@@ -11,358 +11,333 @@ public sealed class FeatureProfileSelectionDialog : Form
     private readonly CheckBox _showFunctionBarTooltipsCheckBox;
     private readonly CheckBox _enableDragArchiveHandoffCheckBox;
     private readonly CheckBox _includeDragZipManifestCheckBox;
-    private readonly CheckBox _fdCompatibleFunctionKeysCheckBox;
     private readonly CheckBox _videoEnterPlaysExternalCheckBox;
+    private readonly CheckBox _showPathAsBreadcrumbCheckBox;
+    private readonly CheckBox _useMidFdManagedTrashCheckBox;
+    private readonly CheckBox _clipboardPasteTextAsFileCheckBox;
+    private readonly RadioButton _standardInputRadioButton;
+    private readonly RadioButton _fdCompatibleInputRadioButton;
+    private readonly RadioButton _basicRangeRadioButton;
+    private readonly RadioButton _convenientRangeRadioButton;
+    private readonly RadioButton _allRangeRadioButton;
     private readonly TextBox _sevenZipPathBox;
     private readonly TextBox _videoToolDirectoryBox;
     private readonly TextBox _externalEditorPathBox;
+    private readonly ComboBox _colorThemeComboBox;
+    private readonly Label _rangeStateLabel;
+    private readonly Label _videoToolStatusLabel;
+    private readonly Label _sevenZipStatusLabel;
+    private readonly Label _externalEditorStatusLabel;
+    private bool _updatingRange;
+    private bool _initializingControls;
 
     public FeatureProfile SelectedProfile { get; private set; } = FeatureProfile.PracticalStable;
-    public bool UseFdCompatibleFunctionKeys => _fdCompatibleFunctionKeysCheckBox.Checked;
+    public bool UseFdCompatibleFunctionKeys => _fdCompatibleInputRadioButton.Checked;
     public bool VideoEnterPlaysExternal => _videoEnterPlaysExternalCheckBox.Checked;
     public bool RestoreStartupState => _restoreStartupStateCheckBox.Checked;
     public bool EnableMouseGestures => _enableMouseGesturesCheckBox.Checked;
     public bool ShowFunctionBarTooltips => _showFunctionBarTooltipsCheckBox.Checked;
     public bool EnableDragArchiveHandoff => _enableDragArchiveHandoffCheckBox.Checked;
     public bool IncludeDragZipManifest => _includeDragZipManifestCheckBox.Checked;
+    public bool ShowPathAsBreadcrumb => _showPathAsBreadcrumbCheckBox.Checked;
+    public bool UseMidFdManagedTrash => _useMidFdManagedTrashCheckBox.Checked;
+    public bool ClipboardPasteTextAsFileEnabled => _clipboardPasteTextAsFileCheckBox.Checked;
+    public string ColorTheme => FileListColorResolver.GetPresetKeyFromDisplayName(_colorThemeComboBox.Text);
     public string? SevenZipPath => NullIfEmpty(_sevenZipPathBox.Text);
     public string? VideoToolDirectory => NullIfEmpty(_videoToolDirectoryBox.Text);
     public string? ExternalEditorPath => NullIfEmpty(_externalEditorPathBox.Text);
 
-    public FeatureProfileSelectionDialog(AppSettings? settings = null)
+    public FeatureProfileSelectionDialog(AppSettings? settings = null, bool isFirstLaunch = true)
     {
-        Text = "MidFD 初回セットアップ";
-        StartPosition = FormStartPosition.CenterScreen;
+        Text = isFirstLaunch ? "MidFD 初回セットアップ" : "MidFD 基本セットアップ";
+        StartPosition = isFirstLaunch ? FormStartPosition.CenterScreen : FormStartPosition.CenterParent;
         FormBorderStyle = FormBorderStyle.FixedDialog;
         MaximizeBox = false;
         MinimizeBox = false;
-        ShowInTaskbar = false;
+        ShowInTaskbar = true;
         AutoScaleMode = AutoScaleMode.Font;
-        ClientSize = new Size(720, 920);
-        Padding = new Padding(12);
+        ClientSize = new Size(780, 740);
+        Padding = new Padding(8);
 
         SelectedProfile = ResolveInitialProfile(settings);
-
-        var titleLabel = new Label
+        InputSettings? input = settings?.Input;
+        FileOperationsSettings? fileOperations = settings?.FileOperations;
+        PreviewSettings? preview = settings?.Preview;
+        AppearanceSettings? appearance = settings?.Appearance;
+        SevenZipSettings? sevenZip = settings?.SevenZip;
+        ExternalToolsSettings? externalTools = settings?.ExternalTools;
+        var bodyPanel = new Panel
         {
-            Text = "MidFD の初期オプションと基本操作を選択してください。",
+            Dock = DockStyle.Fill,
+            AutoScroll = false,
+            AutoScrollMinSize = Size.Empty,
+            Padding = Padding.Empty
+        };
+
+        bodyPanel.Controls.Add(new Label
+        {
+            Text = "使用する機能の範囲を選択してください。",
             AutoSize = false,
-            Location = new Point(16, 16),
-            Size = new Size(680, 24),
+            Location = new Point(16, 14),
+            Size = new Size(780, 24),
             Font = new Font(Font, FontStyle.Bold)
-        };
-
-        var advancedHeadingLabel = new Label
-        {
-            Text = "初回セットアップでは導入用の項目だけを表示します。後から「設定 > 起動・ログ / 操作 / 外部連携」で変更できます。",
-            AutoSize = false,
-            Location = new Point(16, 48),
-            Size = new Size(680, 36)
-        };
-
-        var advancedGroup = new GroupBox
-        {
-            Text = "初期オプション",
-            Location = new Point(16, 92),
-            Size = new Size(680, 350)
-        };
-
-        int advancedTop = 24;
-        advancedGroup.Controls.Add(new Label
-        {
-            AutoSize = false,
-            Location = new Point(16, advancedTop),
-            Size = new Size(640, 20),
-            Text = "高度な使い方（任意）"
         });
-        advancedTop += 24;
-        _enableDragArchiveHandoffCheckBox = new CheckBox
+        bodyPanel.Controls.Add(new Label
         {
-            Text = "Drag ZIP を使う",
+            Text = "選択した範囲は下の各セグメントへ反映されます。個別に変更すると「個別設定」になります。",
+            AutoSize = false,
+            Location = new Point(16, 42),
+            Size = new Size(700, 24)
+        });
+
+        var rangeGroup = new GroupBox { Text = "機能範囲", Location = new Point(16, 74), Size = new Size(700, 96) };
+        _basicRangeRadioButton = AddRadio(rangeGroup, "基本機能のみ", 18, 22);
+        _convenientRangeRadioButton = AddRadio(rangeGroup, "便利機能まで使う（推奨）", 18, 50);
+        _allRangeRadioButton = AddRadio(rangeGroup, "すべての機能を使う", 280, 22);
+        rangeGroup.Controls.Add(new Label { Text = "注意が必要な外部受け渡し機能も有効になります。", AutoSize = true, Location = new Point(298, 50) });
+        bodyPanel.Controls.Add(rangeGroup);
+
+        var basicGroup = new GroupBox { Text = "基本機能                         ON", Location = new Point(16, 182), Size = new Size(340, 100) };
+        basicGroup.Controls.Add(new Label { Text = "ファイル閲覧・コピー・移動・名前変更・Mark\r\n標準のキー操作・内部Viewer", AutoSize = false, Location = new Point(18, 28), Size = new Size(340, 50) });
+        bodyPanel.Controls.Add(basicGroup);
+
+        var convenientGroup = new GroupBox { Text = "便利機能", Location = new Point(376, 182), Size = new Size(340, 224) };
+        _restoreStartupStateCheckBox = AddCheckBox(convenientGroup, "前回の状態を復元", 18, 28, isFirstLaunch ? true : settings?.Session?.RestoreStartupState ?? true);
+        _enableMouseGesturesCheckBox = AddCheckBox(convenientGroup, "マウスジェスチャー", 18, 58, isFirstLaunch ? true : input?.EnableMouseGestures ?? true);
+        _showFunctionBarTooltipsCheckBox = AddCheckBox(convenientGroup, "Functionバーの説明", 18, 88, isFirstLaunch ? true : input?.ShowFunctionBarTooltips ?? true);
+        _videoEnterPlaysExternalCheckBox = AddCheckBox(convenientGroup, "メディアファイルのEnter外部再生", 18, 118, isFirstLaunch ? true : preview?.VideoEnterPlaysExternal ?? false);
+        _showPathAsBreadcrumbCheckBox = AddCheckBox(convenientGroup, "パスをパンくず形式で表示", 18, 148, isFirstLaunch ? true : appearance?.ShowPathAsBreadcrumb ?? false);
+        convenientGroup.Controls.Add(new Label { Text = "外部アプリは、設定済みのパスまたは\r\n自動検出したツールを使用します。", AutoSize = false, Location = new Point(18, 176), Size = new Size(300, 42) });
+        bodyPanel.Controls.Add(convenientGroup);
+
+        var cautionGroup = new GroupBox { Text = "注意が必要な機能", Location = new Point(16, 294), Size = new Size(340, 220) };
+        _useMidFdManagedTrashCheckBox = AddCheckBox(cautionGroup, "MidFD管理ゴミ箱", 18, 28, fileOperations?.UseMidFdManagedTrash ?? false);
+        _enableDragArchiveHandoffCheckBox = AddCheckBox(cautionGroup, "Drag ZIP", 18, 58, fileOperations?.EnableDragArchiveHandoff ?? false);
+        _includeDragZipManifestCheckBox = AddCheckBox(cautionGroup, "内容一覧manifestの同梱", 18, 88, fileOperations?.IncludeDragZipManifest ?? false);
+        _clipboardPasteTextAsFileCheckBox = AddCheckBox(cautionGroup, "クリップボードのテキストをファイルとして貼り付ける", 18, 118, fileOperations?.ClipboardPasteTextAsFileEnabled ?? false);
+        cautionGroup.Controls.Add(new Label { Text = "通常削除したファイルをMidFD管理ゴミ箱へ移し、\r\nCtrl+Zで復元できるようにします。\r\nテキスト貼り付けは通常OFFを推奨します。", AutoSize = false, Location = new Point(18, 146), Size = new Size(300, 64) });
+        bodyPanel.Controls.Add(cautionGroup);
+
+        var operationGroup = new GroupBox { Text = "操作方式", Location = new Point(376, 400), Size = new Size(340, 62) };
+        _standardInputRadioButton = AddRadio(operationGroup, "MidFD標準", 18, 24);
+        _fdCompatibleInputRadioButton = AddRadio(operationGroup, "FD／WinFD互換", 160, 24);
+        _fdCompatibleInputRadioButton.Checked = string.Equals(input?.FunctionKeyProfile, InputSettings.FdCompatibleProfileValue, StringComparison.OrdinalIgnoreCase);
+        _standardInputRadioButton.Checked = !_fdCompatibleInputRadioButton.Checked;
+        bodyPanel.Controls.Add(operationGroup);
+
+        var displayGroup = new GroupBox { Text = "表示", Location = new Point(376, 466), Size = new Size(340, 62) };
+        displayGroup.Controls.Add(new Label { Text = "配色プリセット", AutoSize = true, Location = new Point(18, 25) });
+        _colorThemeComboBox = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Location = new Point(108, 18), Size = new Size(210, 28) };
+        foreach (string key in FileListColorResolver.BuiltInPresetKeys)
+        {
+            _colorThemeComboBox.Items.Add(FileListColorResolver.GetPresetDisplayName(key));
+        }
+        foreach (CustomFileListColorPreset preset in appearance?.CustomFileListColorPresets ?? new List<CustomFileListColorPreset>())
+        {
+            _colorThemeComboBox.Items.Add(preset.Name);
+        }
+        string currentTheme = FileListColorResolver.CanonicalizePresetKey(appearance?.ColorTheme);
+        int themeIndex = _colorThemeComboBox.Items.IndexOf(FileListColorResolver.GetPresetDisplayName(currentTheme));
+        _colorThemeComboBox.SelectedIndex = themeIndex >= 0 ? themeIndex : 0;
+        displayGroup.Controls.Add(_colorThemeComboBox);
+        bodyPanel.Controls.Add(displayGroup);
+
+        var externalGroup = new GroupBox { Text = "外部アプリ", Location = new Point(16, 534), Size = new Size(700, 154) };
+        int externalRowTop = 13;
+        AddLabel(externalGroup, "7-Zip", 18, externalRowTop + 4, 120);
+        _sevenZipPathBox = AddReadOnlyTextBox(externalGroup, 142, externalRowTop, 440, sevenZip?.ExePath ?? string.Empty);
+        AddBrowseFileButton(externalGroup, 592, externalRowTop - 1, 90, _sevenZipPathBox, "7-Zip実行ファイルを選択");
+        _sevenZipStatusLabel = AddStatus(externalGroup, string.Empty, 142, _sevenZipPathBox.Bottom + 2, 440);
+        externalRowTop = _sevenZipStatusLabel.Bottom + 2;
+
+        AddLabel(externalGroup, "動画ツール", 18, externalRowTop + 4, 120);
+        _videoToolDirectoryBox = AddReadOnlyTextBox(externalGroup, 142, externalRowTop, 440, preview?.VideoToolDirectory ?? string.Empty);
+        AddBrowseFolderButton(externalGroup, 592, externalRowTop - 1, 90, _videoToolDirectoryBox, "動画ツールフォルダを選択");
+        _videoToolStatusLabel = AddStatus(externalGroup, string.Empty, 142, _videoToolDirectoryBox.Bottom + 2, 440);
+        externalRowTop = _videoToolStatusLabel.Bottom + 2;
+
+        AddLabel(externalGroup, "外部エディタ", 18, externalRowTop + 4, 120);
+        _externalEditorPathBox = AddReadOnlyTextBox(externalGroup, 142, externalRowTop, 440, externalTools?.ExternalEditorPath ?? string.Empty);
+        AddBrowseFileButton(externalGroup, 592, externalRowTop - 1, 90, _externalEditorPathBox, "外部エディタ実行ファイルを選択");
+        _externalEditorStatusLabel = AddStatus(externalGroup, string.Empty, 142, _externalEditorPathBox.Bottom + 2, 440);
+        externalGroup.Height = _externalEditorStatusLabel.Bottom + 16;
+        ClientSize = new Size(ClientSize.Width, Math.Max(ClientSize.Height, externalGroup.Bottom + 56));
+        bodyPanel.Controls.Add(externalGroup);
+
+        var footer = new Panel { Dock = DockStyle.Fill, Padding = new Padding(4) };
+        _rangeStateLabel = new Label
+        {
+            AutoSize = false,
+            Dock = DockStyle.Fill,
+            TextAlign = ContentAlignment.MiddleLeft,
+            Text = string.Empty
+        };
+        var footerButtons = new FlowLayoutPanel
+        {
             AutoSize = true,
-            Location = new Point(16, advancedTop),
-            Checked = settings?.FileOperations?.EnableDragArchiveHandoff ?? false
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
+            Dock = DockStyle.Right,
+            FlowDirection = FlowDirection.RightToLeft,
+            WrapContents = false
         };
-        advancedGroup.Controls.Add(_enableDragArchiveHandoffCheckBox);
-        advancedGroup.Controls.Add(new Label
+        var cancelButton = new Button { Text = "キャンセル", Size = new Size(110, 32), DialogResult = DialogResult.Cancel };
+        var okButton = new Button { Text = isFirstLaunch ? "この設定で開始" : "設定画面へ反映", Size = new Size(180, 32), DialogResult = DialogResult.OK };
+        footerButtons.Controls.Add(okButton);
+        footerButtons.Controls.Add(cancelButton);
+        footer.Controls.Add(_rangeStateLabel);
+        footer.Controls.Add(footerButtons);
+        var rootLayout = new TableLayoutPanel
         {
-            AutoSize = false,
-            Location = new Point(36, advancedTop + 20),
-            Size = new Size(620, 20),
-            Text = "Shift/Ctrl+複数マークドラッグ時に、ZIP 1個へまとめて外部へ渡します。"
-        });
-
-        _includeDragZipManifestCheckBox = new CheckBox
-        {
-            Text = "Drag ZIP に内容一覧manifestを同梱する",
-            AutoSize = true,
-            Location = new Point(36, advancedTop + 44),
-            Checked = settings?.FileOperations?.IncludeDragZipManifest ?? false
+            Dock = DockStyle.Fill,
+            ColumnCount = 1,
+            RowCount = 2,
+            Margin = Padding.Empty,
+            Padding = Padding.Empty
         };
-        advancedGroup.Controls.Add(_includeDragZipManifestCheckBox);
-        advancedGroup.Controls.Add(new Label
-        {
-            AutoSize = false,
-            Location = new Point(56, advancedTop + 64),
-            Size = new Size(600, 20),
-            Text = "ZIP内へ対象一覧を入れます。ローカルパス情報を含む場合があります。"
-        });
-
-        _enableMouseGesturesCheckBox = new CheckBox
-        {
-            Text = "マウスジェスチャーを使う",
-            AutoSize = true,
-            Location = new Point(16, advancedTop + 92),
-            Checked = settings?.Input?.EnableMouseGestures ?? false
-        };
-        advancedGroup.Controls.Add(_enableMouseGesturesCheckBox);
-        advancedGroup.Controls.Add(new Label
-        {
-            AutoSize = false,
-            Location = new Point(36, advancedTop + 112),
-            Size = new Size(620, 20),
-            Text = "右ドラッグで戻る/進むなどの操作を行います。"
-        });
-
-        _showFunctionBarTooltipsCheckBox = new CheckBox
-        {
-            Text = "Functionバーの詳細説明を表示する",
-            AutoSize = true,
-            Location = new Point(16, advancedTop + 140),
-            Checked = settings?.Input?.ShowFunctionBarTooltips ?? true
-        };
-        advancedGroup.Controls.Add(_showFunctionBarTooltipsCheckBox);
-        advancedGroup.Controls.Add(new Label
-        {
-            AutoSize = false,
-            Location = new Point(36, advancedTop + 160),
-            Size = new Size(620, 20),
-            Text = "Functionバーのマウスオーバー時に説明やキーヒントを表示します。"
-        });
-
-        _restoreStartupStateCheckBox = new CheckBox
-        {
-            Text = "起動時に前回の状態を復元する",
-            AutoSize = true,
-            Location = new Point(16, advancedTop + 188),
-            Checked = settings?.Session?.RestoreStartupState ?? true
-        };
-        advancedGroup.Controls.Add(_restoreStartupStateCheckBox);
-        advancedGroup.Controls.Add(new Label
-        {
-            AutoSize = false,
-            Location = new Point(36, advancedTop + 208),
-            Size = new Size(620, 40),
-            Text = "前回のカテゴリ・タブ構成、最後に開いていたフォルダ、\r\nウィンドウ位置、列数、ソートなどを復元します。"
-        });
-
-        advancedGroup.Controls.Add(new Label
-        {
-            AutoSize = false,
-            Location = new Point(16, advancedTop + 252),
-            Size = new Size(620, 36),
-            Text = "後から「設定 > 起動・ログ」で個別に調整できます。\r\nMarkSlot などの導線は通常の設定から利用します。"
-        });
-
-        var operationGroup = new GroupBox
-        {
-            Text = "操作スタイル",
-            Location = new Point(16, 450),
-            Size = new Size(680, 134)
-        };
-        _fdCompatibleFunctionKeysCheckBox = new CheckBox
-        {
-            Text = "FD/WinFD互換の操作プリセットを使う",
-            AutoSize = true,
-            Location = new Point(16, 20),
-            Checked = string.Equals(settings?.Input?.FunctionKeyProfile, InputSettings.FdCompatibleProfileValue, StringComparison.OrdinalIgnoreCase)
-        };
-        operationGroup.Controls.Add(_fdCompatibleFunctionKeysCheckBox);
-        operationGroup.Controls.Add(new Label
-        {
-            AutoSize = false,
-            Location = new Point(36, 40),
-            Size = new Size(632, 20),
-            Text = "Fキー配置・一部Shift+F・列数キー操作をWinFD寄りにします。"
-        });
-
-        _videoEnterPlaysExternalCheckBox = new CheckBox
-        {
-            Text = "メディアファイルは Enter で外部再生する",
-            AutoSize = true,
-            Location = new Point(16, 64),
-            Checked = settings?.Preview?.VideoEnterPlaysExternal ?? false
-        };
-        operationGroup.Controls.Add(_videoEnterPlaysExternalCheckBox);
-        operationGroup.Controls.Add(new Label
-        {
-            AutoSize = false,
-            Location = new Point(36, 86),
-            Size = new Size(632, 40),
-            Text = "動画: OFF=Enterで静止画 / Ctrl+Enterで外部再生\r\n動画: ON=Enterで外部再生 / Ctrl+Enterで静止画\r\n音声: 設定ON/OFFに関係なく Enter / Ctrl+Enter で外部再生"
-        });
-
-        var externalInfoGroup = new GroupBox
-        {
-            Text = "外部連携（任意）",
-            Location = new Point(16, 590),
-            Size = new Size(680, 222)
-        };
-        int labelWidth = 130;
-        int inputX = 154;
-        int top = 28;
-
-        AddLabel(externalInfoGroup, "7-Zip パス:", 16, top + 4, labelWidth);
-        _sevenZipPathBox = AddTextBox(externalInfoGroup, inputX, top, 432, settings?.SevenZip?.ExePath ?? string.Empty);
-        AddBrowseFileButton(externalInfoGroup, 596, top - 1, 64, _sevenZipPathBox, "7-Zip 実行ファイルを選択", "実行ファイル|*.exe|すべてのファイル|*.*");
-        top += 36;
-
-        AddLabel(externalInfoGroup, "動画ツールフォルダ:", 16, top + 4, labelWidth);
-        _videoToolDirectoryBox = AddTextBox(externalInfoGroup, inputX, top, 432, settings?.Preview?.VideoToolDirectory ?? string.Empty);
-        AddBrowseFolderButton(externalInfoGroup, 596, top - 1, 64, _videoToolDirectoryBox, "動画ツールフォルダを選択");
-        top += 36;
-
-        AddLabel(externalInfoGroup, "外部エディタ:", 16, top + 4, labelWidth);
-        _externalEditorPathBox = AddTextBox(externalInfoGroup, inputX, top, 432, settings?.ExternalTools?.ExternalEditorPath ?? string.Empty);
-        AddBrowseFileButton(externalInfoGroup, 596, top - 1, 64, _externalEditorPathBox, "外部エディタ実行ファイルを選択", "実行ファイル|*.exe|すべてのファイル|*.*");
-        top += 40;
-
-        externalInfoGroup.Controls.Add(new Label
-        {
-            AutoSize = false,
-            Location = new Point(16, top),
-            Size = new Size(648, 78),
-            Text = "※未設定でも基本操作は可能です。\r\n※動画の外部再生は ffplay がなくても Windows の関連付けで開きます。\r\n※動画静止画プレビューには ffmpeg.exe が必要です。\r\n※後から「設定 > 外部連携」で変更できます。"
-        });
-
-        var noteLabel = new Label
-        {
-            AutoSize = false,
-            Location = new Point(16, 820),
-            Size = new Size(680, 40),
-            Text = "後から「設定 > 操作 / 外部連携」で変更できます。\r\nAlt+英数字ランチャーや MarkSlot などは、入力割り当てや外部ツール定義から利用します。"
-        };
-
-        int buttonBottomY = ClientSize.Height - 40;
-
-        var startButton = new Button
-        {
-            Text = "この設定で開始",
-            Size = new Size(180, 32),
-            Location = new Point(316, buttonBottomY),
-            DialogResult = DialogResult.OK
-        };
-        var cancelButton = new Button
-        {
-            Text = "キャンセル",
-            Size = new Size(110, 32),
-            Location = new Point(506, buttonBottomY),
-            DialogResult = DialogResult.Cancel
-        };
-
-        Controls.Add(titleLabel);
-        Controls.Add(advancedHeadingLabel);
-        Controls.Add(advancedGroup);
-        Controls.Add(operationGroup);
-        Controls.Add(externalInfoGroup);
-        Controls.Add(noteLabel);
-        Controls.Add(cancelButton);
-        Controls.Add(startButton);
-
-        AcceptButton = startButton;
+        rootLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100F));
+        rootLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100F));
+        rootLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 48F));
+        rootLayout.Controls.Add(bodyPanel, 0, 0);
+        rootLayout.Controls.Add(footer, 0, 1);
+        Controls.Add(rootLayout);
+        AcceptButton = okButton;
         CancelButton = cancelButton;
 
-        _enableDragArchiveHandoffCheckBox.CheckedChanged += (_, _) => UpdateAdvancedOptionsEnabledState();
-        UpdateAdvancedOptionsEnabledState();
+        _initializingControls = true;
+        _basicRangeRadioButton.CheckedChanged += (_, _) => ApplyRangeFromRadio(0);
+        _convenientRangeRadioButton.CheckedChanged += (_, _) => ApplyRangeFromRadio(1);
+        _allRangeRadioButton.CheckedChanged += (_, _) => ApplyRangeFromRadio(2);
+        foreach (CheckBox checkBox in new[] { _restoreStartupStateCheckBox, _enableMouseGesturesCheckBox, _showFunctionBarTooltipsCheckBox, _videoEnterPlaysExternalCheckBox, _showPathAsBreadcrumbCheckBox, _useMidFdManagedTrashCheckBox, _enableDragArchiveHandoffCheckBox, _includeDragZipManifestCheckBox, _clipboardPasteTextAsFileCheckBox }) checkBox.CheckedChanged += (_, _) => RefreshRangeState();
+        _standardInputRadioButton.CheckedChanged += (_, _) => { if (_standardInputRadioButton.Checked) ApplyInputModeColor(false); };
+        _fdCompatibleInputRadioButton.CheckedChanged += (_, _) => { if (_fdCompatibleInputRadioButton.Checked) ApplyInputModeColor(true); };
+        _enableDragArchiveHandoffCheckBox.CheckedChanged += (_, _) => _includeDragZipManifestCheckBox.Enabled = _enableDragArchiveHandoffCheckBox.Checked;
+        _videoToolDirectoryBox.TextChanged += (_, _) => RefreshExternalStatuses();
+        _sevenZipPathBox.TextChanged += (_, _) => RefreshExternalStatuses();
+        _externalEditorPathBox.TextChanged += (_, _) => RefreshExternalStatuses();
+
+        int rangeIndex = ResolveRangeIndex();
+        _updatingRange = true;
+        if (rangeIndex == 0) _basicRangeRadioButton.Checked = true;
+        else if (rangeIndex == 1) _convenientRangeRadioButton.Checked = true;
+        else if (rangeIndex == 2) _allRangeRadioButton.Checked = true;
+        _updatingRange = false;
+        _includeDragZipManifestCheckBox.Enabled = _enableDragArchiveHandoffCheckBox.Checked;
+        RefreshRangeState();
+        RefreshExternalStatuses();
+        _initializingControls = false;
+        Shown += (_, _) => { Activate(); BringToFront(); };
     }
 
-    private static string? NullIfEmpty(string? value)
+    private int ResolveRangeIndex()
     {
-        if (string.IsNullOrWhiteSpace(value))
-        {
-            return null;
-        }
-        return value.Trim();
+        bool basic = !_restoreStartupStateCheckBox.Checked && !_enableMouseGesturesCheckBox.Checked && _showFunctionBarTooltipsCheckBox.Checked && !_videoEnterPlaysExternalCheckBox.Checked && !_showPathAsBreadcrumbCheckBox.Checked && !_useMidFdManagedTrashCheckBox.Checked && !_enableDragArchiveHandoffCheckBox.Checked && !_includeDragZipManifestCheckBox.Checked && !_clipboardPasteTextAsFileCheckBox.Checked;
+        bool convenient = _restoreStartupStateCheckBox.Checked && _enableMouseGesturesCheckBox.Checked && _showFunctionBarTooltipsCheckBox.Checked && _videoEnterPlaysExternalCheckBox.Checked && _showPathAsBreadcrumbCheckBox.Checked && !_useMidFdManagedTrashCheckBox.Checked && !_enableDragArchiveHandoffCheckBox.Checked && !_includeDragZipManifestCheckBox.Checked && !_clipboardPasteTextAsFileCheckBox.Checked;
+        bool all = _restoreStartupStateCheckBox.Checked && _enableMouseGesturesCheckBox.Checked && _showFunctionBarTooltipsCheckBox.Checked && _videoEnterPlaysExternalCheckBox.Checked && _showPathAsBreadcrumbCheckBox.Checked && _useMidFdManagedTrashCheckBox.Checked && _enableDragArchiveHandoffCheckBox.Checked && _includeDragZipManifestCheckBox.Checked && _clipboardPasteTextAsFileCheckBox.Checked;
+        return basic ? 0 : convenient ? 1 : all ? 2 : -1;
     }
 
-    private static void AddLabel(Control parent, string text, int x, int y, int width)
+    private void ApplyRangeFromRadio(int index)
     {
-        parent.Controls.Add(new Label
-        {
-            Text = text,
-            Location = new Point(x, y),
-            Size = new Size(width, 20)
-        });
+        if (_updatingRange) return;
+        if ((index == 0 && !_basicRangeRadioButton.Checked) || (index == 1 && !_convenientRangeRadioButton.Checked) || (index == 2 && !_allRangeRadioButton.Checked)) return;
+        SyncSelectedProfile(index);
+        _updatingRange = true;
+        _restoreStartupStateCheckBox.Checked = index > 0;
+        _enableMouseGesturesCheckBox.Checked = index > 0;
+        _showFunctionBarTooltipsCheckBox.Checked = true;
+        _videoEnterPlaysExternalCheckBox.Checked = index > 0;
+        _showPathAsBreadcrumbCheckBox.Checked = index > 0;
+        _useMidFdManagedTrashCheckBox.Checked = index == 2;
+        _enableDragArchiveHandoffCheckBox.Checked = index == 2;
+        _includeDragZipManifestCheckBox.Checked = index == 2;
+        _clipboardPasteTextAsFileCheckBox.Checked = index == 2;
+        _includeDragZipManifestCheckBox.Enabled = index == 2;
+        _updatingRange = false;
+        RefreshRangeState();
     }
 
-    private static TextBox AddTextBox(Control parent, int x, int y, int width, string value)
+    private void RefreshRangeState()
     {
-        var box = new TextBox
+        if (_updatingRange) return;
+        int index = ResolveRangeIndex();
+        _updatingRange = true;
+        if (index < 0) { _basicRangeRadioButton.Checked = false; _convenientRangeRadioButton.Checked = false; _allRangeRadioButton.Checked = false; }
+        else if (index == 0) _basicRangeRadioButton.Checked = true;
+        else if (index == 1) _convenientRangeRadioButton.Checked = true;
+        else _allRangeRadioButton.Checked = true;
+        _updatingRange = false;
+        if (!_initializingControls && index >= 0) SyncSelectedProfile(index);
+        _rangeStateLabel.Text = index < 0 ? "現在は個別設定です。構成を選ぶと一括変更します。" : string.Empty;
+    }
+
+    private void SyncSelectedProfile(int index)
+    {
+        SelectedProfile = index switch
         {
-            Location = new Point(x, y),
-            Size = new Size(width, 23),
-            Text = value
+            0 => FeatureProfile.MinimalCore,
+            1 => FeatureProfile.PracticalStable,
+            2 => FeatureProfile.Full,
+            _ => SelectedProfile
         };
+    }
+
+    private void RefreshExternalStatuses()
+    {
+        string? sevenZipPath = SevenZipService.ResolveExecutable(NullIfEmpty(_sevenZipPathBox.Text));
+        _sevenZipStatusLabel.Text = sevenZipPath == null ? "自動探索／fallback: 未検出" : $"自動検出済み: {Path.GetFileName(sevenZipPath)}";
+        VideoToolResolutionResult video = VideoToolResolutionService.Resolve(NullIfEmpty(_videoToolDirectoryBox.Text));
+        _videoToolStatusLabel.Text = $"ffmpeg {OnOff(video.FfmpegFound)}／ffplay {OnOff(video.FfplayFound)}";
+        string? editorPath = NullIfEmpty(_externalEditorPathBox.Text);
+        _externalEditorStatusLabel.Text = !string.IsNullOrEmpty(editorPath) && File.Exists(editorPath)
+            ? $"検出済み: {Path.GetFileName(editorPath)}"
+            : "未検出（未設定時はnotepad.exeを使用）";
+    }
+
+    private void ApplyInputModeColor(bool fdCompatible)
+    {
+        if (_initializingControls) return;
+        string targetKey = FileListColorResolver.CanonicalizePresetKey(fdCompatible ? "WinFdCompatible" : "MidFdStandard");
+        for (int index = 0; index < FileListColorResolver.BuiltInPresetKeys.Length; index++)
+        {
+            string builtInKey = FileListColorResolver.CanonicalizePresetKey(FileListColorResolver.BuiltInPresetKeys[index]);
+            if (!string.Equals(builtInKey, targetKey, StringComparison.OrdinalIgnoreCase)) continue;
+            if (_colorThemeComboBox.SelectedIndex != index) _colorThemeComboBox.SelectedIndex = index;
+            return;
+        }
+    }
+
+    private static string OnOff(bool value) => value ? "検出済み" : "未検出";
+    private static CheckBox AddCheckBox(Control parent, string text, int x, int y, bool value) { var box = new CheckBox { Text = text, AutoSize = true, Location = new Point(x, y), Checked = value }; parent.Controls.Add(box); return box; }
+    private static RadioButton AddRadio(Control parent, string text, int x, int y) { var radio = new RadioButton { Text = text, AutoSize = true, Location = new Point(x, y) }; parent.Controls.Add(radio); return radio; }
+    private static Label AddStatus(Control parent, string text, int x, int y, int width)
+    {
+        int height = TextRenderer.MeasureText("検出済み", parent.Font).Height + 4;
+        var label = new Label { Text = text, AutoSize = false, Location = new Point(x, y), Size = new Size(width, height), ForeColor = Color.DimGray };
+        parent.Controls.Add(label);
+        return label;
+    }
+    private static void AddLabel(Control parent, string text, int x, int y, int width) => parent.Controls.Add(new Label { Text = text, Location = new Point(x, y), Size = new Size(width, 23) });
+    private static TextBox AddReadOnlyTextBox(Control parent, int x, int y, int width, string value)
+    {
+        int height = TextRenderer.MeasureText("Ag", parent.Font).Height + 8;
+        var box = new TextBox { AutoSize = false, Location = new Point(x, y), Size = new Size(width, height), Text = value, ReadOnly = true, TextAlign = HorizontalAlignment.Right };
         parent.Controls.Add(box);
         return box;
     }
+    private static string? NullIfEmpty(string? value) => string.IsNullOrWhiteSpace(value) ? null : value.Trim();
+    private static FeatureProfile ResolveInitialProfile(AppSettings? settings) => FeatureProfileService.TryResolveProfile(settings?.Profile, out FeatureProfile profile) ? profile : FeatureProfile.PracticalStable;
 
-    private static void AddBrowseFileButton(Control parent, int x, int y, int width, TextBox target, string title, string filter)
+    private static void AddBrowseFileButton(Control parent, int x, int y, int width, TextBox target, string title)
     {
-        var button = new Button
-        {
-            Text = "参照",
-            Location = new Point(x, y),
-            Size = new Size(width, 25)
-        };
-        button.Click += (_, _) =>
-        {
-            using var dialog = new OpenFileDialog
-            {
-                Title = title,
-                Filter = filter,
-                CheckFileExists = true
-            };
-            if (dialog.ShowDialog(parent.FindForm()) == DialogResult.OK)
-            {
-                target.Text = dialog.FileName;
-            }
-        };
+        var button = new Button { Text = "変更...", Location = new Point(x, y), Size = new Size(width, 25) };
+        button.Click += (_, _) => { using var dialog = new OpenFileDialog { Title = title, Filter = "実行ファイル|*.exe|すべてのファイル|*.*", CheckFileExists = true }; if (dialog.ShowDialog(parent.FindForm()) == DialogResult.OK) target.Text = dialog.FileName; };
         parent.Controls.Add(button);
     }
 
     private static void AddBrowseFolderButton(Control parent, int x, int y, int width, TextBox target, string description)
     {
-        var button = new Button
-        {
-            Text = "参照",
-            Location = new Point(x, y),
-            Size = new Size(width, 25)
-        };
-        button.Click += (_, _) =>
-        {
-            using var dialog = new FolderBrowserDialog
-            {
-                Description = description,
-                ShowNewFolderButton = false
-            };
-            if (dialog.ShowDialog(parent.FindForm()) == DialogResult.OK)
-            {
-                target.Text = dialog.SelectedPath;
-            }
-        };
+        var button = new Button { Text = "変更...", Location = new Point(x, y), Size = new Size(width, 25) };
+        button.Click += (_, _) => { using var dialog = new FolderBrowserDialog { Description = description, ShowNewFolderButton = false }; if (dialog.ShowDialog(parent.FindForm()) == DialogResult.OK) target.Text = dialog.SelectedPath; };
         parent.Controls.Add(button);
-    }
-
-    private static FeatureProfile ResolveInitialProfile(AppSettings? settings)
-    {
-        return FeatureProfileService.TryResolveProfile(settings?.Profile, out FeatureProfile profile)
-            ? profile
-            : FeatureProfile.PracticalStable;
-    }
-
-    private void UpdateAdvancedOptionsEnabledState()
-    {
-        _includeDragZipManifestCheckBox.Enabled = _enableDragArchiveHandoffCheckBox.Checked;
     }
 }

@@ -79,6 +79,29 @@ public static class SevenZipService
         return File.Exists(guiPath) ? guiPath : null;
     }
 
+    public static Process? StartNativePackDialog(string guiExecutablePath, string archivePath, IReadOnlyList<string> sourcePaths)
+    {
+        if (!File.Exists(guiExecutablePath))
+        {
+            throw new FileNotFoundException("7zG.exe が見つかりません。", guiExecutablePath);
+        }
+
+        var startInfo = new ProcessStartInfo
+        {
+            FileName = guiExecutablePath,
+            UseShellExecute = true,
+            WorkingDirectory = Path.GetDirectoryName(guiExecutablePath) ?? string.Empty
+        };
+        startInfo.ArgumentList.Add("a");
+        startInfo.ArgumentList.Add(archivePath);
+        foreach (string sourcePath in sourcePaths)
+        {
+            startInfo.ArgumentList.Add(sourcePath);
+        }
+        startInfo.ArgumentList.Add("-ad");
+        return Process.Start(startInfo);
+    }
+
     public static string BuildUnavailableMessage(string? configuredSevenZipPath, string operationLabel)
     {
         return string.IsNullOrWhiteSpace(configuredSevenZipPath)

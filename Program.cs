@@ -40,12 +40,19 @@ static class Program
 
         try
         {
+            Configuration.AuthorToolsStartupResult authorToolsStartup = Configuration.AuthorToolsStartup.Resolve(args);
+            if (!string.IsNullOrWhiteSpace(authorToolsStartup.Notification))
+            {
+                MessageBox.Show(authorToolsStartup.Notification, "MidFD 作者機能", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            }
+
             if (!TryResolveStartupProfileOverride(args, out string? startupProfileOverride))
             {
                 return;
             }
 
-            Application.Run(new MainForm(startupProfileOverride));
+            var mainForm = new MainForm(startupProfileOverride, authorToolsStartup.Enabled);
+            Application.Run(mainForm);
         }
         catch (Exception ex)
         {
@@ -61,6 +68,7 @@ static class Program
         Application.ThreadException += (sender, e) =>
         {
             Services.StartupExceptionLogger.Write("Application.ThreadException", e.Exception);
+            try { MessageBox.Show("画面操作中にエラーが発生しました。該当操作を中止しました。", "MidFD", MessageBoxButtons.OK, MessageBoxIcon.Warning); } catch { }
         };
 
         // 一般的な未処理例外
@@ -190,9 +198,18 @@ static class Program
             return true;
         }
 
+        if (!ShouldShowFeatureProfileSelection(settingsLoadMetadata))
+        {
+            startupProfileOverride = null;
+            return true;
+        }
+
         try
         {
-            using var dialog = new Dialogs.FeatureProfileSelectionDialog(settings);
+            settings.Input ??= new Configuration.InputSettings();
+            settings.FileOperations ??= new Configuration.FileOperationsSettings();
+            settings.Appearance ??= new Configuration.AppearanceSettings();
+            using var dialog = new Dialogs.FeatureProfileSelectionDialog(settings, isFirstLaunch: true);
             var result = dialog.ShowDialog();
             if (result != DialogResult.OK)
             {
@@ -201,6 +218,7 @@ static class Program
 
             Services.FeatureProfileService.ApplyRuntimeProfile(settings, dialog.SelectedProfile, settingsLoadMetadata.IsMouseGesturesExplicit);
             settings.Input ??= new Configuration.InputSettings();
+            settings.FileOperations ??= new Configuration.FileOperationsSettings();
             settings.Preview ??= new Configuration.PreviewSettings();
             settings.SevenZip ??= new Configuration.SevenZipSettings();
             settings.ExternalTools ??= new Configuration.ExternalToolsSettings();
@@ -208,6 +226,14 @@ static class Program
                 ? Configuration.InputSettings.FdCompatibleProfileValue
                 : Configuration.InputSettings.StandardProfileValue;
             settings.Preview.VideoEnterPlaysExternal = dialog.VideoEnterPlaysExternal;
+            settings.Input.EnableMouseGestures = dialog.EnableMouseGestures;
+            settings.Input.ShowFunctionBarTooltips = dialog.ShowFunctionBarTooltips;
+            settings.FileOperations.EnableDragArchiveHandoff = dialog.EnableDragArchiveHandoff;
+            settings.FileOperations.IncludeDragZipManifest = dialog.IncludeDragZipManifest;
+            settings.FileOperations.UseMidFdManagedTrash = dialog.UseMidFdManagedTrash;
+            settings.FileOperations.ClipboardPasteTextAsFileEnabled = dialog.ClipboardPasteTextAsFileEnabled;
+            settings.Appearance.ShowPathAsBreadcrumb = dialog.ShowPathAsBreadcrumb;
+            settings.Appearance.ColorTheme = dialog.ColorTheme;
             settings.SevenZip.ExePath = NormalizeOptionalPath(dialog.SevenZipPath);
             settings.Preview.VideoToolDirectory = NormalizeOptionalPath(dialog.VideoToolDirectory);
             settings.ExternalTools.ExternalEditorPath = NormalizeOptionalPath(dialog.ExternalEditorPath);
@@ -221,6 +247,12 @@ static class Program
             Services.StartupExceptionLogger.Write("FeatureProfileSelection", ex);
             return false;
         }
+    }
+
+    internal static bool ShouldShowFeatureProfileSelection(Configuration.SettingsManager.SettingsLoadMetadata metadata)
+    {
+        ArgumentNullException.ThrowIfNull(metadata);
+        return metadata.LoadKind == Configuration.SettingsManager.SettingsLoadKind.TrueFirstLaunch;
     }
 
     private static string? NormalizeOptionalPath(string? value)

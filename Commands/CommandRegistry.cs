@@ -65,7 +65,8 @@ public sealed class CommandRegistry
             Create(CommandIds.AppOpenCommandLauncher, CommandScope.Global, "コマンドランチャーを開く", "コマンドランチャーを開きます。", true),
             Create(CommandIds.BrowserTabFilterLock, CommandScope.Browser, "現在タブのフィルタロック", "現在のタブのフィルタロック設定ダイアログを開きます。", true),
             Create(CommandIds.BrowserTabLock, CommandScope.Browser, "現在タブの固定/解除", "現在のタブの固定状態を切り替えます。", true),
-            Create(CommandIds.AppOpenCommandList, CommandScope.Global, "コマンド一覧", "コマンド一覧を開きます。", true)
+            Create(CommandIds.AppOpenCommandList, CommandScope.Global, "コマンド一覧", "コマンド一覧を開きます。", true),
+            Create(CommandIds.AppOpenManagedTrash, CommandScope.Global, "MidFD管理ゴミ箱を開く", "MidFD管理ゴミ箱の確認・管理画面を開きます。", true)
         };
 
         _definitions = new ReadOnlyCollection<CommandDefinition>(definitions);

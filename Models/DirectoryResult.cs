@@ -6,4 +6,5 @@ public class DirectoryResult
 {
     public List<DirectoryInfo> SelectedDirs { get; set; } = new();
     public List<FileInfo> SelectedFiles { get; set; } = new();
+    public int RawDirectoryEntryCount { get; set; }
 }

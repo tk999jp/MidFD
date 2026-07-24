@@ -24,13 +24,30 @@
     <Content Include="Assets\appicon\MidFD.ico">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
+    <ProjectReference Include="src\MidFD.FileOperationHelper\MidFD.FileOperationHelper.csproj"
+                      ReferenceOutputAssembly="false"
+                      BuildReference="true"
+                      PrivateAssets="all" />
   </ItemGroup>
 
+  <Target Name="CopyFileOperationHelperOutput" AfterTargets="Build">
+    <ItemGroup>
+      <FileOperationHelperOutput Include="src\MidFD.FileOperationHelper\bin\$(Configuration)\net10.0-windows\*" />
+    </ItemGroup>
+    <Copy SourceFiles="@(FileOperationHelperOutput)" DestinationFolder="$(TargetDir)" SkipUnchangedFiles="true" />
+  </Target>
+
+  <Target Name="PublishFileOperationHelper" AfterTargets="Publish">
+    <MSBuild Projects="src\MidFD.FileOperationHelper\MidFD.FileOperationHelper.csproj"
+             Targets="Publish"
+             Properties="Configuration=$(Configuration);PublishDir=$(PublishDir);PublishReadyToRun=$(PublishReadyToRun);SelfContained=$(SelfContained)" />
+  </Target>
+
   <ItemGroup>
-    <Compile Remove="artifacts\**\*;scratch\**\*;tests\**\*" />
-    <EmbeddedResource Remove="artifacts\**\*;scratch\**\*;tests\**\*" />
-    <Content Remove="artifacts\**\*;scratch\**\*;tests\**\*" />
-    <None Remove="artifacts\**\*;scratch\**\*;tests\**\*" />
+    <Compile Remove="artifacts\**\*;scratch\**\*;tests\**\*;src\**\*" />
+    <EmbeddedResource Remove="artifacts\**\*;scratch\**\*;tests\**\*;src\**\*" />
+    <Content Remove="artifacts\**\*;scratch\**\*;tests\**\*;src\**\*" />
+    <None Remove="artifacts\**\*;scratch\**\*;tests\**\*;src\**\*" />
   </ItemGroup>
 
 </Project>

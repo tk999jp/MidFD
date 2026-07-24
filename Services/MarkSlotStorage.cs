@@ -59,7 +59,6 @@ public static class MarkSlotStorage
     public static bool TryExportSlot(string filePath, MarkSlotEntry slot, out string errorMessage)
     {
         errorMessage = string.Empty;
-
         try
         {
             MarkSlotEntry sanitizedSlot = SanitizeSlotEntry(slot, slot.SlotNumber);

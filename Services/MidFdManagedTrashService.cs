@@ -2,6 +2,7 @@ using System.Text.Json;
 using System.Diagnostics;
 using MidFD.Models;
 using MidFD.Services.TrashManifestStore;
+using MidFD.Configuration.Storage;
 
 namespace MidFD.Services;
 
@@ -16,46 +17,113 @@ public static class MidFdManagedTrashService
         WriteIndented = true,
         PropertyNameCaseInsensitive = true
     };
-    private static ITrashManifestStore ManifestStore = TrashManifestStoreFactory.CreateJsonStore(ManifestPath, JsonOptions);
-    private static string SqliteManifestPath => Path.Combine(AppContext.BaseDirectory, "Data", "Trash", "manifest.db");
-    private static string LegacySqliteManifestPath => Path.Combine(
-        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-        "MidFD",
-        "Trash",
-        "manifest.db");
+    private static readonly object MutationSync = new();
+    private static readonly object StartupSync = new();
+    private static readonly AsyncLocal<Guid?> MutationBatchContext = new();
+    private static Guid? _activeMutationBatchId;
+    private static string _manifestPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "MidFD", "Trash", ManifestFileName);
+    private static string _sqliteManifestPath = Path.Combine(AppContext.BaseDirectory, "Data", "Trash", "manifest.db");
+    private static string _itemsRoot = Path.Combine(AppContext.BaseDirectory, "Data", "Trash", ItemsDirectoryName);
+    private static ManagedTrashPathValidator _pathValidator = new(new[] { _itemsRoot });
+    private static ITrashManifestStore? ManifestStore;
+    private static string SqliteManifestPath => _sqliteManifestPath;
+    internal static bool IsAvailable
+    {
+        get { lock (StartupSync) return ManifestStore != null; }
+    }
+
+    internal static string AvailabilityMessage =>
+        "管理ゴミ箱のmanifest storageを初期化できないため、この機能だけを停止しています。通常の閲覧は継続できます。";
 
     public static void Initialize(Configuration.AppSettings settings)
     {
-        // 常に SQLite を第一選択とし、環境や初期化可否で自動判定（fallback）する
-        var mode = Configuration.ManagedTrashStoreMode.Sqlite;
-        bool isNetwork = IsExecutableDirectoryNetworkPath();
+        AppStoragePaths activePaths = StorageProfileProviderFactory
+            .CreateForActivation(Configuration.SettingsManager.CurrentStorageProfileActivation)
+            .GetPaths();
+        Initialize(settings, activePaths);
+    }
 
-        if (isNetwork)
+    internal static IDisposable InitializeForTest(Configuration.AppSettings settings, AppStoragePaths activePaths)
+    {
+        lock (StartupSync)
         {
-            LogService.Warn($"[MidFdTrashStore] SQLite disabled because executable directory is network path. BaseDirectory={AppContext.BaseDirectory}");
-            LogService.Info($"[MidFdTrashStore] ActiveStore=Json FallbackReason=NetworkExecutableDirectory");
-            mode = Configuration.ManagedTrashStoreMode.Json;
+            var snapshot = new ManagedTrashInitializationSnapshot(
+                ManifestStore,
+                _manifestPath,
+                _sqliteManifestPath,
+                _itemsRoot,
+                _pathValidator);
+            Initialize(settings, activePaths);
+            return snapshot;
         }
+    }
 
-        if (mode == Configuration.ManagedTrashStoreMode.Sqlite)
+    private static void Initialize(Configuration.AppSettings settings, AppStoragePaths activePaths)
+    {
+        lock (StartupSync)
         {
-            EnsureSqliteDbRelocation();
+            ManifestStore = null;
+            try
+            {
+                _sqliteManifestPath = Path.GetFullPath(activePaths.TrashManifestDbPath);
+                string profileRoot = Path.GetFullPath(activePaths.ProfileRoot);
+                string trashDirectory = Path.GetDirectoryName(_sqliteManifestPath) ?? profileRoot;
+                if (!IsPathWithinOrEqual(trashDirectory, profileRoot) ||
+                    !IsPathWithinOrEqual(_sqliteManifestPath, profileRoot))
+                {
+                    throw new InvalidOperationException("Managed trash manifest must be within the active profile root.");
+                }
+
+                _manifestPath = Path.Combine(trashDirectory, ManifestFileName);
+                _itemsRoot = Path.Combine(trashDirectory, ItemsDirectoryName);
+                string legacyLocalItemsRoot = Path.Combine(
+                    Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                    "MidFD",
+                    "Trash",
+                    ItemsDirectoryName);
+                _pathValidator = new ManagedTrashPathValidator(new[] { _itemsRoot, legacyLocalItemsRoot });
+
+                var mode = Configuration.ManagedTrashStoreMode.Sqlite;
+                if (IsExecutableDirectoryNetworkPath())
+                {
+                    LogService.Warn($"[MidFdTrashStore] SQLite disabled because executable directory is network path. BaseDirectory={AppContext.BaseDirectory}");
+                    mode = Configuration.ManagedTrashStoreMode.Json;
+                }
+
+                ManifestStore = TrashManifestStoreFactory.CreateStore(ref mode, ManifestPath, SqliteManifestPath, JsonOptions);
+                if (settings?.FileOperations != null) settings.FileOperations.ManagedTrashStoreMode = mode;
+                LogService.Info("[MidFdTrashStore] Manifest store initialized without physical item migration.");
+            }
+            catch (Exception ex)
+            {
+                ManifestStore = null;
+                LogService.Error("[MidFdTrashStore] Manifest store initialization failed; managed trash is unavailable for this session.", ex);
+            }
         }
+    }
 
-        ManifestStore = TrashManifestStoreFactory.CreateStore(
-            ref mode,
-            ManifestPath,
-            SqliteManifestPath,
-            JsonOptions);
+    private sealed class ManagedTrashInitializationSnapshot(
+        ITrashManifestStore? manifestStore,
+        string manifestPath,
+        string sqliteManifestPath,
+        string itemsRoot,
+        ManagedTrashPathValidator pathValidator) : IDisposable
+    {
+        private bool _disposed;
 
-        if (settings != null && settings.FileOperations != null)
+        public void Dispose()
         {
-            settings.FileOperations.ManagedTrashStoreMode = mode;
+            if (_disposed) return;
+            lock (StartupSync)
+            {
+                ManifestStore = manifestStore;
+                _manifestPath = manifestPath;
+                _sqliteManifestPath = sqliteManifestPath;
+                _itemsRoot = itemsRoot;
+                _pathValidator = pathValidator;
+                _disposed = true;
+            }
         }
-
-        // Telemetry
-        var manifest = LoadManifest();
-        LogService.Info($"[MidFdTrashStore] Store ready. RecordCount={manifest.Records.Count} [MidFdTrashLogThrottle] RuntimeGapCorrective active");
     }
 
     public static bool IsExecutableDirectoryNetworkPath()
@@ -76,45 +144,6 @@ public static class MidFdManagedTrashService
             LogService.Warn($"[MidFdTrashStore] Failed to determine if executable directory is network path. path={AppContext.BaseDirectory}, error={ex.Message}");
             return true; // Safe side
         }
-    }
-
-    private static void EnsureSqliteDbRelocation()
-    {
-        try
-        {
-            string target = SqliteManifestPath;
-            if (File.Exists(target)) return;
-
-            string source = LegacySqliteManifestPath;
-            if (File.Exists(source))
-            {
-                string? dir = Path.GetDirectoryName(target);
-                if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
-                File.Copy(source, target);
-                LogService.Info($"[MidFdTrashStore] Copied legacy AppData SQLite DB to executable data path. Source={source} Target={target}");
-            }
-        }
-        catch (Exception ex)
-        {
-            LogService.Warn($"[MidFdTrashStore] Failed to check/relocate legacy AppData SQLite DB. Error={ex.Message}");
-        }
-    }
-
-    public static TrashManifestMigrationResult MigrateJsonToSqlite(bool dryRun = false)
-    {
-        if (IsExecutableDirectoryNetworkPath())
-        {
-            LogService.Warn($"[TrashManifestMigration] Blocked because executable directory is network path. TargetDb={SqliteManifestPath}");
-            throw new InvalidOperationException("実行ディレクトリがネットワーク上にあるため、SQLite 管理ゴミ箱DBは利用できません。ローカル配置で実行するか、JSON形式を使用してください。");
-        }
-
-        var options = new TrashManifestMigrationOptions
-        {
-            JsonManifestPath = ManifestPath,
-            SqliteDbPath = SqliteManifestPath,
-            DryRun = dryRun
-        };
-        return TrashManifestMigrationService.Migrate(options);
     }
 
     private static bool _suppressSuccessLogging;
@@ -206,6 +235,10 @@ public static class MidFdManagedTrashService
 
     public static void BeginManifestBatch()
     {
+        using IDisposable mutation = EnterMutation();
+        if (_activeMutationBatchId != null) throw new InvalidOperationException("管理ゴミ箱batchは既に開始されています。");
+        _activeMutationBatchId = Guid.NewGuid();
+        MutationBatchContext.Value = _activeMutationBatchId;
         _activeBatchManifest = LoadManifest();
         _manifestRecordCountBefore = _activeBatchManifest.Records.Count;
         _manifestRecordCountAfter = _activeBatchManifest.Records.Count;
@@ -217,16 +250,20 @@ public static class MidFdManagedTrashService
 
     public static void FlushManifestBatch()
     {
+        using IDisposable mutation = EnterMutation();
         if (_activeBatchManifest != null)
         {
             SaveManifest(_activeBatchManifest);
             _manifestRecordCountAfter = _activeBatchManifest.Records.Count;
             _activeBatchManifest = null;
         }
+        _activeMutationBatchId = null;
+        MutationBatchContext.Value = null;
     }
 
     public static void SaveActiveBatch()
     {
+        using IDisposable mutation = EnterMutation();
         if (_activeBatchManifest != null)
         {
             SaveManifest(_activeBatchManifest);
@@ -290,6 +327,7 @@ public static class MidFdManagedTrashService
         out long logMs,
         bool suppressLogging = false)
     {
+        using IDisposable mutation = EnterMutation();
         if (string.IsNullOrWhiteSpace(originalPath))
         {
             throw new ArgumentException("削除対象 path が空です。", nameof(originalPath));
@@ -306,6 +344,7 @@ public static class MidFdManagedTrashService
         string root = ResolveTrashRoot(originalPath);
         string itemId = itemIndex.ToString("D4");
         string trashPath = BuildUniqueTrashPath(root, batchId, itemId, Path.GetFileName(originalPath));
+        _pathValidator.ValidatePath(trashPath);
         Directory.CreateDirectory(Path.GetDirectoryName(trashPath) ?? root);
 
         var moveSw = Stopwatch.StartNew();
@@ -409,6 +448,7 @@ public static class MidFdManagedTrashService
 
     public static void RestoreFromTrash(FileOperationUndoRedoItem item, bool skipStatusUpdate = false, bool suppressLogging = false)
     {
+        using IDisposable mutation = EnterMutation();
         if (string.IsNullOrWhiteSpace(item.BeforePath) || string.IsNullOrWhiteSpace(item.RecycleBinPath))
         {
             throw new InvalidOperationException("MidFD管理ゴミ箱の復元情報が不完全です。");
@@ -419,14 +459,17 @@ public static class MidFdManagedTrashService
             throw new IOException($"復元先に同名項目があるため復元できません: {item.BeforePath}");
         }
 
-        if (!File.Exists(item.RecycleBinPath) && !Directory.Exists(item.RecycleBinPath))
+        TrashManifestRecord record = RequireManifestRecord(item.RecycleBinPath);
+        string recycleBinPath = _pathValidator.ValidateRecord(record);
+        if (!File.Exists(recycleBinPath) && !Directory.Exists(recycleBinPath))
         {
             throw new FileNotFoundException("MidFD管理ゴミ箱内の項目が見つかりません。", item.RecycleBinPath);
         }
 
         var moveSw = Stopwatch.StartNew();
         Directory.CreateDirectory(Path.GetDirectoryName(item.BeforePath) ?? string.Empty);
-        FileOperationService.Move(item.RecycleBinPath, item.BeforePath, suppressLogging: suppressLogging);
+        _pathValidator.ValidatePath(recycleBinPath);
+        FileOperationService.Move(recycleBinPath, item.BeforePath, suppressLogging: suppressLogging);
         moveSw.Stop();
         long fileMoveMs = moveSw.ElapsedMilliseconds;
         _lastManifestFileMoveMs += fileMoveMs;
@@ -449,6 +492,7 @@ public static class MidFdManagedTrashService
 
     internal static FileOperationUndoRedoItem RedoDeleteToTrash(FileOperationUndoRedoItem item, out TrashManifestRecord? outRecord, bool skipRegistration = false, bool suppressLogging = false)
     {
+        using IDisposable mutation = EnterMutation();
         outRecord = null;
         if (string.IsNullOrWhiteSpace(item.BeforePath))
         {
@@ -483,41 +527,45 @@ public static class MidFdManagedTrashService
             return Task.CompletedTask;
         }
 
-        int retentionDays = Math.Clamp(settings.FileOperations.ManagedTrashUndoRetentionDays, 1, 365);
+        int retentionDays = settings.FileOperations.ManagedTrashUndoRetentionDays;
         if (retentionDays <= 0)
         {
             return Task.CompletedTask;
         }
 
-        return Task.Run(() => RunRetentionCleanupCore(retentionDays, undoRedoService, trigger));
+        int clampedDays = Math.Clamp(retentionDays, 1, 365);
+        return Task.Run(() => RunRetentionCleanupCore(clampedDays, undoRedoService, trigger));
     }
 
     public static void EmptyTrash()
     {
+        using IDisposable mutation = EnterMutation();
         TrashManifest manifest = _activeBatchManifest ?? LoadManifest();
         int deleted = 0;
         int cleaned = 0;
         int pruned = 0;
-        List<string> itemsRoots = CollectKnownItemsRoots(manifest);
 
         foreach (TrashManifestRecord record in manifest.Records.ToList())
         {
             try
             {
+                string validatedTrashPath = _pathValidator.ValidateRecord(record);
                 TryGetItemsRootForTrashPath(record.TrashPath, out string? itemsRoot);
-                if (Directory.Exists(record.TrashPath))
+                if (Directory.Exists(validatedTrashPath))
                 {
-                    FileOperationService.Delete(record.TrashPath);
+                    FileOperationService.Delete(validatedTrashPath);
                     deleted++;
                 }
-                else if (File.Exists(record.TrashPath))
+                else if (File.Exists(validatedTrashPath))
                 {
-                    FileOperationService.Delete(record.TrashPath);
+                    FileOperationService.Delete(validatedTrashPath);
                     deleted++;
                 }
                 else
                 {
                     cleaned++;
+                    LogService.Warn($"[MidFdTrash] Missing item was preserved for explicit missing-record cleanup. trash={record.TrashPath}");
+                    continue;
                 }
 
                 manifest.Records.Remove(record);
@@ -532,11 +580,6 @@ public static class MidFdManagedTrashService
             }
         }
 
-        foreach (string itemsRoot in itemsRoots)
-        {
-            pruned += EmptyItemsRootChildren(itemsRoot);
-        }
-
         if (_activeBatchManifest == null)
         {
             SaveManifest(manifest);
@@ -544,11 +587,12 @@ public static class MidFdManagedTrashService
 
         LogService.Info(
             $"[MidFdTrash] Empty completed. deleted={deleted}, cleaned={cleaned}, " +
-            $"pruned={pruned}, itemsRoots={itemsRoots.Count}, remaining={manifest.Records.Count}");
+            $"pruned={pruned}, remaining={manifest.Records.Count}");
     }
 
     private static void RunRetentionCleanupCore(int retentionDays, FileOperationUndoRedoService? undoRedoService, string trigger)
     {
+        using IDisposable mutation = EnterMutation();
         if (!RetentionCleanupGate.Wait(0))
         {
             LogService.Info($"[MidFdTrashCleanup] Skipped because cleanup is already running. trigger={trigger}");
@@ -574,275 +618,60 @@ public static class MidFdManagedTrashService
                 .Where(record => IsExpiredManagedTrashRecord(record, startedUtc, retentionDays))
                 .ToList();
 
-            var manifestTrashPaths = new HashSet<string>(manifest.Records.Select(r => r.TrashPath), StringComparer.OrdinalIgnoreCase);
-
-            // Part 2: Scan physical .midfd-trash roots for untracked legacy items
-            List<string> legacyExpiredPaths = new();
-            List<string> knownRoots = CollectKnownItemsRoots(manifest);
-            foreach (string itemsRoot in knownRoots)
-            {
-                if (!Directory.Exists(itemsRoot) || !IsSafeItemsRoot(itemsRoot))
-                {
-                    continue;
-                }
-
-                try
-                {
-                    // Search structure: itemsRoot/yyyyMMddHHmmssfff-xxxx/itemIndex/original_filename
-                    // The standard directory structure created by MidFD has batch directory at top-level under itemsRoot
-                    foreach (string batchDir in Directory.EnumerateDirectories(itemsRoot))
-                    {
-                        try
-                        {
-                            string batchName = Path.GetFileName(batchDir);
-                            // Validate batch directory format or use file metadata as fallback
-                            DateTime batchTime = DateTime.MinValue;
-                            // Batch directory format usually starts with yyyyMMddHHmmssfff (17 chars)
-                            if (batchName.Length >= 17 && DateTime.TryParseExact(batchName[..17], "yyyyMMddHHmmssfff", null, System.Globalization.DateTimeStyles.AssumeUniversal | System.Globalization.DateTimeStyles.AdjustToUniversal, out DateTime parsedTime))
-                            {
-                                batchTime = parsedTime.ToUniversalTime();
-                            }
-
-                            // Enumerate index subdirectories (like 00000001, 1, etc.)
-                            foreach (string indexDir in Directory.EnumerateDirectories(batchDir))
-                            {
-                                foreach (string file in Directory.EnumerateFiles(indexDir))
-                                {
-                                    if (manifestTrashPaths.Contains(file))
-                                    {
-                                        continue;
-                                    }
-
-                                    // Check expiration
-                                    DateTime fileTime = batchTime;
-                                    if (fileTime == DateTime.MinValue)
-                                    {
-                                        try
-                                        {
-                                            DateTime createTime = File.GetCreationTimeUtc(file);
-                                            DateTime writeTime = File.GetLastWriteTimeUtc(file);
-                                            fileTime = createTime < writeTime ? createTime : writeTime;
-                                        }
-                                        catch
-                                        {
-                                            continue;
-                                        }
-                                    }
-
-                                    if (fileTime != DateTime.MinValue && fileTime < startedUtc && startedUtc - fileTime >= TimeSpan.FromDays(Math.Clamp(retentionDays, 1, 365)))
-                                    {
-                                        legacyExpiredPaths.Add(file);
-                                    }
-                                }
-
-                                foreach (string dir in Directory.EnumerateDirectories(indexDir))
-                                {
-                                    if (manifestTrashPaths.Contains(dir))
-                                    {
-                                        continue;
-                                    }
-
-                                    DateTime dirTime = batchTime;
-                                    if (dirTime == DateTime.MinValue)
-                                    {
-                                        try
-                                        {
-                                            DateTime createTime = Directory.GetCreationTimeUtc(dir);
-                                            DateTime writeTime = Directory.GetLastWriteTimeUtc(dir);
-                                            dirTime = createTime < writeTime ? createTime : writeTime;
-                                        }
-                                        catch
-                                        {
-                                            continue;
-                                        }
-                                    }
-
-                                    if (dirTime != DateTime.MinValue && dirTime < startedUtc && startedUtc - dirTime >= TimeSpan.FromDays(Math.Clamp(retentionDays, 1, 365)))
-                                    {
-                                        legacyExpiredPaths.Add(dir);
-                                    }
-                                }
-                            }
-                        }
-                        catch (Exception ex)
-                        {
-                            LogService.Warn($"[MidFdTrashCleanup] Failed scanning batch directory for legacy items. dir={batchDir}, error={ex.Message}");
-                        }
-                    }
-                }
-                catch (Exception ex)
-                {
-                    LogService.Warn($"[MidFdTrashCleanup] Failed scanning items root. root={itemsRoot}, error={ex.Message}");
-                }
-            }
-
-            // Combine both targets. Track manifest paths to remove records later, legacy paths just get recycled
-            var allTargets = expiredRecords.Select(r => (Path: r.TrashPath, IsLegacy: false))
-                .Concat(legacyExpiredPaths.Select(p => (Path: p, IsLegacy: true)))
-                .ToList();
-
-            var handedOffPaths = new List<string>();
-            int skippedCount = 0;
-            int failedCount = 0;
-            const int batchSize = 32;
-
-            for (int index = 0; index < allTargets.Count; index += batchSize)
-            {
-                List<(string Path, bool IsLegacy)> batch = allTargets.Skip(index).Take(batchSize).ToList();
-                List<string> batchPaths = new();
-                foreach (var target in batch)
-                {
-                    if (!CanHandoffToRecycleBin(target.Path))
-                    {
-                        skippedCount++;
-                        continue;
-                    }
-
-                    if (!PathExists(target.Path))
-                    {
-                        skippedCount++;
-                        LogService.Warn($"[MidFdTrashCleanup] Skipped expired item because trash path is missing. path={target.Path}");
-                        continue;
-                    }
-
-                    batchPaths.Add(target.Path);
-                }
-
-                if (batchPaths.Count == 0)
-                {
-                    continue;
-                }
-
-                try
-                {
-                    ShellRecycleBinDeleteService.Result result = ShellRecycleBinDeleteService
-                        .DeleteToRecycleBinAsync(batchPaths, IntPtr.Zero, CancellationToken.None, static _ => { })
-                        .GetAwaiter()
-                        .GetResult();
-
-                    var successPaths = new HashSet<string>(result.SuccessPaths, StringComparer.OrdinalIgnoreCase);
-                    if (successPaths.Count > 0)
-                    {
-                        // Remove from manifest only if tracked
-                        int removed = ManifestStore.RemoveRecordsByTrashPaths(manifest, successPaths);
-                        if (removed > 0)
-                        {
-                            undoRedoService?.PruneTrashDeleteItemsByRecycleBinPaths(successPaths);
-                        }
-                        handedOffPaths.AddRange(successPaths);
-
-                        // Slice U1: prune empty item index and batch directories for succeeded paths
-                        foreach (string path in successPaths)
-                        {
-                            try
-                            {
-                                string? parentIndexDir = Path.GetDirectoryName(path);
-                                if (!string.IsNullOrEmpty(parentIndexDir) && Directory.Exists(parentIndexDir))
-                                {
-                                    // Verify it is inside a safe items root and is indeed a subdirectory of it
-                                    if (TryGetItemsRootForTrashPath(path, out string? itemsRoot) && !string.IsNullOrEmpty(itemsRoot))
-                                    {
-                                        // Delete index dir if empty
-                                        if (!Directory.EnumerateFileSystemEntries(parentIndexDir).Any())
-                                        {
-                                            Directory.Delete(parentIndexDir, recursive: false);
-                                            LogService.Info($"[MidFdTrashCleanup] Pruned empty index directory. path={parentIndexDir}");
-
-                                            // Delete batch dir if empty
-                                            string? parentBatchDir = Path.GetDirectoryName(parentIndexDir);
-                                            if (!string.IsNullOrEmpty(parentBatchDir) && Directory.Exists(parentBatchDir) &&
-                                                !string.Equals(parentBatchDir.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar), itemsRoot.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar), StringComparison.OrdinalIgnoreCase))
-                                            {
-                                                if (!Directory.EnumerateFileSystemEntries(parentBatchDir).Any())
-                                                {
-                                                    Directory.Delete(parentBatchDir, recursive: false);
-                                                    LogService.Info($"[MidFdTrashCleanup] Pruned empty batch directory. path={parentBatchDir}");
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                            catch (Exception ex)
-                            {
-                                LogService.Warn($"[MidFdTrashCleanup] Failed to prune empty parent directory post-handoff. path={path}, error={ex.Message}");
-                            }
-                        }
-                    }
-
-                    if (result.SuccessCount < batchPaths.Count)
-                    {
-                        failedCount += batchPaths.Count - result.SuccessCount;
-                    }
-
-                    if (result.FailCount > 0 || result.AnyOperationsAborted || result.HResult < 0)
-                    {
-                        LogService.Warn(
-                            $"[MidFdTrashCleanup] recycle-bin handoff finished with partial failure. " +
-                            $"trigger={trigger}, success={result.SuccessCount}, fail={result.FailCount}, " +
-                            $"aborted={result.AnyOperationsAborted}, hr=0x{result.HResult:X8}");
-                    }
-                }
-                catch (Exception ex)
-                {
-                    failedCount += batchPaths.Count;
-                    LogService.Warn($"[MidFdTrashCleanup] recycle-bin handoff failed. trigger={trigger}, batchCount={batchPaths.Count}, error={ex.Message}");
-                }
-            }
-
-            // Slice U2: scan and prune empty batch/index directories that are already empty under known items roots
+            int deletedCount = 0;
+            int cleanedMissingCount = 0;
             int emptyPruned = 0;
-            foreach (string itemsRoot in knownRoots)
+            int failedCount = 0;
+
+            // 1. Process expiredRecords (tracked in manifest)
+            var pathsToRemoveFromManifest = new List<string>();
+            foreach (var record in expiredRecords)
             {
-                if (!Directory.Exists(itemsRoot) || !IsSafeItemsRoot(itemsRoot))
+                if (!IsRecordAvailableForRestore(record))
                 {
+                    cleanedMissingCount++;
+                    LogService.Warn($"[MidFdTrashCleanup] Missing or invalid expired item was preserved for explicit cleanup. path={record.TrashPath}");
                     continue;
                 }
 
+                string path = _pathValidator.ValidateRecord(record);
                 try
                 {
-                    foreach (string batchDir in Directory.EnumerateDirectories(itemsRoot))
-                    {
-                        try
-                        {
-                            foreach (string indexDir in Directory.EnumerateDirectories(batchDir))
-                            {
-                                if (Directory.Exists(indexDir) && !Directory.EnumerateFileSystemEntries(indexDir).Any())
-                                {
-                                    Directory.Delete(indexDir, recursive: false);
-                                    emptyPruned++;
-                                    LogService.Info($"[MidFdTrashCleanup] Pruned stale empty index directory. path={indexDir}");
-                                }
-                            }
+                    FileOperationService.Delete(path);
+                    deletedCount++;
+                    pathsToRemoveFromManifest.Add(path);
 
-                            if (Directory.Exists(batchDir) && !Directory.EnumerateFileSystemEntries(batchDir).Any())
-                            {
-                                Directory.Delete(batchDir, recursive: false);
-                                emptyPruned++;
-                                LogService.Info($"[MidFdTrashCleanup] Pruned stale empty batch directory. path={batchDir}");
-                            }
-                        }
-                        catch (Exception ex)
-                        {
-                            LogService.Warn($"[MidFdTrashCleanup] Failed pruning empty directory during scan. dir={batchDir}, error={ex.Message}");
-                        }
+                    if (TryGetItemsRootForTrashPath(path, out string? itemsRoot) && !string.IsNullOrEmpty(itemsRoot))
+                    {
+                        emptyPruned += PruneEmptyParents(path, itemsRoot);
                     }
                 }
                 catch (Exception ex)
                 {
-                    LogService.Warn($"[MidFdTrashCleanup] Failed scanning for empty directories. root={itemsRoot}, error={ex.Message}");
+                    failedCount++;
+                    LogService.Warn($"[MidFdTrashCleanup] Failed to delete expired item. path={path}, error={ex.Message}");
                 }
             }
 
-            if (handedOffPaths.Count > 0 && _activeBatchManifest == null)
+            if (pathsToRemoveFromManifest.Count > 0)
+            {
+                var pathsSet = new HashSet<string>(pathsToRemoveFromManifest, StringComparer.OrdinalIgnoreCase);
+                int removed = RequireManifestStore().RemoveRecordsByTrashPaths(manifest, pathsSet);
+                if (removed > 0)
+                {
+                    undoRedoService?.PruneTrashDeleteItemsByRecycleBinPaths(pathsSet);
+                }
+            }
+
+            if (pathsToRemoveFromManifest.Count > 0 && _activeBatchManifest == null)
             {
                 SaveManifest(manifest);
             }
 
             LogService.Info(
                 $"[MidFdTrashCleanup] Completed. trigger={trigger}, retentionDays={retentionDays}, " +
-                $"expiredRecords={expiredRecords.Count}, legacyExpired={legacyExpiredPaths.Count}, " +
-                $"handedOff={handedOffPaths.Count}, emptyContainersPruned={emptyPruned}, skipped={skippedCount}, failed={failedCount}");
+                $"deleted={deletedCount}, missingOrInvalidPreserved={cleanedMissingCount}, " +
+                $"emptyContainersPruned={emptyPruned}, failed={failedCount}, remaining={manifest.Records.Count}");
         }
         finally
         {
@@ -875,24 +704,92 @@ public static class MidFdManagedTrashService
         return File.Exists(path) || Directory.Exists(path);
     }
 
-    private static bool CanHandoffToRecycleBin(string path)
+    internal static bool IsRecordAvailableForRestore(TrashManifestRecord record) =>
+        IsRecordAvailableForRestore(record, _pathValidator);
+
+    internal static ManagedTrashRecordView GetRecordView(TrashManifestRecord record) =>
+        ManagedTrashRecordAvailabilityService.Evaluate(record, _pathValidator);
+
+    internal static bool IsRecordAvailableForRestore(TrashManifestRecord record, ManagedTrashPathValidator pathValidator)
     {
-        try
+        return ManagedTrashRecordAvailabilityService.Evaluate(record, pathValidator).CanRestore;
+    }
+
+    public static void DeleteFromTrashForever(string trashPath, FileOperationUndoRedoService? undoRedoService)
+    {
+        using IDisposable mutation = EnterMutation();
+        if (string.IsNullOrWhiteSpace(trashPath)) return;
+        TrashManifestRecord record = RequireManifestRecord(trashPath);
+        trashPath = _pathValidator.ValidateRecord(record);
+
+        if (!PathExists(trashPath))
         {
-            string fullPath = Path.GetFullPath(path);
-            string? root = Path.GetPathRoot(fullPath);
-            if (string.IsNullOrWhiteSpace(root))
+            throw new FileNotFoundException("物理itemが存在しません。欠損レコード掃除を使用してください。", trashPath);
+        }
+
+        if (File.Exists(trashPath) || Directory.Exists(trashPath))
+        {
+            FileOperationService.Delete(trashPath);
+        }
+
+        TrashManifest manifest = LoadManifest();
+        var pathsSet = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { trashPath };
+        int removed = RequireManifestStore().RemoveRecordsByTrashPaths(manifest, pathsSet);
+        if (removed > 0)
+        {
+            SaveManifest(manifest);
+            undoRedoService?.PruneTrashDeleteItemsByRecycleBinPaths(pathsSet);
+        }
+
+        if (TryGetItemsRootForTrashPath(trashPath, out string? itemsRoot) && !string.IsNullOrEmpty(itemsRoot))
+        {
+            PruneEmptyParents(trashPath, itemsRoot);
+        }
+    }
+
+    public static int CleanMissingTrashRecords(FileOperationUndoRedoService? undoRedoService)
+    {
+        using IDisposable mutation = EnterMutation();
+        TrashManifest manifest = LoadManifest();
+        var missingPaths = new List<string>();
+        int prunedContainers = 0;
+
+        foreach (var record in manifest.Records)
+        {
+            try
             {
-                return false;
+                string validatedPath = _pathValidator.ValidateRecord(record);
+                if (record.Status == TrashRecordStatus.InTrash && !PathExists(validatedPath))
+                {
+                    missingPaths.Add(validatedPath);
+                }
+            }
+            catch (Exception ex)
+            {
+                LogService.Warn($"[MidFdTrash] Skipped invalid manifest record during missing-record cleanup. error={ex.Message}");
+            }
+        }
+
+        if (missingPaths.Count > 0)
+        {
+            var pathsSet = new HashSet<string>(missingPaths, StringComparer.OrdinalIgnoreCase);
+            int removed = RequireManifestStore().RemoveRecordsByTrashPaths(manifest, pathsSet);
+            if (removed > 0)
+            {
+                SaveManifest(manifest);
+                undoRedoService?.PruneTrashDeleteItemsByRecycleBinPaths(pathsSet);
             }
 
-            return new DriveInfo(root).DriveType == DriveType.Fixed;
+            foreach (string path in missingPaths)
+            {
+                if (TryGetItemsRootForTrashPath(path, out string? itemsRoot) && !string.IsNullOrEmpty(itemsRoot))
+                {
+                    prunedContainers += PruneEmptyParents(path, itemsRoot);
+                }
+            }
         }
-        catch (Exception ex)
-        {
-            LogService.Warn($"[MidFdTrashCleanup] Failed to inspect drive type for handoff. path={path}, error={ex.Message}");
-            return false;
-        }
+
+        return missingPaths.Count;
     }
 
     public static string CreateBatchId()
@@ -900,30 +797,26 @@ public static class MidFdManagedTrashService
         return DateTime.UtcNow.ToString("yyyyMMddHHmmssfff") + "-" + Guid.NewGuid().ToString("N")[..8];
     }
 
-    private static string ResolveTrashRoot(string originalPath)
+    internal static string ResolveTrashRootPath(string originalPath)
     {
-        try
+        string fullPath = Path.GetFullPath(originalPath);
+        string? sourceRoot = Path.GetPathRoot(fullPath);
+        if (string.IsNullOrWhiteSpace(sourceRoot))
         {
-            string? root = Path.GetPathRoot(Path.GetFullPath(originalPath));
-            if (!string.IsNullOrWhiteSpace(root))
-            {
-                string sameVolumeRoot = Path.Combine(root, TrashDirectoryName);
-                Directory.CreateDirectory(sameVolumeRoot);
-                TryHideDirectory(sameVolumeRoot);
-                return sameVolumeRoot;
-            }
-        }
-        catch (Exception ex)
-        {
-            LogService.Warn($"[MidFdTrash] Same-volume trash root unavailable. original={originalPath}, error={ex.Message}");
+            throw new InvalidOperationException("削除元のvolume/share rootを解決できません。");
         }
 
-        string fallbackRoot = Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-            "MidFD",
-            "Trash");
-        Directory.CreateDirectory(fallbackRoot);
-        return fallbackRoot;
+        return Path.GetFullPath(Path.Combine(sourceRoot, TrashDirectoryName));
+    }
+
+    private static string ResolveTrashRoot(string originalPath)
+    {
+        string trashRoot = ResolveTrashRootPath(originalPath);
+        string itemsRoot = Path.Combine(trashRoot, ItemsDirectoryName);
+        _pathValidator.ValidatePath(Path.Combine(itemsRoot, ".root-validation"));
+        Directory.CreateDirectory(itemsRoot);
+        TryHideDirectory(trashRoot);
+        return trashRoot;
     }
 
     private static string BuildUniqueTrashPath(string root, string batchId, string itemId, string originalName)
@@ -972,55 +865,7 @@ public static class MidFdManagedTrashService
         return nameWithoutExtension[..Math.Min(nameWithoutExtension.Length, baseLength)] + extension;
     }
 
-    private static string ManifestPath => Path.Combine(
-        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-        "MidFD",
-        "Trash",
-        ManifestFileName);
-
-    private static string LocalTrashRoot => Path.Combine(
-        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-        "MidFD",
-        "Trash");
-
-    private static string LocalItemsRoot => Path.Combine(LocalTrashRoot, ItemsDirectoryName);
-
-    private static List<string> CollectKnownItemsRoots(TrashManifest manifest)
-    {
-        var roots = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-
-        foreach (TrashManifestRecord record in manifest.Records)
-        {
-            if (TryGetItemsRootForTrashPath(record.TrashPath, out string? itemsRoot) &&
-                !string.IsNullOrWhiteSpace(itemsRoot))
-            {
-                roots.Add(itemsRoot);
-            }
-        }
-
-        if (Directory.Exists(LocalItemsRoot) && IsSafeItemsRoot(LocalItemsRoot))
-        {
-            roots.Add(Path.GetFullPath(LocalItemsRoot));
-        }
-
-        foreach (string drive in Directory.GetLogicalDrives())
-        {
-            try
-            {
-                string driveItemsRoot = Path.Combine(drive, TrashDirectoryName, ItemsDirectoryName);
-                if (Directory.Exists(driveItemsRoot) && IsSafeItemsRoot(driveItemsRoot))
-                {
-                    roots.Add(Path.GetFullPath(driveItemsRoot));
-                }
-            }
-            catch (Exception ex)
-            {
-                LogService.Warn($"[MidFdTrash] Failed to inspect drive trash root. drive={drive}, error={ex.Message}");
-            }
-        }
-
-        return roots.ToList();
-    }
+    private static string ManifestPath => _manifestPath;
 
     private static bool TryGetItemsRootForTrashPath(string trashPath, out string? itemsRoot)
     {
@@ -1030,37 +875,9 @@ public static class MidFdManagedTrashService
             return false;
         }
 
-        string fullPath;
-        try
-        {
-            fullPath = Path.GetFullPath(trashPath);
-        }
-        catch
-        {
-            return false;
-        }
-
-        string localItemsRoot = Path.GetFullPath(LocalItemsRoot);
-        if (IsPathWithinOrEqual(fullPath, localItemsRoot) && IsSafeItemsRoot(localItemsRoot))
-        {
-            itemsRoot = localItemsRoot;
-            return true;
-        }
-
-        string? root = Path.GetPathRoot(fullPath);
-        if (string.IsNullOrWhiteSpace(root))
-        {
-            return false;
-        }
-
-        string sameVolumeItemsRoot = Path.GetFullPath(Path.Combine(root, TrashDirectoryName, ItemsDirectoryName));
-        if (IsPathWithinOrEqual(fullPath, sameVolumeItemsRoot) && IsSafeItemsRoot(sameVolumeItemsRoot))
-        {
-            itemsRoot = sameVolumeItemsRoot;
-            return true;
-        }
-
-        return false;
+        return _pathValidator.TryResolveItemsRoot(trashPath, out itemsRoot) &&
+               !string.IsNullOrWhiteSpace(itemsRoot) &&
+               _pathValidator.IsSafeItemsRoot(itemsRoot);
     }
 
     private static int PruneEmptyParents(string trashPath, string itemsRoot)
@@ -1103,72 +920,9 @@ public static class MidFdManagedTrashService
         return pruned;
     }
 
-    private static int EmptyItemsRootChildren(string itemsRoot)
-    {
-        if (!IsSafeItemsRoot(itemsRoot) || !Directory.Exists(itemsRoot))
-        {
-            return 0;
-        }
-
-        int pruned = 0;
-        string normalizedItemsRoot = Path.GetFullPath(itemsRoot).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
-        foreach (string child in Directory.EnumerateFileSystemEntries(normalizedItemsRoot).ToList())
-        {
-            try
-            {
-                string fullChild = Path.GetFullPath(child);
-                string? parent = Path.GetDirectoryName(fullChild)?.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
-                if (!string.Equals(parent, normalizedItemsRoot, StringComparison.OrdinalIgnoreCase))
-                {
-                    LogService.Warn($"[MidFdTrash] Skipped non-child trash pruning target. target={fullChild}, itemsRoot={normalizedItemsRoot}");
-                    continue;
-                }
-
-                FileOperationService.Delete(fullChild);
-                pruned++;
-                LogService.Info($"[MidFdTrash] Pruned orphan trash item root child. path={fullChild}");
-            }
-            catch (Exception ex)
-            {
-                LogService.Warn($"[MidFdTrash] Failed to prune orphan trash item root child. path={child}, error={ex.Message}");
-            }
-        }
-
-        return pruned;
-    }
-
     private static bool IsSafeItemsRoot(string itemsRoot)
     {
-        if (string.IsNullOrWhiteSpace(itemsRoot))
-        {
-            return false;
-        }
-
-        string fullPath;
-        try
-        {
-            fullPath = Path.GetFullPath(itemsRoot).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
-        }
-        catch
-        {
-            return false;
-        }
-
-        string? pathRoot = Path.GetPathRoot(fullPath)?.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
-        if (string.IsNullOrWhiteSpace(pathRoot) ||
-            string.Equals(fullPath, pathRoot, StringComparison.OrdinalIgnoreCase))
-        {
-            return false;
-        }
-
-        string localItemsRoot = Path.GetFullPath(LocalItemsRoot).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
-        if (string.Equals(fullPath, localItemsRoot, StringComparison.OrdinalIgnoreCase))
-        {
-            return true;
-        }
-
-        string expectedSuffix = Path.Combine(TrashDirectoryName, ItemsDirectoryName);
-        return fullPath.EndsWith(expectedSuffix, StringComparison.OrdinalIgnoreCase);
+        return _pathValidator.IsSafeItemsRoot(itemsRoot);
     }
 
     private static bool IsPathWithinOrEqual(string path, string parent)
@@ -1179,14 +933,78 @@ public static class MidFdManagedTrashService
                normalizedPath.StartsWith(normalizedParent + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase);
     }
 
-    private static TrashManifest LoadManifest()
+    private static TrashManifestRecord RequireManifestRecord(string trashPath)
     {
-        return ManifestStore.Load();
+        string normalizedPath = Path.GetFullPath(trashPath);
+        TrashManifest manifest = _activeBatchManifest ?? LoadManifest();
+        var matches = new List<TrashManifestRecord>();
+        foreach (TrashManifestRecord record in manifest.Records)
+        {
+            try
+            {
+                string validatedPath = _pathValidator.ValidateRecord(record);
+                if (string.Equals(validatedPath, normalizedPath, StringComparison.OrdinalIgnoreCase)) matches.Add(record);
+            }
+            catch
+            {
+                // Invalid metadata is not a candidate for a physical operation.
+            }
+        }
+        if (matches.Count != 1)
+        {
+            throw new InvalidOperationException("管理ゴミ箱manifest recordのidentityが一致しません。");
+        }
+        return matches[0];
+    }
+
+    private static IDisposable EnterMutation()
+    {
+        ThrowIfManagedTrashUnavailable();
+        if (!Monitor.TryEnter(MutationSync))
+        {
+            throw new InvalidOperationException("別の管理ゴミ箱操作を実行中です。完了後に再試行してください。");
+        }
+        if (_activeMutationBatchId != null && MutationBatchContext.Value != _activeMutationBatchId)
+        {
+            Monitor.Exit(MutationSync);
+            throw new InvalidOperationException("別の管理ゴミ箱batchを実行中です。完了後に再試行してください。");
+        }
+        return new MutationLease();
+    }
+
+    private static void ThrowIfManagedTrashUnavailable()
+    {
+        if (!IsAvailable) throw new InvalidOperationException(AvailabilityMessage);
+    }
+
+    private static ITrashManifestStore RequireManifestStore()
+    {
+        lock (StartupSync)
+        {
+            return ManifestStore ?? throw new InvalidOperationException(AvailabilityMessage);
+        }
+    }
+
+    private sealed class MutationLease : IDisposable
+    {
+        private bool _disposed;
+        public void Dispose()
+        {
+            if (_disposed) return;
+            _disposed = true;
+            Monitor.Exit(MutationSync);
+        }
+    }
+
+    internal static TrashManifest LoadManifest()
+    {
+        ThrowIfManagedTrashUnavailable();
+        return RequireManifestStore().Load();
     }
 
     private static void SaveManifest(TrashManifest manifest)
     {
-        ManifestStore.Save(manifest);
+        RequireManifestStore().Save(manifest);
     }
 
     private static void RegisterNewTrashRecord(TrashManifestRecord record)
@@ -1194,7 +1012,7 @@ public static class MidFdManagedTrashService
         if (_activeBatchManifest != null)
         {
             var appendSw = Stopwatch.StartNew();
-            ManifestStore.RegisterNewRecord(_activeBatchManifest, record);
+            RequireManifestStore().RegisterNewRecord(_activeBatchManifest, record);
             appendSw.Stop();
 
             _manifestAppendCount++;
@@ -1216,7 +1034,7 @@ public static class MidFdManagedTrashService
     {
         TrashManifest manifest = _activeBatchManifest ?? LoadManifest();
         var appendSw = Stopwatch.StartNew();
-        ManifestStore.RegisterNewRecords(manifest, records);
+        RequireManifestStore().RegisterNewRecords(manifest, records);
         appendSw.Stop();
 
         _manifestAppendCount += records.Count();
@@ -1238,7 +1056,7 @@ public static class MidFdManagedTrashService
     {
         TrashManifest manifest = _activeBatchManifest ?? LoadManifest();
         var sw = Stopwatch.StartNew();
-        _manifestUpsertScanCount += ManifestStore.UpsertRecord(manifest, record);
+        _manifestUpsertScanCount += RequireManifestStore().UpsertRecord(manifest, record);
         sw.Stop();
         _manifestRecordCountAfter = manifest.Records.Count;
         _lastManifestStatusUpdateMs += sw.ElapsedMilliseconds;
@@ -1256,7 +1074,7 @@ public static class MidFdManagedTrashService
     {
         TrashManifest manifest = _activeBatchManifest ?? LoadManifest();
         var sw = Stopwatch.StartNew();
-        bool success = ManifestStore.UpdateRecordStatus(manifest, trashPath, status);
+        bool success = RequireManifestStore().UpdateRecordStatus(manifest, trashPath, status);
         sw.Stop();
         _lastManifestStatusUpdateMs += sw.ElapsedMilliseconds;
 
@@ -1278,7 +1096,7 @@ public static class MidFdManagedTrashService
     {
         TrashManifest manifest = _activeBatchManifest ?? LoadManifest();
         var sw = Stopwatch.StartNew();
-        int updated = ManifestStore.UpdateRecordStatuses(manifest, trashPaths, status);
+        int updated = RequireManifestStore().UpdateRecordStatuses(manifest, trashPaths, status);
         sw.Stop();
         _lastManifestStatusUpdateMs += sw.ElapsedMilliseconds;
 
@@ -1294,7 +1112,7 @@ public static class MidFdManagedTrashService
     private static bool TryGetRecordByOriginalPath(string originalPath, out TrashManifestRecord? record)
     {
         TrashManifest manifest = _activeBatchManifest ?? LoadManifest();
-        return ManifestStore.TryGetRecordByOriginalPath(manifest, originalPath, out record);
+        return RequireManifestStore().TryGetRecordByOriginalPath(manifest, originalPath, out record);
     }
 
     private static bool TryParseItemIndex(string? itemId, out int index)

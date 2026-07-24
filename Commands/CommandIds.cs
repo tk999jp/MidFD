@@ -57,4 +57,5 @@ public static class CommandIds
     public const string FileMove = "file.move";
     public const string FileRename = "file.rename";
     public const string FileDelete = "file.delete";
+    public const string AppOpenManagedTrash = "app.open_managed_trash";
 }

@@ -83,17 +83,99 @@ public partial class MainForm
             AutoPopDelay = 8000
         };
         InitializeHeaderContextMenus();
+        InitializeHeaderSortContextMenu();
         WireHeaderCopyInteractions();
+    }
+    private void InitializeHeaderSortContextMenu()
+    {
+        _headerSortContextMenu = new ContextMenuStrip();
+        AddHeaderSortKeyItem("名前(&N)", SortKind.Name);
+        AddHeaderSortKeyItem("拡張子(&E)", SortKind.Ext);
+        AddHeaderSortKeyItem("サイズ(&S)", SortKind.Size);
+        AddHeaderSortKeyItem("日付(&T)", SortKind.Date);
+        _headerSortContextMenu.Items.Add(new ToolStripSeparator());
+        _headerSortAscendingItem = new ToolStripMenuItem("昇順(&A)");
+        _headerSortAscendingItem.Click += (_, _) => ApplyHeaderSortDirection(ascending: true);
+        _headerSortContextMenu.Items.Add(_headerSortAscendingItem);
+        _headerSortDescendingItem = new ToolStripMenuItem("降順(&D)");
+        _headerSortDescendingItem.Click += (_, _) => ApplyHeaderSortDirection(ascending: false);
+        _headerSortContextMenu.Items.Add(_headerSortDescendingItem);
+        _headerSortContextMenu.Opening += (_, e) =>
+        {
+            if (!lblSort.Visible || string.IsNullOrWhiteSpace(lblSort.Text))
+            {
+                e.Cancel = true;
+                return;
+            }
+            foreach (var pair in _headerSortKeyItems)
+            {
+                pair.Value.Checked = pair.Key == _currentSort;
+            }
+            if (_headerSortAscendingItem != null)
+            {
+                _headerSortAscendingItem.Checked = _sortAscending;
+            }
+            if (_headerSortDescendingItem != null)
+            {
+                _headerSortDescendingItem.Checked = !_sortAscending;
+            }
+        };
+        lblSort.MouseClick += HeaderSort_MouseClick;
+    }
+    private void AddHeaderSortKeyItem(string text, SortKind sortKind)
+    {
+        if (_headerSortContextMenu == null)
+        {
+            return;
+        }
+        var item = new ToolStripMenuItem(text)
+        {
+            Tag = sortKind
+        };
+        item.Click += HeaderSortKeyItem_Click;
+        _headerSortKeyItems[sortKind] = item;
+        _headerSortContextMenu.Items.Add(item);
+    }
+    private void HeaderSort_MouseClick(object? sender, MouseEventArgs e)
+    {
+        if (e.Button != MouseButtons.Left || !lblSort.Visible || string.IsNullOrWhiteSpace(lblSort.Text) || _headerSortContextMenu == null)
+        {
+            return;
+        }
+        _headerSortContextMenu.Show(lblSort, new Point(0, lblSort.Height));
+    }
+    private void HeaderSortKeyItem_Click(object? sender, EventArgs e)
+    {
+        if (GuardClipboardBusy() || sender is not ToolStripMenuItem item || item.Tag is not SortKind sortKind)
+        {
+            return;
+        }
+        bool ascending = sortKind == _currentSort ? !_sortAscending : _sortAscending;
+        ApplySortState(sortKind, ascending);
+    }
+    private void ApplyHeaderSortDirection(bool ascending)
+    {
+        if (!GuardClipboardBusy())
+        {
+            ApplySortState(_currentSort, ascending);
+        }
+    }
+    private static bool IsHeaderSortText(string text)
+    {
+        return text.Split(' ', StringSplitOptions.RemoveEmptyEntries)
+            .Any(static part => part.StartsWith("S:", StringComparison.Ordinal));
     }
     private void InitializeHeaderContextMenus()
     {
         // Path 行用メニュー
         _headerPathContextMenu = new ContextMenuStrip();
+        _headerPathContextMenu.Opening += (_, e) => e.Cancel = TryConsumeHeaderContextMenuSuppress();
         var copyPathItem = new ToolStripMenuItem("パスをコピー");
         copyPathItem.Click += (_, _) => CopyCurrentDirectoryFromHeader();
         _headerPathContextMenu.Items.Add(copyPathItem);
         // Item 行用メニュー
         _headerItemContextMenu = new ContextMenuStrip();
+        _headerItemContextMenu.Opening += (_, e) => e.Cancel = TryConsumeHeaderContextMenuSuppress();
         var copyFullPathItem = new ToolStripMenuItem("フルパスをコピー");
         copyFullPathItem.Click += (_, _) => CopySelectedItemFullPathFromHeader();
         var copyFileNameItem = new ToolStripMenuItem("ファイル名をコピー");

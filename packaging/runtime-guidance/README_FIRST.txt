@@ -1,60 +1,94 @@
 ======================================================================
-MidFD v2026.07.04 を起動する前に (README FIRST)
+MidFDを起動する前に (README FIRST)
 ======================================================================
 
-本アプリ (MidFD.exe) を起動するには、お使いのPCに「.NET 10.0 Desktop Runtime」
-がインストールされている必要があります。
+MidFD.exeを起動するには、お使いのPCに次のruntimeが必要です。
 
-GitHub の `Code > Download ZIP` や `Source code (zip)` はソースコード用であり、
-そのまま実行できる配布物ではありません。通常利用する場合は、
-GitHub Releases の `MidFD-win-x64.zip` を使用してください。
+  .NET 10.0 Desktop Runtime (Windows x64)
 
-起動時にエラーが発生する場合や、クリックしても何も反応がない場合は、
-以下の手順に従ってデスクトップ向けランタイムを導入してください。
+GitHubの「Code > Download ZIP」や「Source code (zip)」はsource codeです。
+通常利用する場合は、GitHub Releasesの次の実行用packageを使用してください。
+
+  MidFD-win-x64.zip
 
 ----------------------------------------------------------------------
 起動できない場合の症状例
 ----------------------------------------------------------------------
-- アプリ (MidFD.exe) をダブルクリックしても何も起きない（何も反応がない）
-- 「.NET をインストールしてください」というダイアログやエラーメッセージが表示される
-- 「Microsoft.WindowsDesktop.App」が見つからない、またはランタイムが見つからない旨の
-  エラーが発生する
+
+- MidFD.exeをdouble clickしても何も起きない
+- 「.NETをinstallしてください」と表示される
+- 「Microsoft.WindowsDesktop.App」が見つからないと表示される
+- 必要なruntimeが見つからない旨のerrorが表示される
 
 ----------------------------------------------------------------------
-導入方法 1. 公式Webサイトからダウンロード (推奨)
+導入方法1: Microsoft公式Web site (推奨)
 ----------------------------------------------------------------------
-1. ブラウザで以下の Microsoft 公式 .NET 10 ダウンロードページを開きます。
+
+1. 次のMicrosoft公式pageを開きます。
+
    https://dotnet.microsoft.com/download/dotnet/10.0
 
-2. 「.NET Desktop Runtime 10.0.x」の項目を探します。
+2. 「.NET Desktop Runtime 10.0.x」を探します。
 
-3. Windows の「x64」リンクをクリックしてインストーラー（例: windowsdesktop-runtime-10.0.x-win-x64.exe）をダウンロードします。
+3. Windows x64版installerをdownloadします。
 
-4. ダウンロードしたインストーラーを実行し、画面の指示に従ってインストールしてください。
+   例: windowsdesktop-runtime-10.0.x-win-x64.exe
 
-■ 重要: インストールするランタイムの種類について
-  - 必ず「.NET Desktop Runtime」(デスクトップランタイム) の「x64」版をインストールしてください。
-  - ※「.NET SDK」(開発者向け) や「.NET Runtime」(コンソール向け)、「ASP.NET Core Runtime」(サーバー向け) では動作しません。
+4. installerを実行し、画面の指示に従ってinstallします。
+
+重要:
+- 必ず「.NET Desktop Runtime」のx64版を選んでください。
+- 「.NET Runtime」「ASP.NET Core Runtime」だけではWindows Forms appを起動できません。
+- .NET SDKが既に正しく導入されている環境では、追加installが不要な場合があります。
 
 ----------------------------------------------------------------------
-導入方法 2. winget コマンドによるインストール (上級者向け)
+導入方法2: winget (上級者向け)
 ----------------------------------------------------------------------
-コマンドプロンプトまたは PowerShell を起動し、以下のコマンドを実行してください。
+
+Command PromptまたはPowerShellで次を実行します。
 
   winget install Microsoft.DotNet.DesktopRuntime.10
 
 ----------------------------------------------------------------------
-動作要件・注意事項
+外部tool
 ----------------------------------------------------------------------
-- 動作要件:
-  - Windows 10 / 11 (64bit)
-  - .NET 10.0 Desktop Runtime (x64)
 
-- MidFD に 7-Zip / ffmpeg / ffprobe / ffplay は同梱されていません。必要に応じて別途用意してください。
-- `ffplay` は設定されている場合に動画/音声の外部再生に使用されます。未設定時は Windows の関連付けで開きます。
+MidFDには次の外部toolを同梱していません。
 
-- 以前のバージョン（v2026.06.14以前など）が動いていた環境であっても、
-  v2026.07.04 以降は .NET 10.0 Desktop Runtime が必要となります。
-  従来の .NET 9.x / 8.x 環境では起動できませんので、新しく .NET 10.0 デスクトップ
-  ランタイムの導入をお願いいたします。
+- 7-Zip
+- ffmpeg
+- ffprobe
+- ffplay
+- 外部editor
+
+これらは必要な機能だけ別途用意できます。
+
+- 7-Zip未設定時も、対応可能な圧縮・解凍は既存fallbackを使用します。
+- ffplay未設定時の外部再生は、Windowsの関連付けを使用します。
+- 動画静止画previewにはffmpeg.exeが必要です。
+
+----------------------------------------------------------------------
+配布物の確認
+----------------------------------------------------------------------
+
+通常の配布ZIPには、少なくとも次が含まれます。
+
+- MidFD.exe
+- MidFD.FileOperationHelper.exe
+- README_FIRST.txt
+- README.md
+- CHANGELOG.md
+- LICENSE
+- UserDocs folder
+
+MidFD.FileOperationHelper.exeは、symlink／junctionの作成に権限が必要な場合だけ使用する補助programです。MidFD.exeと同じ配布folderから削除しないでください。
+
+----------------------------------------------------------------------
+動作要件
+----------------------------------------------------------------------
+
+- Windows 10 / 11 64bit
+- .NET 10.0 Desktop Runtime x64
+
+従来の.NET 8／9だけが導入された環境では起動できません。.NET 10.0 Desktop Runtimeを追加してください。
 ======================================================================

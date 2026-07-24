@@ -1,7 +1,6 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.IO;
-using System.Linq;
 using System.Windows.Forms;
 using MidFD.Services;
 using MidFD.Models;
@@ -53,6 +52,8 @@ namespace MidFD.Helpers
             public int CachedMarkCount { get; set; }
             public string CachedMarkSizeText { get; set; } = string.Empty;
             public string CachedMarkSummaryCompact { get; set; } = string.Empty;
+            public bool HasCurrentMarkSummaryCache { get; set; }
+            public bool IsMarkSummaryPending { get; set; }
             public string? CurrentItemText { get; set; }
             public string? CurrentItemPath { get; set; }
             public string? CurrentItemExtensionText { get; set; }
@@ -69,6 +70,9 @@ namespace MidFD.Helpers
             public bool ShowItemIcons { get; set; }
             public string DateFormat { get; set; } = "yyyy-MM-dd HH:mm";
             public string SizeFormat { get; set; } = "HumanReadable";
+            public bool HasCachedDriveInfo { get; set; }
+            public long CachedDriveUsed { get; set; }
+            public long CachedDriveFree { get; set; }
         }
 
         public static DisplayStrings Build(InputState state)
@@ -101,15 +105,11 @@ namespace MidFD.Helpers
                 parts.Add(state.FilterLockSummary);
             }
 
-            // Sort: 非デフォルト時かつ Mark がない時のみ表示（Mark 優先のため）
-            bool hasMark = !string.IsNullOrEmpty(result.MarkSummary);
-            bool isDefaultSort = (state.SortKind == SortKind.Name && state.SortAscending);
-            if (!hasMark && !isDefaultSort)
-            {
-                string sortStr = state.SortKind.ToString();
-                string ascStr = state.SortAscending ? "▲" : "▼";
-                parts.Add($"S:{sortStr}{ascStr}");
-            }
+            // Sort: 非デフォルト時はMarkの有無に関係なく表示する。
+            // MarkとSortはHeader右上で併記し、MarkSizeを保持したままsort状態も示す。
+            string sortStr = state.SortKind.ToString();
+            string ascStr = state.SortAscending ? "▲" : "▼";
+            parts.Add($"S:{sortStr}{ascStr}");
 
             result.SortFilter = parts.Count > 0 ? string.Join(" ", parts) : string.Empty;
 
@@ -144,11 +144,9 @@ namespace MidFD.Helpers
             if (state.MarkedFiles.Count > 0)
             {
                 result.MarkCountLine = $"Mark:{state.MarkedFiles.Count,3}";
-                result.MarkCount = state.CachedMarkCount > 0 ? state.CachedMarkCount : state.MarkedFiles.Count;
+                result.MarkCount = state.MarkedFiles.Count;
 
-                bool deferred = NetworkPathResolutionPolicy.IsAuxiliaryResolutionDeferred(state.CurrentPath) ||
-                    state.MarkedFiles.Any(NetworkPathResolutionPolicy.IsUncPath);
-                if (deferred)
+                if (state.HasCurrentMarkSummaryCache && !state.IsMarkSummaryPending)
                 {
                     if (!string.IsNullOrWhiteSpace(state.CachedMarkSummaryCompact))
                     {
@@ -168,56 +166,17 @@ namespace MidFD.Helpers
                         result.MarkSummary = result.MarkSummaryCompact;
                     }
 
-                    result.MarkSizeText = !string.IsNullOrWhiteSpace(state.CachedMarkSizeText)
+                    result.MarkSizeText = !state.IsMarkSummaryPending && !string.IsNullOrWhiteSpace(state.CachedMarkSizeText)
                         ? state.CachedMarkSizeText
                         : "?";
                     result.MarkSizeLine = $"Size:{result.MarkSizeText}";
-                    NetworkPathResolutionPolicy.LogDecision(
-                        "NetworkPathResolutionDeferral.AuxiliaryUseCached",
-                        "HeaderInfo.MarkSummary",
-                        nameof(BuildTotalInfo),
-                        state.CurrentPath,
-                        usedCached: true,
-                        resolvedSync: false,
-                        reason: "cached-mark-summary");
                     return;
                 }
 
-                long totalSize = 0;
-                int fileCount = 0;
-                int outsideCurrentDirectoryCount = 0;
-                string currentDir = NavigationService.NormalizeDirectoryForCompare(state.CurrentPath);
-                foreach (var path in state.MarkedFiles)
-                {
-                    string? parentDir = Path.GetDirectoryName(path);
-                    if (!string.Equals(
-                        NavigationService.NormalizeDirectoryForCompare(parentDir ?? string.Empty),
-                        currentDir,
-                        StringComparison.OrdinalIgnoreCase))
-                    {
-                        outsideCurrentDirectoryCount++;
-                    }
-
-                    if (File.Exists(path))
-                    {
-                        try
-                        {
-                            totalSize += new FileInfo(path).Length;
-                            fileCount++;
-                        }
-                        catch { /* Ignore access errors */ }
-                    }
-                }
-
-                string outsideInfo = outsideCurrentDirectoryCount > 0 ? $" Out:{outsideCurrentDirectoryCount}" : "";
-                result.MarkSummary = $"Mark:{state.MarkedFiles.Count,3} ({fileCount} Files){outsideInfo} {FileOperationService.FormatSize(totalSize)}";
-
-                result.MarkSizeLine = $"Size:{FileOperationService.FormatSize(totalSize)}";
-
-                // Corrective: Path行右端用のコンパクトなマーク表示
-                string sizeText = FileOperationService.FormatSize(totalSize);
-                result.MarkSizeText = sizeText;
-                result.MarkSummaryCompact = $"Mark: {result.MarkCount} MarkSize: {sizeText}";
+                result.MarkSummary = $"Mark:{state.MarkedFiles.Count,3}";
+                result.MarkSizeText = "?";
+                result.MarkSizeLine = "Size:?";
+                result.MarkSummaryCompact = $"Mark: {result.MarkCount} MarkSize: ?";
             }
         }
 
@@ -329,9 +288,14 @@ namespace MidFD.Helpers
                     "HeaderInfo.Drive",
                     nameof(BuildDriveInfo),
                     state.CurrentPath,
-                    usedCached: false,
+                    usedCached: state.HasCachedDriveInfo,
                     resolvedSync: false,
                     reason: "unc-path");
+                if (state.HasCachedDriveInfo)
+                {
+                    driveUsedText = $"Used:{FileOperationService.FormatSize(state.CachedDriveUsed)}";
+                    driveFreeText = $"Free:{FileOperationService.FormatSize(state.CachedDriveFree)}";
+                }
                 result.DriveUsed = driveUsedText;
                 result.DriveFree = driveFreeText;
                 return;

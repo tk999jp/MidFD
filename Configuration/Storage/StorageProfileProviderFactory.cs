@@ -31,4 +31,5 @@ public static class StorageProfileProviderFactory
     {
         return StorageProfileResolver.CreatePortableProfileInfo(CreatePortable());
     }
+
 }

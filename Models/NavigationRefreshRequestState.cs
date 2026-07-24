@@ -15,8 +15,20 @@ public class NavigationRefreshRequestState
     public bool DelayScheduled { get; set; }
     public bool DelayCompleted { get; set; }
     public bool IsApplying { get; set; }
+    public long WatcherGeneration { get; set; }
+    public bool IsPassiveRefresh { get; set; }
+    public int RawDirectoryEntryCount { get; set; }
+    public int FilteredTotalItemCount { get; set; }
 
     public void Clear()
+    {
+        ClearPendingEventState();
+    }
+
+    public NavigationRefreshBatch Snapshot() => new(
+        TargetPath ?? string.Empty, WatcherGeneration, Reasons.ToArray(), EventCount, ExceptionType, ExceptionMessage);
+
+    public void ClearPendingEventState()
     {
         IsPending = false;
         TargetPath = null;
@@ -27,6 +39,25 @@ public class NavigationRefreshRequestState
         ExceptionMessage = null;
         DelayScheduled = false;
         DelayCompleted = false;
+    }
+
+    public void ResetDirectoryBaseline()
+    {
+        RawDirectoryEntryCount = 0;
+        FilteredTotalItemCount = 0;
+        IsPassiveRefresh = false;
         IsApplying = false;
+        WatcherGeneration = 0;
+    }
+
+    public void ScheduleRefreshDelay()
+    {
+        DelayScheduled = true;
+        DelayCompleted = false;
+    }
+
+    public void CompleteRefreshDelay()
+    {
+        DelayCompleted = true;
     }
 }

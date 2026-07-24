@@ -109,7 +109,7 @@ internal static class NetworkPathResolutionPolicy
             $"usedCached={usedCached} resolvedSync={resolvedSync} reason={reason}");
     }
 
-    private static bool TryGetUncRoot(string? path, out string uncRoot)
+    public static bool TryGetUncRoot(string? path, out string uncRoot)
     {
         uncRoot = string.Empty;
         if (string.IsNullOrWhiteSpace(path))

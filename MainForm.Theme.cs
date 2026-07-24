@@ -25,6 +25,10 @@ public partial class MainForm
         _resolvedColors = FileListColorResolver.ResolveColors(_settings);
 
         var headerColors = HeaderColorPaletteResolver.Resolve(_settings.Appearance);
+        _breadcrumbPathControl?.ApplyThemeColors(
+            uiThemeColors.HeaderBackColor,
+            headerColors.HeaderPathFore,
+            uiThemeColors.AccentColor);
         // Row 2 (現在は monolithic データストア、表示は Paint へ移譲)
         lblPage.ForeColor = headerColors.HeaderRow2Fore;
         lblTotal.ForeColor = headerColors.HeaderRow2Fore;

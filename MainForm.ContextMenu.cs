@@ -568,7 +568,8 @@ public partial class MainForm : Form
 
     private void ExecuteSendTo(string targetExeOrShortcut)
     {
-        var res = SelectionResolver.Resolve(_markedFiles, fileListView.Items.Count > 0 && _browserCursorIndex >= 0 ? fileListView.Items[_browserCursorIndex] : null);
+        int pageLocalCursorIndex = GetBrowserPageLocalCursorIndex();
+        var res = SelectionResolver.Resolve(_markedFiles, pageLocalCursorIndex >= 0 ? fileListView.Items[pageLocalCursorIndex] : null);
         if (!res.FullPaths.Any()) return;
         try
         {

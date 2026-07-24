@@ -11,16 +11,10 @@ public sealed class WorkspaceSnapshotStorage
 {
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
     private readonly string _dbPath;
-    private readonly string _connectionString;
 
     public WorkspaceSnapshotStorage(string dbPath)
     {
         _dbPath = dbPath;
-        _connectionString = new SqliteConnectionStringBuilder
-        {
-            DataSource = dbPath,
-            Mode = SqliteOpenMode.ReadWriteCreate
-        }.ToString();
     }
 
     public IReadOnlyList<WorkspaceSnapshotEntry> LoadEntries()
@@ -35,7 +29,8 @@ public sealed class WorkspaceSnapshotStorage
 
     private IReadOnlyList<(WorkspaceSnapshotEntry Entry, string PayloadJson)> LoadEntriesInternal(bool includePayload)
     {
-        using SqliteConnection connection = OpenInitializedConnection();
+        if (!File.Exists(_dbPath)) return Array.Empty<(WorkspaceSnapshotEntry Entry, string PayloadJson)>();
+        using SqliteConnection connection = OpenReadOnlyConnection();
         using var command = connection.CreateCommand();
         string columns = includePayload
             ? "snapshot_id, name, created_at_utc, updated_at_utc, category_count, tab_count, marked_count, active_path, payload_json"
@@ -99,7 +94,12 @@ public sealed class WorkspaceSnapshotStorage
     {
         payloadJson = null;
         errorMessage = string.Empty;
-        using SqliteConnection connection = OpenInitializedConnection();
+        if (!File.Exists(_dbPath))
+        {
+            errorMessage = "スナップショットの内容が見つかりません。";
+            return false;
+        }
+        using SqliteConnection connection = OpenReadOnlyConnection();
         using var command = connection.CreateCommand();
         command.CommandText = """
             SELECT payload_json
@@ -168,7 +168,8 @@ public sealed class WorkspaceSnapshotStorage
 
     public bool ExistsByName(string name)
     {
-        using SqliteConnection connection = OpenInitializedConnection();
+        if (!File.Exists(_dbPath)) return false;
+        using SqliteConnection connection = OpenReadOnlyConnection();
         using var command = connection.CreateCommand();
         command.CommandText = "SELECT COUNT(1) FROM workspace_snapshots WHERE name = $name;";
         command.Parameters.AddWithValue("$name", name.Trim());
@@ -223,7 +224,7 @@ public sealed class WorkspaceSnapshotStorage
             Directory.CreateDirectory(directory);
         }
 
-        var connection = new SqliteConnection(_connectionString);
+        var connection = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = _dbPath, Mode = SqliteOpenMode.ReadWriteCreate }.ToString());
         connection.Open();
         using var command = connection.CreateCommand();
         command.CommandText = """
@@ -240,6 +241,14 @@ public sealed class WorkspaceSnapshotStorage
             );
             """;
         command.ExecuteNonQuery();
+        return connection;
+    }
+
+    private SqliteConnection OpenReadOnlyConnection()
+    {
+        string immutableUri = $"file:{Path.GetFullPath(_dbPath).Replace('\\', '/')}?immutable=1";
+        var connection = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = immutableUri, Mode = SqliteOpenMode.ReadOnly, Pooling = false }.ToString());
+        connection.Open();
         return connection;
     }
 

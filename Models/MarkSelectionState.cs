@@ -30,6 +30,19 @@ public sealed class MarkSelectionState : IReadOnlyCollection<string>
         return true;
     }
 
+    public int AddRange(IEnumerable<string> paths)
+    {
+        int addedCount = 0;
+        foreach (string path in paths)
+        {
+            if (Add(path))
+            {
+                addedCount++;
+            }
+        }
+        return addedCount;
+    }
+
     public bool Remove(string? path)
     {
         if (string.IsNullOrWhiteSpace(path) || !_paths.Remove(path))
@@ -70,13 +83,28 @@ public sealed class MarkSelectionState : IReadOnlyCollection<string>
 
     public void Restore(IEnumerable<string>? paths)
     {
-        Clear();
-        if (paths == null) return;
+        ReplaceWith(paths);
+    }
 
-        foreach (var path in paths)
+    public void ReplaceWith(IEnumerable<string>? paths)
+    {
+        var replacement = new List<string>();
+        var replacementSet = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        if (paths != null)
         {
-            Add(path);
+            foreach (string? path in paths)
+            {
+                if (!string.IsNullOrWhiteSpace(path) && replacementSet.Add(path))
+                {
+                    replacement.Add(path);
+                }
+            }
         }
+
+        _paths.Clear();
+        _orderedPaths.Clear();
+        _paths.UnionWith(replacementSet);
+        _orderedPaths.AddRange(replacement);
     }
 
     public IReadOnlyList<string> Snapshot()

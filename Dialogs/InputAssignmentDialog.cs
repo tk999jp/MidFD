@@ -543,7 +543,8 @@ public sealed class InputAssignmentDialog : Form
             id.Equals(CommandIds.AppOpenControlPanel, StringComparison.OrdinalIgnoreCase) ||
             id.Equals(CommandIds.AppOpenSettings, StringComparison.OrdinalIgnoreCase) ||
             id.Equals(CommandIds.AppOpenCommandLauncher, StringComparison.OrdinalIgnoreCase) ||
-            id.Equals(CommandIds.AppOpenCommandList, StringComparison.OrdinalIgnoreCase))
+            id.Equals(CommandIds.AppOpenCommandList, StringComparison.OrdinalIgnoreCase) ||
+            id.Equals(CommandIds.AppOpenManagedTrash, StringComparison.OrdinalIgnoreCase))
         {
             return "アプリ / ヘルプ";
         }

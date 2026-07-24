@@ -1,6 +1,7 @@
 ﻿using System;
 using System.Collections.Generic;
 using MidFD.Services;
+using System.Text.Json.Serialization;
 
 namespace MidFD.Models;
 
@@ -14,6 +15,8 @@ public sealed class BrowserTabState
     public bool IsReadOnly { get; set; }
     public TabFilterLockState FilterLock { get; set; } = new();
     public List<string> MarkedPaths { get; set; } = new();
+    [JsonIgnore]
+    public bool MarksDirty { get; set; }
     public NavigationService.NavigationSnapshot Navigation { get; set; } = new();
     public string? FocusTargetName { get; set; }
     public int CursorIndex { get; set; }
@@ -33,6 +36,7 @@ public sealed class BrowserTabState
             IsReadOnly = IsReadOnly,
             FilterLock = FilterLock?.Clone() ?? new TabFilterLockState(),
             MarkedPaths = new List<string>(MarkedPaths),
+            MarksDirty = MarksDirty,
             Navigation = Navigation,
             FocusTargetName = FocusTargetName,
             CursorIndex = CursorIndex,

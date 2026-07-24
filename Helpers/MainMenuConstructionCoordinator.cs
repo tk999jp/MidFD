@@ -70,6 +70,7 @@ internal sealed class MainMenuConstructionCoordinator
         public required Action OpenWorkspaceSnapshotDialog { get; init; }
         public required Action ShowSystemInformation { get; init; }
         public required Action OpenSettings { get; init; }
+        public required Action OpenManagedTrashDialog { get; init; }
         public required Action ShowMenuKeyHint { get; init; }
         public required Action ShowCommandList { get; init; }
         public required Action ShowVersionInfo { get; init; }
@@ -102,6 +103,7 @@ internal sealed class MainMenuConstructionCoordinator
         fileMenu.DropDownItems.Add(context.CreateMenuItem("名前変更(&R)", (s, e) => context.ExecuteRename(), browserOnly: true, requiresIdle: true, requiresSelection: true, requiresFile: false, requiresEditorTarget: false, requiresExactlyTwoSelection: false, requiresTwoFiles: false, shortcutHint: context.GetFunctionAwareShortcutHint(FunctionKeyAction.Rename, "R", null)));
         fileMenu.DropDownItems.Add(context.CreateMenuItem("削除(&D)", (s, e) => context.ExecuteDelete(), browserOnly: true, requiresIdle: true, requiresSelection: true, requiresFile: false, requiresEditorTarget: false, requiresExactlyTwoSelection: false, requiresTwoFiles: false, shortcutHint: "D / Delete"));
         fileMenu.DropDownItems.Add(context.CreateMenuItem("MidFD管理ゴミ箱を空にする(&T)", (s, e) => context.EmptyMidFdManagedTrash(), browserOnly: true, requiresIdle: true, requiresSelection: false, requiresFile: false, requiresEditorTarget: false, requiresExactlyTwoSelection: false, requiresTwoFiles: false, shortcutHint: null));
+        fileMenu.DropDownItems.Add(context.CreateMenuItem("MidFD管理ゴミ箱を確認(&G)...", (s, e) => context.OpenManagedTrashDialog(), browserOnly: true, requiresIdle: true, requiresSelection: false, requiresFile: false, requiresEditorTarget: false, requiresExactlyTwoSelection: false, requiresTwoFiles: false, shortcutHint: null));
         fileMenu.DropDownItems.Add(new ToolStripSeparator());
         fileMenu.DropDownItems.Add(context.CreateMenuItem("新規フォルダ(&K)", (s, e) => context.ExecuteCreateDirectory(), browserOnly: true, requiresIdle: true, requiresSelection: false, requiresFile: false, requiresEditorTarget: false, requiresExactlyTwoSelection: false, requiresTwoFiles: false, shortcutHint: context.GetFunctionAwareShortcutHint(FunctionKeyAction.None, "K", "Shift+F5")));
         fileMenu.DropDownItems.Add(context.CreateMenuItem("新規ファイル(&N)", (s, e) => context.ExecuteCreateFile(), browserOnly: true, requiresIdle: true, requiresSelection: false, requiresFile: false, requiresEditorTarget: false, requiresExactlyTwoSelection: false, requiresTwoFiles: false, shortcutHint: "N"));
@@ -165,6 +167,7 @@ internal sealed class MainMenuConstructionCoordinator
         {
             toolsMenu.DropDownItems.Add(context.CreateMenuItem("Workspace スナップショット...(&W)", (s, e) => context.OpenWorkspaceSnapshotDialog(), browserOnly: true, requiresIdle: true, requiresSelection: false, requiresFile: false, requiresEditorTarget: false, requiresExactlyTwoSelection: false, requiresTwoFiles: false, shortcutHint: null));
         }
+        toolsMenu.DropDownItems.Add(context.CreateMenuItem("MidFD管理ゴミ箱(&T)...", (s, e) => context.OpenManagedTrashDialog(), browserOnly: true, requiresIdle: true, requiresSelection: false, requiresFile: false, requiresEditorTarget: false, requiresExactlyTwoSelection: false, requiresTwoFiles: false, shortcutHint: null));
         toolsMenu.DropDownItems.Add(context.CreateMenuItem("情報(&I)...", (s, e) => context.ShowSystemInformation(), browserOnly: true, requiresIdle: false, requiresSelection: false, requiresFile: false, requiresEditorTarget: false, requiresExactlyTwoSelection: false, requiresTwoFiles: false, shortcutHint: null));
         toolsMenu.DropDownItems.Add(new ToolStripSeparator());
         toolsMenu.DropDownItems.Add(context.CreateMenuItem("設定(&O)", (s, e) => context.OpenSettings(), browserOnly: false, requiresIdle: false, requiresSelection: false, requiresFile: false, requiresEditorTarget: false, requiresExactlyTwoSelection: false, requiresTwoFiles: false, shortcutHint: context.GetFunctionAwareShortcutHint(FunctionKeyAction.None, "O", "Alt+F5")));

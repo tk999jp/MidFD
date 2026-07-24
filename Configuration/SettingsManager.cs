@@ -14,12 +14,27 @@ public static class SettingsManager
     {
         public bool IsProfileExplicit { get; init; }
         public bool IsMouseGesturesExplicit { get; init; }
+        public SettingsLoadKind LoadKind { get; set; } = SettingsLoadKind.UnknownFailure;
     }
 
-    private static readonly string SettingsFilePath;
-    private static readonly string SettingsDbPath;
-    private static readonly SettingsSqliteStore SettingsStore;
+    public enum SettingsLoadKind
+    {
+        TrueFirstLaunch,
+        NormalPrimary,
+        RecoveredFromBackup,
+        RecoveryFailed,
+        UnknownFailure
+    }
+
+    private static string SettingsFilePath;
+    private static string SettingsDbPath;
+    private static string SettingsBackupDirectory;
+    private static SettingsSqliteStore SettingsStore;
     private static readonly StorageProfileActivation StorageActivation;
+    private static string? _lastReportedSaveFailureKey;
+    private static SettingsRecoveryState? _recoveryState;
+    private static PayloadProtectionState? _payloadProtectionState;
+    public static event Action<SettingsSqliteStore.SettingsSaveResult>? SaveFailed;
 
     static SettingsManager()
     {
@@ -35,12 +50,55 @@ public static class SettingsManager
 
         SettingsFilePath = paths.SettingsJsonPath;
         SettingsDbPath = paths.SettingsDbPath;
-        SettingsStore = new SettingsSqliteStore(SettingsDbPath, SettingsFilePath);
+        SettingsBackupDirectory = paths.BackupDirectory;
+        SettingsStore = new SettingsSqliteStore(SettingsDbPath, SettingsFilePath, SettingsBackupDirectory);
     }
 
     internal static string CurrentSettingsFilePath => SettingsFilePath;
     internal static string CurrentSettingsDbPath => SettingsDbPath;
     internal static StorageProfileActivation CurrentStorageProfileActivation => StorageActivation;
+    internal static SettingsRecoveryState? CurrentRecoveryState => _recoveryState;
+
+    internal static IDisposable UseStoreForTest(SettingsSqliteStore store, string dbPath, string jsonPath)
+    {
+        ArgumentNullException.ThrowIfNull(store);
+        string previousDbPath = SettingsDbPath;
+        string previousJsonPath = SettingsFilePath;
+        string previousBackupDirectory = SettingsBackupDirectory;
+        SettingsSqliteStore previousStore = SettingsStore;
+        SettingsRecoveryState? previousRecoveryState = _recoveryState;
+        PayloadProtectionState? previousPayloadProtectionState = _payloadProtectionState;
+        SettingsDbPath = Path.GetFullPath(dbPath);
+        SettingsFilePath = Path.GetFullPath(jsonPath);
+        SettingsBackupDirectory = Path.Combine(Path.GetDirectoryName(SettingsDbPath) ?? AppContext.BaseDirectory, "Backups");
+        SettingsStore = store;
+        _recoveryState = null;
+        _payloadProtectionState = null;
+        return new TestStoreScope(previousStore, previousDbPath, previousJsonPath, previousBackupDirectory, previousRecoveryState, previousPayloadProtectionState);
+    }
+
+    private sealed class TestStoreScope(
+        SettingsSqliteStore store,
+        string dbPath,
+        string jsonPath,
+        string backupDirectory,
+        SettingsRecoveryState? recoveryState,
+        PayloadProtectionState? payloadProtectionState) : IDisposable
+    {
+        private bool _disposed;
+
+        public void Dispose()
+        {
+            if (_disposed) return;
+            _disposed = true;
+            SettingsStore = store;
+            SettingsDbPath = dbPath;
+            SettingsFilePath = jsonPath;
+            SettingsBackupDirectory = backupDirectory;
+            _recoveryState = recoveryState;
+            _payloadProtectionState = payloadProtectionState;
+        }
+    }
 
     public static AppSettings Load()
     {
@@ -52,12 +110,20 @@ public static class SettingsManager
         try
         {
             SettingsSqliteStore.SettingsLoadResult loadResult = SettingsStore.Load();
+            _recoveryState = CreateRecoveryState(loadResult);
+            _payloadProtectionState = loadResult.PrimaryPayloadProtected
+                ? new PayloadProtectionState(
+                    loadResult.ProtectedPrimaryPayloadVersion ?? loadResult.PayloadVersion,
+                    loadResult.RecoveredFromBackup,
+                    Notified: false)
+                : null;
             metadata = loadResult.Metadata;
             AppSettings loadedSettings = loadResult.Settings ?? new AppSettings();
+            loadedSettings.NormalizeChildren();
             MaterializeBrowserTabRestoreState(loadedSettings);
             bool videoStillMigrated = ApplyVideoStillInitialSecondsMigration(loadedSettings);
             bool loggingMigrated = ApplyLoggingDefaultOffMigration(loadedSettings);
-            if (videoStillMigrated || loggingMigrated)
+            if (loadResult.CanWritePrimary && !loadResult.RecoveredFromBackup && (videoStillMigrated || loggingMigrated))
             {
                 Save(loadedSettings);
             }
@@ -66,6 +132,9 @@ public static class SettingsManager
         }
         catch (Exception ex)
         {
+            _recoveryState = new SettingsRecoveryState(
+                "設定データを読み込めなかったため、既定値で起動しました。設定を保存すると新しい設定DBが作成されます。");
+            _payloadProtectionState = null;
             LogService.Error("Failed to load settings.", ex);
             // 設定ファイルが壊れていても起動不能にしないため、デフォルトを返す
             metadata = new SettingsLoadMetadata();
@@ -73,17 +142,104 @@ public static class SettingsManager
         }
     }
 
+    internal static SettingsRecoveryState? CreateRecoveryState(SettingsSqliteStore.SettingsLoadResult loadResult)
+    {
+        if (loadResult.PrimaryPayloadProtected)
+        {
+            string detected = loadResult.ProtectedPrimaryPayloadVersion?.ToString() ?? "不明";
+            string backup = loadResult.RecoveredFromBackup ? "対応するbackupから復旧しました。" : "対応するbackupは見つかりませんでした。";
+            return new SettingsRecoveryState(
+                $"未対応の設定形式(PayloadVersion={detected}、対応={SettingsSqliteStore.CurrentPayloadVersion})を検出しました。{backup}自動保存を抑止し、明示保存時に現行形式への置換を確認します。",
+                loadResult.RecoveredFromBackup,
+                true);
+        }
+        if (loadResult.Metadata.LoadKind == SettingsLoadKind.TrueFirstLaunch)
+        {
+            return null;
+        }
+        if (loadResult.RecoveredFromBackup)
+        {
+            return new SettingsRecoveryState("設定データが破損していたため、バックアップから復旧して起動しました。", true);
+        }
+        if (loadResult.CanWritePrimary) return null;
+        string message = loadResult.Status switch
+        {
+            SettingsSqliteStore.SettingsLoadStatus.UnsupportedVersion => "設定データを読み込めなかったため、既定値で起動しました。設定を保存すると新しい設定DBが作成されます。",
+            SettingsSqliteStore.SettingsLoadStatus.Corrupt => "設定データを読み込めなかったため、既定値で起動しました。設定を保存すると新しい設定DBが作成されます。",
+            SettingsSqliteStore.SettingsLoadStatus.IoFailure => "設定データを読み込めなかったため、既定値で起動しました。設定を保存すると新しい設定DBが作成されます。",
+            _ => "設定データを読み込めなかったため、既定値で起動しました。設定を保存すると新しい設定DBが作成されます。"
+        };
+        return new SettingsRecoveryState(message);
+    }
+
     public static void Save(AppSettings settings)
     {
+        SettingsSqliteStore.SettingsSaveResult result = TrySave(settings);
+        if (!result.SuppressedByPayloadProtection && (!result.Succeeded || !result.BackupSucceeded)) ReportSaveFailure(result);
+    }
+
+    private static void ReportSaveFailure(SettingsSqliteStore.SettingsSaveResult result)
+    {
+        string key = $"{result.Status}:{result.DiagnosticDetail}";
+        if (string.Equals(Interlocked.Exchange(ref _lastReportedSaveFailureKey, key), key, StringComparison.Ordinal)) return;
+        SaveFailed?.Invoke(result);
+    }
+
+    public enum SettingsSaveIntent { Automatic, Explicit }
+
+    public sealed record PayloadProtectionInfo(int? PayloadVersion, bool RecoveredFromBackup);
+
+    public static bool IsPayloadProtected => _payloadProtectionState != null;
+
+    public static PayloadProtectionInfo? CurrentPayloadProtection => _payloadProtectionState is { } state
+        ? new PayloadProtectionInfo(state.PayloadVersion, state.RecoveredFromBackup)
+        : null;
+
+    public static SettingsSqliteStore.SettingsSaveResult TrySave(
+        AppSettings settings,
+        SettingsSaveIntent intent = SettingsSaveIntent.Automatic,
+        bool allowProtectedReplacement = false)
+    {
+        if (_payloadProtectionState != null && intent == SettingsSaveIntent.Automatic)
+        {
+            return new SettingsSqliteStore.SettingsSaveResult(
+                SettingsSqliteStore.SettingsSaveStatus.SuppressedByPayloadProtection,
+                SettingsDbPath,
+                "未対応の設定形式を保護中のため、自動保存を抑止しました。設定画面の明示保存で置換を確認してください。",
+                "Primary payload protection is active.");
+        }
+
+        if (_payloadProtectionState != null && !allowProtectedReplacement)
+        {
+            return new SettingsSqliteStore.SettingsSaveResult(
+                SettingsSqliteStore.SettingsSaveStatus.PayloadReplacementConfirmationRequired,
+                SettingsDbPath,
+                "未対応の設定形式を保護中です。現行形式へ置換する確認が必要です。",
+                "Primary payload replacement confirmation is required.");
+        }
+
         try
         {
             AppSettings persistableSettings = BuildPersistableSettings(settings);
-            SettingsStore.Save(persistableSettings);
+            SettingsSqliteStore.SettingsSaveResult result = SettingsStore.TrySave(persistableSettings, new SettingsLoadMetadata
+            {
+                IsProfileExplicit = true,
+                IsMouseGesturesExplicit = true
+            });
+            if (result.PrimarySaved && _payloadProtectionState != null)
+            {
+                _payloadProtectionState = null;
+            }
+            return result;
         }
         catch (Exception ex)
         {
             LogService.Error("Failed to save settings.", ex);
-            // 保存失敗時もUIをクラッシュさせない
+            return new SettingsSqliteStore.SettingsSaveResult(
+                SettingsSqliteStore.SettingsSaveStatus.UnknownFailure,
+                SettingsDbPath,
+                "設定を保存できませんでした。",
+                ex.Message);
         }
     }
 
@@ -101,6 +257,39 @@ public static class SettingsManager
         NormalizeAllTabHistories(persistableSettings);
         return persistableSettings;
     }
+
+    public static SettingsSqliteStore.SettingsTransferResult Export(string targetPath, AppSettings settings)
+    {
+        ArgumentNullException.ThrowIfNull(settings);
+        return SettingsStore.Export(targetPath, BuildPersistableSettings(settings), new SettingsLoadMetadata
+        {
+            IsProfileExplicit = true,
+            IsMouseGesturesExplicit = true
+        });
+    }
+
+    public static SettingsSqliteStore.SettingsTransferResult Import(string sourcePath)
+    {
+        SettingsSqliteStore.SettingsTransferResult result = ReadImport(sourcePath);
+        if (!result.Succeeded || result.Settings == null) return result;
+        return ApplyImportedSettings(result.Settings);
+    }
+
+    public static SettingsSqliteStore.SettingsTransferResult ReadImport(string sourcePath)
+    {
+        return SettingsStore.Import(sourcePath);
+    }
+
+    public static SettingsSqliteStore.SettingsTransferResult ApplyImportedSettings(AppSettings settings, bool allowProtectedReplacement = false)
+    {
+        ArgumentNullException.ThrowIfNull(settings);
+        SettingsSqliteStore.SettingsSaveResult saveResult = TrySave(settings, SettingsSaveIntent.Explicit, allowProtectedReplacement);
+        return saveResult.Succeeded
+            ? new SettingsSqliteStore.SettingsTransferResult(true, string.Empty, null, settings, saveResult.BackupSucceeded)
+            : new SettingsSqliteStore.SettingsTransferResult(false, saveResult.UserMessage, saveResult.DiagnosticDetail, null, false);
+    }
+
+    private sealed record PayloadProtectionState(int? PayloadVersion, bool RecoveredFromBackup, bool Notified);
 
     private static bool ApplyVideoStillInitialSecondsMigration(AppSettings settings)
     {
@@ -559,3 +748,5 @@ public static class SettingsManager
     }
 
 }
+
+internal sealed record SettingsRecoveryState(string UserMessage, bool IsBackupRecovery = false, bool IsPayloadProtection = false);

@@ -53,10 +53,21 @@ public static class DragArchiveService
 
         Directory.CreateDirectory(fullOutputDir);
 
+        // sourcePathsのクリーンアップ後、manifest／ZIP共通のroot filterを適用する。
+        var cleanedSourcePaths = FilterSourcePaths(CleanSourcePaths(sourcePaths));
+        if (cleanedSourcePaths.Count == 0)
+        {
+            throw new InvalidOperationException("圧縮対象がありません。リンク先を追跡せず、空のDrag ZIPは作成しません。");
+        }
+
         // 1. マニフェストの収集とハッシュ計算
         var manifest = new List<ManifestEntry>();
-        string normalizedBaseDirectory = GetCommonBaseDirectory(sourcePaths);
-        CollectManifest(normalizedBaseDirectory, sourcePaths, manifest);
+        string normalizedBaseDirectory = GetCommonBaseDirectory(cleanedSourcePaths);
+        CollectManifest(normalizedBaseDirectory, cleanedSourcePaths, manifest);
+        if (!manifest.Any(static entry => string.Equals(entry.Type, "File", StringComparison.Ordinal)))
+        {
+            throw new InvalidOperationException("圧縮対象ファイルがありません。リンク先を追跡せず、空のDrag ZIPは作成しません。");
+        }
 
         // 相対パスの昇順でソートして安定化
         manifest.Sort((a, b) => string.Compare(a.RelativePath, b.RelativePath, StringComparison.Ordinal));
@@ -111,10 +122,10 @@ public static class DragArchiveService
 
         try
         {
-            var entries = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var entries = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
             using (var archive = ZipFile.Open(tempZipPath, ZipArchiveMode.Create))
             {
-                foreach (var sourcePath in sourcePaths)
+                foreach (var sourcePath in cleanedSourcePaths)
                 {
                     // CollectManifest ですでに検証済みのため、ここではそのまま追加
                     if (Directory.Exists(sourcePath))
@@ -253,13 +264,13 @@ public static class DragArchiveService
 
     private static void CollectManifest(string baseDirectory, IReadOnlyList<string> sourcePaths, List<ManifestEntry> manifest)
     {
-        var entries = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var entries = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
 
         foreach (var sourcePath in sourcePaths)
         {
             if (ReparsePointHelper.IsReparsePoint(sourcePath))
             {
-                throw new InvalidOperationException($"シンボリックリンクまたはジャンクションが検出されたため、圧縮を中止しました。\n対象: {sourcePath}");
+                continue;
             }
 
             if (Directory.Exists(sourcePath))
@@ -273,11 +284,14 @@ public static class DragArchiveService
         }
     }
 
-    private static void CollectDirectoryManifest(string dirPath, string baseDirectory, HashSet<string> entries, List<ManifestEntry> manifest)
+    private static void CollectDirectoryManifest(string dirPath, string baseDirectory, Dictionary<string, string> entries, List<ManifestEntry> manifest)
     {
         string relativeDir = GetSafeRelativeEntryPath(baseDirectory, dirPath, true);
-        if (entries.Add(relativeDir))
+        string fullDirPath = Path.GetFullPath(dirPath);
+
+        if (!entries.ContainsKey(relativeDir))
         {
+            entries.Add(relativeDir, fullDirPath);
             var di = new DirectoryInfo(dirPath);
             manifest.Add(new ManifestEntry
             {
@@ -286,6 +300,10 @@ public static class DragArchiveService
                 Size = 0,
                 LastWriteTimeUtc = di.LastWriteTimeUtc
             });
+        }
+        else
+        {
+            return;
         }
 
         string[] files;
@@ -301,7 +319,7 @@ public static class DragArchiveService
         {
             if (ReparsePointHelper.IsReparsePoint(file))
             {
-                throw new InvalidOperationException($"シンボリックリンクまたはジャンクションが検出されたため、圧縮を中止しました。\n対象: {file}");
+                continue;
             }
 
             if (Directory.Exists(file))
@@ -315,22 +333,34 @@ public static class DragArchiveService
         }
     }
 
-    private static void CollectFileManifest(string filePath, string baseDirectory, HashSet<string> entries, List<ManifestEntry> manifest)
+    private static void CollectFileManifest(string filePath, string baseDirectory, Dictionary<string, string> entries, List<ManifestEntry> manifest)
     {
         try
         {
             string relativePath = GetSafeRelativeEntryPath(baseDirectory, filePath, false);
-            if (entries.Add(relativePath))
+            string fullPath = Path.GetFullPath(filePath);
+
+            if (entries.TryGetValue(relativePath, out var existingPath))
             {
-                var fi = new FileInfo(filePath);
-                manifest.Add(new ManifestEntry
+                if (string.Equals(existingPath, fullPath, StringComparison.OrdinalIgnoreCase))
                 {
-                    RelativePath = relativePath,
-                    Type = "File",
-                    Size = fi.Length,
-                    LastWriteTimeUtc = fi.LastWriteTimeUtc
-                });
+                    return;
+                }
+                else
+                {
+                    throw new InvalidOperationException($"異なる実体ファイルが同名のエントリとして衝突しています。\nエントリ: {relativePath}\n既存: {existingPath}\n新規: {fullPath}");
+                }
             }
+
+            entries.Add(relativePath, fullPath);
+            var fi = new FileInfo(filePath);
+            manifest.Add(new ManifestEntry
+            {
+                RelativePath = relativePath,
+                Type = "File",
+                Size = fi.Length,
+                LastWriteTimeUtc = fi.LastWriteTimeUtc
+            });
         }
         catch (Exception ex) when (IsAccessDeniedLike(ex))
         {
@@ -338,15 +368,17 @@ public static class DragArchiveService
         }
     }
 
-    private static void AddDirectory(ZipArchive archive, string dirPath, string baseDirectory, HashSet<string> entries)
+    private static void AddDirectory(ZipArchive archive, string dirPath, string baseDirectory, Dictionary<string, string> entries)
     {
         string relativeDir = GetSafeRelativeEntryPath(baseDirectory, dirPath, true);
+        string fullDirPath = Path.GetFullPath(dirPath);
 
-        if (!entries.Add(relativeDir))
+        if (entries.TryGetValue(relativeDir, out var existingPath))
         {
-            throw new InvalidOperationException($"同名のエントリが既に存在します: {relativeDir}");
+            return;
         }
 
+        entries.Add(relativeDir, fullDirPath);
         archive.CreateEntry(relativeDir);
 
         string[] files;
@@ -360,6 +392,10 @@ public static class DragArchiveService
         }
         foreach (var file in files)
         {
+            if (ReparsePointHelper.IsReparsePoint(file))
+            {
+                continue;
+            }
             if (Directory.Exists(file))
             {
                 AddDirectory(archive, file, baseDirectory, entries);
@@ -371,16 +407,26 @@ public static class DragArchiveService
         }
     }
 
-    private static void AddFile(ZipArchive archive, string filePath, string baseDirectory, HashSet<string> entries)
+    private static void AddFile(ZipArchive archive, string filePath, string baseDirectory, Dictionary<string, string> entries)
     {
         try
         {
             string relativePath = GetSafeRelativeEntryPath(baseDirectory, filePath, false);
-            if (!entries.Add(relativePath))
+            string fullPath = Path.GetFullPath(filePath);
+
+            if (entries.TryGetValue(relativePath, out var existingPath))
             {
-                throw new InvalidOperationException($"同名のエントリが既に存在します: {relativePath}");
+                if (string.Equals(existingPath, fullPath, StringComparison.OrdinalIgnoreCase))
+                {
+                    return;
+                }
+                else
+                {
+                    throw new InvalidOperationException($"異なる実体ファイルが同名のエントリとして衝突しています。\nエントリ: {relativePath}\n既存: {existingPath}\n新規: {fullPath}");
+                }
             }
 
+            entries.Add(relativePath, fullPath);
             archive.CreateEntryFromFile(filePath, relativePath, CompressionLevel.Optimal);
         }
         catch (Exception ex) when (IsAccessDeniedLike(ex))
@@ -408,6 +454,70 @@ public static class DragArchiveService
         }
 
         return isDirectory ? relativePath.TrimEnd('/') + "/" : relativePath;
+    }
+
+    private static IReadOnlyList<string> CleanSourcePaths(IReadOnlyList<string> sourcePaths)
+    {
+        if (sourcePaths == null || sourcePaths.Count == 0)
+        {
+            return Array.Empty<string>();
+        }
+
+        var uniquePaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var path in sourcePaths)
+        {
+            if (!string.IsNullOrWhiteSpace(path))
+            {
+                uniquePaths.Add(Path.GetFullPath(path));
+            }
+        }
+
+        var list = new List<string>(uniquePaths);
+        list.Sort((a, b) => a.Length.CompareTo(b.Length));
+
+        var result = new List<string>();
+        foreach (var path in list)
+        {
+            bool hasParent = false;
+            foreach (var parent in result)
+            {
+                if (Directory.Exists(parent))
+                {
+                    string parentDir = parent.EndsWith(Path.DirectorySeparatorChar) ? parent : parent + Path.DirectorySeparatorChar;
+                    if (path.StartsWith(parentDir, StringComparison.OrdinalIgnoreCase))
+                    {
+                        hasParent = true;
+                        break;
+                    }
+                }
+            }
+            if (!hasParent)
+            {
+                result.Add(path);
+            }
+        }
+
+        return result;
+    }
+
+    private static IReadOnlyList<string> FilterSourcePaths(IReadOnlyList<string> sourcePaths)
+    {
+        var result = new List<string>();
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (string sourcePath in sourcePaths)
+        {
+            if ((!File.Exists(sourcePath) && !Directory.Exists(sourcePath)) || ReparsePointHelper.IsReparsePoint(sourcePath))
+            {
+                continue;
+            }
+
+            string identity = Path.GetFullPath(sourcePath).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+            if (seen.Add(identity))
+            {
+                result.Add(sourcePath);
+            }
+        }
+        return result;
     }
 
     private static bool IsDriveRootDirectory(string path)

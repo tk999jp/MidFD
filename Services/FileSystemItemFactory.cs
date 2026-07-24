@@ -1,5 +1,6 @@
 ﻿using System.IO;
 using System.Drawing;
+using System.Globalization;
 using System.Windows.Forms;
 using MidFD.Models;
 
@@ -58,7 +59,9 @@ public static class FileSystemItemFactory
     {
         return sizeFormat switch
         {
-            "Bytes" => $"{length:#,0} B",
+            "Bytes" => length < 10_000
+                ? length.ToString(CultureInfo.InvariantCulture)
+                : length.ToString("#,0", CultureInfo.InvariantCulture),
             "KB/MB" => FormatCompactSize(length),
             _ => FileOperationService.FormatSize(length)
         };

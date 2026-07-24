@@ -79,7 +79,10 @@ public partial class MainForm
                 {
                     return Task.Run(() =>
                     {
-                        var all = Services.BrowserPathEntryCandidateService.BuildCandidates(_navigationService, _quickAccessStore);
+                        var all = Services.BrowserPathEntryCandidateService.BuildCandidates(
+                            _navigationService,
+                            _quickAccessStore,
+                            GetSharedDirectoryMoveHistory());
                         if (string.IsNullOrWhiteSpace(text))
                         {
                             return all.ToList();
@@ -92,6 +95,24 @@ public partial class MainForm
                         var remaining = all.Except(filtered, StringComparer.OrdinalIgnoreCase);
                         return filtered.Concat(remaining).ToList();
                     }, token);
+                },
+                IsInsideExternalControl = point =>
+                    _browserPathEntryGoButton != null &&
+                    !_browserPathEntryGoButton.IsDisposed &&
+                    _browserPathEntryGoButton.RectangleToScreen(_browserPathEntryGoButton.ClientRectangle).Contains(point),
+                OutsideClick = () =>
+                {
+                    if (_browserPathEntryTextBox == null || _browserPathEntryTextBox.IsDisposed)
+                    {
+                        return;
+                    }
+                    BeginInvoke(new Action(() =>
+                    {
+                        if (IsBrowserPathEntryActive())
+                        {
+                            CancelBrowserPathEntry();
+                        }
+                    }));
                 }
             });
         _browserPathEntryTextBox.KeyDown += BrowserPathEntryTextBox_KeyDown;
@@ -117,6 +138,10 @@ public partial class MainForm
 
         LayoutBrowserPathEntryControls();
         lblPath.Visible = false;
+        if (_breadcrumbPathControl != null)
+        {
+            _breadcrumbPathControl.Visible = false;
+        }
         _browserPathEntryTextBox.Visible = true;
         _browserPathEntryGoButton.Visible = true;
         _browserPathEntryTextBox.BringToFront();
@@ -269,9 +294,7 @@ public partial class MainForm
             _navigationService,
             navigateDirectory: path =>
             {
-                ExecuteDirectoryNavigationRequest(
-                    _browserNavigationCoordinator.CreateDirectoryNavigationRequest(path),
-                    onDirectoryMissing: missingPath => ShowStatusMessage(BrowserPathEntryNavigationService.BuildMissingPathMessage(missingPath), 2000));
+                NavigateToLocationDirectory(path);
             },
             openFile: TryOpenBrowserPathEntryFile);
 
@@ -316,7 +339,7 @@ public partial class MainForm
             }
             _browserPathEntryTextBox.Visible = false;
             _browserPathEntryGoButton.Visible = false;
-            lblPath.Visible = true;
+            ApplyPathDisplayMode();
         }
         finally
         {
@@ -324,5 +347,13 @@ public partial class MainForm
         }
 
         fileListView.Focus();
+    }
+
+    private bool NavigateToLocationDirectory(string resolvedPath)
+    {
+        return ExecuteDirectoryNavigationRequest(
+            _browserNavigationCoordinator.CreateDirectoryNavigationRequest(resolvedPath),
+            onNavigationSucceeded: () => AddDirectoryMoveHistory(resolvedPath),
+            onDirectoryMissing: missingPath => ShowStatusMessage(BrowserPathEntryNavigationService.BuildMissingPathMessage(missingPath), 2000));
     }
 }

@@ -20,6 +20,7 @@ public class SettingsForm : Form
     private readonly AppSettings _settings;
 
     private readonly TextBox _sevenZipPathBox;
+    private readonly ComboBox _packDialogModeCombo;
     private readonly TextBox _diffPathBox;
     private readonly TextBox _editorPathBox;
     private readonly Label _sevenZipStatusLabel;
@@ -40,6 +41,7 @@ public class SettingsForm : Form
     private readonly CheckBox _useUnderlineCursorCheckBox;
     private readonly CheckBox _showFunctionBarCheckBox;
     private readonly CheckBox _showBrowserToolbarCheckBox;
+    private readonly CheckBox _showPathAsBreadcrumbCheckBox;
     private readonly ComboBox _fileDisplayModeCombo;
     private readonly ComboBox _dateFormatCombo;
     private readonly ComboBox _sizeFormatCombo;
@@ -60,6 +62,7 @@ public class SettingsForm : Form
     private readonly CheckBox _useMidFdManagedTrashCheckBox;
     private readonly CheckBox _managedTrashAutoHandoffCheckBox;
     private readonly NumericUpDown _managedTrashUndoRetentionDaysBox;
+    private readonly ComboBox _managedTrashRetentionPresetBox;
     private readonly CheckBox _reloadAfterFileOperationCheckBox;
     private readonly CheckBox _selectCreatedItemCheckBox;
     private readonly CheckBox _clipboardPasteTextAsFileCheckBox;
@@ -125,7 +128,8 @@ public class SettingsForm : Form
     }
 
     public event EventHandler? SettingsApplied;
-    public event EventHandler? ManualEmptyManagedTrashRequested;
+    public event EventHandler? OpenManagedTrashDialogRequested;
+    public bool ImportedSettingsApplied { get; private set; }
 
     public SettingsForm(AppSettings settings, FeatureProfile effectiveProfile, InitialTab initialTab = InitialTab.Display)
     {
@@ -232,7 +236,7 @@ public class SettingsForm : Form
         tabDisplay.AutoScroll = false;
         tabColor.AutoScroll = false;
 
-        (_filerFontCombo, _filerFontSizeBox, _browserTabFontSizeBox, _browserTabWidthBox, _showBrowserTabCategoryRowCheckBox, _showExtensionsCheckBox, _showDirectoryMarkerCheckBox, _showHiddenFilesCheckBox, _showItemIconsCheckBox, _useUnderlineCursorCheckBox, _showFunctionBarCheckBox, _showBrowserToolbarCheckBox, _fileDisplayModeCombo, _dateFormatCombo, _sizeFormatCombo,
+        (_filerFontCombo, _filerFontSizeBox, _browserTabFontSizeBox, _browserTabWidthBox, _showBrowserTabCategoryRowCheckBox, _showExtensionsCheckBox, _showDirectoryMarkerCheckBox, _showHiddenFilesCheckBox, _showItemIconsCheckBox, _useUnderlineCursorCheckBox, _showFunctionBarCheckBox, _showBrowserToolbarCheckBox, _showPathAsBreadcrumbCheckBox, _fileDisplayModeCombo, _dateFormatCombo, _sizeFormatCombo,
          _viewerFontCombo, _viewerFontSizeBox, _viewerWordWrapCheckBox, _reuseImageViewerCheckBox, _closeImageViewerOnNonImageCheckBox, _rememberImageViewerBoundsCheckBox)
             = BuildDisplayAndPreviewTab(tabDisplay, fonts, dateFormats, sizeFormats);
 
@@ -251,7 +255,7 @@ public class SettingsForm : Form
         _fileListColorWarningLabel = colorTabResult.FileListColorWarningLabel;
         _functionBarPreviewPanel = colorTabResult.FunctionBarPreviewPanel;
 
-        (_confirmDeleteCheckBox, _confirmPermanentDeleteCheckBox, _useMidFdManagedTrashCheckBox, _managedTrashAutoHandoffCheckBox, _managedTrashUndoRetentionDaysBox, _reloadAfterFileOperationCheckBox, _selectCreatedItemCheckBox, _clipboardPasteTextAsFileCheckBox,
+        (_confirmDeleteCheckBox, _confirmPermanentDeleteCheckBox, _useMidFdManagedTrashCheckBox, _managedTrashAutoHandoffCheckBox, _managedTrashUndoRetentionDaysBox, _managedTrashRetentionPresetBox, _reloadAfterFileOperationCheckBox, _selectCreatedItemCheckBox, _clipboardPasteTextAsFileCheckBox,
          _enableMouseGesturesCheckBox)
             = BuildOperationAndInputTab(tabOperation);
 
@@ -262,7 +266,7 @@ public class SettingsForm : Form
         (_restoreStartupStateCheckBox, _restoreTabsOnStartupCheckBox, _restoreLastPathCheckBox, _restoreDisplayStateCheckBox, _restoreWindowBoundsCheckBox, _restoreColumnCountCheckBox, _restoreSortCheckBox)
             = BuildLaunchAndRestoreTab(tabStartupAndLog);
 
-        (_sevenZipPathBox, _diffPathBox, _editorPathBox, _videoPlaybackVolumeCombo, _videoStillPreviewFfmpegPathBox, _videoEnterPlaysExternalCheckBox, _sevenZipStatusLabel, _diffStatusLabel, _editorStatusLabel, _videoStillPreviewFfmpegStatusLabel, _videoStillPreviewEnabledCheckBox, _videoSkipSecondsCombo)
+        (_sevenZipPathBox, _packDialogModeCombo, _diffPathBox, _editorPathBox, _videoPlaybackVolumeCombo, _videoStillPreviewFfmpegPathBox, _videoEnterPlaysExternalCheckBox, _sevenZipStatusLabel, _diffStatusLabel, _editorStatusLabel, _videoStillPreviewFfmpegStatusLabel, _videoStillPreviewEnabledCheckBox, _videoSkipSecondsCombo)
             = BuildExternalTab(tabExternal);
 
         (_enableLogCheckBox, _enableDetailedLogCheckBox) = BuildLogTab(tabStartupAndLog);
@@ -301,12 +305,89 @@ public class SettingsForm : Form
         };
         btnApply.Click += BtnApply_Click;
 
+        var btnExport = new Button
+        {
+            Text = "設定をエクスポート",
+            Size = new Size(124, 32),
+            Location = new Point(0, 10),
+            Anchor = AnchorStyles.Top | AnchorStyles.Left,
+        };
+        btnExport.Click += (_, _) => ExportSettings();
+
+        var btnImport = new Button
+        {
+            Text = "設定をインポート",
+            Size = new Size(124, 32),
+            Location = new Point(132, 10),
+            Anchor = AnchorStyles.Top | AnchorStyles.Left,
+        };
+        btnImport.Click += (_, _) => ImportSettings();
+
         bottomPanel.Controls.Add(btnOk);
         bottomPanel.Controls.Add(btnCancel);
         bottomPanel.Controls.Add(btnApply);
+        bottomPanel.Controls.Add(btnExport);
+        bottomPanel.Controls.Add(btnImport);
 
         AcceptButton = btnOk;
         CancelButton = btnCancel;
+    }
+
+    private void ExportSettings()
+    {
+        using var dialog = new SaveFileDialog
+        {
+            Filter = "MidFD設定 (*.json)|*.json|JSONファイル (*.json)|*.json",
+            FileName = "midfd-settings.json",
+            AddExtension = true
+        };
+        if (dialog.ShowDialog(this) != DialogResult.OK) return;
+        SettingsSqliteStore.SettingsTransferResult result = SettingsManager.Export(dialog.FileName, _settings);
+        if (!result.Succeeded)
+        {
+            MessageBox.Show(this, result.UserMessage, "設定エクスポート", MessageBoxButtons.OK, MessageBoxIcon.Error);
+        }
+    }
+
+    private void ImportSettings()
+    {
+        using var dialog = new OpenFileDialog
+        {
+            Filter = "MidFD設定 (*.json)|*.json|JSONファイル (*.json)|*.json",
+            CheckFileExists = true
+        };
+        if (dialog.ShowDialog(this) != DialogResult.OK) return;
+        SettingsSqliteStore.SettingsTransferResult result = SettingsManager.ReadImport(dialog.FileName);
+        if (!result.Succeeded)
+        {
+            MessageBox.Show(this, result.UserMessage, "設定インポート", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            return;
+        }
+
+        DialogResult confirmation = MessageBox.Show(
+            this,
+            "選択した設定を現在の設定へ適用しますか？",
+            "設定インポート",
+            MessageBoxButtons.YesNo,
+            MessageBoxIcon.Question);
+        if (confirmation != DialogResult.Yes) return;
+
+        if (!ConfirmPayloadReplacement()) return;
+
+        SettingsSqliteStore.SettingsTransferResult applyResult = SettingsManager.ApplyImportedSettings(result.Settings!, allowProtectedReplacement: true);
+        if (!applyResult.Succeeded)
+        {
+            MessageBox.Show(this, applyResult.UserMessage, "設定インポート", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            return;
+        }
+        if (!applyResult.BackupSucceeded)
+        {
+            MessageBox.Show(this, "設定は保存されましたが、バックアップ更新に失敗しました。", "設定インポート", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+        }
+
+        ImportedSettingsApplied = true;
+        DialogResult = DialogResult.OK;
+        Close();
     }
 
     private TabPage CreateTab(string title)
@@ -318,7 +399,7 @@ public class SettingsForm : Form
         };
     }
 
-    private (ComboBox filerFont, NumericUpDown filerSize, NumericUpDown browserTabFontSize, NumericUpDown browserTabWidth, CheckBox showBrowserTabCategoryRow, CheckBox showExtensions, CheckBox showDirectoryMarker, CheckBox showHiddenFiles, CheckBox showItemIcons, CheckBox useUnderlineCursor, CheckBox showFunctionBar, CheckBox showBrowserToolbar, ComboBox fileDisplayMode, ComboBox dateFormat, ComboBox sizeFormat,
+    private (ComboBox filerFont, NumericUpDown filerSize, NumericUpDown browserTabFontSize, NumericUpDown browserTabWidth, CheckBox showBrowserTabCategoryRow, CheckBox showExtensions, CheckBox showDirectoryMarker, CheckBox showHiddenFiles, CheckBox showItemIcons, CheckBox useUnderlineCursor, CheckBox showFunctionBar, CheckBox showBrowserToolbar, CheckBox showPathAsBreadcrumb, ComboBox fileDisplayMode, ComboBox dateFormat, ComboBox sizeFormat,
              ComboBox viewerFont, NumericUpDown viewerSize, CheckBox viewerWordWrap, CheckBox reuseImageViewer, CheckBox closeOnNonImage, CheckBox rememberBounds)
         BuildDisplayAndPreviewTab(TabPage tab, string[] fonts, string[] dateFormats, string[] sizeFormats)
     {
@@ -331,7 +412,7 @@ public class SettingsForm : Form
         int topY = 22;
 
         // --- Left: List Display ---
-        var groupList = new GroupBox { Text = "一覧表示", Location = new Point(8, 6), Size = new Size(500, 520) };
+        var groupList = new GroupBox { Text = "一覧表示", Location = new Point(8, 6), Size = new Size(500, 610) };
         tab.Controls.Add(groupList);
 
         int top = topY;
@@ -411,6 +492,8 @@ public class SettingsForm : Form
         checkY += 24;
         var showBrowserToolbar = AddCheckBox(groupList, "上部の戻る・進む・上へ・更新ボタンを表示する", 16, checkY, _settings.Appearance.ShowBrowserToolbar);
         checkY += 24;
+        var showPathAsBreadcrumb = AddCheckBox(groupList, "パスをパンくず形式で表示", 16, checkY, _settings.Appearance.ShowPathAsBreadcrumb);
+        checkY += 24;
         var showFunctionBar = AddCheckBox(groupList, "下部のファンクションバーを表示する", 16, checkY, _settings.Appearance.ShowFunctionBar);
         top = checkY + 28;
 
@@ -487,11 +570,11 @@ public class SettingsForm : Form
         var rememberBounds = AddCheckBox(groupViewer, "ビューアの位置/サイズを記憶する", checkX, top, _settings.Preview.RememberImageViewerBounds);
         groupViewer.Height = rememberBounds.Bottom + 16;
 
-        return (filerFont, filerSize, browserTabFontSize, browserTabWidth, showBrowserTabCategoryRow, showExtensions, showDirectoryMarker, showHiddenFiles, showItemIcons, useUnderlineCursor, showFunctionBar, showBrowserToolbar, fileDisplayMode, dateFormat, sizeFormat,
+        return (filerFont, filerSize, browserTabFontSize, browserTabWidth, showBrowserTabCategoryRow, showExtensions, showDirectoryMarker, showHiddenFiles, showItemIcons, useUnderlineCursor, showFunctionBar, showBrowserToolbar, showPathAsBreadcrumb, fileDisplayMode, dateFormat, sizeFormat,
                 viewerFont, viewerSize, viewerWordWrap, reuseImageViewer, closeOnNonImage, rememberBounds);
     }
 
-    private (CheckBox confirmDelete, CheckBox confirmPermanentDelete, CheckBox useMidFdManagedTrash, CheckBox managedTrashAutoHandoff, NumericUpDown managedTrashUndoRetentionDays, CheckBox reloadAfterFileOperation, CheckBox selectCreatedItem, CheckBox clipboardPasteTextAsFile,
+    private (CheckBox confirmDelete, CheckBox confirmPermanentDelete, CheckBox useMidFdManagedTrash, CheckBox managedTrashAutoHandoff, NumericUpDown managedTrashUndoRetentionDays, ComboBox managedTrashRetentionPreset, CheckBox reloadAfterFileOperation, CheckBox selectCreatedItem, CheckBox clipboardPasteTextAsFile,
              CheckBox enableMouseGestures)
         BuildOperationAndInputTab(TabPage tab)
     {
@@ -513,25 +596,87 @@ public class SettingsForm : Form
 
         var managedTrashAutoHandoff = AddCheckBox(groupFile, "期限切れ退避ファイルを自動整理する", 16, top, _settings.FileOperations.ManagedTrashAutoHandoffEnabled);
         top += rowH;
-        AddLabel(groupFile, "Undo保持日数:", top, 112);
-        var managedTrashUndoRetentionDays = AddNumericUpDown(groupFile, 130, top, 72, _settings.FileOperations.ManagedTrashUndoRetentionDays);
+        AddLabel(groupFile, "保持期限:", top, 112);
+
+        var managedTrashRetentionPreset = new ComboBox
+        {
+            Location = new Point(130, top),
+            Size = new Size(100, 24),
+            DropDownStyle = ComboBoxStyle.DropDownList
+        };
+        managedTrashRetentionPreset.Items.AddRange(new object[] { "1日", "3日", "7日", "14日", "30日", "無期限", "カスタム" });
+        groupFile.Controls.Add(managedTrashRetentionPreset);
+
+        var managedTrashUndoRetentionDays = AddNumericUpDown(groupFile, 240, top, 60, _settings.FileOperations.ManagedTrashUndoRetentionDays);
         managedTrashUndoRetentionDays.Minimum = 1;
         managedTrashUndoRetentionDays.Maximum = 365;
         managedTrashUndoRetentionDays.DecimalPlaces = 0;
         managedTrashUndoRetentionDays.Increment = 1;
+
+        managedTrashRetentionPreset.SelectedIndexChanged += (s, e) =>
+        {
+            string sel = managedTrashRetentionPreset.SelectedItem?.ToString() ?? "カスタム";
+            switch (sel)
+            {
+                case "1日":
+                    managedTrashUndoRetentionDays.Value = 1;
+                    managedTrashUndoRetentionDays.Enabled = false;
+                    break;
+                case "3日":
+                    managedTrashUndoRetentionDays.Value = 3;
+                    managedTrashUndoRetentionDays.Enabled = false;
+                    break;
+                case "7日":
+                    managedTrashUndoRetentionDays.Value = 7;
+                    managedTrashUndoRetentionDays.Enabled = false;
+                    break;
+                case "14日":
+                    managedTrashUndoRetentionDays.Value = 14;
+                    managedTrashUndoRetentionDays.Enabled = false;
+                    break;
+                case "30日":
+                    managedTrashUndoRetentionDays.Value = 30;
+                    managedTrashUndoRetentionDays.Enabled = false;
+                    break;
+                case "無期限":
+                    managedTrashUndoRetentionDays.Value = 1; // Minimum is 1, save logic handles 0
+                    managedTrashUndoRetentionDays.Enabled = false;
+                    break;
+                case "カスタム":
+                    managedTrashUndoRetentionDays.Enabled = true;
+                    break;
+            }
+        };
+
+        // Initialize state
+        int currentDays = _settings.FileOperations.ManagedTrashUndoRetentionDays;
+        if (currentDays <= 0)
+        {
+            managedTrashRetentionPreset.SelectedItem = "無期限";
+        }
+        else if (currentDays == 1 || currentDays == 3 || currentDays == 7 || currentDays == 14 || currentDays == 30)
+        {
+            managedTrashRetentionPreset.SelectedItem = $"{currentDays}日";
+        }
+        else
+        {
+            managedTrashRetentionPreset.SelectedItem = "カスタム";
+            managedTrashUndoRetentionDays.Value = Math.Clamp(currentDays, 1, 365);
+        }
+
         top += rowH - 2;
-        var managedTrashRetentionHint = AddWrappedHintLabel(groupFile, 32, top, 430, "指定日数を過ぎた MidFD 管理ゴミ箱内の退避項目を Windows ごみ箱へ移します。");
+        var managedTrashRetentionHint = AddWrappedHintLabel(groupFile, 32, top, 430, "指定期間を過ぎるとMidFD管理ゴミ箱から完全削除します。無期限では自動削除しません。");
         top = managedTrashRetentionHint.Bottom + 8;
 
         var btnEmptyTrash = new Button
         {
-            Text = "MidFD管理ゴミ箱を今すぐ空にする...",
+            Text = "MidFD管理ゴミ箱を確認...",
             Location = new Point(32, top),
             Size = new Size(240, 28)
         };
         btnEmptyTrash.Click += (s, e) =>
         {
-            ManualEmptyManagedTrashRequested?.Invoke(this, EventArgs.Empty);
+            OpenManagedTrashDialogRequested?.Invoke(this, EventArgs.Empty);
         };
         groupFile.Controls.Add(btnEmptyTrash);
         top += rowH + 6;
@@ -595,7 +740,7 @@ public class SettingsForm : Form
         var workspaceHint = AddWrappedHintLabel(groupAdvanced, 16, advancedTop, 444, "詳細な復元設定は起動・ログで調整できます。\nここでは管理導線だけを設定します。");
         advancedTop = workspaceHint.Bottom + 8;
 
-        return (confirmDelete, confirmPermanentDelete, useMidFdManagedTrash, managedTrashAutoHandoff, managedTrashUndoRetentionDays, reloadAfterFileOperation, selectCreatedItem, clipboardPasteTextAsFile, enableMouseGestures);
+        return (confirmDelete, confirmPermanentDelete, useMidFdManagedTrash, managedTrashAutoHandoff, managedTrashUndoRetentionDays, managedTrashRetentionPreset, reloadAfterFileOperation, selectCreatedItem, clipboardPasteTextAsFile, enableMouseGestures);
     }
 
     private (CheckBox restoreStartupState, CheckBox restoreTabsOnStartup, CheckBox restoreLastPath, CheckBox restoreDisplayState, CheckBox restoreWindowBounds, CheckBox restoreColumnCount, CheckBox restoreSort)
@@ -631,7 +776,7 @@ public class SettingsForm : Form
 
         var btnOpenFirstSetup = new Button
         {
-            Text = "初回セットアップを開く...",
+            Text = "基本セットアップを開く...",
             Location = new Point(16, top),
             Size = new Size(180, 32)
         };
@@ -764,18 +909,18 @@ public class SettingsForm : Form
         _functionBarLabelOverridesAltFdCompatibleDraft = _settings.Input.FunctionBarLabelOverridesAltFdCompatible.ToDictionary(kv => kv.Key, kv => kv.Value.Clone(), StringComparer.OrdinalIgnoreCase);
     }
 
-    private (TextBox sevenZip, TextBox diff, TextBox editor, ComboBox videoPlaybackVolume, TextBox videoStillPreviewFfmpegPath, CheckBox videoEnterPlaysExternal, Label sevenZipStatus, Label diffStatus, Label editorStatus, Label videoStillPreviewFfmpegStatus, CheckBox videoStillPreviewEnabled, ComboBox videoSkipSeconds)
+    private (TextBox sevenZip, ComboBox packDialogMode, TextBox diff, TextBox editor, ComboBox videoPlaybackVolume, TextBox videoStillPreviewFfmpegPath, CheckBox videoEnterPlaysExternal, Label sevenZipStatus, Label diffStatus, Label editorStatus, Label videoStillPreviewFfmpegStatus, CheckBox videoStillPreviewEnabled, ComboBox videoSkipSeconds)
         BuildExternalTab(TabPage tab)
     {
         int labelWidth = 124;
         int baseX = labelWidth + 12;
-        int rowH = 64;
+        int rowH = 82;
         int textBoxWidth = 280;
         int browseButtonWidth = 56;
         int browseButtonX = baseX + textBoxWidth + 8;
 
         // --- Left: Archive / Diff / Editor ---
-        var groupArchive = new GroupBox { Text = "外部アプリケーション", Location = new Point(8, 6), Size = new Size(500, 396) };
+        var groupArchive = new GroupBox { Text = "外部アプリケーション", Location = new Point(8, 6), Size = new Size(500, 500) };
         tab.Controls.Add(groupArchive);
 
         int top = 28;
@@ -783,6 +928,39 @@ public class SettingsForm : Form
         var sevenZip = AddTextBox(groupArchive, baseX, top, textBoxWidth, _settings.SevenZip.ExePath ?? "");
         AddBrowseButton(groupArchive, browseButtonX, top - 1, browseButtonWidth, sevenZip);
         var sevenZipStatus = AddStatusLabel(groupArchive, baseX, top + 26, 360);
+        top += rowH;
+
+        groupArchive.Controls.Add(new Label
+        {
+            Text = "通常の「圧縮...」画面:",
+            Location = new Point(8, top + 4),
+            Size = new Size(208, 20),
+            TextAlign = ContentAlignment.MiddleLeft
+        });
+        var packDialogMode = new ComboBox
+        {
+            Location = new Point(220, top),
+            Width = 260,
+            DropDownStyle = ComboBoxStyle.DropDownList
+        };
+        packDialogMode.Items.AddRange(new object[]
+        {
+            "自動（7-Zip標準を優先）",
+            "7-Zip標準Dialogを使用",
+            "MidFD簡易Dialogを使用"
+        });
+        packDialogMode.SelectedIndex = Math.Clamp((int)_settings.SevenZip.PackDialogMode, 0, 2);
+        groupArchive.Controls.Add(packDialogMode);
+        Label packDialogModeDescription = AddWrappedHintLabel(
+            groupArchive,
+            220,
+            top + 30,
+            260,
+            GetPackDialogModeDescription(packDialogMode.SelectedIndex));
+        packDialogMode.SelectedIndexChanged += (_, _) =>
+        {
+            packDialogModeDescription.Text = GetPackDialogModeDescription(packDialogMode.SelectedIndex);
+        };
         top += rowH;
 
         AddLabel(groupArchive, "外部 Diff:", top, labelWidth);
@@ -856,7 +1034,7 @@ public class SettingsForm : Form
         editor.TextChanged += (_, _) => RefreshExternalStatus();
         videoStillPreviewFfmpegPath.TextChanged += (_, _) => RefreshExternalStatus();
 
-        return (sevenZip, diff, editor, videoPlaybackVolume, videoStillPreviewFfmpegPath, videoEnterPlaysExternal, sevenZipStatus, diffStatus, editorStatus, videoStillPreviewFfmpegStatus, videoStillPreviewEnabled, videoSkipSeconds);
+        return (sevenZip, packDialogMode, diff, editor, videoPlaybackVolume, videoStillPreviewFfmpegPath, videoEnterPlaysExternal, sevenZipStatus, diffStatus, editorStatus, videoStillPreviewFfmpegStatus, videoStillPreviewEnabled, videoSkipSeconds);
     }
 
     private (CheckBox enableLog, CheckBox enableDetail) BuildLogTab(TabPage tab)
@@ -1617,6 +1795,7 @@ public class SettingsForm : Form
             [CommandIds.AppOpenCommandLauncher] = 70,
             [CommandIds.AppOpenCommandList] = 71,
             [CommandIds.BrowserShowHelp] = 72,
+            [CommandIds.AppOpenManagedTrash] = 73,
             [CommandIds.AppOpenSettings] = 80
         };
 
@@ -1833,7 +2012,7 @@ public class SettingsForm : Form
         }
     }
 
-    private void SaveCurrentSettings()
+    private bool SaveCurrentSettings()
     {
         SyncInputAssignmentDraftFromEmbeddedView();
 
@@ -1860,6 +2039,7 @@ public class SettingsForm : Form
         _settings.Input.FunctionBarLabelOverridesAltFdCompatible = _functionBarLabelOverridesAltFdCompatibleDraft.ToDictionary(kv => kv.Key, kv => kv.Value.Clone(), StringComparer.OrdinalIgnoreCase);
         _settings.Input.ShowFunctionBarTooltips = _showFunctionBarTooltipsCheckBox?.Checked ?? _settings.Input.ShowFunctionBarTooltips;
         _settings.SevenZip.ExePath = NullIfEmpty(_sevenZipPathBox.Text);
+        _settings.SevenZip.PackDialogMode = (PackDialogMode)Math.Clamp(_packDialogModeCombo.SelectedIndex, 0, 2);
         _settings.ExternalTools.ExternalDiffPath = NullIfEmpty(_diffPathBox.Text);
         _settings.ExternalTools.ExternalEditorPath = NullIfEmpty(_editorPathBox.Text);
 
@@ -1892,6 +2072,7 @@ public class SettingsForm : Form
         _settings.Appearance.ShowBrowserTabCategoryRow = _showBrowserTabCategoryRowCheckBox.Checked;
         _settings.Appearance.ShowFunctionBar = _showFunctionBarCheckBox.Checked;
         _settings.Appearance.ShowBrowserToolbar = _showBrowserToolbarCheckBox.Checked;
+        _settings.Appearance.ShowPathAsBreadcrumb = _showPathAsBreadcrumbCheckBox.Checked;
         _settings.Appearance.ShowExtensions = _showExtensionsCheckBox.Checked;
         _settings.Appearance.ShowDirectoryMarker = _showDirectoryMarkerCheckBox.Checked;
         _settings.Appearance.ShowHiddenFiles = _showHiddenFilesCheckBox.Checked;
@@ -1930,7 +2111,26 @@ public class SettingsForm : Form
         _settings.FileOperations.ConfirmPermanentDelete = _confirmPermanentDeleteCheckBox.Checked;
         _settings.FileOperations.UseMidFdManagedTrash = _useMidFdManagedTrashCheckBox.Checked;
         _settings.FileOperations.ManagedTrashAutoHandoffEnabled = _managedTrashAutoHandoffCheckBox.Checked;
-        _settings.FileOperations.ManagedTrashUndoRetentionDays = (int)_managedTrashUndoRetentionDaysBox.Value;
+        string selectedPreset = _managedTrashRetentionPresetBox.SelectedItem?.ToString() ?? "カスタム";
+        if (selectedPreset == "無期限")
+        {
+            _settings.FileOperations.ManagedTrashUndoRetentionDays = 0;
+        }
+        else if (selectedPreset == "カスタム")
+        {
+            _settings.FileOperations.ManagedTrashUndoRetentionDays = (int)_managedTrashUndoRetentionDaysBox.Value;
+        }
+        else
+        {
+            if (int.TryParse(selectedPreset.Replace("日", ""), out int days))
+            {
+                _settings.FileOperations.ManagedTrashUndoRetentionDays = days;
+            }
+            else
+            {
+                _settings.FileOperations.ManagedTrashUndoRetentionDays = (int)_managedTrashUndoRetentionDaysBox.Value;
+            }
+        }
         // _settings.FileOperations.ManagedTrashStoreMode は Initialize 時に自動決定するためUIからは変更しない
 
         _settings.FileOperations.ReloadAfterFileOperation = _reloadAfterFileOperationCheckBox.Checked;
@@ -1950,7 +2150,53 @@ public class SettingsForm : Form
         _settings.Logging.IsEnabled = _enableLogCheckBox.Checked;
         _settings.Logging.IsDetailedEnabled = _enableDetailedLogCheckBox.Checked;
 
-        SettingsManager.Save(_settings);
+        if (!ConfirmPayloadReplacement())
+        {
+            return false;
+        }
+
+        SettingsSqliteStore.SettingsSaveResult saveResult = SettingsManager.TrySave(
+            _settings,
+            SettingsManager.SettingsSaveIntent.Explicit,
+            allowProtectedReplacement: true);
+        if (saveResult.Succeeded)
+        {
+            if (!saveResult.BackupSucceeded)
+            {
+                MessageBox.Show(this, saveResult.UserMessage, "設定バックアップ警告", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            }
+            return true;
+        }
+        MessageBox.Show(this, saveResult.UserMessage, "設定保存エラー", MessageBoxButtons.OK, MessageBoxIcon.Error);
+        return false;
+    }
+
+    private static string GetPackDialogModeDescription(int selectedIndex)
+    {
+        return selectedIndex switch
+        {
+            (int)PackDialogMode.SevenZipNative => "7zG.exeを使用します。利用できない場合は圧縮を開始できません。",
+            (int)PackDialogMode.MidFd => "MidFD簡易Dialogを使用します。実処理は7z.exeまたはWindows標準機能です。",
+            _ => "7zG.exeが利用可能なら7-Zip標準Dialog、利用できない場合はMidFD簡易Dialogを使用します。"
+        };
+    }
+
+    private bool ConfirmPayloadReplacement()
+    {
+        SettingsManager.PayloadProtectionInfo? protection = SettingsManager.CurrentPayloadProtection;
+        if (protection == null)
+        {
+            return true;
+        }
+
+        string detected = protection.PayloadVersion?.ToString() ?? "不明";
+        return MessageBox.Show(
+            this,
+            $"未対応の設定形式(PayloadVersion={detected})を現行形式(PayloadVersion={SettingsSqliteStore.CurrentPayloadVersion})へ置換します。\n既存のbackup世代管理は維持されます。",
+            "設定形式の置換確認",
+            MessageBoxButtons.YesNo,
+            MessageBoxIcon.Warning,
+            MessageBoxDefaultButton.Button2) == DialogResult.Yes;
     }
 
     private void UpdateDragArchiveManifestCheckboxEnabledState()
@@ -2104,7 +2350,10 @@ public class SettingsForm : Form
             this.DialogResult = DialogResult.None;
             return;
         }
-        SaveCurrentSettings();
+        if (!SaveCurrentSettings())
+        {
+            DialogResult = DialogResult.None;
+        }
     }
 
     private void BtnApply_Click(object? sender, EventArgs e)
@@ -2113,7 +2362,7 @@ public class SettingsForm : Form
         {
             return;
         }
-        SaveCurrentSettings();
+        if (!SaveCurrentSettings()) return;
         SettingsApplied?.Invoke(this, EventArgs.Empty);
     }
 
@@ -2122,6 +2371,12 @@ public class SettingsForm : Form
         var setupSettings = _settings.Clone();
         setupSettings.Input.FunctionKeyProfile = _embeddedInputAssignmentView.SelectedProfileValue;
         setupSettings.Preview.VideoEnterPlaysExternal = _videoEnterPlaysExternalCheckBox.Checked;
+        setupSettings.Appearance.ShowPathAsBreadcrumb = _showPathAsBreadcrumbCheckBox.Checked;
+        setupSettings.Appearance.ColorTheme = FileListColorResolver.CanonicalizePresetKey(_colorThemeCombo.Text);
+        setupSettings.FileOperations.UseMidFdManagedTrash = _useMidFdManagedTrashCheckBox.Checked;
+        setupSettings.FileOperations.ClipboardPasteTextAsFileEnabled = _clipboardPasteTextAsFileCheckBox.Checked;
+        setupSettings.FileOperations.EnableDragArchiveHandoff = _enableDragArchiveHandoffCheckBox.Checked;
+        setupSettings.FileOperations.IncludeDragZipManifest = _includeDragZipManifestCheckBox.Checked;
         setupSettings.SevenZip.ExePath = NullIfEmpty(_sevenZipPathBox.Text);
         setupSettings.Preview.VideoToolDirectory = NullIfEmpty(_videoStillPreviewFfmpegPathBox.Text);
         setupSettings.ExternalTools.ExternalEditorPath = NullIfEmpty(_editorPathBox.Text);
@@ -2133,7 +2388,7 @@ public class SettingsForm : Form
         setupSettings.Session.RestoreColumnCount = _restoreColumnCountCheckBox.Checked;
         setupSettings.Session.RestoreSort = _restoreSortCheckBox.Checked;
 
-        using var dialog = new FeatureProfileSelectionDialog(setupSettings);
+        using var dialog = new FeatureProfileSelectionDialog(setupSettings, isFirstLaunch: false);
         if (dialog.ShowDialog(this) != DialogResult.OK)
         {
             return;
@@ -2141,6 +2396,14 @@ public class SettingsForm : Form
 
         _embeddedInputAssignmentView.SelectedProfileValue = dialog.UseFdCompatibleFunctionKeys ? InputSettings.FdCompatibleProfileValue : InputSettings.StandardProfileValue;
         _videoEnterPlaysExternalCheckBox.Checked = dialog.VideoEnterPlaysExternal;
+        _showPathAsBreadcrumbCheckBox.Checked = dialog.ShowPathAsBreadcrumb;
+        int setupThemeIndex = _colorThemeCombo.FindStringExact(FileListColorResolver.GetPresetDisplayName(dialog.ColorTheme));
+        if (setupThemeIndex >= 0)
+        {
+            _colorThemeCombo.SelectedIndex = setupThemeIndex;
+        }
+        _useMidFdManagedTrashCheckBox.Checked = dialog.UseMidFdManagedTrash;
+        _clipboardPasteTextAsFileCheckBox.Checked = dialog.ClipboardPasteTextAsFileEnabled;
         _enableMouseGesturesCheckBox.Checked = dialog.EnableMouseGestures;
         _showFunctionBarTooltipsCheckBox!.Checked = dialog.ShowFunctionBarTooltips;
         _enableDragArchiveHandoffCheckBox.Checked = dialog.EnableDragArchiveHandoff;

@@ -348,14 +348,30 @@ public static class FileOperationService
 
     private static void CopyLinkObject(string sourcePath, string destinationPath)
     {
-        string target = ReparsePointHelper.GetLinkTarget(sourcePath);
-        if (ReparsePointHelper.IsDirectory(sourcePath))
+        uint tag = ReparsePointHelper.GetReparseTag(sourcePath);
+        CopyLinkObjectForTag(tag, sourcePath, destinationPath);
+    }
+
+    internal static void CopyLinkObjectForTag(uint tag, string sourcePath, string destinationPath)
+    {
+        switch (tag)
         {
-            WindowsLinkCopyService.CreateDirectorySymbolicLink(destinationPath, target);
-        }
-        else
-        {
-            WindowsLinkCopyService.CopyFileSymbolicLink(sourcePath, destinationPath);
+            case 0xA0000003:
+                WindowsLinkCopyService.CopyJunction(sourcePath, destinationPath);
+                break;
+            case 0xA000000C:
+                string target = ReparsePointHelper.GetLinkTarget(sourcePath);
+                if (ReparsePointHelper.IsDirectory(sourcePath))
+                {
+                    WindowsLinkCopyService.CreateDirectorySymbolicLink(destinationPath, target);
+                }
+                else
+                {
+                    WindowsLinkCopyService.CopyFileSymbolicLink(sourcePath, destinationPath);
+                }
+                break;
+            default:
+                throw new IOException($"非対応のreparse tagです (0x{tag:X8}): {sourcePath}");
         }
     }
 
@@ -479,6 +495,7 @@ public static class FileOperationService
             {
                 cancellationToken.ThrowIfCancellationRequested();
                 if (deleteSourceOverride != null) deleteSourceOverride(sourcePath);
+                else if (isReparsePoint(sourcePath)) Delete(sourcePath);
                 else if (isDirectory) DeleteDirectoryTreeWithoutFollowingReparsePoints(sourcePath, excludedReparsePaths);
                 else File.Delete(sourcePath);
             }

@@ -2,6 +2,38 @@
 
 利用者向けの主な変更概要です。内部の開発ログやtest追加は原則として記載しません。
 
+## v2026.08.11 — 縦型タブ・Browser操作・Viewerの改善
+
+### Browser・ファイル操作
+
+- 一覧の上下・左右・page移動、tab／categoryを使った作業場所の切り替え、tabの固定・close、QuickAccess、breadcrumb、directoryを新しいtabで開く導線、tab追加位置の設定を整理しました。
+- 同名directoryのcopy／move／pasteを既存内容を保持するmerge操作へ統一しました。symlink／junctionはリンク先へ再帰せず、リンク自体として扱います。
+- BrowserからのDrag & Dropで、同名directoryのcopy／moveをmergeできるようにしました。fileの型不一致やcollisionのCancelは従来どおり安全に停止します。
+- Browserの外部入力に含まれる画像URLについて、public addressの検証、DNS／redirect再検証、size／timeout、temporary file確定を行うよう安全化し、UNC／大容量directoryを含む一覧更新と操作の応答性を改善しました。
+- マップされたネットワークドライブのUsed／Free情報を非同期で取得し、容量取得中も一覧移動や操作を妨げにくくしました。
+
+### Mark・MarkSlot
+
+- MarkSlot管理画面と通常画面の役割を整理しました。
+- Drag ZIP、clipboard、ファイル操作後のMark保持と、リンクを含むcopy／moveの結果判定を整理しました。
+
+### 入力・Viewer
+
+- 主要なBrowser操作をCommand IDとdispatcherへ接続し、Menu／ContextMenu／Command Palette／double-clickの実行先を整合させました。
+- 「開く」はEnterと同じ対象別動作として統合し、`..`では親directoryへ移動、directoryはMidFD内、fileは対象別openを行います。「既定アプリで開く」はfileをWindows関連付け、directoryをExplorerで開く別操作です。
+- Command Paletteに「開く」を追加し、Functionバーの短縮表示を`open`へ整合させました。
+- Functionバーのprofile／modifier／slot別割り当てで、明示的な未割り当て、選択slotの既定復帰、現在profile全体の既定復帰を整合させました。
+- V／FD互換Shift+F9の明示Previewは、内容を判定してText／LargeText／Binary／Markdown／CSV・TSV／SQLite等のMidFD内Viewerへ表示します。file double-clickはOS既定openの別契約として保持します。
+- X／FD互換F2はコマンド実行Dialogとして統合し、Enter／V／Z／Xの役割を分離しました。
+- Markdown Rendered表示の同一文書内リンクはViewer内で移動し、`http`／`https`以外のschemeや相対pathの外部起動を拒否します。表示modeは設定とViewer下部StatusStrip右端から切り替えられ、Rendered右クリックでは選択部分を含む元Markdown block、link／画像の記述をコピーできます。fileと同じdirectory配下の相対PNG／JPEG／GIF画像だけをinline表示し、ブラウザ由来の標準右クリックmenuと別window起動は表示しません。
+- ZIP fallbackは展開root配下の既存junction等のreparse pathを経由した書込みと、既存reparse destinationへの上書きを拒否します。unsafe entryは書込み前に検出し、通常のnested directory展開と既存file overwriteは保持します。
+- tab、category、menu、Command Paletteの操作を安定化し、入力割り当てのprofile／modifier／slot表示を整理しました。
+
+### 初回設定
+
+- 初回セットアップ、設定復旧、表示色、外部tool設定の導線を整理しました。既存設定形式は変更していません。
+- 初回／基本セットアップから縦型／横型のタブ表示を選択できるようにしました。新規の初回セットアップでは縦型（推奨）を表示し、既存の保存済みタブ表示設定は維持します。
+
 ## v2026.07.24 — ファイル操作・Mark・初回セットアップの改善
 
 ### 初回／基本セットアップ
@@ -20,7 +52,6 @@
 - 属性／日時変更画面をcompact化し、日時の数値segment入力、自動field移動、calendar選択に対応しました。
 - UTF-16 LE／BEのpreviewとbinary判定を補正しました。
 - Mark数とMark sizeの表示を操作直後にも更新し、Mark解除やdirectory移動後の残留表示を補正しました。
-- UNCパスのUsed／Free情報を、画面操作を止めない遅延取得へ変更しました。
 - 大量項目や更新頻度の高いフォルダで、一覧更新・selection・Mark操作が固まりにくいよう調整しました。
 
 ### Mark・MarkSlot

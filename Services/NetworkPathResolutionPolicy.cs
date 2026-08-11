@@ -22,7 +22,48 @@ internal static class NetworkPathResolutionPolicy
                path.StartsWith(VerbatimUncPrefix, StringComparison.OrdinalIgnoreCase);
     }
 
-    public static bool IsAuxiliaryResolutionDeferred(string? path) => IsUncPath(path);
+    public static bool IsAuxiliaryResolutionDeferred(string? path) => IsNetworkPath(path);
+
+    public static bool IsNetworkPath(string? path)
+    {
+        return IsNetworkPath(path, ResolveDriveType);
+    }
+
+    internal static bool IsNetworkPath(string? path, Func<string, DriveType?> driveTypeResolver)
+    {
+        if (IsUncPath(path))
+        {
+            return true;
+        }
+
+        return TryGetDriveRoot(path, out string root) &&
+               driveTypeResolver(root) == DriveType.Network;
+    }
+
+    public static bool TryGetNetworkRoot(string? path, out string networkRoot)
+    {
+        return TryGetNetworkRoot(path, ResolveDriveType, out networkRoot);
+    }
+
+    internal static bool TryGetNetworkRoot(
+        string? path,
+        Func<string, DriveType?> driveTypeResolver,
+        out string networkRoot)
+    {
+        if (TryGetUncRoot(path, out networkRoot))
+        {
+            return true;
+        }
+
+        if (TryGetDriveRoot(path, out string driveRoot) && driveTypeResolver(driveRoot) == DriveType.Network)
+        {
+            networkRoot = driveRoot;
+            return true;
+        }
+
+        networkRoot = string.Empty;
+        return false;
+    }
 
     public static string GetPathKind(string? path)
     {
@@ -41,7 +82,7 @@ internal static class NetworkPathResolutionPolicy
             string? root = Path.GetPathRoot(path);
             if (!string.IsNullOrWhiteSpace(root) && root.Length >= 2 && char.IsLetter(root[0]) && root[1] == ':')
             {
-                return "DriveLetter";
+                return ResolveDriveType(root) == DriveType.Network ? "MappedNetwork" : "DriveLetter";
             }
         }
         catch
@@ -93,6 +134,36 @@ internal static class NetworkPathResolutionPolicy
             driveType = DriveType.Unknown;
             return false;
         }
+    }
+
+    private static DriveType? ResolveDriveType(string root)
+    {
+        return TryGetDriveType(root, out DriveType driveType) ? driveType : null;
+    }
+
+    private static bool TryGetDriveRoot(string? path, out string root)
+    {
+        root = string.Empty;
+        if (string.IsNullOrWhiteSpace(path))
+        {
+            return false;
+        }
+
+        try
+        {
+            string? candidate = Path.GetPathRoot(path);
+            if (!string.IsNullOrWhiteSpace(candidate) && candidate.Length >= 2 && char.IsLetter(candidate[0]) && candidate[1] == ':')
+            {
+                root = candidate;
+                return true;
+            }
+        }
+        catch
+        {
+            // Unknown
+        }
+
+        return false;
     }
 
     public static void LogDecision(

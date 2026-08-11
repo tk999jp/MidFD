@@ -105,6 +105,8 @@ public static class CommandPaletteUniversalSearchService
         IReadOnlyDictionary<string, CommandDefinition> definitions,
         ICollection<CommandLauncherCommand> commands)
     {
+        TryAddCommand(definitions, CommandIds.BrowserExecute, definition => commands.Add(CreateFunctionCommand(
+            definition, context, "開く", "選択項目をMidFDの対象別動作で開きます。", "open 開く 入る 対象別open")));
         TryAddCommand(definitions, CommandIds.BrowserReload, definition => commands.Add(CreateFunctionCommand(
             definition, context, "再読込", "現在ディレクトリを再読込します。", "reload refresh update 更新 再読込")));
         TryAddCommand(definitions, CommandIds.BrowserOpenExplorer, definition => commands.Add(CreateFunctionCommand(

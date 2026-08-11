@@ -110,7 +110,7 @@ bin\Release\net10.0-windows\publish\
 
 ## Release ZIP 作成 (scripts/publish-release.ps1)
 
-配布用の正式なリリースZIPを作成する場合は、以下の PowerShell スクリプト（正本経路）を使用します。
+Release Candidate ZIPを作成する場合は、以下のPowerShellスクリプト（正本経路）を使用します。生成元はcleanなcommit済みHEADです。`ReleaseTag`は予定公開tagであり、Candidate生成時点でGit tagは作成しません。
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\scripts\publish-release.ps1 -ReleaseTag vYYYY.MM.DD
@@ -119,19 +119,18 @@ powershell -ExecutionPolicy Bypass -File .\scripts\publish-release.ps1 -ReleaseT
 ### 主要パラメータと仕様
 
 - `-ReleaseTag` (必須): `vYYYY.MM.DD` 形式でリリースバージョンを指定します。
-- `-SelfContained` (オプション): このスイッチを指定すると、.NET 10 Runtime を同梱した `self-contained` 配布パッケージを作成します。指定しない場合、既定では [.NET 10 Windows Desktop Runtime](https://dotnet.microsoft.com/ja-jp/download/dotnet/10.0) のインストールを前提とする `framework-dependent`（ランタイム非同梱）パッケージを作成します。通常配布時はこのスイッチを指定しません。「.NET Desktop Runtime」の Windows x64 版をインストールしてください。
-- `-AllowDirty` (オプション): ワーキングツリーに未コミットの変更がある状態での実行を許可します（開発検証用）。
-- `-SkipTagCheck` (オプション): 指定されたGitタグの存在チェック、およびHEADコミットとの一致チェックをスキップします（開発検証用）。
+- `-AllowDirty` (オプション): ワーキングツリーに未コミットの変更がある状態での実行を許可します（開発検証専用）。この出力はformal Candidateとして扱いません。
+- packageは.NET 10 Windows Desktop Runtimeのインストールを前提とする `framework-dependent`（ランタイム非同梱）です。`-SelfContained`はscriptで拒否されるため、self-contained package生成経路ではありません。
 
 ### スクリプトの動作概要
 
 1. **バージョン情報の動的生成**: 指定された `ReleaseTag` から、Csproj用の各種バージョン値を動的に算出して注入します（例: `vYYYY.MM.DD` から `Version=YYYY.M.D`, `InformationalVersion=vYYYY.MM.DD` を生成）。
-2. **安全性の検証**: 実リリース時は、Gitワーキングツリーがクリーンであり、かつ指定したリリースタグが HEAD コミットを指していることを自動確認します。
-3. **発行と動的注入**: `/p:Version` や `/p:InformationalVersion` 等のパラメータを付与し、さらに `-SelfContained` の有無に応じた `--self-contained` 値を設定して `dotnet publish` を実行します。これによりアセンブリおよび `Application.ProductVersion` にバージョンとGitコミットハッシュが自動的に埋め込まれます。
+2. **安全性の検証**: 既定ではGitワーキングツリーがクリーンであることを確認し、HEADからCandidateSHAを固定します。`ReleaseTag`の既存Git refやHEAD一致はCandidate生成の前提にしません。
+3. **発行と動的注入**: `/p:Version` や `/p:InformationalVersion` 等のパラメータを付与し、framework-dependentとして `dotnet publish`を実行します。これによりアセンブリおよび`Application.ProductVersion`に予定公開tagとCandidateSHAが埋め込まれます。
 4. **ZIP作成と検証**: `artifacts/release/MidFD-win-x64.zip` を作成後、自動で `artifacts/release-test/` に再解凍して以下の検証を行います。
    - `MidFD.exe` の ProductVersion に指定タグおよびコミットハッシュが正常に含まれていることの確認。
    - 既定の framework-dependent ビルド時、解凍したパッケージに `coreclr.dll`, `hostfxr.dll`, `System.Private.CoreLib.dll` などのランタイム関連ファイルが含まれていない（非同梱である）ことの確認。
-5. **SHA256ハッシュの出力**: 検証に成功した場合、ZIP のハッシュファイル `artifacts/release/MidFD-win-x64.zip.sha256` を出力します。これはスクリプト単体の出力例であり、正式なリリース候補では通常版・同梱版をまとめて `SHA256SUMS.txt` で一括管理します。
+5. **SHA256ハッシュの出力**: 検証に成功した場合、ZIP のハッシュファイル `artifacts/release/MidFD-win-x64.zip.sha256` を出力します。Candidate確定後の公開承認を経て、別public runでtag作成／push、Release／Assets操作を行います。
 
 ## 7-Zip連携
 

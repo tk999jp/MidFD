@@ -24,7 +24,8 @@ public class BrowserTabUiCoordinator
         IReadOnlyList<BrowserTabCategoryDefinition> browserTabCategories,
         int activeCategoryIndex,
         bool showCategoryRow,
-        ref string? lastSnapshotKey)
+        ref string? lastSnapshotKey,
+        Func<BrowserTabState, BrowserTabPresentationSnapshot>? presentationResolver = null)
     {
         if (_browserTabStrip == null)
             return;
@@ -46,9 +47,18 @@ public class BrowserTabUiCoordinator
         }
 
         var stripTabs = browserTabs
-            .Select((state, i) => new BrowserTabStripItem(
-                BrowserTabPresentationHelper.BuildHeaderText(state, i),
-                BrowserTabPresentationHelper.BuildToolTip(state)))
+            .Select((state, i) =>
+            {
+                BrowserTabPresentationSnapshot presentation = presentationResolver?.Invoke(state)
+                    ?? new BrowserTabPresentationSnapshot(state.CurrentPath, null, state.CurrentPath, null, string.Empty, state.CurrentPath, state.CurrentPath, BrowserTabPresentationHelper.BuildHeaderText(state, i), BrowserTabPresentationHelper.BuildToolTip(state), state.CurrentPath);
+                return new BrowserTabStripItem(
+                    presentation.HeaderText,
+                    presentation.ToolTipText,
+                    presentation.CanonicalPath,
+                    presentation.PrefixText,
+                    presentation.BaseTitle,
+                    presentation.RelativeSuffix);
+            })
             .ToList();
 
         string snapshotKey = BrowserTabPresentationHelper.BuildHeaderSnapshotKey(
@@ -66,11 +76,36 @@ public class BrowserTabUiCoordinator
         lastSnapshotKey = snapshotKey;
 
         _browserTabStrip.SetCategories(stripCategories, activeCategoryIndex);
-        _browserTabStrip.SetTabs(stripTabs);
+        _browserTabStrip.SetTabs(stripTabs, activeBrowserTabIndex);
 
         if (activeBrowserTabIndex >= 0 && activeBrowserTabIndex < browserTabs.Count)
         {
             _browserTabStrip.SelectedIndex = activeBrowserTabIndex;
         }
+    }
+
+    public void UpdateTabPresentation(
+        BrowserTabState state,
+        int tabIndex,
+        bool select,
+        Func<BrowserTabState, BrowserTabPresentationSnapshot>? presentationResolver = null)
+    {
+        if (_browserTabStrip == null || tabIndex < 0 || tabIndex >= _browserTabStrip.TabCount)
+        {
+            return;
+        }
+
+        BrowserTabPresentationSnapshot presentation = presentationResolver?.Invoke(state)
+            ?? new BrowserTabPresentationSnapshot(state.CurrentPath, null, state.CurrentPath, null, string.Empty, state.CurrentPath, state.CurrentPath, BrowserTabPresentationHelper.BuildHeaderText(state, tabIndex), BrowserTabPresentationHelper.BuildToolTip(state), state.CurrentPath);
+        _browserTabStrip.UpdateTabAndSelection(
+            tabIndex,
+            new BrowserTabStripItem(
+                presentation.HeaderText,
+                presentation.ToolTipText,
+                presentation.CanonicalPath,
+                presentation.PrefixText,
+                presentation.BaseTitle,
+                presentation.RelativeSuffix),
+            select);
     }
 }

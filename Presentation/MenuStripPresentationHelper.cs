@@ -237,7 +237,6 @@ public static class MenuStripPresentationHelper
                     ? CalculateDropDownInnerPadding(menuFont)
                     : new Padding(2, 1, 2, 1);
             }
-            menu.Margin = Padding.Empty;
         }
     }
 

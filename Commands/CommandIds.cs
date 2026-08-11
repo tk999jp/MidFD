@@ -7,6 +7,8 @@ public static class CommandIds
     public const string BrowserNavigateForward = "browser.navigate.forward";
     public const string BrowserReload = "browser.reload";
     public const string BrowserExecute = "browser.execute";
+    public const string BrowserDefaultOpen = "browser.default_open";
+    public const string BrowserOpenCommandDialog = "browser.open_command_dialog";
     public const string BrowserMarkAllFiles = "browser.mark.all_files";
     public const string BrowserMarkAllItems = "browser.mark.all_items";
     public const string BrowserCursorTop = "browser.cursor.top";
@@ -28,9 +30,13 @@ public static class CommandIds
     public const string ArchiveUnpack = "archive.unpack";
     public const string ArchivePack = "archive.pack";
     public const string BrowserCopyFullPath = "browser.copy.full_path";
+    public const string BrowserCopyCurrentPath = "browser.copy.current_path";
     public const string BrowserTabNew = "browser.tab.new";
+    public const string BrowserOpenInNewTab = "browser.open_in_new_tab";
     public const string BrowserTabNext = "browser.tab.next";
     public const string BrowserTabPrevious = "browser.tab.previous";
+    public const string BrowserTabLayoutToggle = "browser.tab.layout.toggle";
+    public const string BrowserTabReadOnlyToggle = "browser.tab.read_only.toggle";
     public const string BrowserTabCategoryAdd = "browser.tab_category.add";
     public const string BrowserTabCategoryRename = "browser.tab_category.rename";
     public const string BrowserTabCategoryDelete = "browser.tab_category.delete";
@@ -38,9 +44,12 @@ public static class CommandIds
     public const string BrowserTabCategoryMoveRight = "browser.tab_category.move_right";
     public const string BrowserTabCategoryNext = "browser.tab_category.next";
     public const string BrowserTabCategoryPrevious = "browser.tab_category.previous";
+    public const string BrowserTabCategoryManage = "browser.tab_category.manage";
     public const string BrowserTabClose = "browser.tab.close";
     public const string BrowserTabRestoreClosed = "browser.tab.restore_closed";
     public const string ClipboardPaste = "clipboard.paste";
+    public const string ClipboardCut = "browser.clipboard.cut";
+    public const string BrowserProperties = "browser.properties";
     public const string EditUndo = "edit.undo";
     public const string EditRedo = "edit.redo";
     public const string AppOpenSystemInformation = "app.open_system_information";
@@ -51,7 +60,11 @@ public static class CommandIds
     public const string BrowserShowHelp = "browser.show_help";
     public const string BrowserOpenMarkSlot = "browser.open_mark_slot";
     public const string BrowserTabFilterLock = "browser.tab.filter_lock";
+    public const string BrowserTabFilterLockClear = "browser.tab.filter_lock.clear";
     public const string BrowserTabLock = "browser.tab.lock";
+    public const string BrowserTabCloseRight = "browser.tab.close_right";
+    public const string BrowserTabCloseLeft = "browser.tab.close_left";
+    public const string BrowserTabCloseOther = "browser.tab.close_other";
     public const string AppOpenCommandList = "app.open_command_list";
     public const string FileCopy = "file.copy";
     public const string FileMove = "file.move";

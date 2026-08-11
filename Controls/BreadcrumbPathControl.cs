@@ -5,7 +5,7 @@ using MidFD.Services;
 
 namespace MidFD.Controls;
 
-public sealed record BreadcrumbPathSegment(string DisplayText, string FullPath, bool IsRoot, bool IsCurrent);
+public sealed record BreadcrumbPathSegment(string DisplayText, string FullPath, bool IsRoot, bool IsCurrent, bool IsNavigable = true);
 
 public static class BreadcrumbPathModel
 {
@@ -38,7 +38,8 @@ public static class BreadcrumbPathModel
             string shareRoot = $@"\\{parts[0]}\{parts[1]}";
             var segments = new List<BreadcrumbPathSegment>
             {
-                new(shareRoot, shareRoot, true, parts.Length == 2)
+                new(parts[0], shareRoot, true, false, IsNavigable: false),
+                new(parts[1], shareRoot, false, parts.Length == 2)
             };
             string current = shareRoot;
             for (int i = 2; i < parts.Length; i++)
@@ -94,7 +95,8 @@ public static class BreadcrumbPathLayout
         int availableWidth,
         Func<string, int> measureText,
         int separatorWidth,
-        int ellipsisWidth)
+        int ellipsisWidth,
+        IReadOnlyList<int>? intermediatePriority = null)
     {
         if (labels.Count == 0 || availableWidth <= 0)
         {
@@ -118,17 +120,17 @@ public static class BreadcrumbPathLayout
         {
             selected.Add(labels.Count - 1);
         }
-        int tailStart = labels.Count - 2;
-        while (tailStart > 0)
+        IEnumerable<int> candidates = intermediatePriority ?? Enumerable.Range(1, Math.Max(0, labels.Count - 2)).Reverse();
+        foreach (int index in candidates)
         {
-            var candidate = new List<int>(selected) { tailStart };
+            if (index <= 0 || index >= labels.Count - 1 || selected.Contains(index)) continue;
+            var candidate = new List<int>(selected) { index };
             int withEllipsis = FullWidth(candidate) + separatorWidth + ellipsisWidth;
             if (withEllipsis > availableWidth)
             {
-                break;
+                continue;
             }
-            selected.Add(tailStart);
-            tailStart--;
+            selected.Add(index);
         }
 
         selected.Sort();
@@ -144,7 +146,7 @@ public readonly record struct BreadcrumbSeparatorMetrics(
 {
     public static BreadcrumbSeparatorMetrics Create(float dpiScale, int rowHeight)
     {
-        int regionWidth = Math.Max(1, (int)Math.Round(14 * dpiScale));
+        int regionWidth = Math.Max(1, (int)Math.Round(8 * dpiScale));
         int chevronWidth = Math.Max(1, (int)Math.Round(5 * dpiScale));
         int chevronHeight = Math.Clamp((int)Math.Round(rowHeight * 0.38f), 1, Math.Max(1, rowHeight / 2));
         float lineWidth = Math.Max(1f, 1.1f * dpiScale);
@@ -157,10 +159,11 @@ public readonly record struct BreadcrumbSeparatorMetrics(
 
 public sealed class BreadcrumbPathControl : Control
 {
-    private const int SegmentHorizontalPadding = 4;
+    private const int SegmentHorizontalPadding = 2;
     private const int SegmentVerticalPadding = 1;
     private readonly List<(Rectangle Bounds, BreadcrumbPathSegment? Segment)> _hitAreas = new();
     private IReadOnlyList<BreadcrumbPathSegment> _segments = Array.Empty<BreadcrumbPathSegment>();
+    private string _path = string.Empty;
     private IReadOnlyList<BreadcrumbPathSegment> _hiddenSegments = Array.Empty<BreadcrumbPathSegment>();
     private int _hoveredArea = -1;
     private Color _normalTextColor = Color.FromArgb(130, 220, 220);
@@ -190,7 +193,10 @@ public sealed class BreadcrumbPathControl : Control
 
     public void SetPath(string path)
     {
-        _segments = BreadcrumbPathModel.Parse(path);
+        string value = path ?? string.Empty;
+        if (string.Equals(_path, value, StringComparison.Ordinal)) return;
+        _path = value;
+        _segments = BreadcrumbPathModel.Parse(value);
         Invalidate();
     }
 
@@ -247,12 +253,16 @@ public sealed class BreadcrumbPathControl : Control
         int height = ClientSize.Height;
         BreadcrumbSeparatorMetrics separator = BreadcrumbSeparatorMetrics.FromGraphics(e.Graphics, height);
         string[] labels = _segments.Select(BreadcrumbPathModel.GetDisplayText).ToArray();
+        IReadOnlyList<int>? priority = _segments.Count > 2 && _segments[0].FullPath.StartsWith(@"\\", StringComparison.Ordinal)
+            ? Enumerable.Range(1, _segments.Count - 2).OrderBy(static index => index == 1 ? 0 : index).ToArray()
+            : null;
         int[] visible = BreadcrumbPathLayout.SelectVisibleIndices(
             labels,
             ClientSize.Width,
-            text => TextRenderer.MeasureText(e.Graphics, text, Font).Width + SegmentHorizontalPadding * 2,
+            text => TextRenderer.MeasureText(e.Graphics, text, Font, Size.Empty, TextFormatFlags.NoPadding | TextFormatFlags.SingleLine).Width + SegmentHorizontalPadding * 2,
             separator.RegionWidth,
-            TextRenderer.MeasureText(e.Graphics, "…", Font).Width).ToArray();
+            TextRenderer.MeasureText(e.Graphics, "…", Font, Size.Empty, TextFormatFlags.NoPadding | TextFormatFlags.SingleLine).Width,
+            priority).ToArray();
         HashSet<int> visibleSet = visible.ToHashSet();
         _hiddenSegments = _segments
             .Where((_, index) => !visibleSet.Contains(index))
@@ -278,7 +288,7 @@ public sealed class BreadcrumbPathControl : Control
             }
 
             var item = drawItems[i];
-            int textWidth = TextRenderer.MeasureText(e.Graphics, item.Text, Font).Width;
+            int textWidth = TextRenderer.MeasureText(e.Graphics, item.Text, Font, Size.Empty, TextFormatFlags.NoPadding | TextFormatFlags.SingleLine).Width;
             int width = textWidth + SegmentHorizontalPadding * 2;
             var bounds = new Rectangle(x, SegmentVerticalPadding, width, Math.Max(1, height - SegmentVerticalPadding * 2));
             bool hovered = _hoveredArea == _hitAreas.Count;
@@ -303,7 +313,7 @@ public sealed class BreadcrumbPathControl : Control
                         ? _hoverTextColor
                         : _normalTextColor;
             var textBounds = new Rectangle(bounds.Left + SegmentHorizontalPadding, bounds.Top, textWidth, bounds.Height);
-            TextRenderer.DrawText(e.Graphics, item.Text, Font, textBounds, color, TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine);
+            TextRenderer.DrawText(e.Graphics, item.Text, Font, textBounds, color, TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix | TextFormatFlags.NoPadding | TextFormatFlags.SingleLine);
             _hitAreas.Add((bounds, item.Segment));
             x += width;
         }
@@ -363,7 +373,7 @@ public sealed class BreadcrumbPathControl : Control
                 continue;
             }
 
-            if (segment != null)
+            if (segment is { IsNavigable: true })
             {
                 PathSelected?.Invoke(this, segment.FullPath);
             }

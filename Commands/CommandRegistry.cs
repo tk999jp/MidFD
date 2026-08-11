@@ -15,7 +15,9 @@ public sealed class CommandRegistry
             Create(CommandIds.BrowserNavigateBack, CommandScope.Browser, "履歴: 戻る", "ディレクトリ履歴を1つ戻ります。", true),
             Create(CommandIds.BrowserNavigateForward, CommandScope.Browser, "履歴: 進む", "ディレクトリ履歴を1つ進みます。", true),
             Create(CommandIds.BrowserReload, CommandScope.Browser, "再読込", "現在ディレクトリを再読込します。", true),
-            Create(CommandIds.BrowserExecute, CommandScope.Browser, "実行", "選択中の項目を実行します。", true),
+            Create(CommandIds.BrowserExecute, CommandScope.Browser, "開く", "選択項目をMidFDの対象別動作で開きます。", true),
+            Create(CommandIds.BrowserDefaultOpen, CommandScope.Browser, "既定アプリで開く", "ファイルをWindows関連付けで開き、ディレクトリをExplorerで開きます。", true),
+            Create(CommandIds.BrowserOpenCommandDialog, CommandScope.Browser, "コマンド実行", "実行するコマンドを入力します。", true),
             Create(CommandIds.BrowserMarkAllFiles, CommandScope.Browser, "ファイルのみ全選択", "ファイルのみを全選択/全解除します。", true),
             Create(CommandIds.BrowserMarkAllItems, CommandScope.Browser, "ディレクトリを含めて全選択", "ディレクトリを含めて全選択/全解除します。", true),
             Create(CommandIds.BrowserCursorTop, CommandScope.Browser, "先頭へ移動", "一覧の先頭へ移動します。", true),
@@ -36,12 +38,16 @@ public sealed class CommandRegistry
             Create(CommandIds.ArchivePack, CommandScope.Browser, "圧縮", "選択項目を圧縮します。", true),
             Create(CommandIds.ArchiveUnpack, CommandScope.Browser, "解凍", "選択ファイルを解凍します。", true),
             Create(CommandIds.BrowserCopyFullPath, CommandScope.Browser, "フルパスコピー", "選択またはマーク項目のフルパスをコピーします。", true),
+            Create(CommandIds.BrowserCopyCurrentPath, CommandScope.Browser, "現在のパスをコピー", "現在ディレクトリの完全パスをコピーします。", true),
             Create(CommandIds.BrowserPathEntryOpen, CommandScope.Browser, "パス入力", "現在パスの入力欄を開きます。", true),
             Create(CommandIds.BrowserShowHelp, CommandScope.Browser, "ヘルプ", "ヘルプ表示を開きます。", true),
             Create(CommandIds.BrowserOpenMarkSlot, CommandScope.Browser, "マークスロット", "マークスロット画面を開きます。", true),
             Create(CommandIds.BrowserTabNew, CommandScope.Browser, "新しいタブを作る", "新しいBrowserタブを作成します。", true),
+            Create(CommandIds.BrowserOpenInNewTab, CommandScope.Browser, "新しいタブで開く", "選択したディレクトリを新しいBrowserタブで開きます。", false),
             Create(CommandIds.BrowserTabNext, CommandScope.Browser, "次のタブへ移動", "次のBrowserタブへ移動します。", true),
             Create(CommandIds.BrowserTabPrevious, CommandScope.Browser, "前のタブへ移動", "前のBrowserタブへ移動します。", true),
+            Create(CommandIds.BrowserTabLayoutToggle, CommandScope.Browser, "タブ表示位置を切り替える", "タブ表示を横型と縦側の間で切り替えます。", true),
+            Create(CommandIds.BrowserTabReadOnlyToggle, CommandScope.Browser, "現在タブのReadOnly切替", "現在のBrowserタブをReadOnlyと通常の間で切り替えます。", true),
             Create(CommandIds.BrowserTabCategoryAdd, CommandScope.Browser, "カテゴリ追加", "Browserタブカテゴリを追加します。", true),
             Create(CommandIds.BrowserTabCategoryRename, CommandScope.Browser, "カテゴリ名変更", "現在のBrowserタブカテゴリ名を変更します。", true),
             Create(CommandIds.BrowserTabCategoryDelete, CommandScope.Browser, "カテゴリ削除", "現在のBrowserタブカテゴリを削除します。", true, true),
@@ -49,15 +55,18 @@ public sealed class CommandRegistry
             Create(CommandIds.BrowserTabCategoryMoveRight, CommandScope.Browser, "カテゴリを右へ移動", "現在のBrowserタブカテゴリを右へ移動します。", true),
             Create(CommandIds.BrowserTabCategoryNext, CommandScope.Browser, "次のカテゴリへ移動", "次のBrowserタブカテゴリへ移動します。", true),
             Create(CommandIds.BrowserTabCategoryPrevious, CommandScope.Browser, "前のカテゴリへ移動", "前のBrowserタブカテゴリへ移動します。", true),
+            Create(CommandIds.BrowserTabCategoryManage, CommandScope.Browser, "カテゴリ管理", "Browserタブカテゴリの管理画面を開きます。", true),
             Create(CommandIds.BrowserTabClose, CommandScope.Browser, "現在タブを閉じる", "現在のBrowserタブを閉じます。", true),
             Create(CommandIds.BrowserTabRestoreClosed, CommandScope.Browser, "閉じたタブを復元", "直前に閉じたBrowserタブを復元します。", true),
             Create(CommandIds.ClipboardPaste, CommandScope.Browser, "貼り付け", "クリップボード内容を貼り付けます。", true),
+            Create(CommandIds.ClipboardCut, CommandScope.Browser, "切り取り", "選択項目をクリップボードへ切り取ります。", true),
+            Create(CommandIds.BrowserProperties, CommandScope.Browser, "プロパティ", "選択中の1項目のWindowsプロパティを表示します。", true),
             Create(CommandIds.FileCopy, CommandScope.Browser, "コピー", "選択項目をコピーします。", true, false),
             Create(CommandIds.FileMove, CommandScope.Browser, "移動", "選択項目を移動します。", true, false),
             Create(CommandIds.FileRename, CommandScope.Browser, "名前変更", "選択項目を名前変更します。", true, false),
             Create(CommandIds.FileDelete, CommandScope.Browser, "削除", "選択項目を削除します。", true, true),
-            Create(CommandIds.EditUndo, CommandScope.Browser, "元に戻す", "直前の対象操作を元に戻します。", false),
-            Create(CommandIds.EditRedo, CommandScope.Browser, "やり直し", "元に戻した操作をやり直します。", false),
+            Create(CommandIds.EditUndo, CommandScope.Browser, "元に戻す", "直前の対象操作を元に戻します。", true, false, false),
+            Create(CommandIds.EditRedo, CommandScope.Browser, "やり直し", "元に戻した操作をやり直します。", true, false, false),
             Create(CommandIds.AppOpenSystemInformation, CommandScope.Browser, "情報", "ドライブ、メモリ、システム情報を表示します。", true),
             Create(CommandIds.AppOpenNewInstance, CommandScope.Global, "MidFDをもう1枚立ち上げ", "現在パスで新しいMidFDウィンドウを起動します。", true),
             Create(CommandIds.AppOpenControlPanel, CommandScope.Global, "コントロールパネルを開く", "Windowsのコントロールパネルを開きます。", true),
@@ -65,6 +74,10 @@ public sealed class CommandRegistry
             Create(CommandIds.AppOpenCommandLauncher, CommandScope.Global, "コマンドランチャーを開く", "コマンドランチャーを開きます。", true),
             Create(CommandIds.BrowserTabFilterLock, CommandScope.Browser, "現在タブのフィルタロック", "現在のタブのフィルタロック設定ダイアログを開きます。", true),
             Create(CommandIds.BrowserTabLock, CommandScope.Browser, "現在タブの固定/解除", "現在のタブの固定状態を切り替えます。", true),
+            Create(CommandIds.BrowserTabFilterLockClear, CommandScope.Browser, "タブのフィルタロックを解除", "指定したBrowserタブのフィルタロックを解除します。", false),
+            Create(CommandIds.BrowserTabCloseRight, CommandScope.Browser, "右側のタブを閉じる", "指定したBrowserタブより右側のタブを閉じます。", false),
+            Create(CommandIds.BrowserTabCloseLeft, CommandScope.Browser, "左側のタブを閉じる", "指定したBrowserタブより左側のタブを閉じます。", false),
+            Create(CommandIds.BrowserTabCloseOther, CommandScope.Browser, "他のタブを閉じる", "指定したBrowserタブ以外のタブを閉じます。", false),
             Create(CommandIds.AppOpenCommandList, CommandScope.Global, "コマンド一覧", "コマンド一覧を開きます。", true),
             Create(CommandIds.AppOpenManagedTrash, CommandScope.Global, "MidFD管理ゴミ箱を開く", "MidFD管理ゴミ箱の確認・管理画面を開きます。", true)
         };
@@ -80,8 +93,7 @@ public sealed class CommandRegistry
         return _definitions
             .Where(static d =>
                 (d.Scope == CommandScope.Browser || d.Scope == CommandScope.Global) &&
-                d.IsCustomizable &&
-                !d.IsDangerous)
+                (d.InputSurfaces & CommandInputSurface.MouseGesture) != 0)
             .ToArray();
     }
 
@@ -101,7 +113,8 @@ public sealed class CommandRegistry
         string displayName,
         string description,
         bool isCustomizable,
-        bool isDangerous = false)
+        bool isDangerous = false,
+        bool allowMouseGesture = true)
     {
         return new CommandDefinition
         {
@@ -110,7 +123,12 @@ public sealed class CommandRegistry
             DisplayName = displayName,
             Description = description,
             IsCustomizable = isCustomizable,
-            IsDangerous = isDangerous
+            IsDangerous = isDangerous,
+            InputSurfaces = isCustomizable
+                ? CommandInputSurface.Keyboard |
+                  CommandInputSurface.FunctionBar |
+                  (!isDangerous && allowMouseGesture ? CommandInputSurface.MouseGesture : CommandInputSurface.None)
+                : CommandInputSurface.None
         };
     }
 }

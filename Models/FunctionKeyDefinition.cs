@@ -2,9 +2,10 @@
 
 public sealed class FunctionKeyDefinition
 {
+    public FunctionKeyProfile Profile { get; init; }
     public int KeyNumber { get; init; }
-    public FunctionKeyAction Action { get; init; }
-    public string Label { get; init; } = string.Empty;
-    public string? ShortcutHint { get; init; }
-    public bool VisibleOnFunctionBar { get; init; } = true;
+    public bool IsShift { get; init; }
+    public bool IsCtrl { get; init; }
+    public bool IsAlt { get; init; }
+    public string? CommandId { get; init; }
 }

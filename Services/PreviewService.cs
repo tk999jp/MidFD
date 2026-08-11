@@ -53,6 +53,10 @@ public static class PreviewService
     {
         ".mp4", ".m4v", ".mov", ".avi", ".wmv", ".mpg", ".mpeg", ".webm", ".mkv"
     };
+    private static readonly HashSet<string> CsvTsvExtensions = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ".csv", ".tsv"
+    };
     private static readonly HashSet<string> AudioExtensions = new(StringComparer.OrdinalIgnoreCase)
     {
         ".mp3", ".wav", ".flac", ".m4a", ".aac", ".ogg", ".opus", ".wma"
@@ -92,6 +96,11 @@ public static class PreviewService
             return PreviewKind.Markdown;
         }
 
+        if (IsCsvTsvExtension(path))
+        {
+            return PreviewKind.CsvTsv;
+        }
+
         if (IsSqliteExtension(path))
         {
             return PreviewKind.Sqlite;
@@ -118,6 +127,21 @@ public static class PreviewService
 
         // 依然として不明な場合はバイナリ扱い
         return PreviewKind.Binary;
+    }
+
+    /// <summary>
+    /// View (V / FD Shift+F9) 用の内容ベース判定。拡張子による専用ビューア分岐は行わない。
+    /// </summary>
+    public static PreviewKind GetContentPreviewKind(string path, out TextPreviewProbeResult? probe)
+    {
+        probe = null;
+        if (string.IsNullOrWhiteSpace(path) || Directory.Exists(path) || !File.Exists(path))
+        {
+            return PreviewKind.None;
+        }
+
+        probe = ProbeTextPreviewWithRetry(path);
+        return ResolveTextPreviewKind(probe);
     }
 
     public static PreviewKind ResolveTextPreviewKind(TextPreviewProbeResult probe)
@@ -154,6 +178,11 @@ public static class PreviewService
         if (IsMarkdownExtension(path))
         {
             return PreviewKind.Markdown;
+        }
+
+        if (IsCsvTsvExtension(path))
+        {
+            return PreviewKind.CsvTsv;
         }
 
         if (IsSqliteExtension(path))
@@ -225,6 +254,11 @@ public static class PreviewService
             IsLongLineDetected = probe.HasLongLine,
             Reason = probe.Reason
         };
+    }
+
+    public static bool IsCsvTsvExtension(string path)
+    {
+        return CsvTsvExtensions.Contains(Path.GetExtension(path));
     }
 
     public static TextPreviewProbeResult ProbeTextPreview(string path, int requestedBytes = 512 * 1024)

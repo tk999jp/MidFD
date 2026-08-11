@@ -1,5 +1,4 @@
 using System.Collections.Generic;
-using System.IO;
 using System.Linq;
 using System.Windows.Forms;
 using MidFD.Commands;
@@ -53,9 +52,8 @@ internal sealed class CommandStateCoordinator
         bool hasSelection = selectionCount > 0;
         bool hasExactlyTwoSelection = selectionCount == 2;
         bool hasFileSelection = isBrowserMode
-            && !string.IsNullOrWhiteSpace(currentPath)
-            && currentItemText != ".."
-            && File.Exists(currentPath);
+            && (selectionKind == BrowserSelectionKind.File
+                || selectionKind == BrowserSelectionKind.ArchiveCandidate);
         bool hasEditorTarget = hasFileSelection && ExternalToolService.IsEditorTargetExtension(currentPath!);
         return new CommandUiSnapshot(
             IsBrowserMode: isBrowserMode,
@@ -135,95 +133,6 @@ internal sealed class CommandStateCoordinator
         return snapshot.IsBrowserMode;
     }
 
-    internal bool IsActionEnabled(FunctionKeyAction action, CommandUiSnapshot snapshot)
-    {
-        if (!snapshot.IsBrowserMode) return false;
-        if (!snapshot.IsIdle)
-        {
-            // Busy state allows only display navigation or help commands safely
-            if (action != FunctionKeyAction.Help &&
-                action != FunctionKeyAction.Menu &&
-                action != FunctionKeyAction.Top &&
-                action != FunctionKeyAction.Bottom)
-            {
-                return false;
-            }
-        }
-
-        switch (action)
-        {
-            case FunctionKeyAction.Help:
-            case FunctionKeyAction.Menu:
-            case FunctionKeyAction.Top:
-            case FunctionKeyAction.Bottom:
-            case FunctionKeyAction.Sort:
-            case FunctionKeyAction.Filter:
-            case FunctionKeyAction.Logdisk:
-                return true;
-
-            case FunctionKeyAction.Execute:
-            case FunctionKeyAction.Edit:
-                return snapshot.SelectionKind == BrowserSelectionKind.File ||
-                       snapshot.SelectionKind == BrowserSelectionKind.ArchiveCandidate;
-
-            case FunctionKeyAction.Copy:
-            case FunctionKeyAction.Rename:
-                return snapshot.SelectionKind == BrowserSelectionKind.Directory ||
-                       snapshot.SelectionKind == BrowserSelectionKind.File ||
-                       snapshot.SelectionKind == BrowserSelectionKind.ArchiveCandidate;
-
-            case FunctionKeyAction.Unpack:
-                return snapshot.SelectionKind == BrowserSelectionKind.ArchiveCandidate;
-
-            default:
-                return true;
-        }
-    }
-
-    internal bool IsShiftActionEnabled(int keyNumber, CommandUiSnapshot snapshot)
-    {
-        if (!snapshot.IsBrowserMode) return false;
-        if (!snapshot.IsIdle) return false;
-
-        switch (keyNumber)
-        {
-            case 1: // Attr (属性)
-                return snapshot.SelectionKind == BrowserSelectionKind.File ||
-                       snapshot.SelectionKind == BrowserSelectionKind.ArchiveCandidate ||
-                       snapshot.SelectionKind == BrowserSelectionKind.Directory;
-
-            case 3: // Move (移動)
-                return snapshot.SelectionKind == BrowserSelectionKind.File ||
-                       snapshot.SelectionKind == BrowserSelectionKind.ArchiveCandidate ||
-                       snapshot.SelectionKind == BrowserSelectionKind.Directory;
-
-            case 5: // MkDir (新規フォルダ)
-                return true;
-
-            case 6: // PSh (PowerShell)
-                return true;
-
-            case 7: // Rld (再読込)
-                return true;
-
-            case 8: // Edit (外部エディタ)
-                return snapshot.SelectionKind == BrowserSelectionKind.File ||
-                       snapshot.SelectionKind == BrowserSelectionKind.ArchiveCandidate;
-
-            case 9: // Prev (プレビュー)
-                return snapshot.SelectionKind == BrowserSelectionKind.File ||
-                       snapshot.SelectionKind == BrowserSelectionKind.ArchiveCandidate;
-
-            case 10: // Pack (圧縮)
-                return snapshot.SelectionKind == BrowserSelectionKind.File ||
-                       snapshot.SelectionKind == BrowserSelectionKind.ArchiveCandidate ||
-                       snapshot.SelectionKind == BrowserSelectionKind.Directory;
-
-            default:
-                return false;
-        }
-    }
-
     internal bool IsCommandEnabled(string commandId, CommandUiSnapshot snapshot)
     {
         if (!snapshot.IsBrowserMode) return false;
@@ -240,7 +149,14 @@ internal sealed class CommandStateCoordinator
         switch (commandId)
         {
             case CommandIds.BrowserExecute:
-                return snapshot.SelectionKind == BrowserSelectionKind.File ||
+                return snapshot.SelectionKind == BrowserSelectionKind.ParentDirectory ||
+                       snapshot.SelectionKind == BrowserSelectionKind.Directory ||
+                       snapshot.SelectionKind == BrowserSelectionKind.File ||
+                       snapshot.SelectionKind == BrowserSelectionKind.ArchiveCandidate;
+
+            case CommandIds.BrowserDefaultOpen:
+                return snapshot.SelectionKind == BrowserSelectionKind.Directory ||
+                       snapshot.SelectionKind == BrowserSelectionKind.File ||
                        snapshot.SelectionKind == BrowserSelectionKind.ArchiveCandidate;
 
             case CommandIds.BrowserChangeAttributes:

@@ -7,6 +7,7 @@ public enum PreviewKind
     Video,
     Text,
     Markdown,
+    CsvTsv,
     Sqlite,
     LargeText,
     Binary

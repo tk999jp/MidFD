@@ -17,6 +17,8 @@ public sealed class FeatureProfileSelectionDialog : Form
     private readonly CheckBox _clipboardPasteTextAsFileCheckBox;
     private readonly RadioButton _standardInputRadioButton;
     private readonly RadioButton _fdCompatibleInputRadioButton;
+    private readonly RadioButton _verticalTabLayoutRadioButton;
+    private readonly RadioButton _horizontalTabLayoutRadioButton;
     private readonly RadioButton _basicRangeRadioButton;
     private readonly RadioButton _convenientRangeRadioButton;
     private readonly RadioButton _allRangeRadioButton;
@@ -43,6 +45,9 @@ public sealed class FeatureProfileSelectionDialog : Form
     public bool UseMidFdManagedTrash => _useMidFdManagedTrashCheckBox.Checked;
     public bool ClipboardPasteTextAsFileEnabled => _clipboardPasteTextAsFileCheckBox.Checked;
     public string ColorTheme => FileListColorResolver.GetPresetKeyFromDisplayName(_colorThemeComboBox.Text);
+    public BrowserTabLayoutMode LayoutMode => _verticalTabLayoutRadioButton.Checked
+        ? BrowserTabLayoutMode.Vertical
+        : BrowserTabLayoutMode.Horizontal;
     public string? SevenZipPath => NullIfEmpty(_sevenZipPathBox.Text);
     public string? VideoToolDirectory => NullIfEmpty(_videoToolDirectoryBox.Text);
     public string? ExternalEditorPath => NullIfEmpty(_externalEditorPathBox.Text);
@@ -64,6 +69,7 @@ public sealed class FeatureProfileSelectionDialog : Form
         FileOperationsSettings? fileOperations = settings?.FileOperations;
         PreviewSettings? preview = settings?.Preview;
         AppearanceSettings? appearance = settings?.Appearance;
+        BrowserTabSettings? browserTabs = settings?.BrowserTabs;
         SevenZipSettings? sevenZip = settings?.SevenZip;
         ExternalToolsSettings? externalTools = settings?.ExternalTools;
         var bodyPanel = new Panel
@@ -125,9 +131,17 @@ public sealed class FeatureProfileSelectionDialog : Form
         _standardInputRadioButton.Checked = !_fdCompatibleInputRadioButton.Checked;
         bodyPanel.Controls.Add(operationGroup);
 
-        var displayGroup = new GroupBox { Text = "表示", Location = new Point(376, 466), Size = new Size(340, 62) };
-        displayGroup.Controls.Add(new Label { Text = "配色プリセット", AutoSize = true, Location = new Point(18, 25) });
-        _colorThemeComboBox = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Location = new Point(108, 18), Size = new Size(210, 28) };
+        var displayGroup = new GroupBox { Text = "表示", Location = new Point(376, 466), Size = new Size(340, 104) };
+        displayGroup.Controls.Add(new Label { Text = "タブ表示", AutoSize = true, Location = new Point(18, 20) });
+        _verticalTabLayoutRadioButton = AddRadio(displayGroup, "縦型（推奨）", 18, 44);
+        _horizontalTabLayoutRadioButton = AddRadio(displayGroup, "横型", 160, 44);
+        bool useVerticalTabs = isFirstLaunch
+            ? true
+            : browserTabs?.LayoutMode == BrowserTabLayoutMode.Vertical;
+        _verticalTabLayoutRadioButton.Checked = useVerticalTabs;
+        _horizontalTabLayoutRadioButton.Checked = !useVerticalTabs;
+        displayGroup.Controls.Add(new Label { Text = "配色プリセット", AutoSize = true, Location = new Point(18, 78) });
+        _colorThemeComboBox = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Location = new Point(108, 71), Size = new Size(210, 28) };
         foreach (string key in FileListColorResolver.BuiltInPresetKeys)
         {
             _colorThemeComboBox.Items.Add(FileListColorResolver.GetPresetDisplayName(key));
@@ -142,7 +156,7 @@ public sealed class FeatureProfileSelectionDialog : Form
         displayGroup.Controls.Add(_colorThemeComboBox);
         bodyPanel.Controls.Add(displayGroup);
 
-        var externalGroup = new GroupBox { Text = "外部アプリ", Location = new Point(16, 534), Size = new Size(700, 154) };
+        var externalGroup = new GroupBox { Text = "外部アプリ", Location = new Point(16, 576), Size = new Size(700, 154) };
         int externalRowTop = 13;
         AddLabel(externalGroup, "7-Zip", 18, externalRowTop + 4, 120);
         _sevenZipPathBox = AddReadOnlyTextBox(externalGroup, 142, externalRowTop, 440, sevenZip?.ExePath ?? string.Empty);

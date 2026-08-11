@@ -7,6 +7,7 @@ namespace MidFD.Configuration;
 
 public class InputSettings
 {
+    private const string LegacyBrowserCheckExecuteCommandId = "browser.check_execute";
     public const string StandardProfileValue = "Standard";
     public const string FdCompatibleProfileValue = "FDCompatible";
     public const string MouseGestureUnassignedCommandId = "none";
@@ -167,7 +168,13 @@ public class InputSettings
                 continue;
             }
 
-            result[normalizedKey] = value ?? string.Empty;
+            string normalizedCommandId = string.Equals(value, LegacyBrowserCheckExecuteCommandId, StringComparison.OrdinalIgnoreCase)
+                ? CommandIds.BrowserExecute
+                : value ?? string.Empty;
+            if (!result.ContainsKey(normalizedKey) || string.Equals(result[normalizedKey], LegacyBrowserCheckExecuteCommandId, StringComparison.OrdinalIgnoreCase))
+            {
+                result[normalizedKey] = normalizedCommandId;
+            }
         }
 
         return result;
@@ -209,7 +216,13 @@ public class InputSettings
                 continue;
             }
 
-            string normalizedCommandId = commandId.Trim();
+            bool isLegacyCommandId = string.Equals(commandId.Trim(), LegacyBrowserCheckExecuteCommandId, StringComparison.OrdinalIgnoreCase);
+            string normalizedCommandId = NormalizeCommandId(commandId);
+            if (isLegacyCommandId &&
+                source.Keys.Any(key => string.Equals(key.Trim(), CommandIds.BrowserExecute, StringComparison.OrdinalIgnoreCase)))
+            {
+                continue;
+            }
             result[normalizedCommandId] = NormalizeBrowserKeyGestures(keyGestures);
         }
 
@@ -278,6 +291,7 @@ public class InputSettings
     public static void NormalizeAndMigrateFunctionKeyChords(InputSettings settings)
     {
         ArgumentNullException.ThrowIfNull(settings);
+        MigrateLegacyBrowserCheckExecuteCommand(settings);
         if (settings.BrowserKeyCommandOverrides != null)
         {
             if (settings.BrowserKeyCommandOverrides.TryGetValue(CommandIds.FileCopy, out var copyGestures) && copyGestures != null)
@@ -298,6 +312,22 @@ public class InputSettings
         settings.FunctionBarCommandOverridesCtrlFdCompatible ??= new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
         settings.FunctionBarCommandOverridesAltStandard ??= new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
         settings.FunctionBarCommandOverridesAltFdCompatible ??= new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
+        MigrateLegacyCommandId(settings.FunctionBarCommandOverridesStandard);
+        MigrateLegacyCommandId(settings.FunctionBarCommandOverridesFdCompatible);
+        MigrateLegacyCommandId(settings.FunctionBarCommandOverridesShiftStandard);
+        MigrateLegacyCommandId(settings.FunctionBarCommandOverridesShiftFdCompatible);
+        MigrateLegacyCommandId(settings.FunctionBarCommandOverridesCtrlStandard);
+        MigrateLegacyCommandId(settings.FunctionBarCommandOverridesCtrlFdCompatible);
+        MigrateLegacyCommandId(settings.FunctionBarCommandOverridesAltStandard);
+        MigrateLegacyCommandId(settings.FunctionBarCommandOverridesAltFdCompatible);
+        MigrateLegacyCommandId(settings.FunctionBarLabelOverridesStandard);
+        MigrateLegacyCommandId(settings.FunctionBarLabelOverridesFdCompatible);
+        MigrateLegacyCommandId(settings.FunctionBarLabelOverridesShiftStandard);
+        MigrateLegacyCommandId(settings.FunctionBarLabelOverridesShiftFdCompatible);
+        MigrateLegacyCommandId(settings.FunctionBarLabelOverridesCtrlStandard);
+        MigrateLegacyCommandId(settings.FunctionBarLabelOverridesCtrlFdCompatible);
+        MigrateLegacyCommandId(settings.FunctionBarLabelOverridesAltStandard);
+        MigrateLegacyCommandId(settings.FunctionBarLabelOverridesAltFdCompatible);
 
         bool isFdCompatible = string.Equals(settings.FunctionKeyProfile, FdCompatibleProfileValue, StringComparison.OrdinalIgnoreCase);
         Dictionary<string, string?> normalMap = isFdCompatible ? settings.FunctionBarCommandOverridesFdCompatible : settings.FunctionBarCommandOverridesStandard;
@@ -342,6 +372,60 @@ public class InputSettings
         }
 
         settings.BrowserKeyCommandOverrides = NormalizeBrowserKeyCommandOverrides(nextOverrides);
+    }
+
+    private static void MigrateLegacyBrowserCheckExecuteCommand(InputSettings settings)
+    {
+        Dictionary<string, List<string>> overrides = settings.BrowserKeyCommandOverrides
+            ?? new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
+        settings.BrowserKeyCommandOverrides = overrides;
+
+        if (overrides.TryGetValue(CommandIds.BrowserExecute, out List<string>? legacyExecuteGestures) &&
+            !overrides.ContainsKey(CommandIds.BrowserDefaultOpen) &&
+            !overrides.ContainsKey(CommandIds.BrowserOpenCommandDialog) &&
+            !overrides.ContainsKey(LegacyBrowserCheckExecuteCommandId))
+        {
+            List<string> normalized = NormalizeBrowserKeyGestures(legacyExecuteGestures);
+            if (normalized.Count == 1 && string.Equals(normalized[0], "X", StringComparison.OrdinalIgnoreCase))
+            {
+                overrides.Remove(CommandIds.BrowserExecute);
+                overrides[CommandIds.BrowserOpenCommandDialog] = normalized;
+            }
+        }
+
+        if (!overrides.TryGetValue(LegacyBrowserCheckExecuteCommandId, out List<string>? legacyGestures))
+        {
+            return;
+        }
+
+        if (!overrides.ContainsKey(CommandIds.BrowserExecute))
+        {
+            overrides[CommandIds.BrowserExecute] = NormalizeBrowserKeyGestures(legacyGestures);
+        }
+        overrides.Remove(LegacyBrowserCheckExecuteCommandId);
+    }
+
+    private static string NormalizeCommandId(string commandId)
+    {
+        string normalized = commandId.Trim();
+        return string.Equals(normalized, LegacyBrowserCheckExecuteCommandId, StringComparison.OrdinalIgnoreCase)
+            ? CommandIds.BrowserExecute
+            : normalized;
+    }
+
+    private static void MigrateLegacyCommandId<T>(Dictionary<string, T> map)
+    {
+        if (!map.TryGetValue(LegacyBrowserCheckExecuteCommandId, out T? legacyValue))
+        {
+            return;
+        }
+
+        if (!map.ContainsKey(CommandIds.BrowserExecute))
+        {
+            map[CommandIds.BrowserExecute] = legacyValue;
+        }
+
+        map.Remove(LegacyBrowserCheckExecuteCommandId);
     }
 
     public static List<string> NormalizeBrowserKeyGestures(IEnumerable<string>? source)
@@ -478,18 +562,24 @@ public class InputSettings
         var map = new Dictionary<string, IReadOnlyList<string>>(StringComparer.OrdinalIgnoreCase)
         {
             [CommandIds.BrowserNavigateParent] = new[] { "Back", "Alt+Up" },
-            [CommandIds.BrowserNavigateBack] = new[] { "Alt+Left" },
+            [CommandIds.BrowserNavigateBack] = new[] { "Alt+Left", "Ctrl+Back" },
             [CommandIds.BrowserNavigateForward] = new[] { "Alt+Right" },
             [CommandIds.BrowserReload] = new[] { "Ctrl+R", "Shift+R" },
             [CommandIds.BrowserMarkAllFiles] = new[] { "Home" },
             [CommandIds.BrowserMarkAllItems] = new[] { "End", "Ctrl+A" },
-            [CommandIds.BrowserExecute] = new[] { "X" },
-            [CommandIds.BrowserTabPrevious] = new[] { "Ctrl+Left" },
-            [CommandIds.BrowserTabNext] = new[] { "Ctrl+Right" },
+            [CommandIds.BrowserExecute] = new[] { "Enter" },
+            [CommandIds.BrowserDefaultOpen] = new[] { "Z" },
+            [CommandIds.BrowserOpenCommandDialog] = new[] { "X" },
+            [CommandIds.BrowserTabPrevious] = new[] { "Ctrl+Left", "Ctrl+Shift+Tab" },
+            [CommandIds.BrowserTabNext] = new[] { "Ctrl+Right", "Ctrl+Tab" },
             [CommandIds.BrowserChangeAttributes] = new[] { "A" },
             [CommandIds.BrowserOpenShell] = new[] { "H" },
-            [CommandIds.BrowserOpenExternalEditor] = new[] { "E" },
+            [CommandIds.BrowserOpenCommandPrompt] = new[] { "Shift+H" },
+            [CommandIds.BrowserOpenExternalEditor] = isFdCompatible
+                ? new[] { "E", "Shift+Enter" }
+                : new[] { "E" },
             [CommandIds.BrowserCreateDirectory] = new[] { "K" },
+            [CommandIds.BrowserCreateFile] = new[] { "N" },
             [CommandIds.BrowserPreview] = new[] { "V" },
             [CommandIds.BrowserSort] = new[] { "S" },
             [CommandIds.BrowserFilter] = new[] { "F", "Ctrl+F" },
@@ -497,16 +587,27 @@ public class InputSettings
             [CommandIds.BrowserQuickAccess] = new[] { "Q" },
             [CommandIds.BrowserLogdisk] = new[] { "L" },
             [CommandIds.BrowserOpenMarkSlot] = new[] { "Ctrl+M" },
+            [CommandIds.BrowserPathEntryOpen] = new[] { "Ctrl+L" },
             [CommandIds.AppOpenCommandLauncher] = new[] { "Ctrl+Shift+P" },
             [CommandIds.BrowserTabLock] = new[] { "Ctrl+Shift+L" },
             [CommandIds.BrowserShowHelp] = new[] { "Ctrl+H" },
             [CommandIds.AppOpenSystemInformation] = new[] { "I" },
             [CommandIds.BrowserCopyFullPath] = new[] { "Ctrl+Shift+C" },
+            [CommandIds.BrowserCopyCurrentPath] = Array.Empty<string>(),
             [CommandIds.ClipboardPaste] = new[] { "Ctrl+V" },
+            [CommandIds.ClipboardCut] = new[] { "Ctrl+X" },
             [CommandIds.BrowserTabNew] = new[] { "Ctrl+T" },
             [CommandIds.BrowserTabClose] = new[] { "Ctrl+W" },
-            [CommandIds.BrowserTabCategoryNext] = new[] { "Ctrl+Shift+Right" },
-            [CommandIds.BrowserTabCategoryPrevious] = new[] { "Ctrl+Shift+Left" },
+            [CommandIds.BrowserTabLayoutToggle] = Array.Empty<string>(),
+            [CommandIds.BrowserTabReadOnlyToggle] = Array.Empty<string>(),
+            [CommandIds.BrowserTabCategoryAdd] = new[] { "Ctrl+Shift+N" },
+            [CommandIds.BrowserCursorTop] = new[] { "Ctrl+Home" },
+            [CommandIds.BrowserCursorBottom] = new[] { "Ctrl+End" },
+            [CommandIds.BrowserTabCategoryMoveLeft] = new[] { "Ctrl+Alt+Left" },
+            [CommandIds.BrowserTabCategoryMoveRight] = new[] { "Ctrl+Alt+Right" },
+            [CommandIds.BrowserTabCategoryPrevious] = new[] { "Ctrl+Shift+Left", "Ctrl+Up" },
+            [CommandIds.BrowserTabCategoryNext] = new[] { "Ctrl+Shift+Right", "Ctrl+Down" },
+            [CommandIds.BrowserTabCategoryManage] = Array.Empty<string>(),
             [CommandIds.ArchivePack] = new[] { "P" },
             [CommandIds.ArchiveUnpack] = new[] { "U" },
             [CommandIds.AppOpenSettings] = new[] { "O" },

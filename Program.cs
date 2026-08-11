@@ -209,6 +209,7 @@ static class Program
             settings.Input ??= new Configuration.InputSettings();
             settings.FileOperations ??= new Configuration.FileOperationsSettings();
             settings.Appearance ??= new Configuration.AppearanceSettings();
+            settings.BrowserTabs ??= new Configuration.BrowserTabSettings();
             using var dialog = new Dialogs.FeatureProfileSelectionDialog(settings, isFirstLaunch: true);
             var result = dialog.ShowDialog();
             if (result != DialogResult.OK)
@@ -234,6 +235,7 @@ static class Program
             settings.FileOperations.ClipboardPasteTextAsFileEnabled = dialog.ClipboardPasteTextAsFileEnabled;
             settings.Appearance.ShowPathAsBreadcrumb = dialog.ShowPathAsBreadcrumb;
             settings.Appearance.ColorTheme = dialog.ColorTheme;
+            settings.BrowserTabs.LayoutMode = dialog.LayoutMode;
             settings.SevenZip.ExePath = NormalizeOptionalPath(dialog.SevenZipPath);
             settings.Preview.VideoToolDirectory = NormalizeOptionalPath(dialog.VideoToolDirectory);
             settings.ExternalTools.ExternalEditorPath = NormalizeOptionalPath(dialog.ExternalEditorPath);

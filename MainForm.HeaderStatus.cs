@@ -1,5 +1,6 @@
 using System.Drawing;
 using System.Windows.Forms;
+using MidFD.Commands;
 using MidFD.Models;
 using MidFD.Services;
 
@@ -23,13 +24,16 @@ public partial class MainForm
     {
         var panel = sender as Panel;
         if (panel == null) return;
+        int right = Math.Max(0, panel.ClientSize.Width - 1);
+        int bottom = Math.Max(0, panel.ClientSize.Height - 1);
+        int top = Math.Clamp(headerPanel.Top, 0, bottom);
         if (FileListColorResolver.NormalizeCoreTheme(_settings.Appearance?.ColorTheme) == "Light")
         {
             // Light テーマ: 左右線はスキップ、下辺は SeparatorLine で弱めに描画
             using (var pen = new Pen(MidFDColors.SeparatorLine, 1))
             {
                 // 下辺 (一覧領域の外枠として描画)
-                e.Graphics.DrawLine(pen, 0, panel.Height - 1, panel.Width, panel.Height - 1);
+                e.Graphics.DrawLine(pen, 0, bottom, right, bottom);
             }
         }
         else
@@ -38,11 +42,11 @@ public partial class MainForm
             using (var pen = new Pen(MidFDColors.BorderLine, 1))
             {
                 // 左辺
-                e.Graphics.DrawLine(pen, 0, 0, 0, panel.Height);
+                e.Graphics.DrawLine(pen, 0, top, 0, bottom);
                 // 右辺
-                e.Graphics.DrawLine(pen, panel.Width - 1, 0, panel.Width - 1, panel.Height);
+                e.Graphics.DrawLine(pen, right, top, right, bottom);
                 // 下辺 (一覧領域の外枠として描画)
-                e.Graphics.DrawLine(pen, 0, panel.Height - 1, panel.Width, panel.Height - 1);
+                e.Graphics.DrawLine(pen, 0, bottom, right, bottom);
             }
         }
     }
@@ -171,7 +175,7 @@ public partial class MainForm
         _headerPathContextMenu = new ContextMenuStrip();
         _headerPathContextMenu.Opening += (_, e) => e.Cancel = TryConsumeHeaderContextMenuSuppress();
         var copyPathItem = new ToolStripMenuItem("パスをコピー");
-        copyPathItem.Click += (_, _) => CopyCurrentDirectoryFromHeader();
+        copyPathItem.Click += (_, _) => ExecuteCommandFromUi(CommandIds.BrowserCopyCurrentPath, CommandScope.Browser, "HeaderContextMenu.CopyCurrentPath");
         _headerPathContextMenu.Items.Add(copyPathItem);
         // Item 行用メニュー
         _headerItemContextMenu = new ContextMenuStrip();
@@ -310,8 +314,9 @@ public partial class MainForm
         if (_headerToolTip == null) return;
         string? path = GetCurrentDirectoryForHeaderCopy();
         string? fullPath = GetSelectedItemFullPathForHeaderCopy();
-        _headerToolTip.SetToolTip(lblPath, string.IsNullOrWhiteSpace(path) ? null : $"クリック / Ctrl+L でパス入力:\r\n{path}");
-        _headerToolTip.SetToolTip(infoRow2Panel, string.IsNullOrWhiteSpace(path) ? null : $"クリック / Ctrl+L でパス入力:\r\n{path}");
+        string pathShortcut = ResolveBrowserCommandShortcutHint(CommandIds.BrowserPathEntryOpen);
+        _headerToolTip.SetToolTip(lblPath, string.IsNullOrWhiteSpace(path) ? null : $"クリック / {pathShortcut} でパス入力:\r\n{path}");
+        _headerToolTip.SetToolTip(infoRow2Panel, string.IsNullOrWhiteSpace(path) ? null : $"クリック / {pathShortcut} でパス入力:\r\n{path}");
         _headerToolTip.SetToolTip(lblName, string.IsNullOrWhiteSpace(fullPath) ? null : $"左クリックでフルパスをコピー:\r\n{fullPath}");
         _headerToolTip.SetToolTip(infoRow4Panel, string.IsNullOrWhiteSpace(fullPath) ? null : $"左クリックでフルパスをコピー:\r\n{fullPath}");
         // アイテムがない場合のカーソル調整

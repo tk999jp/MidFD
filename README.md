@@ -34,7 +34,15 @@ MidFDには次の外部ツールを同梱していません。必要な機能だ
 
 ### メイン画面
 
-![MidFD Browser画面](UserDocs/images/screenshot-main-browser.png)
+![MidFD 縦型タブのメイン画面](UserDocs/images/screenshot-vertical-tabs.png)
+
+縦型タブでは、複数の作業場所を左側へまとめ、カテゴリごとに整理できます。フォルダを別タブで開いたまま切り替えられるため、並行して作業する場所を把握しやすくなります。初回セットアップでは縦型を推奨しています。
+
+### 横型タブ
+
+![MidFD 横型タブ](UserDocs/images/screenshot-main-browser.png)
+
+横型タブも選択でき、従来型のタブ配置で利用できます。
 
 ### Command Palette
 
@@ -94,7 +102,7 @@ MidFDには次の外部ツールを同梱していません。必要な機能だ
 
 ### Viewer・外部ツール
 
-- テキスト、画像、SVG、Markdown、SQLiteのread-only preview
+- テキスト、画像、SVG、Markdown、CSV／TSV、SQLiteのread-only preview
 - UTF-16 LE／BEを含むテキストpreviewとbinary判定
 - 大きなテキストファイル向けLargeText Viewer
 - 画像の矩形選択コピー、回転、反転、画像情報表示
@@ -115,6 +123,10 @@ MidFDには次の外部ツールを同梱していません。必要な機能だ
 ## 初回セットアップ
 
 初回起動時に「MidFD 初回セットアップ」を表示します。後から設定画面の「起動・ログ」から「MidFD 基本セットアップ」として再表示できます。
+
+初回セットアップの「表示」では、タブ表示を「縦型（推奨）」または「横型」から選べます。既存ユーザーの保存済みタブ表示設定は維持されます。設定画面から基本セットアップを再表示した場合は現在の設定値が選択されます。
+
+![MidFD 初回セットアップのタブ表示選択](UserDocs/images/screenshot-first-setup-tabs.png)
 
 ### 機能範囲
 
@@ -143,9 +155,10 @@ MidFDには次の外部ツールを同梱していません。必要な機能だ
 
 | 操作 | キー |
 |---|---|
-| 開く／表示 | Enter |
+| 対象別に開く | Enter |
+| 明示Preview | V |
 | OSの関連付けで開く | Z |
-| コマンド実行 | X |
+| コマンド実行Dialog | X |
 | PowerShell | H |
 | コマンドプロンプト | Shift+H |
 | パス入力 | Ctrl+L |

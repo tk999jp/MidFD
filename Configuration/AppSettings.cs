@@ -270,6 +270,7 @@ public class BrowserTabSettings
     public const int SafetyMaxTabsPerCategory = 100;
     public const float DefaultTabFontSize = 9.0f;
     public const int DefaultTabWidth = 140;
+    public const int DefaultNavigationWidth = 220;
 
     public int MaxTabsPerCategory { get; set; } = DefaultMaxTabsPerCategory;
     private float _tabFontSize = DefaultTabFontSize;
@@ -285,6 +286,9 @@ public class BrowserTabSettings
         get => _tabWidth;
         set => _tabWidth = value;
     }
+    public BrowserTabLayoutMode LayoutMode { get; set; } = BrowserTabLayoutMode.Horizontal;
+    public BrowserTabNewPosition NewTabPosition { get; set; } = BrowserTabNewPosition.NextToActive;
+    public int NavigationWidth { get; set; } = DefaultNavigationWidth;
     public List<BrowserTabCategoryDefinition> Categories { get; set; } = new();
 
     public BrowserTabSettings Clone()
@@ -294,6 +298,9 @@ public class BrowserTabSettings
             MaxTabsPerCategory = MaxTabsPerCategory,
             TabFontSize = TabFontSize,
             TabWidth = TabWidth,
+            LayoutMode = LayoutMode,
+            NewTabPosition = NewTabPosition,
+            NavigationWidth = NavigationWidth,
             Categories = (Categories ?? []).Where(static category => category != null).Select(static category => category.Clone()).ToList()
         };
     }
@@ -391,6 +398,7 @@ public class PreviewSettings
     public int Height { get; set; } = 400;
     public bool IsManuallyPositioned { get; set; } = false;
     public bool ViewerWordWrap { get; set; } = false;
+    public MarkdownViewerMode MarkdownViewerMode { get; set; } = MarkdownViewerMode.Rendered;
     public bool ReuseImageViewer { get; set; } = true;
     public bool CloseImageViewerOnNonImageSelection { get; set; } = false;
     public bool RememberImageViewerBounds { get; set; } = true;
@@ -426,6 +434,24 @@ public class SevenZipSettings
     public string? ExePath { get; set; }
     public PackDialogMode PackDialogMode { get; set; } = PackDialogMode.Auto;
     public SevenZipSettings Clone() => (SevenZipSettings)MemberwiseClone();
+}
+
+public enum MarkdownViewerMode
+{
+    Rendered = 0,
+    Raw = 1
+}
+
+public enum BrowserTabLayoutMode
+{
+    Horizontal = 0,
+    Vertical = 1
+}
+
+public enum BrowserTabNewPosition
+{
+    NextToActive = 0,
+    End = 1
 }
 
 public class ExternalToolsSettings

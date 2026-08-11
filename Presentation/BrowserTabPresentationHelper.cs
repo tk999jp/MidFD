@@ -8,6 +8,42 @@ namespace MidFD.Presentation;
 
 public static class BrowserTabPresentationHelper
 {
+    public static BrowserTabPresentationSnapshot BuildPresentation(
+        BrowserTabState state,
+        int index,
+        Func<string, string?> resolveAliasDisplayName)
+    {
+        string titleBasisPath = state.IsLocked && !string.IsNullOrWhiteSpace(state.StartupPath)
+            ? state.StartupPath
+            : state.CurrentPath;
+        string? relativeSuffix = state.IsLocked
+            ? GetRelativeSuffix(state.StartupPath, state.CurrentPath)
+            : null;
+        string? resolvedAliasTitle = ResolveAliasDisplayName(titleBasisPath, resolveAliasDisplayName);
+        string? aliasTitle = resolvedAliasTitle != null && (!state.IsLocked || relativeSuffix != null)
+            ? resolvedAliasTitle
+            : null;
+        string baseTitle = aliasTitle ?? titleBasisPath;
+        string displayCore = string.IsNullOrWhiteSpace(relativeSuffix)
+            ? baseTitle
+            : $"{baseTitle} >{relativeSuffix}";
+        bool fixedWithinBase = state.IsLocked && !string.IsNullOrWhiteSpace(state.StartupPath)
+            && relativeSuffix != null;
+        string headerCore = displayCore;
+        string prefixText = (state.IsLocked ? "■ " : string.Empty) + (state.IsReadOnly ? "[RO] " : string.Empty);
+        return new BrowserTabPresentationSnapshot(
+            titleBasisPath,
+            aliasTitle,
+            baseTitle,
+            relativeSuffix,
+            prefixText,
+            fixedWithinBase || aliasTitle != null ? null : state.CurrentPath,
+            displayCore,
+            $"{prefixText}{headerCore}",
+            BuildToolTip(state, displayCore),
+            state.CurrentPath);
+    }
+
     public static string BuildHeaderSnapshotKey(
         bool showCategoryRow,
         int activeCategoryIndex,
@@ -118,13 +154,17 @@ public static class BrowserTabPresentationHelper
 
     public static string BuildToolTip(BrowserTabState state)
     {
+        return BuildToolTip(state, string.IsNullOrWhiteSpace(state.Title) ? "新しいタブ" : state.Title);
+    }
+
+    private static string BuildToolTip(BrowserTabState state, string heading)
+    {
         var lines = new List<string>
         {
             state.IsLocked ? "状態: 固定タブ" : "状態: 通常タブ",
             state.IsReadOnly ? "ReadOnly: 有効" : "ReadOnly: 無効"
         };
-        string title = string.IsNullOrWhiteSpace(state.Title) ? "新しいタブ" : state.Title;
-        lines.Add($"見出し: {title}");
+        lines.Add($"見出し: {heading}");
         if (!string.IsNullOrWhiteSpace(state.CurrentPath))
         {
             lines.Add($"場所: {state.CurrentPath}");
@@ -134,6 +174,40 @@ public static class BrowserTabPresentationHelper
             lines.Add($"起動元: {state.StartupPath}");
         }
         return string.Join(Environment.NewLine, lines.Where(static line => !string.IsNullOrWhiteSpace(line)));
+    }
+
+    private static string? ResolveAliasDisplayName(string? path, Func<string, string?> resolveAliasDisplayName)
+    {
+        if (string.IsNullOrWhiteSpace(path)) return null;
+        string normalizedPath;
+        try
+        {
+            normalizedPath = Path.GetFullPath(path);
+        }
+        catch
+        {
+            normalizedPath = path;
+        }
+        return resolveAliasDisplayName(normalizedPath);
+    }
+
+    private static string? GetRelativeSuffix(string? basePath, string? currentPath)
+    {
+        if (string.IsNullOrWhiteSpace(basePath) || string.IsNullOrWhiteSpace(currentPath)) return null;
+        try
+        {
+            string normalizedBase = Path.GetFullPath(basePath).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+            string normalizedCurrent = Path.GetFullPath(currentPath).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+            if (string.Equals(normalizedBase, normalizedCurrent, StringComparison.OrdinalIgnoreCase)) return string.Empty;
+            string basePrefix = normalizedBase + Path.DirectorySeparatorChar;
+            if (!normalizedCurrent.StartsWith(basePrefix, StringComparison.OrdinalIgnoreCase)) return null;
+            string relative = normalizedCurrent[basePrefix.Length..];
+            return string.Join(">", relative.Split(new[] { Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar }, StringSplitOptions.RemoveEmptyEntries));
+        }
+        catch
+        {
+            return null;
+        }
     }
 
     private static void AppendSnapshotField(StringBuilder sb, string value)
@@ -159,3 +233,15 @@ public static class BrowserTabPresentationHelper
         return path + Path.DirectorySeparatorChar;
     }
 }
+
+public sealed record BrowserTabPresentationSnapshot(
+    string TitleBasisPath,
+    string? AliasTitle,
+    string BaseTitle,
+    string? RelativeSuffix,
+    string PrefixText,
+    string? CanonicalPath,
+    string DisplayCore,
+    string HeaderText,
+    string ToolTipText,
+    string CurrentPath);

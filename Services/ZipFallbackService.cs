@@ -45,8 +45,6 @@ public static class ZipFallbackService
         string fullArchivePath = Path.GetFullPath(archivePath);
         string fullExtractPath = Path.GetFullPath(extractToDirectory);
 
-        Directory.CreateDirectory(fullExtractPath);
-
         System.Collections.Generic.HashSet<string>? selectedSet = null;
         if (selectedEntries != null)
         {
@@ -62,6 +60,7 @@ public static class ZipFallbackService
         }
 
         using ZipArchive archive = ZipFile.OpenRead(fullArchivePath);
+        var extractionPlan = new List<(ZipArchiveEntry Entry, string NormalizedName, string DestinationPath, bool IsDirectory)>();
         foreach (ZipArchiveEntry entry in archive.Entries)
         {
             token.ThrowIfCancellationRequested();
@@ -82,6 +81,15 @@ public static class ZipFallbackService
 
             bool isDirectory = normalizedEntryName.EndsWith("/");
             string destinationPath = GetSafeDestinationPath(fullExtractPath, normalizedEntryName);
+            EnsureNoReparseTraversal(fullExtractPath, destinationPath, normalizedEntryName);
+            extractionPlan.Add((entry, normalizedEntryName, destinationPath, isDirectory));
+        }
+
+        Directory.CreateDirectory(fullExtractPath);
+        foreach ((ZipArchiveEntry entry, string normalizedEntryName, string destinationPath, bool isDirectory) in extractionPlan)
+        {
+            token.ThrowIfCancellationRequested();
+            EnsureNoReparseTraversal(fullExtractPath, destinationPath, normalizedEntryName);
 
             onOutputLine?.Invoke(entry.FullName);
 
@@ -125,6 +133,29 @@ public static class ZipFallbackService
         }
 
         return destinationPath;
+    }
+
+    private static void EnsureNoReparseTraversal(string destinationRoot, string destinationPath, string entryName)
+    {
+        if (ReparsePointHelper.Exists(destinationRoot) && ReparsePointHelper.IsReparsePoint(destinationRoot))
+        {
+            throw new InvalidOperationException($"ZIP entry の展開先rootがreparse pointです: {entryName}");
+        }
+
+        string relativePath = Path.GetRelativePath(destinationRoot, destinationPath);
+        string currentPath = Path.GetFullPath(destinationRoot);
+        string[] components = relativePath.Split(
+            new[] { Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar },
+            StringSplitOptions.RemoveEmptyEntries);
+
+        foreach (string component in components)
+        {
+            currentPath = Path.Combine(currentPath, component);
+            if (ReparsePointHelper.Exists(currentPath) && ReparsePointHelper.IsReparsePoint(currentPath))
+            {
+                throw new InvalidOperationException($"ZIP entry の展開先にreparse pointを経由するpathがあります: {entryName}");
+            }
+        }
     }
 
     private static void AddDirectoryToArchive(ZipArchive archive, string sourceDirectoryPath, string entryRoot)

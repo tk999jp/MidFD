@@ -35,13 +35,6 @@ public sealed class ViewerPreviewCoordinator
     }
 
     public readonly record struct PreviewRefreshRequest(int RequestId, CancellationToken Token);
-    public readonly record struct PreviewPopupTogglePlan(
-        bool NextVisible,
-        bool ShouldPosition,
-        bool ShouldShow,
-        bool ShouldHide,
-        bool ShouldPersist,
-        bool ShouldRefresh);
     public readonly record struct ViewerModeLifecyclePlan(
         PreviewKind NextViewerKind,
         bool ShouldClearPreview,
@@ -152,25 +145,6 @@ public sealed class ViewerPreviewCoordinator
             ref previewCts);
 
         _ = runPreviewUpdate(request.RequestId, request.Token);
-    }
-
-    public PreviewPopupTogglePlan CreatePreviewPopupTogglePlan(
-        bool isVisible,
-        bool hasSavedBounds,
-        bool isManuallyPositioned)
-    {
-        if (isVisible)
-        {
-            return new PreviewPopupTogglePlan(false, false, false, true, true, false);
-        }
-
-        return new PreviewPopupTogglePlan(
-            true,
-            !hasSavedBounds && !isManuallyPositioned,
-            true,
-            false,
-            true,
-            true);
     }
 
     public ViewerModeLifecyclePlan CreateViewerModeLifecyclePlan(

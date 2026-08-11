@@ -14,7 +14,16 @@ using MidFD.Services.TrashManifestStore;
 namespace MidFD;
 
 public partial class MainForm
-{    private void ExecuteRename(SelectionResult? selectionSnapshot = null)
+{
+    private sealed class DirectoryMergeExecutionState
+    {
+        public int SuccessCount { get; set; }
+        public int SkipCount { get; set; }
+        public int FailCount { get; set; }
+        public bool Canceled { get; set; }
+    }
+
+    private void ExecuteRename(SelectionResult? selectionSnapshot = null)
     {
         if (GuardMutationBusy()) return;
         if (GuardReadOnlyBrowserTab())
@@ -2010,7 +2019,7 @@ public partial class MainForm
             RefreshBrowserStatusSummary();
         }
     }
-    private void ExecuteClipboardCut()
+    private void ExecuteClipboardCut(SelectionResult? selectionSnapshot = null)
     {
         if (GuardReadOnlyBrowserTab("切り取り")) return;
         var entryPlan = _fileOperationEntryCoordinator.CreateSelectionEntryPlan(
@@ -2018,7 +2027,7 @@ public partial class MainForm
             null,
             _fileOpUiState.Cts != null,
             "切り取り",
-            ResolveSelection(),
+            ResolveSelection(selectionSnapshot),
             "切り取り対象がありません。");
         if (!entryPlan.CanProceed)
         {
@@ -2605,12 +2614,6 @@ public partial class MainForm
             shouldSkip = true;
             return false;
         }
-        if (sourceIsDir)
-        {
-            this.Invoke(() => _fileOperationDialogCoordinator.ShowUnsupportedDirectoryOverwrite(this));
-            shouldSkip = true;
-            return false;
-        }
         var decision = applyToAllDecision;
         if (decision == null)
         {
@@ -2982,6 +2985,23 @@ public partial class MainForm
         out bool shouldCancel,
         ISet<string>? excludedReparsePaths = null)
     {
+        PasteCopyDirectoryIntoExisting(
+            sourceDir,
+            destinationDir,
+            ref fileApplyToAllDecision,
+            out shouldCancel,
+            null,
+            excludedReparsePaths);
+    }
+
+    private void PasteCopyDirectoryIntoExisting(
+        string sourceDir,
+        string destinationDir,
+        ref CopyCollisionDecision? fileApplyToAllDecision,
+        out bool shouldCancel,
+        DirectoryMergeExecutionState? executionState,
+        ISet<string>? excludedReparsePaths = null)
+    {
         shouldCancel = false;
         foreach (var entry in FileOperationService.BuildDirectoryCopyPlan(sourceDir, destinationDir))
         {
@@ -2991,7 +3011,20 @@ public partial class MainForm
             }
             if (entry.IsDirectory)
             {
-                Directory.CreateDirectory(entry.DestinationPath);
+                try
+                {
+                    bool destinationExisted = Directory.Exists(entry.DestinationPath);
+                    Directory.CreateDirectory(entry.DestinationPath);
+                    if (!destinationExisted && executionState != null)
+                    {
+                        executionState.SuccessCount++;
+                    }
+                }
+                catch (Exception ex) when (executionState != null)
+                {
+                    executionState.FailCount++;
+                    LogService.Error($"フォルダ統合失敗: {entry.DestinationPath}", ex);
+                }
                 continue;
             }
             string destinationPath = entry.DestinationPath;
@@ -3008,15 +3041,35 @@ public partial class MainForm
                 if (collisionResolution.ShouldCancel)
                 {
                     shouldCancel = true;
+                    if (executionState != null)
+                    {
+                        executionState.Canceled = true;
+                    }
                     return;
                 }
                 if (collisionResolution.ShouldSkip)
                 {
+                    if (executionState != null)
+                    {
+                        executionState.SkipCount++;
+                    }
                     continue;
                 }
                 destinationPath = collisionResolution.DestinationPath;
             }
-            FileOperationService.Copy(entry.SourcePath, destinationPath, excludedReparsePaths);
+            try
+            {
+                FileOperationService.Copy(entry.SourcePath, destinationPath, excludedReparsePaths);
+                if (executionState != null)
+                {
+                    executionState.SuccessCount++;
+                }
+            }
+            catch (Exception ex) when (executionState != null)
+            {
+                executionState.FailCount++;
+                LogService.Error($"フォルダ統合失敗: {Path.GetFileName(entry.SourcePath)}", ex);
+            }
         }
     }
     private void PasteMoveDirectoryIntoExisting(
@@ -3029,6 +3082,29 @@ public partial class MainForm
         ISet<string>? excludedReparsePaths = null,
         ISet<string>? successfulPreparedReparsePaths = null)
     {
+        PasteMoveDirectoryIntoExisting(
+            sourceDir,
+            destinationDir,
+            ref fileApplyToAllDecision,
+            out shouldCancel,
+            out skipCount,
+            out failCount,
+            null,
+            excludedReparsePaths,
+            successfulPreparedReparsePaths);
+    }
+
+    private void PasteMoveDirectoryIntoExisting(
+        string sourceDir,
+        string destinationDir,
+        ref CopyCollisionDecision? fileApplyToAllDecision,
+        out bool shouldCancel,
+        out int skipCount,
+        out int failCount,
+        DirectoryMergeExecutionState? executionState,
+        ISet<string>? excludedReparsePaths = null,
+        ISet<string>? successfulPreparedReparsePaths = null)
+    {
         MoveDirectoryIntoExistingWithCollisionResolution(
             sourceDir,
             destinationDir,
@@ -3038,7 +3114,8 @@ public partial class MainForm
             out skipCount,
             out failCount,
             excludedReparsePaths,
-            successfulPreparedReparsePaths);
+            successfulPreparedReparsePaths,
+            executionState);
     }
     private void DirectMoveDirectoryIntoExisting(
         string sourceDir,
@@ -3048,7 +3125,8 @@ public partial class MainForm
         out int skipCount,
         out int failCount,
         ISet<string>? excludedReparsePaths = null,
-        ISet<string>? successfulPreparedReparsePaths = null)
+        ISet<string>? successfulPreparedReparsePaths = null,
+        DirectoryMergeExecutionState? executionState = null)
     {
         MoveDirectoryIntoExistingWithCollisionResolution(
             sourceDir,
@@ -3059,7 +3137,8 @@ public partial class MainForm
             out skipCount,
             out failCount,
             excludedReparsePaths,
-            successfulPreparedReparsePaths);
+            successfulPreparedReparsePaths,
+            executionState);
     }
     private void MoveDirectoryIntoExistingWithCollisionResolution(
         string sourceDir,
@@ -3070,7 +3149,8 @@ public partial class MainForm
         out int skipCount,
         out int failCount,
         ISet<string>? excludedReparsePaths = null,
-        ISet<string>? successfulPreparedReparsePaths = null)
+        ISet<string>? successfulPreparedReparsePaths = null,
+        DirectoryMergeExecutionState? executionState = null)
     {
         shouldCancel = false;
         skipCount = 0;
@@ -3085,7 +3165,20 @@ public partial class MainForm
             }
             if (entry.IsDirectory)
             {
-                Directory.CreateDirectory(entry.DestinationPath);
+                try
+                {
+                    bool destinationExisted = Directory.Exists(entry.DestinationPath);
+                    Directory.CreateDirectory(entry.DestinationPath);
+                    if (!destinationExisted && executionState != null)
+                    {
+                        executionState.SuccessCount++;
+                    }
+                }
+                catch (Exception ex) when (executionState != null)
+                {
+                    executionState.FailCount++;
+                    LogService.Error($"{operationLogLabel}フォルダ統合失敗: {entry.DestinationPath}", ex);
+                }
                 continue;
             }
             string destinationPath = entry.DestinationPath;
@@ -3103,11 +3196,19 @@ public partial class MainForm
                 if (collisionResolution.ShouldCancel)
                 {
                     shouldCancel = true;
+                    if (executionState != null)
+                    {
+                        executionState.Canceled = true;
+                    }
                     return;
                 }
                 if (collisionResolution.ShouldSkip)
                 {
                     skipCount++;
+                    if (executionState != null)
+                    {
+                        executionState.SkipCount++;
+                    }
                     continue;
                 }
                 destinationPath = collisionResolution.DestinationPath;
@@ -3116,11 +3217,19 @@ public partial class MainForm
             try
             {
                 FileOperationService.Move(entry.SourcePath, destinationPath, overwriteMove, suppressLogging: suppressItemSuccessLogs);
+                if (executionState != null)
+                {
+                    executionState.SuccessCount++;
+                }
             }
             catch (Exception ex)
             {
                 LogService.Error($"{operationLogLabel}フォルダ統合失敗: {Path.GetFileName(entry.SourcePath)}", ex);
                 failCount++;
+                if (executionState != null)
+                {
+                    executionState.FailCount++;
+                }
             }
         }
         failCount += FileOperationService.DeleteSuccessfulPreparedReparsePointsUnderSource(

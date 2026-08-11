@@ -91,13 +91,95 @@ public partial class MainForm
     }
     private void PopulateListView(IReadOnlyList<ListViewItem> items)
     {
-        fileListView.BeginUpdate();
         fileListView.Items.Clear();
+        if (items.Count > 0)
+        {
+            fileListView.Items.AddRange(items.ToArray());
+        }
+    }
+    private void ApplyDirectoryLoadUi(
+        BrowserLoadCoordinator.DirectoryLoadResult result,
+        Action? applyFinalPresentation = null)
+    {
+        fileListView.BeginUpdate();
         try
         {
-            if (items.Count > 0)
+            DismissTransientContextMenus();
+            _browserMarkInteractionController.ClearPendingPromotionCandidate();
+            bool directoryChanged = !string.Equals(
+                NavigationService.NormalizeDirectoryForCompare(result.PreviousPath),
+                NavigationService.NormalizeDirectoryForCompare(result.NewPath),
+                StringComparison.OrdinalIgnoreCase);
+            if (directoryChanged)
             {
-                fileListView.Items.AddRange(items.ToArray());
+                InvalidateRecentMultiMarkIntent();
+                ClearPendingCurrentDirectoryRefresh();
+                _navigationRefreshCoordinator.State.IsPassiveRefresh = false;
+            }
+            // 1. 内部状態とパス表示の更新
+            _navigationService.SetCurrentPath(result.NewPath, result.IsHistoryNavigation);
+            SyncBreadcrumbPathPresentation();
+            if (directoryChanged)
+            {
+                if (!TryCarryMarkSummaryAcrossDirectoryChange(result.PreviousPath))
+                {
+                    InvalidateMarkSummaryCache();
+                }
+                _directoryNavigationGeneration++;
+                StopDirectoryCountAudit(dispose: false);
+            }
+            _browserPageStartIndex = result.PageStartIndex;
+            _browserTotalItemCount = result.TotalItemCount;
+            _browserCursorIndex = result.LastIndex;
+            _browserItemsPerPage = GetBrowserItemsPerPage();
+            var listApplyStopwatch = Stopwatch.StartNew();
+            _isApplyingDirectoryList = true;
+            try
+            {
+                PopulateListView(result.Items);
+                listApplyStopwatch.Stop();
+                var selectionRestoreStopwatch = Stopwatch.StartNew();
+                int pageLocalIndex = result.LastIndex - result.PageStartIndex;
+                RestoreSelectionState(result.FocusTargetName, pageLocalIndex, result.IsReload);
+                selectionRestoreStopwatch.Stop();
+                LogService.Info(
+                    $"[DirectoryLoadTiming] path='{result.NewPath}' itemCount={result.Items.Count} " +
+                    $"enumerationSortMs={result.EnumerationAndSortMilliseconds} itemBuildMs={result.ItemBuildMilliseconds} generatedUiItemCount={result.GeneratedUiItemCount} totalItemCount={result.TotalItemCount} pageStartIndex={result.PageStartIndex} reusedSnapshot={result.ReusedSnapshot} " +
+                    $"listApplyMs={listApplyStopwatch.ElapsedMilliseconds} selectionRestoreMs={selectionRestoreStopwatch.ElapsedMilliseconds}");
+            }
+            finally
+            {
+                _isApplyingDirectoryList = false;
+            }
+            if (fileListView.SelectedIndices.Count > 0)
+            {
+                ApplyBrowserSelectionChanged(scheduleInfoUpdate: false);
+            }
+            if (!result.ReusedSnapshot)
+            {
+                _navigationRefreshCoordinator.ConfigureDirectoryCost(
+                    result.RawDirectoryEntryCount,
+                    result.TotalItemCount,
+                    result.ItemBuildMilliseconds);
+            }
+            if (!result.SuppressRecent)
+            {
+                RecordQuickAccessRecent(result.PreviousPath, result.NewPath, result.IsReload);
+            }
+            CommitActiveBrowserTabFromDirectoryLoad(result);
+            if (!_isSwitchingBrowserTab)
+            {
+                ApplyActiveBrowserTabPresentation(synchronizeSelection: false);
+            }
+            applyFinalPresentation?.Invoke();
+            UpdateCurrentDirectoryWatcher(result.NewPath, "ApplyDirectoryLoadUi");
+            UpdateDirectoryCountAuditLifecycle();
+            TryProcessPendingCurrentDirectoryRefresh("ApplyDirectoryLoadUi");
+            UpdateMenuStripState();
+            UpdateInfoPanel();
+            if (!_isSwitchingBrowserTab)
+            {
+                browserPanel.Invalidate();
             }
         }
         finally
@@ -105,81 +187,83 @@ public partial class MainForm
             fileListView.EndUpdate();
         }
     }
-    private void ApplyDirectoryLoadUi(BrowserLoadCoordinator.DirectoryLoadResult result)
+
+    private BrowserLoadCoordinator.DirectoryLoadResult? PrepareBrowserTabSwitchDirectoryLoad(
+        BrowserTabState targetTab,
+        string targetPath)
     {
-        DismissTransientContextMenus();
-        _browserMarkInteractionController.ClearPendingPromotionCandidate();
-        bool directoryChanged = !string.Equals(
-            NavigationService.NormalizeDirectoryForCompare(result.PreviousPath),
-            NavigationService.NormalizeDirectoryForCompare(result.NewPath),
-            StringComparison.OrdinalIgnoreCase);
-        if (directoryChanged)
-        {
-            InvalidateRecentMultiMarkIntent();
-            ClearPendingCurrentDirectoryRefresh();
-            _navigationRefreshCoordinator.State.IsPassiveRefresh = false;
-        }
-        // 1. 内部状態とパス表示の更新
-        _navigationService.SetCurrentPath(result.NewPath, result.IsHistoryNavigation);
-        if (directoryChanged)
-        {
-            if (!TryCarryMarkSummaryAcrossDirectoryChange(result.PreviousPath))
-            {
-                InvalidateMarkSummaryCache();
-            }
-            _directoryNavigationGeneration++;
-            StopDirectoryCountAudit(dispose: false);
-        }
-        _browserPageStartIndex = result.PageStartIndex;
-        _browserTotalItemCount = result.TotalItemCount;
-        _browserCursorIndex = result.LastIndex;
-        _browserItemsPerPage = GetBrowserItemsPerPage();
-        // 2. 一覧項目の再構築
-        var listApplyStopwatch = Stopwatch.StartNew();
-        _isApplyingDirectoryList = true;
+        HideBrowserFileNameToolTip();
         try
         {
-            PopulateListView(result.Items);
-            listApplyStopwatch.Stop();
-            // 3. 選択状態の復元
-            var selectionRestoreStopwatch = Stopwatch.StartNew();
-            int pageLocalIndex = result.LastIndex - result.PageStartIndex;
-            RestoreSelectionState(result.FocusTargetName, pageLocalIndex, result.IsReload);
-            selectionRestoreStopwatch.Stop();
-            LogService.Info(
-                $"[DirectoryLoadTiming] path='{result.NewPath}' itemCount={result.Items.Count} " +
-                $"enumerationSortMs={result.EnumerationAndSortMilliseconds} itemBuildMs={result.ItemBuildMilliseconds} generatedUiItemCount={result.GeneratedUiItemCount} totalItemCount={result.TotalItemCount} pageStartIndex={result.PageStartIndex} reusedSnapshot={result.ReusedSnapshot} " +
-                $"listApplyMs={listApplyStopwatch.ElapsedMilliseconds} selectionRestoreMs={selectionRestoreStopwatch.ElapsedMilliseconds}");
+            var request = new BrowserLoadCoordinator.DirectoryLoadRequest(
+                targetPath,
+                targetTab.FocusTargetName,
+                IsHistoryNavigation: true,
+                SuppressRecent: true,
+                CurrentPath: _navigationService.CurrentPath,
+                LastIndex: targetTab.CursorIndex,
+                CurrentItemFullName: null,
+                FilterPattern: _filterPattern,
+                FilterUseRegex: _filterUseRegex,
+                ShowHiddenFiles: _settings.Appearance?.ShowHiddenFiles ?? false,
+                SortKind: targetTab.SortKind,
+                SortAscending: targetTab.SortAscending,
+                FilterLock: targetTab.FilterLock,
+                DateFormat: _settings.Appearance?.DateFormat,
+                SizeFormat: _settings.Appearance?.SizeFormat,
+                ShowDirectoryMarker: _settings.Appearance?.ShowDirectoryMarker ?? true,
+                ItemsPerPage: GetBrowserItemsPerPageForColumnCount(targetTab.ColumnCount),
+                SnapshotPolicy: BrowserLoadCoordinator.SnapshotPolicy.RebuildSnapshot);
+            return _browserLoadCoordinator.Execute(
+                request,
+                new BrowserLoadCoordinator.ExecutionContext
+                {
+                    ShowStatusMessage = ShowStatusMessage,
+                    DecoratePathItem = ApplyMarkColor
+                });
         }
-        finally
+        catch (Exception ex)
         {
-            _isApplyingDirectoryList = false;
+            NotifyDirectoryLoadFailure(ex);
+            return null;
         }
-        if (fileListView.SelectedIndices.Count > 0)
+    }
+
+    private void CommitPreparedBrowserTabSwitchDirectoryLoad(
+        BrowserLoadCoordinator.DirectoryLoadResult result,
+        Action? applyFinalPresentation = null)
+    {
+        _directoryContentGeneration++;
+        StopDirectoryCountAudit(dispose: false);
+        ApplyDirectoryLoadUi(result, applyFinalPresentation);
+    }
+
+    private int GetBrowserItemsPerPageForColumnCount(int columnCount)
+    {
+        int itemHeight = HeaderLayoutHelper.GetMeasuredLineHeight(browserPanel.Font, 4);
+        int rowsPerColumn = Math.Max(1, (browserPanel.Height - 10) / itemHeight);
+        int minimumColumnWidth = GetMinimumBrowserColumnWidthForMode(GetBrowserFileDisplayMode());
+        int maxColumnsByWidth = Math.Max(1, browserPanel.Width / Math.Max(1, minimumColumnWidth));
+        int effectiveColumns = Math.Max(1, Math.Min(Math.Max(1, columnCount), maxColumnsByWidth));
+        return effectiveColumns * rowsPerColumn;
+    }
+
+    private void CommitActiveBrowserTabFromDirectoryLoad(BrowserLoadCoordinator.DirectoryLoadResult result)
+    {
+        BrowserTabState? activeTab = _browserTabViewState.ActiveTab;
+        if (activeTab == null)
         {
-            ApplyBrowserSelectionChanged(scheduleInfoUpdate: false);
+            return;
         }
-        if (!result.ReusedSnapshot)
-        {
-            _navigationRefreshCoordinator.ConfigureDirectoryCost(
-                result.RawDirectoryEntryCount,
-                result.TotalItemCount,
-                result.ItemBuildMilliseconds);
-        }
-        // 4. パネル再描画。selection反映後、末尾でInfo表示を1回更新する。
-        browserPanel.Invalidate();
-        if (!result.SuppressRecent)
-        {
-            RecordQuickAccessRecent(result.PreviousPath, result.NewPath, result.IsReload);
-        }
-        CaptureActiveBrowserTabState(captureMarks: false);
-        UpdateCurrentDirectoryWatcher(result.NewPath, "ApplyDirectoryLoadUi");
-        UpdateDirectoryCountAuditLifecycle();
-        TryProcessPendingCurrentDirectoryRefresh("ApplyDirectoryLoadUi");
-        UpdateMenuStripState();
-        // Phase: header stream / initial final relayout corrective follow-up
-        // ディレクトリ読み込みとタブ状態確定後の最終レイアウトを保証する
-        UpdateInfoPanel();
+
+        activeTab.Title = GetBrowserTabTitle(result.NewPath);
+        activeTab.CurrentPath = result.NewPath;
+        activeTab.Navigation = _navigationService.CaptureState();
+        activeTab.FocusTargetName = result.FocusTargetName;
+        activeTab.CursorIndex = result.LastIndex;
+        activeTab.ColumnCount = Math.Clamp(_columnCount, 1, 9);
+        activeTab.SortKind = _currentSort;
+        activeTab.SortAscending = _sortAscending;
     }
 
     private int GetBrowserPageLocalCursorIndex()
@@ -464,6 +548,13 @@ public partial class MainForm
     {
         _navigationRefreshCoordinator.ClearPendingRefresh();
         _directoryRefreshDebounceTimer.Stop();
+    }
+
+    private void RearmCurrentDirectoryWatcherAfterInternalMutation(string currentPath)
+    {
+        DisposeCurrentDirectoryWatcher();
+        ClearPendingCurrentDirectoryRefresh();
+        UpdateCurrentDirectoryWatcher(currentPath, "InternalMutation");
     }
 
     private void StopDirectoryCountAudit(bool dispose)

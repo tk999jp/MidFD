@@ -230,7 +230,7 @@ namespace MidFD.Helpers
                     state.CurrentItemPath,
                     usedCached: false,
                     resolvedSync: false,
-                    reason: "unc-path");
+                    reason: "network-path");
                 result.ItemAttr = "----";
                 result.FileDate = "";
                 result.FileStats = state.CurrentItemIsDirectory ? (state.ShowDirectoryMarker ? "<DIR>" : "") : "";
@@ -301,23 +301,9 @@ namespace MidFD.Helpers
                 return;
             }
 
-            if (NetworkPathResolutionPolicy.TryGetDriveType(root, out DriveType driveType) && driveType == DriveType.Network)
-            {
-                NetworkPathResolutionPolicy.LogDecision(
-                    "NetworkPathResolutionDeferral.Skip",
-                    "HeaderInfo.Drive",
-                    nameof(BuildDriveInfo),
-                    state.CurrentPath,
-                    usedCached: false,
-                    resolvedSync: false,
-                    reason: "remote-drive");
-                result.DriveUsed = driveUsedText;
-                result.DriveFree = driveFreeText;
-                return;
-            }
-
             try
             {
+                DriveType driveType;
                 if (NetworkPathResolutionPolicy.TryGetDriveType(root, out driveType) &&
                     (driveType == DriveType.Fixed || driveType == DriveType.Removable || driveType == DriveType.CDRom))
                 {

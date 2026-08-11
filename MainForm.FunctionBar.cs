@@ -141,6 +141,7 @@ public partial class MainForm : Form
         };
         this.contentFramePanel.Resize += (s, e) => this.contentFramePanel.Invalidate();
         // Phase 2g-fix4b.1: Row 2 の Custom Paint 配線
+        headerPanel.Paint += HeaderPanel_Paint;
         headerZone1.Paint += HeaderZone_Paint;
         headerZone2.Paint += HeaderZone_Paint;
         headerZone3.Paint += HeaderZone_Paint;
@@ -208,11 +209,8 @@ public partial class MainForm : Form
         var profileValue = profile == FunctionKeyProfile.FDCompatible
             ? InputSettings.FdCompatibleProfileValue
             : InputSettings.StandardProfileValue;
-        var definitions = FunctionKeyProfileService.GetDefinitions(profileValue);
-
         for (int slot = 1; slot <= 12; slot++)
         {
-            var def = definitions.FirstOrDefault(d => d.KeyNumber == slot);
             string? customCmdId = FunctionKeyProfileService.ResolveFunctionBarCommandId(
                 profile,
                 slot,
@@ -229,11 +227,7 @@ public partial class MainForm : Form
                 isAltLayer);
 
             bool isUnassignedModifier = string.IsNullOrEmpty(customCmdId) ||
-                                        string.Equals(customCmdId, "none", StringComparison.OrdinalIgnoreCase);
-            if (profile == FunctionKeyProfile.Standard)
-            {
-                isUnassignedModifier = (isCtrlLayer || isAltLayer) && isUnassignedModifier;
-            }
+                                        FunctionKeyProfileService.IsExplicitUnassigned(customCmdId);
 
             // Determine ShortLabel
             string shortLabel;
@@ -241,21 +235,13 @@ public partial class MainForm : Form
             {
                 shortLabel = "";
             }
-            else if (profile == FunctionKeyProfile.FDCompatible)
-            {
-                shortLabel = FunctionKeyProfileService.ResolveFdCompatibleFunctionBarShortLabel(slot, isShiftLayer, isCtrlLayer, isAltLayer);
-            }
-            else if (!string.IsNullOrEmpty(customCmdId))
+            else
             {
                 shortLabel = FunctionKeyProfileService.ResolveFunctionBarDisplayLabelFromCommandId(profile, customCmdId);
             }
-            else
-            {
-                shortLabel = def?.Label ?? "Cmd";
-            }
 
             // Apply Custom ShortLabel Override if exists and active CommandId matches
-            if (!isUnassignedModifier && !string.IsNullOrEmpty(customCmdId) && !string.Equals(customCmdId, "none", StringComparison.OrdinalIgnoreCase))
+            if (!isUnassignedModifier && !string.IsNullOrEmpty(customCmdId) && !FunctionKeyProfileService.IsExplicitUnassigned(customCmdId))
             {
                 var labelOverrides = GetActiveFunctionBarLabelOverrides(isShiftLayer, isCtrlLayer, isAltLayer, profile == FunctionKeyProfile.FDCompatible);
                 if (labelOverrides != null && labelOverrides.TryGetValue($"F{slot}", out var labelOverride) && labelOverride != null)
@@ -323,9 +309,7 @@ public partial class MainForm : Form
                 }
                 else
                 {
-                    isEnabled = def != null && def.Action != FunctionKeyAction.None
-                        ? _commandStateCoordinator.IsActionEnabled(def.Action, snapshot)
-                        : false;
+                    isEnabled = false;
                 }
             }
             else if (isUnassignedModifier)
@@ -377,24 +361,7 @@ public partial class MainForm : Form
             }
             else
             {
-                if (profile == FunctionKeyProfile.FDCompatible)
-                {
-                    var action = def?.Action ?? FunctionKeyAction.None;
-                    if (action == FunctionKeyAction.None)
-                    {
-                        toolTipText = $"{slotPrefix}: 未割り当て";
-                    }
-                    else
-                    {
-                        string actionLabel = GetActionShortLabel_MainForm(action);
-                        string description = GetActionDescription_MainForm(action);
-                        toolTipText = $"[{slotPrefix}] {actionLabel}\r\n{description}";
-                    }
-                }
-                else
-                {
-                    toolTipText = $"{shortLabel}\r\nFunction: {slotPrefix}\r\nカスタムコマンドを割り当てることができます。";
-                }
+                toolTipText = $"{shortLabel}\r\nFunction: {slotPrefix}\r\nカスタムコマンドを割り当てることができます。";
             }
 
             // Determine LayoutLabel (width base label from standard layer)
@@ -421,41 +388,7 @@ public partial class MainForm : Form
                     false);
 
                 bool normalUnassigned = string.IsNullOrEmpty(normalCmdId) ||
-                                        string.Equals(normalCmdId, "none", StringComparison.OrdinalIgnoreCase);
-                if (profile == FunctionKeyProfile.Standard)
-                {
-                    normalUnassigned = false;
-                }
-
-                string normalShortLabel;
-                if (normalUnassigned)
-                {
-                    normalShortLabel = "";
-                }
-                else if (profile == FunctionKeyProfile.FDCompatible)
-                {
-                    normalShortLabel = FunctionKeyProfileService.ResolveFdCompatibleFunctionBarShortLabel(slot, false, false, false);
-                }
-                else if (!string.IsNullOrEmpty(normalCmdId))
-                {
-                    normalShortLabel = FunctionKeyProfileService.ResolveFunctionBarDisplayLabelFromCommandId(profile, normalCmdId);
-                }
-                else
-                {
-                    normalShortLabel = def?.Label ?? "Cmd";
-                }
-
-                if (!normalUnassigned && !string.IsNullOrEmpty(normalCmdId) && !string.Equals(normalCmdId, "none", StringComparison.OrdinalIgnoreCase))
-                {
-                    var normalOverrides = GetActiveFunctionBarLabelOverrides(false, false, false, profile == FunctionKeyProfile.FDCompatible);
-                    if (normalOverrides != null && normalOverrides.TryGetValue($"F{slot}", out var labelOverride) && labelOverride != null)
-                    {
-                        if (string.Equals(labelOverride.CommandId, normalCmdId, StringComparison.OrdinalIgnoreCase) && !string.IsNullOrWhiteSpace(labelOverride.Label))
-                        {
-                            normalShortLabel = InputSettings.NormalizeFunctionBarLabelText(labelOverride.Label);
-                        }
-                    }
-                }
+                                        FunctionKeyProfileService.IsExplicitUnassigned(normalCmdId);
 
                 if (normalUnassigned)
                 {
@@ -1091,11 +1024,15 @@ public partial class MainForm : Form
 
     private WinFdCompatibleLabelInfo ResolveWinFdCompatibleLabelInfo(int keyNumber)
     {
-        string displayText = FunctionKeyProfileService.ResolveFdCompatibleFunctionBarShortLabel(
+        string? commandId = ResolveFunctionBarCommandIdForHint(
+            FunctionKeyProfile.FDCompatible,
             keyNumber,
             _isFunctionBarShiftLayerActive,
             _isFunctionBarCtrlLayerActive,
             _isFunctionBarAltLayerActive);
+        string displayText = FunctionKeyProfileService.ResolveFunctionBarDisplayLabelFromCommandId(
+            FunctionKeyProfile.FDCompatible,
+            commandId);
         if (string.IsNullOrWhiteSpace(displayText))
         {
             return new WinFdCompatibleLabelInfo { DisplayText = "", HotKeyCharIndex = -1 };

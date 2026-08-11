@@ -30,6 +30,9 @@ public class SettingsForm : Form
     private readonly NumericUpDown _filerFontSizeBox;
     private readonly NumericUpDown _browserTabFontSizeBox;
     private readonly NumericUpDown _browserTabWidthBox;
+    private ComboBox _browserTabLayoutModeCombo = null!;
+    private ComboBox _browserTabNewPositionCombo = null!;
+    private NumericUpDown _browserTabNavigationWidthBox = null!;
     private readonly ComboBox _viewerFontCombo;
     private readonly NumericUpDown _viewerFontSizeBox;
     private readonly ComboBox _colorThemeCombo;
@@ -46,6 +49,7 @@ public class SettingsForm : Form
     private readonly ComboBox _dateFormatCombo;
     private readonly ComboBox _sizeFormatCombo;
     private readonly CheckBox _viewerWordWrapCheckBox;
+    private ComboBox _markdownViewerModeCombo = null!;
     private readonly CheckBox _reuseImageViewerCheckBox;
     private readonly CheckBox _closeImageViewerOnNonImageCheckBox;
     private readonly CheckBox _rememberImageViewerBoundsCheckBox;
@@ -191,7 +195,7 @@ public class SettingsForm : Form
         StartPosition = FormStartPosition.CenterParent;
         Padding = new Padding(12);
         AutoScaleMode = AutoScaleMode.Font;
-        ClientSize = new Size(1088, 720);
+        ClientSize = new Size(1088, 820);
 
         var tabs = new TabControl
         {
@@ -237,7 +241,7 @@ public class SettingsForm : Form
         tabColor.AutoScroll = false;
 
         (_filerFontCombo, _filerFontSizeBox, _browserTabFontSizeBox, _browserTabWidthBox, _showBrowserTabCategoryRowCheckBox, _showExtensionsCheckBox, _showDirectoryMarkerCheckBox, _showHiddenFilesCheckBox, _showItemIconsCheckBox, _useUnderlineCursorCheckBox, _showFunctionBarCheckBox, _showBrowserToolbarCheckBox, _showPathAsBreadcrumbCheckBox, _fileDisplayModeCombo, _dateFormatCombo, _sizeFormatCombo,
-         _viewerFontCombo, _viewerFontSizeBox, _viewerWordWrapCheckBox, _reuseImageViewerCheckBox, _closeImageViewerOnNonImageCheckBox, _rememberImageViewerBoundsCheckBox)
+         _viewerFontCombo, _viewerFontSizeBox, _viewerWordWrapCheckBox, _markdownViewerModeCombo, _reuseImageViewerCheckBox, _closeImageViewerOnNonImageCheckBox, _rememberImageViewerBoundsCheckBox)
             = BuildDisplayAndPreviewTab(tabDisplay, fonts, dateFormats, sizeFormats);
 
         ColorTabResult colorTabResult = BuildColorTab(tabColor);
@@ -400,7 +404,7 @@ public class SettingsForm : Form
     }
 
     private (ComboBox filerFont, NumericUpDown filerSize, NumericUpDown browserTabFontSize, NumericUpDown browserTabWidth, CheckBox showBrowserTabCategoryRow, CheckBox showExtensions, CheckBox showDirectoryMarker, CheckBox showHiddenFiles, CheckBox showItemIcons, CheckBox useUnderlineCursor, CheckBox showFunctionBar, CheckBox showBrowserToolbar, CheckBox showPathAsBreadcrumb, ComboBox fileDisplayMode, ComboBox dateFormat, ComboBox sizeFormat,
-             ComboBox viewerFont, NumericUpDown viewerSize, CheckBox viewerWordWrap, CheckBox reuseImageViewer, CheckBox closeOnNonImage, CheckBox rememberBounds)
+             ComboBox viewerFont, NumericUpDown viewerSize, CheckBox viewerWordWrap, ComboBox markdownViewerMode, CheckBox reuseImageViewer, CheckBox closeOnNonImage, CheckBox rememberBounds)
         BuildDisplayAndPreviewTab(TabPage tab, string[] fonts, string[] dateFormats, string[] sizeFormats)
     {
         // Layout Constants
@@ -412,7 +416,7 @@ public class SettingsForm : Form
         int topY = 22;
 
         // --- Left: List Display ---
-        var groupList = new GroupBox { Text = "一覧表示", Location = new Point(8, 6), Size = new Size(500, 610) };
+        var groupList = new GroupBox { Text = "一覧表示", Location = new Point(8, 6), Size = new Size(500, 700) };
         tab.Controls.Add(groupList);
 
         int top = topY;
@@ -473,6 +477,19 @@ public class SettingsForm : Form
             _browserTabWidthBox.Value = BrowserTabSettings.DefaultTabWidth;
         };
         groupList.Controls.Add(resetTabWidthButton);
+        top += rowH + 8;
+
+        AddLabel(groupList, "タブ表示:", top, lblW);
+        _browserTabLayoutModeCombo = AddComboBox(groupList, inpX, top, 150, new[] { "横型", "縦側" },
+            _settings.BrowserTabs.LayoutMode == BrowserTabLayoutMode.Vertical ? "縦側" : "横型");
+        top += rowH;
+        AddLabel(groupList, "縦navigation幅:", top, lblW);
+        _browserTabNavigationWidthBox = AddNumericUpDown(groupList, inpX, top, 72, _settings.BrowserTabs.NavigationWidth, min: 120m, max: 600m, decimalPlaces: 0, increment: 10m);
+        top += rowH + 8;
+        AddLabel(groupList, "新しいタブを開く位置:", top, lblW + 20);
+        _browserTabNewPositionCombo = AddComboBox(groupList, inpX + 20, top, 190,
+            new[] { "現在のタブの隣", "タブ列の末尾" },
+            _settings.BrowserTabs.NewTabPosition == BrowserTabNewPosition.End ? "タブ列の末尾" : "現在のタブの隣");
         top += rowH + 8;
 
         // チェックボックス群（1列配置）
@@ -563,6 +580,10 @@ public class SettingsForm : Form
 
         var viewerWordWrap = AddCheckBox(groupViewer, "折り返しを既定で ON にする", checkX, top, _settings.Preview.ViewerWordWrap);
         top += rowH;
+        AddLabel(groupViewer, "Markdown表示:", top, 110);
+        var markdownViewerMode = AddComboBox(groupViewer, 120, top, 150, new[] { "Rendered", "Raw" },
+            _settings.Preview.MarkdownViewerMode == MarkdownViewerMode.Raw ? "Raw" : "Rendered");
+        top += rowH;
         var reuseImageViewer = AddCheckBox(groupViewer, "画像ビューアを再利用する", checkX, top, _settings.Preview.ReuseImageViewer);
         top += rowH;
         var closeOnNonImage = AddCheckBox(groupViewer, "非画像時にビューアを閉じる", checkX, top, _settings.Preview.CloseImageViewerOnNonImageSelection);
@@ -571,7 +592,7 @@ public class SettingsForm : Form
         groupViewer.Height = rememberBounds.Bottom + 16;
 
         return (filerFont, filerSize, browserTabFontSize, browserTabWidth, showBrowserTabCategoryRow, showExtensions, showDirectoryMarker, showHiddenFiles, showItemIcons, useUnderlineCursor, showFunctionBar, showBrowserToolbar, showPathAsBreadcrumb, fileDisplayMode, dateFormat, sizeFormat,
-                viewerFont, viewerSize, viewerWordWrap, reuseImageViewer, closeOnNonImage, rememberBounds);
+                viewerFont, viewerSize, viewerWordWrap, markdownViewerMode, reuseImageViewer, closeOnNonImage, rememberBounds);
     }
 
     private (CheckBox confirmDelete, CheckBox confirmPermanentDelete, CheckBox useMidFdManagedTrash, CheckBox managedTrashAutoHandoff, NumericUpDown managedTrashUndoRetentionDays, ComboBox managedTrashRetentionPreset, CheckBox reloadAfterFileOperation, CheckBox selectCreatedItem, CheckBox clipboardPasteTextAsFile,
@@ -2062,6 +2083,9 @@ public class SettingsForm : Form
         _settings.Fonts.FileListFontSize = (float)_filerFontSizeBox.Value;
         _settings.BrowserTabs.TabFontSize = (float)_browserTabFontSizeBox.Value;
         _settings.BrowserTabs.TabWidth = (int)_browserTabWidthBox.Value;
+        _settings.BrowserTabs.LayoutMode = _browserTabLayoutModeCombo.SelectedIndex == 1 ? BrowserTabLayoutMode.Vertical : BrowserTabLayoutMode.Horizontal;
+        _settings.BrowserTabs.NewTabPosition = _browserTabNewPositionCombo.SelectedIndex == 1 ? BrowserTabNewPosition.End : BrowserTabNewPosition.NextToActive;
+        _settings.BrowserTabs.NavigationWidth = (int)_browserTabNavigationWidthBox.Value;
         _settings.Fonts.ViewerFontFamily = _viewerFontCombo.Text;
         _settings.Fonts.ViewerFontSize = (float)_viewerFontSizeBox.Value;
 
@@ -2089,6 +2113,9 @@ public class SettingsForm : Form
         _settings.Appearance.SizeFormat = _sizeFormatCombo.Text;
 
         _settings.Preview.ViewerWordWrap = _viewerWordWrapCheckBox.Checked;
+        _settings.Preview.MarkdownViewerMode = _markdownViewerModeCombo.SelectedItem?.ToString() == "Raw"
+            ? MarkdownViewerMode.Raw
+            : MarkdownViewerMode.Rendered;
         _settings.Preview.ReuseImageViewer = _reuseImageViewerCheckBox.Checked;
         _settings.Preview.CloseImageViewerOnNonImageSelection = _closeImageViewerOnNonImageCheckBox.Checked;
         _settings.Preview.RememberImageViewerBounds = _rememberImageViewerBoundsCheckBox.Checked;
@@ -2402,6 +2429,7 @@ public class SettingsForm : Form
         {
             _colorThemeCombo.SelectedIndex = setupThemeIndex;
         }
+        _browserTabLayoutModeCombo.SelectedIndex = dialog.LayoutMode == BrowserTabLayoutMode.Vertical ? 1 : 0;
         _useMidFdManagedTrashCheckBox.Checked = dialog.UseMidFdManagedTrash;
         _clipboardPasteTextAsFileCheckBox.Checked = dialog.ClipboardPasteTextAsFileEnabled;
         _enableMouseGesturesCheckBox.Checked = dialog.EnableMouseGestures;

@@ -14,7 +14,7 @@ public sealed class InputAssignmentDialog : Form
     private const int FunctionBarLabelMaxDisplayCells = 6;
     private const int FunctionBarLabelTextBoxMaxLength = 12;
     private const string ReservedFunctionSlotCommandId = "__reserved_altf4__";
-    private enum FunctionLayer
+    internal enum FunctionLayer
     {
         Normal,
         Shift,
@@ -32,6 +32,29 @@ public sealed class InputAssignmentDialog : Form
         public override string ToString() => DisplayText;
     }
 
+    private sealed class FunctionCommandComboBoxCell : DataGridViewComboBoxCell
+    {
+        public override Type EditType => typeof(FunctionCommandComboBoxEditingControl);
+    }
+
+    private sealed class FunctionCommandComboBoxEditingControl : DataGridViewComboBoxEditingControl
+    {
+        [Browsable(false)]
+        [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
+        public Action? DeletePressed { get; set; }
+
+        protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
+        {
+            if ((keyData & Keys.KeyCode) == Keys.Delete)
+            {
+                DeletePressed?.Invoke();
+                return true;
+            }
+
+            return base.ProcessCmdKey(ref msg, keyData);
+        }
+    }
+
     private readonly InputSettings _settingsDraft;
     private readonly CommandRegistry _registry;
     private readonly ComboBox _profileCombo;
@@ -43,6 +66,7 @@ public sealed class InputAssignmentDialog : Form
     private readonly DataGridView _gestureGrid;
     private readonly Dictionary<string, CommandDefinition> _commandById;
     private bool _refreshing;
+    private bool _functionGridCommandDeleteDialogScheduled;
     private bool _openingFunctionDropdown;
     private bool _openingGestureDropdown;
 
@@ -199,7 +223,7 @@ public sealed class InputAssignmentDialog : Form
             labelColumn.CellTemplate.Style.ForeColor = Color.Black;
         }
         _functionGrid.Columns.Add(labelColumn);
-        _functionGrid.Columns.Add(CreateCommandComboColumn("Command", "機能名", 290, includeDefault: true, includeUnassigned: true));
+        _functionGrid.Columns.Add(CreateCommandComboColumn("Command", "機能名", 290, includeDefault: true, includeUnassigned: true, interceptDeleteBeforeNative: true));
         _functionGrid.Columns.Add(new DataGridViewTextBoxColumn
         {
             Name = "NormalKey",
@@ -338,20 +362,26 @@ public sealed class InputAssignmentDialog : Form
         int width,
         bool includeDefault,
         bool includeUnassigned,
-        IReadOnlyList<CommandDefinition>? commands = null)
+        IReadOnlyList<CommandDefinition>? commands = null,
+        bool interceptDeleteBeforeNative = false)
     {
-        return new DataGridViewComboBoxColumn
+        var column = new DataGridViewComboBoxColumn();
+        if (interceptDeleteBeforeNative)
         {
-            Name = name,
-            HeaderText = headerText,
-            Width = width,
-            ReadOnly = false,
-            DisplayMember = nameof(CommandOption.DisplayText),
-            ValueMember = nameof(CommandOption.CommandId),
-            DataSource = CreateCommandOptions(includeDefault, includeUnassigned, commands),
-            DisplayStyle = DataGridViewComboBoxDisplayStyle.DropDownButton,
-            AutoSizeMode = DataGridViewAutoSizeColumnMode.Fill
-        };
+            column.CellTemplate = new FunctionCommandComboBoxCell();
+        }
+
+        column.Name = name;
+        column.HeaderText = headerText;
+        column.Width = width;
+        column.ReadOnly = false;
+        column.DisplayMember = nameof(CommandOption.DisplayText);
+        column.ValueMember = nameof(CommandOption.CommandId);
+        column.DataSource = CreateCommandOptions(includeDefault, includeUnassigned, commands);
+        column.DisplayStyle = DataGridViewComboBoxDisplayStyle.DropDownButton;
+        column.AutoSizeMode = DataGridViewAutoSizeColumnMode.Fill;
+
+        return column;
     }
 
     private CommandOption[] CreateCommandOptions(bool includeDefault, bool includeUnassigned, IReadOnlyList<CommandDefinition>? commands = null)
@@ -360,10 +390,6 @@ public sealed class InputAssignmentDialog : Form
         if (includeDefault)
         {
             options.Add(new CommandOption("(既定)", "__default__"));
-        }
-        if (includeDefault)
-        {
-            options.Add(new CommandOption("予約済み / 設定不可", ReservedFunctionSlotCommandId));
         }
         if (includeUnassigned)
         {
@@ -472,6 +498,8 @@ public sealed class InputAssignmentDialog : Form
             id.Equals(CommandIds.FileRename, StringComparison.OrdinalIgnoreCase) ||
             id.Equals(CommandIds.FileDelete, StringComparison.OrdinalIgnoreCase) ||
             id.Equals(CommandIds.BrowserExecute, StringComparison.OrdinalIgnoreCase) ||
+            id.Equals(CommandIds.BrowserDefaultOpen, StringComparison.OrdinalIgnoreCase) ||
+            id.Equals(CommandIds.BrowserOpenCommandDialog, StringComparison.OrdinalIgnoreCase) ||
             id.Equals(CommandIds.BrowserChangeAttributes, StringComparison.OrdinalIgnoreCase) ||
             id.Equals(CommandIds.BrowserCreateDirectory, StringComparison.OrdinalIgnoreCase) ||
             id.Equals(CommandIds.BrowserCreateFile, StringComparison.OrdinalIgnoreCase) ||
@@ -580,24 +608,34 @@ public sealed class InputAssignmentDialog : Form
             return 1;
         }
 
-        if (id.Equals(CommandIds.FileMove, StringComparison.OrdinalIgnoreCase))
+        if (id.Equals(CommandIds.BrowserDefaultOpen, StringComparison.OrdinalIgnoreCase))
         {
             return 2;
         }
 
-        if (id.Equals(CommandIds.FileRename, StringComparison.OrdinalIgnoreCase))
+        if (id.Equals(CommandIds.BrowserOpenCommandDialog, StringComparison.OrdinalIgnoreCase))
         {
             return 3;
         }
 
+        if (id.Equals(CommandIds.FileMove, StringComparison.OrdinalIgnoreCase))
+        {
+            return 5;
+        }
+
+        if (id.Equals(CommandIds.FileRename, StringComparison.OrdinalIgnoreCase))
+        {
+            return 6;
+        }
+
         if (id.Equals(CommandIds.FileDelete, StringComparison.OrdinalIgnoreCase))
         {
-            return 4;
+            return 7;
         }
 
         if (id.Equals(CommandIds.BrowserChangeAttributes, StringComparison.OrdinalIgnoreCase))
         {
-            return 5;
+            return 8;
         }
 
         if (id.Equals(CommandIds.ClipboardPaste, StringComparison.OrdinalIgnoreCase))
@@ -691,7 +729,7 @@ public sealed class InputAssignmentDialog : Form
     private IReadOnlyList<CommandDefinition> GetAssignableCommands()
     {
         return GetFeatureCommands()
-            .Where(static c => c.IsCustomizable)
+            .Where(static c => (c.InputSurfaces & (CommandInputSurface.Keyboard | CommandInputSurface.FunctionBar)) != 0)
             .ToArray();
     }
 
@@ -846,6 +884,14 @@ public sealed class InputAssignmentDialog : Form
                 isReserved ? ReservedFunctionSlotCommandId : commandValue,
                 normalKeyText,
                 descriptionText);
+            if (isReserved && _functionGrid.Rows[row].Cells["Command"] is DataGridViewComboBoxCell reservedCell)
+            {
+                reservedCell.DataSource = new[]
+                {
+                    new CommandOption("予約済み / 設定不可", ReservedFunctionSlotCommandId)
+                };
+                reservedCell.Value = ReservedFunctionSlotCommandId;
+            }
             _functionGrid.Rows[row].Tag = (slot, layer, hasOverride, isReserved);
             DataGridViewCell labelCell = _functionGrid.Rows[row].Cells["Label"];
             labelCell.ReadOnly = !supportsLabelOverride || isReserved;
@@ -1319,24 +1365,17 @@ public sealed class InputAssignmentDialog : Form
     private List<string> GetEffectiveShortcutKeys(string commandId)
     {
         var overrides = InputSettings.NormalizeBrowserKeyCommandOverrides(_settingsDraft.BrowserKeyCommandOverrides);
-        if (overrides.TryGetValue(commandId, out List<string>? overrideKeys))
-        {
-            List<string> normalized = InputSettings.NormalizeBrowserKeyGestures(overrideKeys)
-                .Where(static g => !InputSettings.IsFunctionKeyChordGesture(g))
-                .ToList();
-            return normalized.Count == 0 ? new List<string> { "(未割り当て)" } : normalized;
-        }
-
-        IReadOnlyDictionary<string, IReadOnlyList<string>> defaults = InputSettings.GetDefaultBrowserKeyCommandMap(ResolveProfileValue());
-        if (defaults.TryGetValue(commandId, out IReadOnlyList<string>? defaultKeys))
-        {
-            List<string> normalizedDefaults = InputSettings.NormalizeBrowserKeyGestures(defaultKeys)
-                .Where(static g => !InputSettings.IsFunctionKeyChordGesture(g))
-                .ToList();
-            return normalizedDefaults.Count == 0 ? new List<string> { "(未割り当て)" } : normalizedDefaults;
-        }
-
-        return new List<string> { "(なし)" };
+        List<string> effective = BrowserCommandBindingResolver
+            .ResolveEffectiveKeyCommandMap(
+                ResolveProfileValue(),
+                overrides,
+                _registry,
+                _settingsDraft.CommandLauncherShortcut)
+            .Where(pair => string.Equals(pair.Value, commandId, StringComparison.OrdinalIgnoreCase))
+            .Select(pair => pair.Key)
+            .OrderBy(static key => key, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+        return effective.Count == 0 ? new List<string> { "(未割り当て)" } : effective;
     }
 
     private List<string> GetFunctionSlotsForCommand(string commandId)
@@ -1478,10 +1517,10 @@ public sealed class InputAssignmentDialog : Form
         if (col == 2)
         {
             var overrides = InputSettings.NormalizeBrowserKeyCommandOverrides(_settingsDraft.BrowserKeyCommandOverrides);
-            overrides.TryGetValue(commandId, out List<string>? existing);
+            bool hasOverride = overrides.TryGetValue(commandId, out List<string>? existing);
             List<string> working = InputSettings.NormalizeBrowserKeyGestures(existing ?? new List<string>());
             IReadOnlyDictionary<string, IReadOnlyList<string>> defaults = InputSettings.GetDefaultBrowserKeyCommandMap(ResolveProfileValue());
-            List<string> current = working.Count > 0
+            List<string> current = hasOverride
                 ? working
                 : (defaults.TryGetValue(commandId, out IReadOnlyList<string>? defaultForCurrent)
                     ? InputSettings.NormalizeBrowserKeyGestures(defaultForCurrent)
@@ -1516,7 +1555,7 @@ public sealed class InputAssignmentDialog : Form
             {
                 return;
             }
-            ResetFunctionAssignmentForCommand(commandId);
+            UnassignFunctionAssignmentsForCommand(commandId);
         }
         else if (col == 4)
         {
@@ -1541,10 +1580,10 @@ public sealed class InputAssignmentDialog : Form
     private void OpenShortcutEditor(string commandId)
     {
         var overrides = InputSettings.NormalizeBrowserKeyCommandOverrides(_settingsDraft.BrowserKeyCommandOverrides);
-        overrides.TryGetValue(commandId, out List<string>? existing);
+        bool hasOverride = overrides.TryGetValue(commandId, out List<string>? existing);
         List<string> working = InputSettings.NormalizeBrowserKeyGestures(existing ?? new List<string>());
         IReadOnlyDictionary<string, IReadOnlyList<string>> defaults = InputSettings.GetDefaultBrowserKeyCommandMap(ResolveProfileValue());
-        List<string> current = working.Count > 0
+        List<string> current = hasOverride
             ? working
             : (defaults.TryGetValue(commandId, out IReadOnlyList<string>? defaultForCurrent)
                 ? InputSettings.NormalizeBrowserKeyGestures(defaultForCurrent)
@@ -1619,10 +1658,12 @@ public sealed class InputAssignmentDialog : Form
         var effective = BrowserCommandBindingResolver.ResolveEffectiveKeyCommandMap(
             ResolveProfileValue(),
             overrides,
-            _registry);
+            _registry,
+            _settingsDraft.CommandLauncherShortcut);
 
         if (effective.TryGetValue(gesture, out string? existingCommandId) &&
             !string.IsNullOrWhiteSpace(existingCommandId) &&
+            !string.Equals(existingCommandId, InputSettings.MouseGestureUnassignedCommandId, StringComparison.OrdinalIgnoreCase) &&
             !string.Equals(existingCommandId, targetCommandId, StringComparison.OrdinalIgnoreCase))
         {
             if (!IsEditableCommand(existingCommandId))
@@ -1712,8 +1753,11 @@ public sealed class InputAssignmentDialog : Form
         var effective = BrowserCommandBindingResolver.ResolveEffectiveKeyCommandMap(
             ResolveProfileValue(),
             overrides,
-            _registry);
-        if (!effective.TryGetValue(gesture, out string? existingCommandId) || string.IsNullOrWhiteSpace(existingCommandId))
+            _registry,
+            _settingsDraft.CommandLauncherShortcut);
+        if (!effective.TryGetValue(gesture, out string? existingCommandId) ||
+            string.IsNullOrWhiteSpace(existingCommandId) ||
+            string.Equals(existingCommandId, InputSettings.MouseGestureUnassignedCommandId, StringComparison.OrdinalIgnoreCase))
         {
             return false;
         }
@@ -1829,11 +1873,25 @@ public sealed class InputAssignmentDialog : Form
 
         if (dialog.IsDeleted)
         {
-            foreach (Dictionary<string, string?> map in new[] { normal, shift, ctrl, alt })
+            FunctionKeyProfile profile = isFdCompatible ? FunctionKeyProfile.FDCompatible : FunctionKeyProfile.Standard;
+            foreach ((Dictionary<string, string?> map, FunctionLayer layer) in new[]
+                     {
+                         (normal, FunctionLayer.Normal),
+                         (shift, FunctionLayer.Shift),
+                         (ctrl, FunctionLayer.Ctrl),
+                         (alt, FunctionLayer.Alt)
+                     })
             {
-                foreach (string key in map.Where(x => string.Equals(x.Value, commandId, StringComparison.OrdinalIgnoreCase)).Select(x => x.Key).ToArray())
+                foreach (int slot in Enumerable.Range(1, 12))
                 {
-                    map.Remove(key);
+                    string key = $"F{slot}";
+                    string? effectiveCommandId = map.TryGetValue(key, out string? overridden)
+                        ? overridden
+                        : ResolveFunctionCommandId(profile, slot, layer);
+                    if (string.Equals(effectiveCommandId, commandId, StringComparison.OrdinalIgnoreCase))
+                    {
+                        map[key] = "none";
+                    }
                 }
             }
         }
@@ -2006,14 +2064,13 @@ public sealed class InputAssignmentDialog : Form
             return false;
         }
 
-        return command.IsCustomizable;
+        return (command.InputSurfaces & (CommandInputSurface.Keyboard | CommandInputSurface.FunctionBar)) != 0;
     }
 
     private bool IsMouseGestureAssignableCommand(string commandId)
     {
         return _commandById.TryGetValue(commandId, out CommandDefinition? command)
-               && command.IsCustomizable
-               && !command.IsDangerous;
+               && (command.InputSurfaces & CommandInputSurface.MouseGesture) != 0;
     }
 
     private void SetOverrideMap(FunctionLayer layer, bool isFdCompatible, Dictionary<string, string?> map)
@@ -2173,6 +2230,12 @@ public sealed class InputAssignmentDialog : Form
 
     private void FunctionGrid_EditingControlShowing(object? sender, DataGridViewEditingControlShowingEventArgs e)
     {
+        if (_functionGrid.CurrentCell?.ColumnIndex == 2 && e.Control is FunctionCommandComboBoxEditingControl commandComboBox)
+        {
+            commandComboBox.DeletePressed = RequestFunctionSlotDelete;
+            return;
+        }
+
         if (_functionGrid.CurrentCell?.ColumnIndex != 1 || e.Control is not TextBox textBox)
         {
             return;
@@ -2197,6 +2260,33 @@ public sealed class InputAssignmentDialog : Form
         textBox.KeyPress += FunctionGridLabelTextBox_KeyPress;
         textBox.TextChanged += FunctionGridLabelTextBox_TextChanged;
         _functionLabelEditingInitializing = false;
+    }
+
+    private void RequestFunctionSlotDelete()
+    {
+        if (_functionGridCommandDeleteDialogScheduled ||
+            _functionGrid.CurrentCell?.ColumnIndex != 2 ||
+            _functionGrid.CurrentRow?.Tag is not ValueTuple<int, FunctionLayer, bool, bool> rowTag ||
+            rowTag.Item4)
+        {
+            return;
+        }
+
+        int slot = rowTag.Item1;
+        FunctionLayer layer = rowTag.Item2;
+        bool isFdCompatible = string.Equals(ResolveProfileValue(), InputSettings.FdCompatibleProfileValue, StringComparison.OrdinalIgnoreCase);
+        _functionGridCommandDeleteDialogScheduled = true;
+        BeginInvoke(new Action(() =>
+        {
+            try
+            {
+                ConfirmFunctionSlotDelete(slot, layer, isFdCompatible);
+            }
+            finally
+            {
+                _functionGridCommandDeleteDialogScheduled = false;
+            }
+        }));
     }
 
     private void FunctionGridLabelTextBox_KeyPress(object? sender, KeyPressEventArgs e)
@@ -2330,30 +2420,52 @@ public sealed class InputAssignmentDialog : Form
             return;
         }
 
-        string slotKey = $"F{slot}";
-        Dictionary<string, string?> map = GetOverrideMap(layer, isFdCompatible);
-
-        if (string.Equals(selected, "__default__", StringComparison.OrdinalIgnoreCase))
-        {
-            map.Remove(slotKey);
-        }
-        else if (string.Equals(selected, ReservedFunctionSlotCommandId, StringComparison.OrdinalIgnoreCase))
+        if (string.Equals(selected, ReservedFunctionSlotCommandId, StringComparison.OrdinalIgnoreCase))
         {
             MessageBox.Show(this, "予約済み値は Alt+F4 以外に設定できません。", "入力不可", MessageBoxButtons.OK, MessageBoxIcon.Information);
             RefreshFunctionGrid();
             return;
         }
-        else if (string.Equals(selected, InputSettings.MouseGestureUnassignedCommandId, StringComparison.OrdinalIgnoreCase))
+        ApplyFunctionSlotCommandSelection(
+            GetOverrideMap(layer, isFdCompatible),
+            GetFunctionBarLabelOverrideMap(layer, isFdCompatible),
+            $"F{slot}",
+            selected,
+            out Dictionary<string, string?> updatedCommandMap,
+            out Dictionary<string, FunctionBarLabelOverride> updatedLabelMap);
+        SetOverrideMap(layer, isFdCompatible, updatedCommandMap);
+        SetFunctionBarLabelOverrideMap(layer, isFdCompatible, updatedLabelMap);
+        RefreshAllViews();
+    }
+
+    internal static void ApplyFunctionSlotCommandSelection(
+        Dictionary<string, string?> commandMap,
+        Dictionary<string, FunctionBarLabelOverride> labelOverrides,
+        string slotKey,
+        string selectedCommandId,
+        out Dictionary<string, string?> updatedCommandMap,
+        out Dictionary<string, FunctionBarLabelOverride> updatedLabelOverrides)
+    {
+        updatedCommandMap = new Dictionary<string, string?>(commandMap, StringComparer.OrdinalIgnoreCase);
+        updatedLabelOverrides = new Dictionary<string, FunctionBarLabelOverride>(labelOverrides, StringComparer.OrdinalIgnoreCase);
+
+        if (string.Equals(selectedCommandId, "__default__", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(selectedCommandId, InputSettings.MouseGestureUnassignedCommandId, StringComparison.OrdinalIgnoreCase))
         {
-            map[slotKey] = "none";
-        }
-        else
-        {
-            map[slotKey] = selected;
+            if (string.Equals(selectedCommandId, InputSettings.MouseGestureUnassignedCommandId, StringComparison.OrdinalIgnoreCase))
+            {
+                updatedCommandMap[slotKey] = InputSettings.MouseGestureUnassignedCommandId;
+            }
+            else
+            {
+                updatedCommandMap.Remove(slotKey);
+            }
+
+            updatedLabelOverrides.Remove(slotKey);
+            return;
         }
 
-        SetOverrideMap(layer, isFdCompatible, map);
-        RefreshAllViews();
+        updatedCommandMap[slotKey] = selectedCommandId;
     }
 
     private void FunctionGrid_KeyDown(object? sender, KeyEventArgs e)
@@ -2429,8 +2541,14 @@ public sealed class InputAssignmentDialog : Form
             return;
         }
 
+        RequestFunctionSlotDelete();
+        e.Handled = true;
+        e.SuppressKeyPress = true;
+    }
+
+    private void ConfirmFunctionSlotDelete(int slotNumber, FunctionLayer commandLayer, bool commandIsFdCompatible)
+    {
         string commandSlotKey = $"F{slotNumber}";
-        FunctionLayer commandLayer = GetSelectedFunctionLayer();
         string targetLabel = commandLayer switch
         {
             FunctionLayer.Shift => $"Shift+{commandSlotKey}",
@@ -2438,18 +2556,23 @@ public sealed class InputAssignmentDialog : Form
             FunctionLayer.Alt => $"Alt+{commandSlotKey}",
             _ => commandSlotKey
         };
-        if (MessageBox.Show(this, $"{targetLabel} の割り当てを解除しますか？", "確認", MessageBoxButtons.YesNo, MessageBoxIcon.Question, MessageBoxDefaultButton.Button2) != DialogResult.Yes)
+
+        DialogResult result = MessageBox.Show(this, $"{targetLabel} の割り当てを解除しますか？", "確認", MessageBoxButtons.YesNo, MessageBoxIcon.Question, MessageBoxDefaultButton.Button2);
+        if (result != DialogResult.Yes)
         {
             return;
         }
 
-        bool commandIsFdCompatible = string.Equals(ResolveProfileValue(), InputSettings.FdCompatibleProfileValue, StringComparison.OrdinalIgnoreCase);
-        Dictionary<string, string?> map = GetOverrideMap(commandLayer, commandIsFdCompatible);
-        map[commandSlotKey] = "none";
-        SetOverrideMap(commandLayer, commandIsFdCompatible, map);
+        ApplyFunctionSlotCommandSelection(
+            GetOverrideMap(commandLayer, commandIsFdCompatible),
+            GetFunctionBarLabelOverrideMap(commandLayer, commandIsFdCompatible),
+            commandSlotKey,
+            InputSettings.MouseGestureUnassignedCommandId,
+            out Dictionary<string, string?> updatedCommandMap,
+            out Dictionary<string, FunctionBarLabelOverride> updatedLabelMap);
+        SetOverrideMap(commandLayer, commandIsFdCompatible, updatedCommandMap);
+        SetFunctionBarLabelOverrideMap(commandLayer, commandIsFdCompatible, updatedLabelMap);
         RefreshAllViews();
-        e.Handled = true;
-        e.SuppressKeyPress = true;
     }
 
     private void GestureGrid_CellClick(object? sender, DataGridViewCellEventArgs e)
@@ -2497,7 +2620,7 @@ public sealed class InputAssignmentDialog : Form
         if (!string.Equals(selected, InputSettings.MouseGestureUnassignedCommandId, StringComparison.OrdinalIgnoreCase))
         {
             CommandDefinition? definition = _registry.Find(selected);
-            if (definition == null || !definition.IsCustomizable || definition.IsDangerous)
+            if (definition == null || (definition.InputSurfaces & CommandInputSurface.MouseGesture) == 0)
             {
                 MessageBox.Show(this, "この機能はマウスジェスチャーには割り当てできません。", "割り当て不可", MessageBoxButtons.OK, MessageBoxIcon.Information);
                 RefreshGestureGrid();
@@ -2602,8 +2725,7 @@ public sealed class InputAssignmentDialog : Form
             return;
         }
         _settingsDraft.BrowserKeyCommandOverrides.Remove(commandId);
-        ResetFunctionAssignmentForCommand(commandId);
-        ResetFunctionLabelOverridesForCommand(commandId);
+        ResetFunctionAssignmentsForCommandToDefault(commandId);
         ResetGestureAssignmentForCommand(commandId);
         RefreshAllViews();
     }
@@ -2705,45 +2827,130 @@ public sealed class InputAssignmentDialog : Form
         RefreshAllViews();
     }
 
-    private void ResetFunctionAssignmentForCommand(string commandId)
+    private void UnassignFunctionAssignmentsForCommand(string commandId)
     {
-        foreach (Dictionary<string, string?> map in new[]
-                 {
-                     _settingsDraft.FunctionBarCommandOverridesStandard,
-                     _settingsDraft.FunctionBarCommandOverridesFdCompatible,
-                     _settingsDraft.FunctionBarCommandOverridesShiftStandard,
-                     _settingsDraft.FunctionBarCommandOverridesShiftFdCompatible,
-                     _settingsDraft.FunctionBarCommandOverridesCtrlStandard,
-                     _settingsDraft.FunctionBarCommandOverridesCtrlFdCompatible,
-                     _settingsDraft.FunctionBarCommandOverridesAltStandard,
-                     _settingsDraft.FunctionBarCommandOverridesAltFdCompatible
-                 })
+        bool isFdCompatible = string.Equals(ResolveProfileValue(), InputSettings.FdCompatibleProfileValue, StringComparison.OrdinalIgnoreCase);
+        FunctionKeyProfile profile = isFdCompatible ? FunctionKeyProfile.FDCompatible : FunctionKeyProfile.Standard;
+        Dictionary<string, string?> normal = GetOverrideMap(FunctionLayer.Normal, isFdCompatible);
+        Dictionary<string, string?> shift = GetOverrideMap(FunctionLayer.Shift, isFdCompatible);
+        Dictionary<string, string?> ctrl = GetOverrideMap(FunctionLayer.Ctrl, isFdCompatible);
+        Dictionary<string, string?> alt = GetOverrideMap(FunctionLayer.Alt, isFdCompatible);
+        IReadOnlyList<(FunctionLayer Layer, int Slot)> changed = UnassignEffectiveFunctionAssignments(
+            profile,
+            commandId,
+            normal,
+            shift,
+            ctrl,
+            alt);
+
+        foreach (FunctionLayer layer in Enum.GetValues<FunctionLayer>())
         {
-            foreach (string key in map.Where(x => string.Equals(x.Value, commandId, StringComparison.OrdinalIgnoreCase)).Select(x => x.Key).ToArray())
+            Dictionary<string, FunctionBarLabelOverride> labelOverrides = GetFunctionBarLabelOverrideMap(layer, isFdCompatible);
+            foreach ((FunctionLayer changedLayer, int slot) in changed.Where(item => item.Layer == layer))
             {
-                map.Remove(key);
+                labelOverrides.Remove($"F{slot}");
             }
+
+            Dictionary<string, string?> map = layer switch
+            {
+                FunctionLayer.Shift => shift,
+                FunctionLayer.Ctrl => ctrl,
+                FunctionLayer.Alt => alt,
+                _ => normal
+            };
+            SetOverrideMap(layer, isFdCompatible, map);
+            SetFunctionBarLabelOverrideMap(layer, isFdCompatible, labelOverrides);
         }
     }
 
-    private void ResetFunctionLabelOverridesForCommand(string commandId)
+    internal static IReadOnlyList<(FunctionLayer Layer, int Slot)> UnassignEffectiveFunctionAssignments(
+        FunctionKeyProfile profile,
+        string commandId,
+        Dictionary<string, string?> normal,
+        Dictionary<string, string?> shift,
+        Dictionary<string, string?> ctrl,
+        Dictionary<string, string?> alt)
     {
-        foreach (Dictionary<string, FunctionBarLabelOverride> map in new[]
+        var changed = new List<(FunctionLayer Layer, int Slot)>();
+        foreach ((FunctionLayer layer, Dictionary<string, string?> map) in new[]
                  {
-                     _settingsDraft.FunctionBarLabelOverridesStandard,
-                     _settingsDraft.FunctionBarLabelOverridesFdCompatible,
-                     _settingsDraft.FunctionBarLabelOverridesShiftStandard,
-                     _settingsDraft.FunctionBarLabelOverridesShiftFdCompatible,
-                     _settingsDraft.FunctionBarLabelOverridesCtrlStandard,
-                     _settingsDraft.FunctionBarLabelOverridesCtrlFdCompatible,
-                     _settingsDraft.FunctionBarLabelOverridesAltStandard,
-                     _settingsDraft.FunctionBarLabelOverridesAltFdCompatible
+                     (FunctionLayer.Normal, normal),
+                     (FunctionLayer.Shift, shift),
+                     (FunctionLayer.Ctrl, ctrl),
+                     (FunctionLayer.Alt, alt)
                  })
         {
-            foreach (string key in map.Where(x => string.Equals(x.Value.CommandId, commandId, StringComparison.OrdinalIgnoreCase)).Select(x => x.Key).ToArray())
+            for (int slot = 1; slot <= 12; slot++)
             {
-                map.Remove(key);
+                if (layer == FunctionLayer.Alt && slot == 4)
+                {
+                    continue;
+                }
+
+                string? effectiveCommandId = FunctionKeyProfileService.ResolveFunctionBarCommandId(
+                    profile,
+                    slot,
+                    profile == FunctionKeyProfile.Standard ? normal : null,
+                    profile == FunctionKeyProfile.FDCompatible ? normal : null,
+                    profile == FunctionKeyProfile.Standard ? shift : null,
+                    profile == FunctionKeyProfile.FDCompatible ? shift : null,
+                    layer == FunctionLayer.Shift,
+                    profile == FunctionKeyProfile.Standard ? ctrl : null,
+                    profile == FunctionKeyProfile.FDCompatible ? ctrl : null,
+                    profile == FunctionKeyProfile.Standard ? alt : null,
+                    profile == FunctionKeyProfile.FDCompatible ? alt : null,
+                    layer == FunctionLayer.Ctrl,
+                    layer == FunctionLayer.Alt);
+                if (!string.Equals(effectiveCommandId, commandId, StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+
+                map[$"F{slot}"] = InputSettings.MouseGestureUnassignedCommandId;
+                changed.Add((layer, slot));
             }
+        }
+
+        return changed;
+    }
+
+    private void ResetFunctionAssignmentsForCommandToDefault(string commandId)
+    {
+        bool isFdCompatible = string.Equals(ResolveProfileValue(), InputSettings.FdCompatibleProfileValue, StringComparison.OrdinalIgnoreCase);
+        FunctionKeyProfile profile = isFdCompatible ? FunctionKeyProfile.FDCompatible : FunctionKeyProfile.Standard;
+        var layerMaps = new[]
+        {
+            (FunctionLayer.Normal, GetOverrideMap(FunctionLayer.Normal, isFdCompatible)),
+            (FunctionLayer.Shift, GetOverrideMap(FunctionLayer.Shift, isFdCompatible)),
+            (FunctionLayer.Ctrl, GetOverrideMap(FunctionLayer.Ctrl, isFdCompatible)),
+            (FunctionLayer.Alt, GetOverrideMap(FunctionLayer.Alt, isFdCompatible))
+        };
+
+        foreach ((FunctionLayer layer, Dictionary<string, string?> map) in layerMaps)
+        {
+            Dictionary<string, FunctionBarLabelOverride> labelOverrides = GetFunctionBarLabelOverrideMap(layer, isFdCompatible);
+            for (int slot = 1; slot <= 12; slot++)
+            {
+                string slotKey = $"F{slot}";
+                string? defaultCommandId = FunctionKeyProfileService.ResolveDefinition(
+                    profile,
+                    slot,
+                    layer == FunctionLayer.Shift,
+                    layer == FunctionLayer.Ctrl,
+                    layer == FunctionLayer.Alt)?.CommandId;
+                bool defaultMatches = string.Equals(defaultCommandId, commandId, StringComparison.OrdinalIgnoreCase);
+                bool overrideMatches = map.TryGetValue(slotKey, out string? overrideCommandId) &&
+                                        string.Equals(overrideCommandId, commandId, StringComparison.OrdinalIgnoreCase);
+                bool tombstoneForDefault = defaultMatches && FunctionKeyProfileService.IsExplicitUnassigned(overrideCommandId);
+                if (overrideMatches || tombstoneForDefault)
+                {
+                    map.Remove(slotKey);
+                    labelOverrides.Remove(slotKey);
+                }
+            }
+
+            SetOverrideMap(layer, isFdCompatible, map);
+            SetFunctionBarLabelOverrideMap(layer, isFdCompatible, labelOverrides);
         }
     }
 

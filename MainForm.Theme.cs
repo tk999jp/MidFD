@@ -87,6 +87,7 @@ public partial class MainForm
         outerHostPanel.BackColor = uiThemeColors.ChromeBackColor;
         mainAreaPanel.BackColor = uiThemeColors.ChromeBackColor;
         headerPanel.BackColor = uiThemeColors.HeaderBackColor;
+        headerPanel.Padding = new Padding(0, 1, 0, 0);
         topPanel.BackColor = uiThemeColors.HeaderBackColor;
         infoRow2Panel.BackColor = uiThemeColors.HeaderBackColor;
         infoRow3Panel.BackColor = uiThemeColors.HeaderBackColor;
@@ -152,9 +153,17 @@ public partial class MainForm
             _browserTabStrip.ActiveTabBackColor = MidFDColors.ListSelectedBack;
             _browserTabStrip.InactiveTabBackColor = uiThemeColors.ChromeBackColor;
             _browserTabStrip.TabBorderColor = uiThemeColors.BorderColor;
-            _browserTabStrip.ActiveTabTextColor = uiThemeColors.AccentColor;
-            _browserTabStrip.InactiveTabTextColor = uiThemeColors.ChromeForeColor;
+            _browserTabStrip.ActiveTabTextColor = Color.White;
+            _browserTabStrip.InactiveTabTextColor = MidFDColors.ListNormalFore;
             _browserTabStrip.Invalidate();
+        }
+        if (_browserTabNavigation != null && _resolvedColors != null)
+        {
+            _browserTabNavigation.ApplyThemeColors(uiThemeColors.BorderColor, _resolvedColors.Background, MidFDColors.ListNormalFore);
+        }
+        if (_delimitedGrid != null)
+        {
+            ApplyDelimitedGridTheme(_delimitedGrid);
         }
         foreach (ListViewItem item in fileListView.Items)
         {

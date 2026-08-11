@@ -4,6 +4,7 @@ using System.Drawing;
 using System.Linq;
 using System.Windows.Forms;
 using MidFD.Models;
+using MidFD.Presentation;
 using MidFD.Services;
 
 using System.ComponentModel;
@@ -33,6 +34,7 @@ public sealed class BrowserTabStrip : Control
     private Point _dragMouseDownPoint = Point.Empty;
     private Point _dragCurrentMousePoint = Point.Empty;
     private bool _isReorderDragActive;
+    private bool _activeTabLeftClickCandidate;
     private int _lastLoggedPaintTabCount = int.MinValue;
     private int _lastLoggedPaintCategoryRowHeight = int.MinValue;
     private int _lastLoggedPaintTabRowTop = int.MinValue;
@@ -59,7 +61,7 @@ public sealed class BrowserTabStrip : Control
     public Color TabBorderColor { get; set; } = MidFDColors.BorderLine;
     [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
     [Browsable(false)]
-    public Color ActiveTabTextColor { get; set; } = Color.Yellow;
+    public Color ActiveTabTextColor { get; set; } = Color.White;
     [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
     [Browsable(false)]
     public Color InactiveTabTextColor { get; set; } = MidFDColors.ListNormalFore;
@@ -122,6 +124,7 @@ public sealed class BrowserTabStrip : Control
     public event EventHandler<BrowserTabStripCategoryEventArgs>? CategoryClicked;
     public event EventHandler? AddTabClicked;
     public event EventHandler<BrowserTabStripMouseEventArgs>? TabDoubleClicked;
+    public event EventHandler<BrowserTabStripMouseEventArgs>? SelectedTabReclicked;
     public event EventHandler<BrowserTabStripMouseEventArgs>? TabRightClicked;
     public event EventHandler<BrowserTabStripMouseEventArgs>? TabMiddleClicked;
     public event EventHandler<BrowserTabStripReorderEventArgs>? TabReordered;
@@ -179,21 +182,50 @@ public sealed class BrowserTabStrip : Control
 
     public void SetTabs(IReadOnlyList<BrowserTabStripItem> tabs)
     {
-        if (_tabs.SequenceEqual(tabs))
+        SetTabs(tabs, _selectedIndex);
+    }
+
+    public void SetTabs(IReadOnlyList<BrowserTabStripItem> tabs, int selectedIndex)
+    {
+        int normalizedSelectedIndex = tabs.Count == 0
+            ? -1
+            : (selectedIndex >= 0 && selectedIndex < tabs.Count ? selectedIndex : 0);
+        if (_tabs.SequenceEqual(tabs) && _selectedIndex == normalizedSelectedIndex)
         {
+            return;
+        }
+
+        if (_tabs.Count == tabs.Count)
+        {
+            bool itemChanged = false;
+            Rectangle invalidBounds = _selectedIndex >= 0 ? GetTabBounds(_selectedIndex) : Rectangle.Empty;
+            for (int i = 0; i < tabs.Count; i++)
+            {
+                if (_tabs[i].Equals(tabs[i])) continue;
+                _tabs[i] = tabs[i];
+                itemChanged = true;
+                invalidBounds = UnionInvalidBounds(invalidBounds, GetTabBounds(i));
+            }
+
+            bool selectionChanged = _selectedIndex != normalizedSelectedIndex;
+            _selectedIndex = normalizedSelectedIndex;
+            if (selectionChanged)
+            {
+                EnsureSelectedTabVisible();
+                invalidBounds = UnionInvalidBounds(invalidBounds, GetTabBounds(_selectedIndex));
+            }
+
+            if (itemChanged || selectionChanged)
+            {
+                Invalidate(invalidBounds.IsEmpty ? ClientRectangle : invalidBounds);
+                LogService.Info($"[BrowserTabStrip] UpdateTabsInPlace Count={_tabs.Count} SelectedIndex={_selectedIndex} ShowCategoryRow={ShowCategoryRow}");
+            }
             return;
         }
 
         _tabs.Clear();
         _tabs.AddRange(tabs);
-        if (_tabs.Count == 0)
-        {
-            _selectedIndex = -1;
-        }
-        else if (_selectedIndex < 0 || _selectedIndex >= _tabs.Count)
-        {
-            _selectedIndex = 0;
-        }
+        _selectedIndex = normalizedSelectedIndex;
 
         if (_dragStartIndex >= _tabs.Count)
         {
@@ -204,6 +236,69 @@ public sealed class BrowserTabStrip : Control
         EnsureSelectedTabVisible();
         LogService.Info($"[BrowserTabStrip] SetTabs Count={_tabs.Count} SelectedIndex={_selectedIndex} ShowCategoryRow={ShowCategoryRow}");
         Invalidate();
+    }
+
+    public void UpdateTabAndSelection(int index, BrowserTabStripItem tab, bool select)
+    {
+        if (index < 0 || index >= _tabs.Count)
+        {
+            return;
+        }
+
+        bool itemChanged = !_tabs[index].Equals(tab);
+        int nextSelectedIndex = select ? index : _selectedIndex;
+        bool selectionChanged = _selectedIndex != nextSelectedIndex;
+        if (!itemChanged && !selectionChanged)
+        {
+            return;
+        }
+
+        Rectangle invalidBounds = GetTabBounds(index);
+        invalidBounds = UnionInvalidBounds(invalidBounds, GetTabBounds(_selectedIndex));
+        _tabs[index] = tab;
+        if (selectionChanged)
+        {
+            _selectedIndex = nextSelectedIndex;
+            EnsureSelectedTabVisible();
+            invalidBounds = UnionInvalidBounds(invalidBounds, GetTabBounds(_selectedIndex));
+        }
+
+        Invalidate(invalidBounds.IsEmpty ? ClientRectangle : invalidBounds);
+        if (selectionChanged)
+        {
+            SelectedIndexChanged?.Invoke(this, EventArgs.Empty);
+        }
+    }
+
+    /// <summary>構造を変えず、既存タブ1件の表示内容だけを更新する。</summary>
+    public void UpdateTab(int index, BrowserTabStripItem tab)
+    {
+        if (index < 0 || index >= _tabs.Count || _tabs[index].Equals(tab))
+        {
+            return;
+        }
+
+        _tabs[index] = tab;
+        Rectangle invalidBounds = GetTabBounds(index);
+        Invalidate(invalidBounds.IsEmpty ? ClientRectangle : invalidBounds);
+    }
+
+    private Rectangle GetTabBounds(int index)
+    {
+        int visibleIndex = _tabBoundIndexes.IndexOf(index);
+        if (visibleIndex >= 0 && visibleIndex < _tabBounds.Count)
+        {
+            return _tabBounds[visibleIndex];
+        }
+
+        return Rectangle.Empty;
+    }
+
+    private static Rectangle UnionInvalidBounds(Rectangle left, Rectangle right)
+    {
+        if (left.IsEmpty) return right;
+        if (right.IsEmpty) return left;
+        return Rectangle.Union(left, right);
     }
 
     public void FlashLimitReached()
@@ -446,6 +541,7 @@ public sealed class BrowserTabStrip : Control
         int tabIndex = GetTabIndexAt(e.Location);
         if (tabIndex >= 0)
         {
+            _activeTabLeftClickCandidate = e.Button == MouseButtons.Left && tabIndex == _selectedIndex;
             SelectedIndex = tabIndex;
             if (e.Button == MouseButtons.Left)
             {
@@ -479,6 +575,7 @@ public sealed class BrowserTabStrip : Control
     protected override void OnMouseUp(MouseEventArgs e)
     {
         base.OnMouseUp(e);
+        bool shouldNotifySelectedTabReclick = false;
 
         if (e.Button == MouseButtons.Left && _isCategoryDragActive)
         {
@@ -506,6 +603,7 @@ public sealed class BrowserTabStrip : Control
 
         if (e.Button == MouseButtons.Left || e.Button == MouseButtons.Right)
         {
+            shouldNotifySelectedTabReclick = _activeTabLeftClickCandidate;
             bool wasCategoryDrag = _categoryDragStartIndex >= 0;
             ResetDragReorderState();
             if (e.Button == MouseButtons.Left && TryHandleTabNavigationClick(e.Location))
@@ -547,6 +645,18 @@ public sealed class BrowserTabStrip : Control
         else if (e.Button == MouseButtons.Middle)
         {
             TabMiddleClicked?.Invoke(this, eventArgs);
+        }
+        else if (e.Button == MouseButtons.Left && shouldNotifySelectedTabReclick && tabIndex == _selectedIndex)
+        {
+            NotifySelectedTabReclicked(tabIndex, e.Button, e.Location);
+        }
+    }
+
+    internal void NotifySelectedTabReclicked(int tabIndex, MouseButtons button, Point location = default)
+    {
+        if (button == MouseButtons.Left && tabIndex == _selectedIndex)
+        {
+            SelectedTabReclicked?.Invoke(this, new BrowserTabStripMouseEventArgs(tabIndex, button, location));
         }
     }
 
@@ -805,7 +915,18 @@ public sealed class BrowserTabStrip : Control
         Rectangle fillBounds = new(bounds.X, bounds.Y, bounds.Width, Math.Max(1, baselineY - bounds.Y));
         Color textColor = isSelected ? ActiveTabTextColor : InactiveTabTextColor;
         Rectangle textBounds = Rectangle.Inflate(fillBounds, -10, -2);
-        string displayText = FitTextWithMiddleEllipsis(graphics, tab.Text, textBounds.Width);
+        int prefixWidth = MeasureTabTextWidth(graphics, tab.Prefix);
+        int coreWidth = Math.Max(1, textBounds.Width - prefixWidth);
+        string coreText = tab.BaseTitle != null
+            ? BrowserTabNavigationPathPresentationHelper.FormatBaseAndRelativeForWidth(
+                tab.BaseTitle,
+                tab.RelativeSuffix,
+                coreWidth,
+                text => MeasureTabTextWidth(graphics, text))
+            : !string.IsNullOrWhiteSpace(tab.CanonicalPath)
+                ? FitCanonicalPath(graphics, tab.CanonicalPath!, coreWidth)
+                : FitTextWithMiddleEllipsis(graphics, tab.Text, coreWidth);
+        string displayText = tab.Prefix + coreText;
         TextRenderer.DrawText(
             graphics,
             displayText,
@@ -1374,6 +1495,7 @@ public sealed class BrowserTabStrip : Control
         _categoryDragStartIndex = -1;
         _categoryDragHoverInsertionIndex = -1;
         _isCategoryDragActive = false;
+        _activeTabLeftClickCandidate = false;
 
         Invalidate();
     }
@@ -1477,6 +1599,11 @@ public sealed class BrowserTabStrip : Control
             return text;
         }
 
+        if (TryBuildPathCandidate(text, out string compactPath))
+        {
+            return FitPathCandidate(graphics, compactPath, availableWidth);
+        }
+
         const string ellipsis = "…";
         if (MeasureTabTextWidth(graphics, ellipsis) > availableWidth)
         {
@@ -1514,6 +1641,65 @@ public sealed class BrowserTabStrip : Control
             TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix | TextFormatFlags.NoPadding).Width;
     }
 
+    private static bool TryBuildPathCandidate(string text, out string candidate)
+    {
+        candidate = string.Empty;
+        bool trailingSeparator = text.EndsWith('\\');
+        string trimmed = text.TrimEnd('\\');
+        int lastSeparator = trimmed.LastIndexOf('\\');
+        if (lastSeparator <= 0 || lastSeparator >= trimmed.Length - 1) return false;
+        string current = trimmed[(lastSeparator + 1)..];
+        if (trimmed.StartsWith(@"\\", StringComparison.Ordinal))
+        {
+            int hostEnd = trimmed.IndexOf('\\', 2);
+            if (hostEnd <= 2) return false;
+            candidate = trimmed[..hostEnd] + "\\…\\" + current;
+        }
+        else
+        {
+            int rootEnd = trimmed.IndexOf('\\');
+            if (rootEnd < 0) return false;
+            candidate = trimmed[..(rootEnd + 1)] + "…\\" + current;
+        }
+        if (trailingSeparator) candidate += "\\";
+        return true;
+    }
+
+    private string FitPathCandidate(Graphics graphics, string candidate, int availableWidth)
+    {
+        if (MeasureTabTextWidth(graphics, candidate) <= availableWidth) return candidate;
+        int marker = candidate.IndexOf("\\…\\", StringComparison.Ordinal);
+        if (marker <= 0) return candidate;
+        string root = candidate[..marker];
+        string tail = candidate[marker..];
+        for (int length = root.Length - 1; length >= 1; length--)
+        {
+            string shortened = root[..length] + "…" + tail;
+            if (MeasureTabTextWidth(graphics, shortened) <= availableWidth) return shortened;
+        }
+        string minimumRoot = root.StartsWith(@"\\", StringComparison.Ordinal)
+            ? root[..Math.Min(root.Length, 5)]
+            : root[..Math.Min(root.Length, 3)];
+        string minimum = minimumRoot + "…" + tail;
+        if (MeasureTabTextWidth(graphics, minimum) <= availableWidth) return minimum;
+
+        string current = tail.TrimStart('\\', '…').TrimEnd('\\');
+        string suffix = tail.EndsWith('\\') ? "\\" : string.Empty;
+        for (int length = current.Length - 1; length >= 1; length--)
+        {
+            string shortened = minimumRoot + "…\\" + current[..length] + "…" + suffix;
+            if (MeasureTabTextWidth(graphics, shortened) <= availableWidth) return shortened;
+        }
+        return minimum;
+    }
+
+    private string FitCanonicalPath(Graphics graphics, string path, int availableWidth)
+    {
+        if (MeasureTabTextWidth(graphics, path) <= availableWidth) return path;
+        if (TryBuildPathCandidate(path, out string candidate)) return FitPathCandidate(graphics, candidate, availableWidth);
+        return FitTextWithMiddleEllipsis(graphics, path, availableWidth);
+    }
+
     private static string BuildMiddleEllipsisCandidate(string text, int visibleCount, string ellipsis)
     {
         if (string.IsNullOrEmpty(text) || visibleCount <= 0)
@@ -1549,17 +1735,24 @@ public sealed record BrowserTabStripCategoryItem(
     string? ToolTipText,
     BrowserTabStripCategoryItemKind Kind = BrowserTabStripCategoryItemKind.Category);
 
-public sealed record BrowserTabStripItem(string Text, string? ToolTipText);
+public sealed record BrowserTabStripItem(
+    string Text,
+    string? ToolTipText,
+    string? CanonicalPath = null,
+    string Prefix = "",
+    string? BaseTitle = null,
+    string? RelativeSuffix = null);
 
 public sealed class BrowserTabStripCategoryEventArgs : EventArgs
 {
-    public BrowserTabStripCategoryEventArgs(int categoryIndex, string categoryId, BrowserTabStripCategoryItemKind kind, MouseButtons button, Point location)
+    public BrowserTabStripCategoryEventArgs(int categoryIndex, string categoryId, BrowserTabStripCategoryItemKind kind, MouseButtons button, Point location, int tabIndex = -1)
     {
         CategoryIndex = categoryIndex;
         CategoryId = categoryId;
         Kind = kind;
         Button = button;
         Location = location;
+        TabIndex = tabIndex;
     }
 
     public int CategoryIndex { get; }
@@ -1567,6 +1760,7 @@ public sealed class BrowserTabStripCategoryEventArgs : EventArgs
     public BrowserTabStripCategoryItemKind Kind { get; }
     public MouseButtons Button { get; }
     public Point Location { get; }
+    public int TabIndex { get; }
 }
 
 public sealed class BrowserTabStripMouseEventArgs : EventArgs

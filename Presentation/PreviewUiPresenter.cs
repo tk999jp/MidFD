@@ -38,49 +38,4 @@ public static class PreviewUiPresenter
         }
     }
 
-    public static void PositionPreviewPopup(Form owner, PreviewPopupForm previewPopup)
-    {
-        if (!owner.IsHandleCreated)
-        {
-            return;
-        }
-
-        if (previewPopup.IsManuallyPositioned)
-        {
-            Rectangle currentScreen = Screen.FromControl(previewPopup).WorkingArea;
-            if (!currentScreen.IntersectsWith(previewPopup.Bounds))
-            {
-                previewPopup.IsManuallyPositioned = false;
-            }
-            else
-            {
-                return;
-            }
-        }
-
-        Rectangle screen = Screen.FromControl(owner).WorkingArea;
-        const int popupW = 400;
-        const int popupH = 400;
-        int x = owner.Right + 4;
-        int y = owner.Top;
-
-        if (x + popupW > screen.Right)
-        {
-            x = owner.Left - popupW - 4;
-        }
-        if (x < screen.Left)
-        {
-            x = screen.Left;
-        }
-        if (y + popupH > screen.Bottom)
-        {
-            y = screen.Bottom - popupH;
-        }
-        if (y < screen.Top)
-        {
-            y = screen.Top;
-        }
-
-        previewPopup.SetBounds(x, y, popupW, popupH);
-    }
 }

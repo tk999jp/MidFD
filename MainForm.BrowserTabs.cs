@@ -3,6 +3,7 @@ using System.Media;
 using System.Text;
 using System.Text.RegularExpressions;
 using System.Windows.Forms;
+using MidFD.Commands;
 using MidFD.Configuration;
 using MidFD.Dialogs;
 using MidFD.Helpers;
@@ -14,7 +15,11 @@ using MidFD.Services.Workspace;
 namespace MidFD;
 
 public partial class MainForm
-{private void InitializeBrowserTabControl()
+{
+    private string? _lastBrowserTabNavigationStructureKey;
+    private bool _browserFileListFocusPending;
+
+private void InitializeBrowserTabControl()
 {
     _browserTabHostPanel = new Panel
     {
@@ -23,7 +28,8 @@ public partial class MainForm
         BackColor = MidFDColors.ListNormalBack,
         Margin = Padding.Empty,
         Name = "browserTabHostPanel",
-        Padding = Padding.Empty
+        Padding = Padding.Empty,
+        Visible = false
     };
     _browserTabHostPanel.Resize += (s, e) => LayoutBrowserTabControlWithinHost();
     _browserTabStrip = new BrowserTabStrip
@@ -38,7 +44,7 @@ public partial class MainForm
         ActiveTabBackColor = MidFDColors.ListSelectedBack,
         InactiveTabBackColor = MidFDColors.ListNormalBack,
         TabBorderColor = MidFDColors.BorderLine,
-        ActiveTabTextColor = FileListColorResolver.NormalizeCoreTheme(_settings.Appearance?.ColorTheme) == "Light" ? Color.Black : Color.Yellow,
+        ActiveTabTextColor = Color.White,
         InactiveTabTextColor = MidFDColors.ListNormalFore,
         ShowCategoryRow = ShouldShowBrowserTabCategoryRow()
     };
@@ -49,18 +55,66 @@ public partial class MainForm
     _browserTabStrip.TabReordered += BrowserTabStrip_TabReordered;
     _browserTabStrip.CategoryReordered += BrowserTabStrip_CategoryReordered;
     _browserTabStrip.TabDoubleClicked += BrowserTabStrip_TabDoubleClicked;
+    _browserTabStrip.SelectedTabReclicked += BrowserTabStrip_SelectedTabReclicked;
     _browserTabStrip.TabRightClicked += BrowserTabStrip_TabRightClicked;
     _browserTabStrip.TabListDropDownOpening += BrowserTabStrip_TabListDropDownOpening;
     _browserTabUiCoordinator.Bind(_browserTabStrip);
     _browserTabHostPanel.Controls.Add(_browserTabStrip);
     outerHostPanel.Controls.Add(_browserTabHostPanel);
+    _browserTabNavigation = new BrowserTabNavigation
+    {
+        Name = "browserTabNavigation",
+        Font = CreateBrowserTabFont(),
+        BackColor = MidFDColors.ListNormalBack,
+        ForeColor = MidFDColors.ListNormalFore,
+        Width = GetBrowserTabNavigationWidth(),
+        Visible = false
+    };
+    _browserTabNavigation.SelectedIndexChanged += BrowserTabStrip_SelectedIndexChanged;
+    _browserTabNavigation.CategoryClicked += BrowserTabStrip_CategoryClicked;
+    _browserTabNavigation.CategoryContextMenuRequested += BrowserTabStrip_CategoryClicked;
+    _browserTabNavigation.AddTabForCategoryClicked += BrowserTabNavigation_AddTabForCategoryClicked;
+    _browserTabNavigation.NavigationWidthChanged += BrowserTabNavigation_NavigationWidthChanged;
+    _browserTabNavigation.TabReordered += BrowserTabStrip_TabReordered;
+    _browserTabNavigation.CategoryReordered += BrowserTabStrip_CategoryReordered;
+    _browserTabNavigation.TabDoubleClicked += BrowserTabStrip_TabDoubleClicked;
+    _browserTabNavigation.SelectedTabReclicked += BrowserTabStrip_SelectedTabReclicked;
+    _browserTabNavigation.TabRightClicked += BrowserTabStrip_TabRightClicked;
+    outerHostPanel.Controls.Add(_browserTabNavigation);
     outerHostPanel.Controls.SetChildIndex(_browserTabHostPanel, 1);
     LayoutBrowserTabControlWithinHost();
 }
+
     private bool ShouldShowBrowserTabCategoryRow()
     {
         return _settings.Appearance?.ShowBrowserTabCategoryRow ?? true;
     }
+    private bool IsVerticalBrowserTabLayout() => _settings.BrowserTabs?.LayoutMode == BrowserTabLayoutMode.Vertical;
+    private bool SetBrowserTabLayout(BrowserTabLayoutMode mode)
+    {
+        _settings.BrowserTabs ??= new BrowserTabSettings();
+        if (_settings.BrowserTabs.LayoutMode == mode)
+        {
+            return false;
+        }
+        _settings.BrowserTabs.LayoutMode = mode;
+        SettingsManager.Save(_settings);
+        ApplyBrowserTabStripDisplaySettings();
+        RefreshBrowserTabHeaders();
+        return true;
+    }
+    private void SetBrowserTabLayoutFromMenu(BrowserTabLayoutMode mode)
+    {
+        SetBrowserTabLayout(mode);
+    }
+    private bool ToggleBrowserTabLayout()
+    {
+        BrowserTabLayoutMode current = _settings.BrowserTabs?.LayoutMode ?? BrowserTabLayoutMode.Horizontal;
+        return SetBrowserTabLayout(current == BrowserTabLayoutMode.Horizontal
+            ? BrowserTabLayoutMode.Vertical
+            : BrowserTabLayoutMode.Horizontal);
+    }
+    private int GetBrowserTabNavigationWidth() => Math.Clamp(_settings.BrowserTabs?.NavigationWidth ?? BrowserTabSettings.DefaultNavigationWidth, 120, 600);
     private float GetBrowserTabFontSize()
     {
         _settings.BrowserTabs ??= new BrowserTabSettings();
@@ -84,18 +138,49 @@ public partial class MainForm
     }
     private void ApplyBrowserTabStripDisplaySettings()
     {
+        bool vertical = IsVerticalBrowserTabLayout();
+        bool wasVertical = _browserTabNavigation?.Visible == true;
+        if (wasVertical != vertical)
+        {
+            _lastBrowserTabHeaderSnapshotKey = null;
+            _lastBrowserTabNavigationStructureKey = null;
+        }
         int targetHeight = GetBrowserTabStripHostHeight();
+        Control? layoutHost = _browserTabHostPanel?.Parent ?? _browserTabNavigation?.Parent;
+        layoutHost?.SuspendLayout();
+        try
+        {
         if (_browserTabHostPanel != null)
         {
             _browserTabHostPanel.Height = targetHeight;
         }
         if (_browserTabStrip != null)
         {
+            _browserTabStrip.Visible = !vertical;
             _browserTabStrip.ShowCategoryRow = ShouldShowBrowserTabCategoryRow();
             _browserTabStrip.PreferredTabWidth = GetBrowserTabWidth();
             _browserTabStrip.Height = targetHeight;
         }
+        if (_browserTabHostPanel != null)
+        {
+            _browserTabHostPanel.Visible = !vertical;
+            _browserTabHostPanel.Dock = DockStyle.Top;
+        }
+        if (_browserTabNavigation != null)
+        {
+            _browserTabNavigation.Visible = vertical;
+            _browserTabNavigation.Dock = DockStyle.Left;
+            _browserTabNavigation.Width = GetBrowserTabNavigationWidth();
+            _browserTabNavigation.Font = CreateBrowserTabFont();
+        }
         LayoutBrowserTabControlWithinHost();
+        }
+        finally
+        {
+            layoutHost?.ResumeLayout(performLayout: true);
+            layoutHost?.PerformLayout();
+            layoutHost?.Invalidate();
+        }
     }
     private void InitializeInitialBrowserTab()
     {
@@ -103,13 +188,12 @@ public partial class MainForm
         _browserTabViewState.Clear();
         _browserTabViewState.Add(initialState);
         _browserTabViewState.ActiveTabIndex = 0;
+        // Fresh-profile startup previously updated only the runtime state and
+        // SelectedIndex.  The strip/tree remained empty until a later
+        // structural operation (for example, adding a tab) called the full
+        // projection.  Apply the completed initial state through the same
+        // startup projection used by restored tabs.
         RefreshBrowserTabHeaders();
-        if (_browserTabStrip != null && _browserTabViewState.Count > 0)
-        {
-            _suppressBrowserTabSelectionChanged = true;
-            _browserTabStrip.SelectedIndex = 0;
-            _suppressBrowserTabSelectionChanged = false;
-        }
     }
     private void EnsureBrowserTabCategoryConfiguration()
     {
@@ -259,7 +343,10 @@ public partial class MainForm
         {
             _browserTabViewState.ActiveTabIndex = -1;
         }
-        RefreshBrowserTabHeaders();
+        if (_browserTabViewState.Count == 0)
+        {
+            RefreshBrowserTabHeaders();
+        }
         _browserTabStrip?.Invalidate();
         _browserTabHostPanel?.Invalidate();
     }
@@ -783,7 +870,7 @@ public partial class MainForm
             SortAscending = _sortAscending
         };
     }
-    private void SwitchBrowserTabCategory(string categoryId)
+    private void SwitchBrowserTabCategory(string categoryId, int? requestedTabIndex = null)
     {
         EnsureBrowserModeBeforeWorkspaceNavigation();
         string targetCategoryId = ResolveExistingBrowserTabCategoryId(categoryId);
@@ -792,45 +879,159 @@ public partial class MainForm
             $"TabsBefore={_browserTabViewState.Count} ActiveIndexBefore={_browserTabViewState.ActiveTabIndex}");
         if (string.Equals(targetCategoryId, _categoryViewState.ActiveCategoryId, StringComparison.OrdinalIgnoreCase))
         {
+            if (requestedTabIndex.HasValue && requestedTabIndex.Value >= 0 && requestedTabIndex.Value < _browserTabViewState.Count
+                && requestedTabIndex.Value != _browserTabViewState.ActiveTabIndex)
+            {
+                SwitchBrowserTab(requestedTabIndex.Value);
+                return;
+            }
             ClearBrowserTabCategoryContextState();
             RefreshBrowserTabHeaders();
             UpdateMenuStripState();
             _browserTabStrip?.Invalidate();
             _browserTabHostPanel?.Invalidate();
-            browserPanel.Focus();
+            FocusBrowserFileList();
             LogService.Info($"[BrowserTabCategory] Switch skipped because target category was already active: {targetCategoryId}");
             return;
         }
         CaptureActiveBrowserTabState();
-        StoreActiveBrowserTabCategorySessionState(updateCompatibilityMirror: false);
         List<BrowserTabState> targetTabs = LoadBrowserTabsForCategory(targetCategoryId);
-        int targetIndex = Math.Clamp(ResolveBrowserTabCategoryActiveIndex(targetCategoryId, targetTabs.Count), 0, Math.Max(0, targetTabs.Count - 1));
+        int targetIndex = requestedTabIndex.HasValue && requestedTabIndex.Value >= 0 && requestedTabIndex.Value < targetTabs.Count
+            ? requestedTabIndex.Value
+            : Math.Clamp(ResolveBrowserTabCategoryActiveIndex(targetCategoryId, targetTabs.Count), 0, Math.Max(0, targetTabs.Count - 1));
         LogService.Info($"[BrowserTabCategory] Switch loaded Category={targetCategoryId} Tabs={targetTabs.Count} TargetIndex={targetIndex}");
+
+        BrowserTabState targetTab = targetTabs[targetIndex];
+        string targetPath = string.IsNullOrWhiteSpace(targetTab.CurrentPath) || !Directory.Exists(targetTab.CurrentPath)
+            ? (Directory.Exists(_navigationService.CurrentPath) ? _navigationService.CurrentPath : Environment.CurrentDirectory)
+            : targetTab.CurrentPath;
+        BrowserLoadCoordinator.DirectoryLoadResult? preparedLoad = PrepareBrowserTabSwitchDirectoryLoad(targetTab, targetPath);
+        if (preparedLoad == null)
+        {
+            return;
+        }
+
+        StoreActiveBrowserTabCategorySessionState(updateCompatibilityMirror: false);
         _browserTabViewState.Clear();
         _browserTabViewState.AddRange(targetTabs);
         _categoryViewState.ActiveCategoryId = targetCategoryId;
         ClearBrowserTabContextState();
         ClearBrowserTabCategoryContextState();
-        RefreshBrowserTabHeaders();
-        if (_browserTabViewState.Count > 0)
+        _browserTabViewState.ActiveTabIndex = targetIndex;
+        _isSwitchingBrowserTab = true;
+        try
         {
-            _browserTabViewState.ActiveTabIndex = -1;
-            SwitchBrowserTab(targetIndex);
+            _columnCount = Math.Clamp(targetTab.ColumnCount, 1, 9);
+            _currentSort = targetTab.SortKind;
+            _sortAscending = targetTab.SortAscending;
+            _navigationService.RestoreState(targetTab.Navigation);
+            RestoreMarksForBrowserTab(targetTab);
+            CommitPreparedBrowserTabSwitchDirectoryLoad(
+                preparedLoad,
+                () =>
+                {
+                    ApplyBrowserTabCategoryPresentation(targetIndex);
+                    FocusBrowserFileList();
+                });
         }
-        else
+        finally
         {
-            _browserTabViewState.ActiveTabIndex = -1;
+            _isSwitchingBrowserTab = false;
         }
-        RefreshBrowserTabHeaders();
         UpdateMenuStripState();
-        _browserTabStrip?.Invalidate();
-        _browserTabHostPanel?.Invalidate();
         StoreActiveBrowserTabCategorySessionState(updateCompatibilityMirror: false);
-        browserPanel.Focus();
         LogService.Info(
             $"[BrowserTabCategory] Switch applied ActiveAfter={_categoryViewState.ActiveCategoryId} TabsAfter={_browserTabViewState.Count} " +
             $"ActiveIndexAfter={_browserTabViewState.ActiveTabIndex}");
-        ShowStatusMessage($"カテゴリを切り替えました: {_categoryViewState.Categories[GetActiveBrowserTabCategoryIndex()].DisplayName}");
+            ShowStatusMessage($"カテゴリを切り替えました: {_categoryViewState.Categories[GetActiveBrowserTabCategoryIndex()].DisplayName}");
+    }
+
+    private void ApplyBrowserTabCategoryPresentation(int targetIndex)
+    {
+        bool vertical = IsVerticalBrowserTabLayout();
+        if (!vertical)
+        {
+            _browserTabUiCoordinator.RefreshHeaders(
+                _browserTabViewState.Tabs,
+                targetIndex,
+                _categoryViewState.Categories,
+                GetActiveBrowserTabCategoryIndex(),
+                ShouldShowBrowserTabCategoryRow(),
+                ref _lastBrowserTabHeaderSnapshotKey,
+                BuildBrowserTabPresentation);
+            return;
+        }
+
+        if (_browserTabNavigation == null)
+        {
+            return;
+        }
+
+        List<BrowserTabNavigationCategoryItem> categories = BuildBrowserTabNavigationPresentationSnapshot();
+        _lastBrowserTabNavigationStructureKey = BuildBrowserTabNavigationStructureKey();
+        _browserTabNavigation.SetCategories(categories, GetActiveBrowserTabCategoryIndex(), targetIndex);
+    }
+
+    private List<BrowserTabNavigationCategoryItem> BuildBrowserTabNavigationPresentationSnapshot()
+    {
+        string activeCategoryId = ResolveExistingBrowserTabCategoryId(_categoryViewState.ActiveCategoryId);
+        var categories = new List<BrowserTabNavigationCategoryItem>();
+        foreach (BrowserTabCategoryDefinition category in _categoryViewState.Categories)
+        {
+            IReadOnlyList<BrowserTabState> tabs = string.Equals(category.Id, activeCategoryId, StringComparison.OrdinalIgnoreCase)
+                ? _browserTabViewState.Tabs
+                : BuildStoredBrowserTabPresentationStates(category.Id);
+            categories.Add(new BrowserTabNavigationCategoryItem(
+                category.Id,
+                string.IsNullOrWhiteSpace(category.DisplayName) ? "既定" : category.DisplayName,
+                BrowserTabPresentationHelper.BuildCategoryToolTip(category),
+                tabs.Select((state, i) =>
+                {
+                    BrowserTabPresentationSnapshot presentation = BuildBrowserTabPresentation(state);
+                    return new BrowserTabStripItem(
+                        presentation.HeaderText,
+                        presentation.ToolTipText,
+                        presentation.CanonicalPath,
+                        presentation.PrefixText,
+                        presentation.BaseTitle,
+                        presentation.RelativeSuffix);
+                }).ToList()));
+        }
+        if (ShouldShowBrowserTabCategoryRow())
+        {
+            categories.Add(new BrowserTabNavigationCategoryItem(
+                BrowserTabStrip.ManageCategoriesEntryId,
+                "＋カテゴリ",
+                "新しいカテゴリを追加します。",
+                Array.Empty<BrowserTabStripItem>(),
+                BrowserTabStripCategoryItemKind.ManageEntry));
+        }
+        return categories;
+    }
+
+    private IReadOnlyList<BrowserTabState> BuildStoredBrowserTabPresentationStates(string categoryId)
+    {
+        BrowserTabRestoreCategoryState? categoryState = FindBrowserTabRestoreCategoryState(categoryId);
+        var tabs = new List<BrowserTabState>();
+        foreach (BrowserTabSessionState sessionTab in categoryState?.OpenTabs ?? Enumerable.Empty<BrowserTabSessionState>())
+        {
+            string path = sessionTab.CurrentPath ?? string.Empty;
+            tabs.Add(new BrowserTabState
+            {
+                Id = sessionTab.TabId == Guid.Empty ? Guid.NewGuid() : sessionTab.TabId,
+                Title = GetBrowserTabTitle(path),
+                CurrentPath = path,
+                IsLocked = sessionTab.IsLocked,
+                StartupPath = sessionTab.StartupPath ?? string.Empty,
+                IsReadOnly = sessionTab.IsReadOnly,
+                FocusTargetName = sessionTab.FocusTargetName,
+                CursorIndex = Math.Max(0, sessionTab.CursorIndex),
+                ColumnCount = Math.Clamp(sessionTab.ColumnCount, 1, 9),
+                SortKind = sessionTab.SortKind,
+                SortAscending = sessionTab.SortAscending
+            });
+        }
+        return tabs;
     }
     private void SelectAdjacentBrowserTabCategory(int delta)
     {
@@ -852,8 +1053,8 @@ public partial class MainForm
         {
             currentIndex = 0;
         }
-        int nextIndex = (currentIndex + delta + _categoryViewState.Count) % _categoryViewState.Count;
-        if (nextIndex == currentIndex)
+        int nextIndex = currentIndex + delta;
+        if (nextIndex < 0 || nextIndex >= _categoryViewState.Count)
         {
             return;
         }
@@ -983,11 +1184,13 @@ public partial class MainForm
     }
     private void BrowserTabStrip_SelectedIndexChanged(object? sender, EventArgs e)
     {
-        if (_suppressBrowserTabSelectionChanged || _browserTabStrip == null)
+        if (_suppressBrowserTabSelectionChanged || (_browserTabStrip == null && _browserTabNavigation == null))
         {
             return;
         }
-        int newIndex = _browserTabStrip.SelectedIndex;
+        int newIndex = sender is BrowserTabNavigation navigation
+            ? navigation.SelectedIndex
+            : _browserTabStrip?.SelectedIndex ?? -1;
         if (newIndex >= 0 && newIndex < _browserTabViewState.Count)
         {
             SwitchBrowserTab(newIndex);
@@ -995,9 +1198,24 @@ public partial class MainForm
     }
     private void BrowserTabStrip_CategoryClicked(object? sender, BrowserTabStripCategoryEventArgs e)
     {
+        if (e.TabIndex >= 0)
+        {
+            if (e.Button == MouseButtons.Right
+                && string.Equals(e.CategoryId, _categoryViewState.ActiveCategoryId, StringComparison.OrdinalIgnoreCase))
+            {
+                BrowserTabStrip_TabRightClicked(sender, new BrowserTabStripMouseEventArgs(e.TabIndex, e.Button, e.Location));
+                return;
+            }
+            SwitchBrowserTabCategory(e.CategoryId, e.TabIndex);
+            if (e.Button == MouseButtons.Right)
+            {
+                BrowserTabStrip_TabRightClicked(sender, new BrowserTabStripMouseEventArgs(e.TabIndex, e.Button, e.Location));
+            }
+            return;
+        }
         if (e.Button == MouseButtons.Right)
         {
-            ShowBrowserTabCategoryContextMenu(e);
+            ShowBrowserTabCategoryContextMenu(sender as Control ?? _browserTabStrip, e);
             return;
         }
         if (e.Button != MouseButtons.Left)
@@ -1006,14 +1224,26 @@ public partial class MainForm
         }
         if (e.Kind == BrowserTabStripCategoryItemKind.ManageEntry)
         {
-            AddGeneratedBrowserTabCategory();
+            _ = ExecuteCommandFromUi(CommandIds.BrowserTabCategoryAdd, CommandScope.Browser, "BrowserTab.CategoryManageEntry");
             return;
         }
         SwitchBrowserTabCategory(e.CategoryId);
     }
     private void BrowserTabStrip_AddTabClicked(object? sender, EventArgs e)
     {
-        AddBrowserTabFromEntry();
+        _ = ExecuteCommandFromUi(CommandIds.BrowserTabNew, CommandScope.Browser, "BrowserTab.Plus");
+    }
+    private void BrowserTabNavigation_AddTabForCategoryClicked(object? sender, BrowserTabStripCategoryEventArgs e)
+    {
+        SwitchBrowserTabCategory(e.CategoryId);
+        _ = ExecuteCommandFromUi(CommandIds.BrowserTabNew, CommandScope.Browser, "BrowserTab.CategoryPlus");
+    }
+    private void BrowserTabNavigation_NavigationWidthChanged(object? sender, EventArgs e)
+    {
+        _settings.BrowserTabs ??= new BrowserTabSettings();
+        int actualWidth = sender is BrowserTabNavigation navigation ? navigation.Width : GetBrowserTabNavigationWidth();
+        _settings.BrowserTabs.NavigationWidth = Math.Clamp(actualWidth, 120, 600);
+        SettingsManager.Save(_settings);
     }
     private IReadOnlyList<BrowserTabCategoryDefinition> GetBrowserTabCategoryDefinitionsForDialog()
     {
@@ -1032,7 +1262,7 @@ public partial class MainForm
             DeleteBrowserTabCategories);
         dialog.ShowDialog(this);
         RefreshBrowserTabHeaders();
-        browserPanel.Focus();
+        FocusBrowserFileList();
     }
     private string GenerateNextBrowserTabCategoryDisplayName()
     {
@@ -1116,7 +1346,7 @@ public partial class MainForm
         SettingsManager.Save(_settings);
         string direction = delta < 0 ? "左" : "右";
         ShowStatusMessage($"カテゴリを{direction}へ移動しました: {movedCategory.DisplayName}");
-        browserPanel.Focus();
+        FocusBrowserFileList();
         return movedCategory.DisplayName;
     }
     private bool MoveActiveBrowserTabCategory(int delta)
@@ -1170,6 +1400,11 @@ public partial class MainForm
             existing => string.Equals(existing.Id, category.Id, StringComparison.OrdinalIgnoreCase));
         if (target == null)
         {
+            return null;
+        }
+        if (string.Equals(target.Id, BrowserTabSettings.DefaultCategoryId, StringComparison.OrdinalIgnoreCase))
+        {
+            ShowStatusMessage("既定カテゴリは削除できません。");
             return null;
         }
         DialogResult confirm = MessageBox.Show(
@@ -1226,6 +1461,8 @@ public partial class MainForm
     {
         CaptureActiveBrowserTabState();
         StoreActiveBrowserTabCategorySessionState(updateCompatibilityMirror: false);
+        int activeCategoryIndexBeforeRemoval = _categoryViewState.FindIndex(
+            category => string.Equals(category.Id, _categoryViewState.ActiveCategoryId, StringComparison.OrdinalIgnoreCase));
         HashSet<string> targetIds = targets
             .Select(target => target.Id)
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
@@ -1239,8 +1476,11 @@ public partial class MainForm
         EnsureBrowserTabRestoreSnapshot();
         if ((_categoryViewState.ActiveCategoryId != null && targetIds.Contains(_categoryViewState.ActiveCategoryId)) || recoveredCategory != null)
         {
+            int fallbackCategoryIndex = recoveredCategory != null
+                ? 0
+                : Math.Clamp(activeCategoryIndexBeforeRemoval, 0, _categoryViewState.Count - 1);
             string fallbackCategoryId = recoveredCategory?.Id
-                ?? ResolveExistingBrowserTabCategoryId(_categoryViewState.ActiveCategoryId);
+                ?? _categoryViewState.Categories[fallbackCategoryIndex].Id;
             List<BrowserTabState> targetTabs = LoadBrowserTabsForCategory(fallbackCategoryId);
             int targetIndex = Math.Clamp(ResolveBrowserTabCategoryActiveIndex(fallbackCategoryId, targetTabs.Count), 0, Math.Max(0, targetTabs.Count - 1));
             _browserTabViewState.Clear();
@@ -1321,7 +1561,10 @@ public partial class MainForm
         BrowserTabState currentState = _browserTabViewState.Tabs[_browserTabViewState.ActiveTabIndex];
         bool shouldValidateMarks = validateMarks && captureMarks && currentState.MarksDirty;
         BrowserTabState latestState = BuildBrowserTabStateFromCurrentUi(shouldValidateMarks, markSourceOverride);
-        currentState.Title = latestState.Title;
+        if (!currentState.IsLocked)
+        {
+            currentState.Title = latestState.Title;
+        }
         currentState.CurrentPath = latestState.CurrentPath;
         currentState.Navigation = latestState.Navigation;
         currentState.FocusTargetName = latestState.FocusTargetName;
@@ -1345,7 +1588,6 @@ public partial class MainForm
                 currentState.MarksDirty = false;
             }
         }
-        RefreshBrowserTabHeaders();
     }
     private void RestoreMarksForBrowserTab(BrowserTabState state)
     {
@@ -1361,17 +1603,34 @@ public partial class MainForm
     }
     private void RefreshBrowserTabHeaders()
     {
+        bool vertical = IsVerticalBrowserTabLayout();
         _suppressBrowserTabSelectionChanged = true;
         try
         {
-            ApplyBrowserTabStripDisplaySettings();
-            _browserTabUiCoordinator.RefreshHeaders(
-                _browserTabViewState.Tabs,
-                _browserTabViewState.ActiveTabIndex,
-                _categoryViewState.Categories,
-                GetActiveBrowserTabCategoryIndex(),
+            if (!vertical)
+            {
+                _browserTabUiCoordinator.RefreshHeaders(
+                    _browserTabViewState.Tabs,
+                    _browserTabViewState.ActiveTabIndex,
+                    _categoryViewState.Categories,
+                    GetActiveBrowserTabCategoryIndex(),
                 ShouldShowBrowserTabCategoryRow(),
-                ref _lastBrowserTabHeaderSnapshotKey);
+                ref _lastBrowserTabHeaderSnapshotKey,
+                BuildBrowserTabPresentation);
+            }
+
+            if (vertical && _browserTabNavigation != null)
+            {
+                string structureKey = BuildBrowserTabNavigationStructureKey();
+                if (!string.Equals(_lastBrowserTabNavigationStructureKey, structureKey, StringComparison.Ordinal))
+                {
+                    List<BrowserTabNavigationCategoryItem> categories = BuildBrowserTabNavigationPresentationSnapshot();
+                    _lastBrowserTabNavigationStructureKey = structureKey;
+                    _browserTabNavigation.SetCategories(categories, GetActiveBrowserTabCategoryIndex());
+                }
+                _browserTabNavigation.UpdateSelection(GetActiveBrowserTabCategoryIndex(), _browserTabViewState.ActiveTabIndex);
+                RefreshBrowserTabNavigationPathPresentations();
+            }
 
             LayoutBrowserTabControlWithinHost();
         }
@@ -1380,13 +1639,189 @@ public partial class MainForm
             _suppressBrowserTabSelectionChanged = false;
         }
     }
+    private string BuildBrowserTabNavigationStructureKey()
+    {
+        BrowserTabRestoreSnapshot snapshot = _settings.Session?.BrowserTabRestoreSnapshot ?? new BrowserTabRestoreSnapshot();
+        string activeCategoryId = ResolveExistingBrowserTabCategoryId(_categoryViewState.ActiveCategoryId);
+        var key = new StringBuilder();
+        foreach (BrowserTabCategoryDefinition category in _categoryViewState.Categories)
+        {
+            key.Append(category.Id).Append('|').Append(category.DisplayName).Append('|');
+            IEnumerable<BrowserTabState> activeTabs = string.Equals(category.Id, activeCategoryId, StringComparison.OrdinalIgnoreCase)
+                ? _browserTabViewState.Tabs
+                : Array.Empty<BrowserTabState>();
+            if (activeTabs.Any())
+            {
+                foreach (BrowserTabState tab in activeTabs) key.Append(tab.Id).Append(';');
+            }
+            else
+            {
+                BrowserTabRestoreCategoryState? stored = snapshot.Categories.FirstOrDefault(item => string.Equals(item.Id, category.Id, StringComparison.OrdinalIgnoreCase));
+                foreach (BrowserTabSessionState tab in stored?.OpenTabs ?? Enumerable.Empty<BrowserTabSessionState>()) key.Append(tab.TabId).Append('|').Append(tab.CurrentPath).Append(';');
+            }
+            key.Append('#');
+        }
+        return key.ToString();
+    }
     private string GetBrowserTabTitle(string? path)
     {
         return BrowserTabPresentationHelper.BuildTabTitle(
             path,
             normalizedPath => QuickAccessService.FindAliasDisplayName(_quickAccessStore, normalizedPath));
     }
-    private bool CreateNewBrowserTab(string? initialPath = null, bool showStatusMessage = true)
+
+    private BrowserTabPresentationSnapshot BuildBrowserTabPresentation(BrowserTabState state)
+    {
+        return BrowserTabPresentationHelper.BuildPresentation(
+            state,
+            0,
+            normalizedPath => QuickAccessService.FindAliasDisplayName(_quickAccessStore, normalizedPath));
+    }
+    private void RefreshActiveBrowserTabNavigationPathPresentation()
+    {
+        if (_browserTabNavigation == null || !IsVerticalBrowserTabLayout()) return;
+        int categoryIndex = GetActiveBrowserTabCategoryIndex();
+        int tabIndex = _browserTabViewState.ActiveTabIndex;
+        if (categoryIndex < 0 || tabIndex < 0 || tabIndex >= _browserTabViewState.Tabs.Count) return;
+
+        BrowserTabState state = _browserTabViewState.Tabs[tabIndex];
+        BrowserTabPresentationSnapshot presentation = BuildBrowserTabPresentation(state);
+        _browserTabNavigation.UpdateTabPathPresentation(
+            categoryIndex,
+            tabIndex,
+            presentation.CanonicalPath,
+            presentation.HeaderText,
+            presentation.ToolTipText,
+            presentation.PrefixText,
+            baseTitle: presentation.BaseTitle,
+            relativeSuffix: presentation.RelativeSuffix);
+    }
+
+    private void ApplyActiveBrowserTabPresentation(bool synchronizeSelection)
+    {
+        int tabIndex = _browserTabViewState.ActiveTabIndex;
+        if (tabIndex < 0 || tabIndex >= _browserTabViewState.Tabs.Count)
+        {
+            return;
+        }
+
+        BrowserTabState state = _browserTabViewState.Tabs[tabIndex];
+        bool vertical = IsVerticalBrowserTabLayout();
+        if (!vertical)
+        {
+            _browserTabUiCoordinator.UpdateTabPresentation(
+                state,
+                tabIndex,
+                synchronizeSelection,
+                BuildBrowserTabPresentation);
+            return;
+        }
+
+        if (_browserTabNavigation == null)
+        {
+            return;
+        }
+
+        int categoryIndex = GetActiveBrowserTabCategoryIndex();
+        if (categoryIndex < 0)
+        {
+            return;
+        }
+
+        BrowserTabPresentationSnapshot presentation = BuildBrowserTabPresentation(state);
+        _browserTabNavigation.UpdateTabPathPresentation(
+            categoryIndex,
+            tabIndex,
+            presentation.CanonicalPath,
+            presentation.HeaderText,
+            presentation.ToolTipText,
+            presentation.PrefixText,
+            synchronizeSelection,
+            presentation.BaseTitle,
+            presentation.RelativeSuffix);
+    }
+
+    private void ApplyVisibleBrowserTabSelection(int tabIndex)
+    {
+        _suppressBrowserTabSelectionChanged = true;
+        try
+        {
+            if (IsVerticalBrowserTabLayout())
+            {
+                _browserTabNavigation?.UpdateSelection(GetActiveBrowserTabCategoryIndex(), tabIndex);
+                return;
+            }
+
+            if (_browserTabStrip != null && tabIndex >= 0 && tabIndex < _browserTabViewState.Count)
+            {
+                BrowserTabState state = _browserTabViewState.Tabs[tabIndex];
+                BrowserTabPresentationSnapshot presentation = BuildBrowserTabPresentation(state);
+                _browserTabStrip.UpdateTabAndSelection(
+                    tabIndex,
+                    new BrowserTabStripItem(
+                        presentation.HeaderText,
+                        presentation.ToolTipText,
+                        presentation.CanonicalPath,
+                        presentation.PrefixText,
+                        presentation.BaseTitle,
+                        presentation.RelativeSuffix),
+                    select: true);
+            }
+        }
+        finally
+        {
+            _suppressBrowserTabSelectionChanged = false;
+        }
+    }
+
+    private void RefreshBrowserTabNavigationPathPresentations()
+    {
+        if (_browserTabNavigation == null) return;
+        string activeCategoryId = ResolveExistingBrowserTabCategoryId(_categoryViewState.ActiveCategoryId);
+        for (int categoryIndex = 0; categoryIndex < _categoryViewState.Categories.Count; categoryIndex++)
+        {
+            BrowserTabCategoryDefinition category = _categoryViewState.Categories[categoryIndex];
+            IReadOnlyList<BrowserTabState> tabs = string.Equals(category.Id, activeCategoryId, StringComparison.OrdinalIgnoreCase)
+                ? _browserTabViewState.Tabs
+                : BuildStoredBrowserTabPresentationStates(category.Id);
+            for (int tabIndex = 0; tabIndex < tabs.Count; tabIndex++)
+            {
+                BrowserTabState state = tabs[tabIndex];
+                BrowserTabPresentationSnapshot presentation = BuildBrowserTabPresentation(state);
+                _browserTabNavigation.UpdateTabPathPresentation(
+                    categoryIndex,
+                    tabIndex,
+                    presentation.CanonicalPath,
+                    presentation.HeaderText,
+                    presentation.ToolTipText,
+                    presentation.PrefixText,
+                    baseTitle: presentation.BaseTitle,
+                    relativeSuffix: presentation.RelativeSuffix);
+            }
+        }
+    }
+    private void FocusBrowserFileList()
+    {
+        if (_browserFileListFocusPending || IsDisposed || !IsHandleCreated)
+        {
+            return;
+        }
+        _browserFileListFocusPending = true;
+        BeginInvoke(new Action(() =>
+        {
+            _browserFileListFocusPending = false;
+            if (!IsDisposed && fileListView.CanFocus)
+            {
+                fileListView.Select();
+                fileListView.Focus();
+            }
+            else if (!IsDisposed)
+            {
+                browserPanel.Focus();
+            }
+        }));
+    }
+    private bool CreateNewBrowserTab(string? initialPath = null, bool showStatusMessage = true, bool useConfiguredInsertion = false)
     {
         if (GuardClipboardBusy())
         {
@@ -1401,7 +1836,10 @@ public partial class MainForm
             return false;
         }
         CaptureActiveBrowserTabState();
-        BrowserTabState newState = BuildBrowserTabStateFromCurrentUi();
+        string categoryId = ResolveExistingBrowserTabCategoryId(_categoryViewState.ActiveCategoryId);
+        BrowserTabState newState = useConfiguredInsertion
+            ? CreateInitialBrowserTabStateForCategory(categoryId)
+            : BuildBrowserTabStateFromCurrentUi();
         newState.IsLocked = false;
         newState.StartupPath = string.Empty;
         newState.IsReadOnly = false;
@@ -1420,8 +1858,10 @@ public partial class MainForm
             newState.CursorIndex = 0;
             newState.Title = GetBrowserTabTitle(initialPath);
         }
-        _browserTabViewState.Add(newState);
-        int newIndex = _browserTabViewState.Count - 1;
+        int newIndex = useConfiguredInsertion
+            ? ResolveNewBrowserTabInsertIndex(_browserTabViewState.Count, _browserTabViewState.ActiveTabIndex, _settings.BrowserTabs.NewTabPosition)
+            : _browserTabViewState.Count;
+        _browserTabViewState.Insert(newIndex, newState);
         RefreshBrowserTabHeaders();
         _browserTabViewState.ActiveTabIndex = -1;
         SwitchBrowserTab(newIndex);
@@ -1435,7 +1875,8 @@ public partial class MainForm
     {
         foreach (BrowserTabState state in _browserTabViewState.Tabs)
         {
-            state.Title = GetBrowserTabTitle(state.CurrentPath);
+            BrowserTabPresentationSnapshot presentation = BuildBrowserTabPresentation(state);
+            state.Title = presentation.AliasTitle ?? presentation.DisplayCore;
         }
         RefreshBrowserTabHeaders();
     }
@@ -1668,8 +2109,24 @@ public partial class MainForm
             }
             return false;
         }
-        if (_browserTabViewState.Count <= 1)
+        if (_browserTabViewState.Count == 1)
         {
+            BrowserTabCategoryDefinition? activeCategory = FindBrowserTabCategoryDefinition(_categoryViewState.ActiveCategoryId);
+            if (activeCategory != null
+                && !string.Equals(activeCategory.Id, BrowserTabSettings.DefaultCategoryId, StringComparison.OrdinalIgnoreCase))
+            {
+                DialogResult confirm = MessageBox.Show(
+                    $"このタブを閉じると、カテゴリ「{activeCategory.DisplayName}」も削除されます。\nカテゴリごと削除しますか？",
+                    "タブを閉じる",
+                    MessageBoxButtons.OKCancel,
+                    MessageBoxIcon.Warning,
+                    MessageBoxDefaultButton.Button2);
+                if (confirm != DialogResult.OK)
+                {
+                    return false;
+                }
+                return DeleteBrowserTabCategoriesCore([activeCategory], $"カテゴリを削除しました: {activeCategory.DisplayName}") != null;
+            }
             if (showStatusMessage)
             {
                 ShowStatusMessage("最後のタブは閉じられません。");
@@ -1768,7 +2225,11 @@ public partial class MainForm
     }
     private void BrowserTabStrip_TabDoubleClicked(object? sender, BrowserTabStripMouseEventArgs e)
     {
-        ToggleBrowserTabLock(e.TabIndex);
+        ExecuteCommandFromUi(
+            CommandIds.BrowserTabLock,
+            CommandScope.Browser,
+            "BrowserTab.DoubleClick",
+            contextTabIndex: e.TabIndex);
     }
     private void BrowserTabStrip_TabRightClicked(object? sender, BrowserTabStripMouseEventArgs e)
     {
@@ -1778,63 +2239,109 @@ public partial class MainForm
         }
         ClearBrowserTabContextState();
         _browserTabViewState.ContextTabIndex = e.TabIndex;
-        if (_browserTabViewState.ActiveTabIndex != e.TabIndex)
-        {
-            SwitchBrowserTab(e.TabIndex);
-        }
         EnsureBrowserTabContextMenu();
         UpdateBrowserTabContextMenuItems(e.TabIndex);
-        _browserTabContextMenu?.Show(_browserTabStrip, e.Location);
+        Control owner = sender as Control ?? _browserTabStrip ?? (Control)this;
+        _browserTabContextMenu?.Show(owner, e.Location);
     }
-    private void SwitchBrowserTab(int newIndex)
+    private bool SwitchBrowserTab(int newIndex)
     {
         HideBrowserFileNameToolTip();
         EnsureBrowserModeBeforeWorkspaceNavigation();
         if (_isSwitchingBrowserTab || newIndex < 0 || newIndex >= _browserTabViewState.Count)
         {
-            return;
+            return false;
         }
         if (newIndex == _browserTabViewState.ActiveTabIndex)
         {
-            browserPanel.Focus();
-            return;
+            FocusBrowserFileList();
+            return true;
         }
         CaptureActiveBrowserTabState(validateMarks: true);
+        int previousActiveTabIndex = _browserTabViewState.ActiveTabIndex;
+        BrowserTabState state = _browserTabViewState.Tabs[newIndex];
+        string targetPath = state.CurrentPath;
+        if (string.IsNullOrWhiteSpace(targetPath) || !Directory.Exists(targetPath))
+        {
+            targetPath = Directory.Exists(_navigationService.CurrentPath)
+                ? _navigationService.CurrentPath
+                : Environment.CurrentDirectory;
+        }
+
+        BrowserLoadCoordinator.DirectoryLoadResult? preparedLoad = PrepareBrowserTabSwitchDirectoryLoad(state, targetPath);
+        if (preparedLoad == null)
+        {
+            RestoreBrowserTabSelectionAfterFailedSwitch(previousActiveTabIndex);
+            return false;
+        }
+
         _isSwitchingBrowserTab = true;
         try
         {
+            // Commit begins only after directory enumeration, sorting and UI
+            // item materialization have all succeeded.
             _browserTabViewState.ActiveTabIndex = newIndex;
-            BrowserTabState state = _browserTabViewState.Tabs[newIndex];
             _columnCount = Math.Clamp(state.ColumnCount, 1, 9);
             _currentSort = state.SortKind;
             _sortAscending = state.SortAscending;
             _navigationService.RestoreState(state.Navigation);
-            string targetPath = state.CurrentPath;
-            if (string.IsNullOrWhiteSpace(targetPath) || !Directory.Exists(targetPath))
-            {
-                targetPath = Directory.Exists(_navigationService.CurrentPath)
-                    ? _navigationService.CurrentPath
-                    : Environment.CurrentDirectory;
-            }
-            if (!ExecuteDirectoryNavigationRequest(
-                _browserNavigationCoordinator.CreateDirectoryNavigationRequest(
-                    targetPath,
-                    state.FocusTargetName,
-                    isHistoryNavigation: true,
-                    suppressRecent: true)))
-            {
-                return;
-            }
             RestoreMarksForBrowserTab(state);
-            RefreshBrowserTabHeaders();
-            browserPanel.Focus();
+            CommitPreparedBrowserTabSwitchDirectoryLoad(
+                preparedLoad,
+                () =>
+                {
+                    ApplyVisibleBrowserTabSelection(newIndex);
+                    FocusBrowserFileList();
+                });
         }
         finally
         {
             _isSwitchingBrowserTab = false;
         }
+        return true;
     }
-    private void SelectAdjacentBrowserTab(int delta)
+
+    private void BrowserTabStrip_SelectedTabReclicked(object? sender, BrowserTabStripMouseEventArgs e)
+    {
+        if (e.Button == MouseButtons.Left && e.TabIndex == _browserTabViewState.ActiveTabIndex)
+        {
+            FocusBrowserFileList();
+        }
+    }
+
+    internal static int ResolveNewBrowserTabInsertIndex(int tabCount, int activeTabIndex, BrowserTabNewPosition position)
+    {
+        int safeTabCount = Math.Max(0, tabCount);
+        if (position == BrowserTabNewPosition.End)
+        {
+            return safeTabCount;
+        }
+
+        return activeTabIndex >= 0 && activeTabIndex < safeTabCount
+            ? activeTabIndex + 1
+            : safeTabCount;
+    }
+
+    private void RestoreBrowserTabSelectionAfterFailedSwitch(int activeTabIndex)
+    {
+        _suppressBrowserTabSelectionChanged = true;
+        try
+        {
+            if (IsVerticalBrowserTabLayout())
+            {
+                _browserTabNavigation?.UpdateSelection(GetActiveBrowserTabCategoryIndex(), activeTabIndex);
+            }
+            else if (_browserTabStrip != null)
+            {
+                _browserTabStrip.SelectedIndex = activeTabIndex;
+            }
+        }
+        finally
+        {
+            _suppressBrowserTabSelectionChanged = false;
+        }
+    }
+    private void SelectAdjacentBrowserTab(int delta, bool wrap = true)
     {
         if (GuardClipboardBusy())
         {
@@ -1844,7 +2351,15 @@ public partial class MainForm
         {
             return;
         }
-        int nextIndex = (_browserTabViewState.ActiveTabIndex + delta + _browserTabViewState.Count) % _browserTabViewState.Count;
+        int nextIndex = _browserTabViewState.ActiveTabIndex + delta;
+        if (wrap)
+        {
+            nextIndex = (nextIndex + _browserTabViewState.Count) % _browserTabViewState.Count;
+        }
+        else if (nextIndex < 0 || nextIndex >= _browserTabViewState.Count)
+        {
+            return;
+        }
         SwitchBrowserTab(nextIndex);
     }
     private string? GetActiveBrowserTabLockRootPath()

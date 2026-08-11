@@ -13,7 +13,18 @@ using MidFD.Services;
 namespace MidFD;
 
 public partial class MainForm
-{    private PreviewKind GetCurrentSelectionPreviewKind()
+{
+    private readonly record struct MarkdownBrowserContext(string? SourceText, string? LinkTarget, string? ImageTarget);
+
+    private bool _markdownBrowserInitialNavigation;
+    private bool _markdownExternalNavigationPending;
+    private Uri? _markdownBrowserDocumentUri;
+    private HtmlDocument? _markdownBrowserEventDocument;
+    private HtmlElementEventHandler? _markdownBrowserContextMenuHandler;
+    private ContextMenuStrip? _markdownBrowserContextMenu;
+    private MarkdownBrowserContext _markdownBrowserContext;
+
+    private PreviewKind GetCurrentSelectionPreviewKind()
     {
         var item = GetCurrentBrowserItem();
         string? fullPath = item?.Tag as string;
@@ -22,6 +33,275 @@ public partial class MainForm
             return PreviewKind.None;
         }
         return GetEffectivePreviewKind(fullPath);
+    }
+    private WebBrowser CreateMarkdownBrowser()
+    {
+        var browser = new WebBrowser
+        {
+            Dock = DockStyle.Fill,
+            Visible = false,
+            ScriptErrorsSuppressed = true,
+            IsWebBrowserContextMenuEnabled = MarkdownPreviewBrowserPolicy.IsStandardContextMenuEnabled
+        };
+        browser.Navigating += (_, e) => HandleMarkdownBrowserNavigating(e);
+        browser.NewWindow += (_, e) => e.Cancel = MarkdownPreviewBrowserPolicy.CancelNewWindow;
+        browser.DocumentCompleted += (_, _) =>
+        {
+            AttachMarkdownBrowserDocumentEvents(browser);
+            _markdownBrowserInitialNavigation = false;
+            _markdownBrowserDocumentUri = browser.Url;
+            if (browser.Visible && !IsDisposed)
+            {
+                BeginInvoke(new Action(() => browser.Focus()));
+            }
+        };
+        viewerPanel.Controls.Add(browser);
+        return browser;
+    }
+
+    private ContextMenuStrip CreateMarkdownBrowserContextMenu(WebBrowser browser)
+    {
+        var menu = new ContextMenuStrip();
+        var copySelection = new ToolStripMenuItem("選択範囲をコピー", null, (_, _) => browser.Document?.ExecCommand("Copy", false, string.Empty));
+        var copySelectedMarkdown = new ToolStripMenuItem("選択部分を含むMarkdownをコピー", null, (_, _) => CopyMarkdownContextText(GetMarkdownBrowserSelectionSourceText(browser)));
+        var copySource = new ToolStripMenuItem("このブロックのMarkdownをコピー", null, (_, _) => CopyMarkdownContextText(_markdownBrowserContext.SourceText));
+        var copyLink = new ToolStripMenuItem("リンク先をコピー", null, (_, _) => CopyMarkdownContextText(_markdownBrowserContext.LinkTarget));
+        var copyImage = new ToolStripMenuItem("画像のパスをコピー", null, (_, _) => CopyMarkdownContextText(_markdownBrowserContext.ImageTarget));
+        var selectAll = new ToolStripMenuItem("すべて選択", null, (_, _) => browser.Document?.ExecCommand("SelectAll", false, string.Empty));
+        var separator = new ToolStripSeparator();
+        menu.Items.AddRange([copySelection, copySelectedMarkdown, copySource, copyLink, copyImage, separator, selectAll]);
+        menu.Opening += (_, _) =>
+        {
+            bool hasSelection = HasMarkdownBrowserSelection(browser);
+            if (hasSelection)
+            {
+                copySelection.Visible = true;
+                copySelection.Enabled = true;
+                copySelectedMarkdown.Visible = true;
+                copySelectedMarkdown.Enabled = GetMarkdownBrowserSelectionSourceText(browser) != null;
+                copySource.Visible = false;
+                copyLink.Visible = false;
+                copyImage.Visible = false;
+                separator.Visible = true;
+                return;
+            }
+
+            copySelection.Visible = false;
+            copySelectedMarkdown.Visible = false;
+            copySource.Visible = !string.IsNullOrEmpty(_markdownBrowserContext.SourceText);
+            copySource.Enabled = copySource.Visible;
+            copySource.Text = !string.IsNullOrEmpty(_markdownBrowserContext.LinkTarget)
+                ? "このリンクのMarkdownをコピー"
+                : !string.IsNullOrEmpty(_markdownBrowserContext.ImageTarget)
+                    ? "この画像のMarkdownをコピー"
+                    : "このブロックのMarkdownをコピー";
+            copyLink.Visible = !string.IsNullOrEmpty(_markdownBrowserContext.LinkTarget);
+            copyImage.Visible = !string.IsNullOrEmpty(_markdownBrowserContext.ImageTarget);
+            separator.Visible = copySource.Visible || copyLink.Visible || copyImage.Visible;
+        };
+        return menu;
+    }
+
+    private void AttachMarkdownBrowserDocumentEvents(WebBrowser browser)
+    {
+        HtmlDocument? document = browser.Document;
+        if (document == null || ReferenceEquals(document, _markdownBrowserEventDocument))
+        {
+            return;
+        }
+
+        if (_markdownBrowserEventDocument != null && _markdownBrowserContextMenuHandler != null)
+        {
+            _markdownBrowserEventDocument.ContextMenuShowing -= _markdownBrowserContextMenuHandler;
+        }
+
+        _markdownBrowserEventDocument = document;
+        _markdownBrowserContextMenuHandler = (_, e) =>
+        {
+            e.ReturnValue = false;
+            _markdownBrowserContext = GetMarkdownBrowserContext(document.GetElementFromPoint(e.ClientMousePosition));
+            _markdownBrowserContextMenu ??= CreateMarkdownBrowserContextMenu(browser);
+            _markdownBrowserContextMenu.Show(browser, browser.PointToClient(Cursor.Position));
+        };
+        document.ContextMenuShowing += _markdownBrowserContextMenuHandler;
+    }
+
+    private static bool HasMarkdownBrowserSelection(WebBrowser browser)
+    {
+        try
+        {
+            return browser.Document?.InvokeScript("midfdHasSelection") is bool hasSelection && hasSelection;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private string? GetMarkdownBrowserSelectionSourceText(WebBrowser browser)
+    {
+        try
+        {
+            string? ranges = browser.Document?.InvokeScript("midfdGetSelectionSourceBlocks") as string;
+            return _markdownViewerSource == null
+                ? null
+                : MarkdownSelectionSourceResolver.ResolveContainingBlocks(_markdownViewerSource, ranges);
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private MarkdownBrowserContext GetMarkdownBrowserContext(HtmlElement? element)
+    {
+        string? source = null;
+        string? link = null;
+        string? image = null;
+        while (element != null)
+        {
+            link ??= AttributeOrNull(element, "data-md-link-target");
+            image ??= AttributeOrNull(element, "data-md-image-target");
+            source ??= GetMarkdownSourceRange(element);
+            element = element.Parent;
+        }
+        return new MarkdownBrowserContext(source, link, image);
+    }
+
+    private string? GetMarkdownSourceRange(HtmlElement element)
+    {
+        if (_markdownViewerSource == null
+            || !int.TryParse(AttributeOrNull(element, "data-md-start"), out int start)
+            || !int.TryParse(AttributeOrNull(element, "data-md-length"), out int length)
+            || start < 0 || length < 0 || start > _markdownViewerSource.Length - length)
+        {
+            return null;
+        }
+        return _markdownViewerSource.Substring(start, length);
+    }
+
+    private static string? AttributeOrNull(HtmlElement element, string name)
+    {
+        string value = element.GetAttribute(name);
+        return string.IsNullOrEmpty(value) ? null : value;
+    }
+
+    private void CopyMarkdownContextText(string? text)
+    {
+        if (string.IsNullOrEmpty(text))
+        {
+            return;
+        }
+        Clipboard.SetText(text);
+        ShowStatusMessage("Markdownをコピーしました。");
+    }
+
+    private void HandleMarkdownBrowserNavigating(WebBrowserNavigatingEventArgs e)
+    {
+        MarkdownNavigationResult result = MarkdownNavigationPolicy.Evaluate(
+            e.Url?.AbsoluteUri,
+            _markdownBrowserDocumentUri,
+            _markdownBrowserInitialNavigation);
+        if (result.AllowsInternalNavigation)
+        {
+            return;
+        }
+
+        e.Cancel = true;
+        if (result.Decision == MarkdownNavigationDecision.ConfirmExternalHttp
+            && result.TargetUri != null)
+        {
+            ConfirmAndLaunchMarkdownExternalUrl(result.TargetUri);
+            return;
+        }
+
+        ShowStatusMessage("Markdown Previewではこのリンクを開けません。");
+    }
+
+    private void ConfirmAndLaunchMarkdownExternalUrl(Uri targetUri)
+    {
+        if (_markdownExternalNavigationPending)
+        {
+            return;
+        }
+
+        _markdownExternalNavigationPending = true;
+        try
+        {
+            string message = $"外部リンクを標準ブラウザで開きますか？\n\n{targetUri.AbsoluteUri}";
+            if (MessageBox.Show(
+                    this,
+                    message,
+                    "外部リンク",
+                    MessageBoxButtons.YesNo,
+                    MessageBoxIcon.Question,
+                    MessageBoxDefaultButton.Button2) != DialogResult.Yes)
+            {
+                return;
+            }
+
+            Process.Start(new ProcessStartInfo(targetUri.AbsoluteUri) { UseShellExecute = true });
+        }
+        catch (Exception ex)
+        {
+            ShowStatusMessage($"外部リンクを開けませんでした: {ex.Message}");
+        }
+        finally
+        {
+            _markdownExternalNavigationPending = false;
+        }
+    }
+
+    private DataGridView CreateDelimitedGrid()
+    {
+        var grid = new DataGridView
+        {
+            Dock = DockStyle.Fill,
+            Visible = false,
+            ReadOnly = true,
+            SelectionMode = DataGridViewSelectionMode.CellSelect,
+            MultiSelect = false,
+            TabStop = true,
+            AllowUserToAddRows = false,
+            AllowUserToDeleteRows = false,
+            AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.DisplayedCells,
+            ClipboardCopyMode = DataGridViewClipboardCopyMode.EnableAlwaysIncludeHeaderText,
+            RowHeadersVisible = false,
+            EnableHeadersVisualStyles = false
+        };
+        ApplyDelimitedGridTheme(grid);
+        viewerPanel.Controls.Add(grid);
+        return grid;
+    }
+
+    private void ApplyDelimitedGridTheme(DataGridView grid)
+    {
+        UiThemeColors theme = UiThemeResolver.Resolve(_settings.Appearance);
+        Color selectionBack = MidFDColors.ListSelectedBack;
+        Color selectionFore = MidFDColors.ListSelectedFore;
+        var cellStyle = new DataGridViewCellStyle
+        {
+            BackColor = theme.ViewerBackColor,
+            ForeColor = theme.ViewerForeColor,
+            SelectionBackColor = selectionBack,
+            SelectionForeColor = selectionFore
+        };
+        var headerStyle = new DataGridViewCellStyle
+        {
+            BackColor = theme.ViewerStatusBackColor,
+            ForeColor = theme.ViewerStatusForeColor,
+            SelectionBackColor = selectionBack,
+            SelectionForeColor = selectionFore
+        };
+
+        grid.BackgroundColor = theme.ViewerBackColor;
+        grid.ForeColor = theme.ViewerForeColor;
+        grid.GridColor = theme.BorderColor;
+        grid.DefaultCellStyle = cellStyle;
+        grid.RowsDefaultCellStyle = cellStyle;
+        grid.AlternatingRowsDefaultCellStyle = new DataGridViewCellStyle(cellStyle);
+        grid.ColumnHeadersDefaultCellStyle = headerStyle;
+        grid.RowHeadersDefaultCellStyle = headerStyle;
     }
     private PreviewKind GetEffectivePreviewKind(string path, PreviewKind rawKind)
     {
@@ -35,9 +315,12 @@ public partial class MainForm
     }
     private void ApplyViewerChromeState()
     {
+        if (_markdownBrowser != null) _markdownBrowser.Visible = _currentViewerKind == PreviewKind.Markdown && !IsMarkdownViewerRawMode;
+        if (_delimitedGrid != null) _delimitedGrid.Visible = _currentViewerKind == PreviewKind.CsvTsv;
         bool compactViewer = _uiMode == UIMode.Viewer
             && (_currentViewerKind == PreviewKind.Text
                 || _currentViewerKind == PreviewKind.Markdown
+                || _currentViewerKind == PreviewKind.CsvTsv
                 || _currentViewerKind == PreviewKind.Sqlite
                 || _currentViewerKind == PreviewKind.Binary
                 || _currentViewerKind == PreviewKind.LargeText);
@@ -50,6 +333,83 @@ public partial class MainForm
             topPanel,
             _largeFileControl);
         ApplyFunctionBarVisibilityForCurrentContext();
+        UpdateMarkdownViewerModeStatus();
+    }
+    private bool IsMarkdownViewerRawMode => (_settings.Preview?.MarkdownViewerMode ?? MarkdownViewerMode.Rendered) == MarkdownViewerMode.Raw;
+
+    private void SetMarkdownViewerMode(MarkdownViewerMode mode, bool save = true)
+    {
+        _settings.Preview ??= new PreviewSettings();
+        bool changed = _settings.Preview.MarkdownViewerMode != mode;
+        _settings.Preview.MarkdownViewerMode = mode;
+        if (save && changed)
+        {
+            SettingsManager.Save(_settings);
+        }
+
+        if (_uiMode != UIMode.Viewer || _currentViewerKind != PreviewKind.Markdown || _markdownViewerSource == null)
+        {
+            UpdateMarkdownViewerModeStatus();
+            return;
+        }
+
+        bool rawMode = mode == MarkdownViewerMode.Raw;
+        ApplyViewerChromeState();
+        if (rawMode)
+        {
+            viewerTextBox.ReadOnly = true;
+            viewerTextBox.Text = _markdownViewerSource;
+            viewerTextBox.Visible = true;
+            viewerTextBox.BringToFront();
+            viewerTextBox.Focus();
+            ApplyViewerStatusLine("Markdown raw preview applied");
+            return;
+        }
+
+        viewerTextBox.Visible = false;
+        _markdownBrowser?.BringToFront();
+        _markdownBrowser?.Focus();
+        ApplyViewerStatusLine("Markdown rendered preview applied");
+    }
+
+    private void UpdateMarkdownViewerModeStatus()
+    {
+        if (_markdownModeSpacer == null || _markdownRenderedModeStatusLabel == null || _markdownRawModeStatusLabel == null)
+        {
+            return;
+        }
+
+        bool visible = _uiMode == UIMode.Viewer && _currentViewerKind == PreviewKind.Markdown && _markdownViewerSource != null;
+        _markdownModeSpacer.Visible = visible;
+        _markdownRenderedModeStatusLabel.Visible = visible;
+        _markdownRawModeStatusLabel.Visible = visible;
+        ApplyMarkdownModeStatusStyle(_markdownRenderedModeStatusLabel, "Rendered", !IsMarkdownViewerRawMode);
+        ApplyMarkdownModeStatusStyle(_markdownRawModeStatusLabel, "Raw", IsMarkdownViewerRawMode);
+    }
+
+    private ToolStripStatusLabel CreateMarkdownModeStatusLabel(string text, MarkdownViewerMode mode)
+    {
+        var label = new ToolStripStatusLabel
+        {
+            Text = text,
+            Alignment = ToolStripItemAlignment.Right,
+            AutoSize = true,
+            Visible = false,
+            IsLink = false,
+            Margin = new Padding(4, 1, 4, 1),
+            Padding = new Padding(0, 1, 0, 1),
+            Overflow = ToolStripItemOverflow.Never
+        };
+        label.Click += (_, _) => SetMarkdownViewerMode(mode);
+        return label;
+    }
+
+    private void ApplyMarkdownModeStatusStyle(ToolStripStatusLabel label, string modeName, bool selected)
+    {
+        label.Text = selected ? $"✓ {modeName}" : modeName;
+        label.BackColor = statusStrip.BackColor;
+        label.ForeColor = statusLabel.ForeColor;
+        label.Font = new Font(statusStrip.Font, selected ? FontStyle.Bold : FontStyle.Regular);
     }
     private void ExecuteViewerFind()
     {
@@ -306,9 +666,5 @@ public partial class MainForm
         state.ActiveSearchHitLength = 0;
         _largeFileControl.ClearActiveSearchHit();
         ApplyViewerStatusLine();
-    }
-    private void PositionPreviewPopup()
-    {
-        Presentation.PreviewUiPresenter.PositionPreviewPopup(this, _previewPopup);
     }
 }

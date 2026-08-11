@@ -12,6 +12,12 @@ public static class MarkdownPreviewService
     {
         string text = await PreviewService.GetTextPreviewAsync(path, maxBytes, token);
         token.ThrowIfCancellationRequested();
+        return text;
+    }
+
+    public static async Task<string> GetRawPreviewWithOutlineAsync(string path, int maxBytes, CancellationToken token)
+    {
+        string text = await GetPreviewAsync(path, maxBytes, token);
 
         var sb = new StringBuilder();
         sb.AppendLine($"[Markdown Preview: {Path.GetFileName(path)}]");

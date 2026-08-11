@@ -8,6 +8,8 @@ MidFDは、FDライクな操作感を参考にしつつ、現在のWindows環境
 
 初めて起動すると「MidFD 初回セットアップ」を表示します。
 
+「表示」ではタブ表示を「縦型（推奨）」または「横型」から選べます。縦型は左側にcategory／tabを並べ、横型は従来どおり上部にcategory／tabを表示します。どちらのmodeでもtab／category機能を利用できます。
+
 ### 機能範囲
 
 | 選択 | 主な内容 |
@@ -32,6 +34,7 @@ MidFDは、FDライクな操作感を参考にしつつ、現在のWindows環境
 
 設定画面の「起動・ログ」から「MidFD 基本セットアップ」を再表示できます。
 
+- 再表示時は保存済みのタブ表示を含む現在値を表示します。
 - ［設定画面へ反映］: 外側の設定UIへ値を反映
 - ［適用］／［OK］: 永続保存
 - ［キャンセル］: 外側UIと保存済み設定を変更しない
@@ -48,8 +51,11 @@ Browser画面では、ファイルやフォルダを選択し、Mark、コピー
 |---|---|
 | 選択移動 | ↑ / ↓ / ← / → |
 | ページ移動 | PageUp / PageDown |
-| 開く／表示 | Enter |
-| OSの関連付けで開く | Z |
+| 開く（対象別open） | Enter |
+| 明示Preview | V |
+| OSの関連付け／Explorerで開く | Z |
+| コマンド実行Dialog | X |
+| コマンド実行Dialog（FD／WinFD互換） | F2 |
 | 親directory | Backspace / Alt+↑ |
 | 履歴を戻る／進む | Alt+← / Alt+→ |
 | QuickAccess | Q |
@@ -58,6 +64,8 @@ Browser画面では、ファイルやフォルダを選択し、Mark、コピー
 | 再読込 | Ctrl+R / Shift+R |
 | 設定 | O |
 | Command Palette | Ctrl+Shift+P |
+
+Enterは`..`で親directoryへ移動し、directoryはMidFD内で開き、fileは対象別openを行います。Vは明示Preview、Xはコマンド実行Dialogです。ZはfileをOSの関連付けで、directoryをExplorerで開きます。ファイル一覧のdouble-clickはfileをOS既定openしますが、directoryはMidFD内で開くため、Zとはdirectoryの結果が異なります。
 
 ## パス表示と移動
 
@@ -232,9 +240,13 @@ LargeText Viewerでは大容量file向けの表示経路を使用します。通
 
 変換は表示用であり、元fileを書き換えません。
 
-### Markdown・SQLite
+### Markdown・CSV／TSV・SQLite
 
-MarkdownとSQLiteはread-only previewです。編集する場合は外部editorまたはMidEditor等を使用してください。
+Markdown、CSV／TSV、SQLiteはread-only previewです。Markdownは設定の「表示」→「ビューア」とViewer下部StatusStrip右端の`Rendered`／`Raw`から表示を切り替えられます。編集する場合は外部editorまたはMidEditor等を使用してください。
+
+MarkdownのRendered表示で同一文書内の見出しリンクを選ぶと、Viewer内で該当位置へ移動します。`http`／`https`リンクだけは確認後にOSの既定ブラウザで開きます。相対path、`file:`、`javascript:`、その他のschemeは開きません。
+
+Rendered表示の右クリックmenuはMidFDの項目だけを表示します。選択範囲がある場合は選択textを優先してコピーでき、選択部分を含むsource-mapped Markdown blockを元sourceのままコピーできます。選択がない場合はblock、link、画像に記述したpathと元Markdownをコピーできます。Markdown fileと同じdirectory配下のPNG／JPEG／GIF相対画像だけをinline表示し、remote URL、absolute path、`file:`、`data:`などは自動取得しません。
 
 ## 動画・音声
 
@@ -244,7 +256,7 @@ MarkdownとSQLiteはread-only previewです。編集する場合は外部editor�
 
 | キー | 動作 |
 |---|---|
-| Enter / V | 動画静止画preview |
+| Enter | 動画静止画preview |
 | Ctrl+Enter | 外部再生 |
 
 ONの場合:
@@ -252,11 +264,13 @@ ONの場合:
 | キー | 動作 |
 |---|---|
 | Enter | 外部再生 |
-| Ctrl+Enter / V | 動画静止画preview |
+| Ctrl+Enter | 動画静止画preview |
 
 音声は設定に関係なく外部再生します。`ffplay.exe` が見つからない場合はWindowsの関連付けで開きます。
 
 ## タブ・カテゴリ
+
+タブ表示は「縦型」と「横型」から選べます。縦型では左側にcategory／tabをまとめ、横型では上部にcategory／tabを表示します。初回セットアップでは縦型（推奨）が選択され、後から「基本セットアップ」で変更できます。
 
 - `Ctrl+T`: 新規tab
 - `Ctrl+W`: 現在tabを閉じる
@@ -264,6 +278,8 @@ ONの場合:
 - `Ctrl+Shift+Right` / `Ctrl+Shift+Left`: 次／前のcategory
 - `Ctrl+Alt+Right` / `Ctrl+Alt+Left`: categoryを移動
 - `Ctrl+Shift+N`: category追加
+
+ContextMenuのdirectory項目では「新しいtabで開く」を選べます。新しいtabの追加位置は設定から、現在tabの隣またはtab列末尾を選択できます。
 
 前回状態復元を有効にすると、category、tab、path、cursor位置等を起動時に復元します。詳細は設定の「起動・ログ」で変更できます。
 

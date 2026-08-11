@@ -1,4 +1,4 @@
-﻿using System.IO;
+using System.IO;
 using System.Text;
 using System.Text.RegularExpressions;
 using System.Windows.Forms;
@@ -256,8 +256,7 @@ public static class BrowserDropUrlResolverService
             return false;
         }
 
-        if (!parsed.Scheme.Equals(Uri.UriSchemeHttp, StringComparison.OrdinalIgnoreCase)
-            && !parsed.Scheme.Equals(Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase))
+        if (!NetworkSecurityPolicyService.IsPublicHttpUri(parsed))
         {
             return false;
         }

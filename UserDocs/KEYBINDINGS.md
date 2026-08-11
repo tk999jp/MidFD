@@ -15,9 +15,11 @@ FD／WinFD互換は、利用できる機能範囲を制限する設定ではあ�
 
 | 操作 | キー |
 |---|---|
-| 開く／表示 | Enter |
-| Windowsの関連付けで開く | Z |
+| 開く（対象別open） | Enter |
+| 既定アプリ／Explorerで開く | Z |
 | コマンド実行 | X |
+| コマンド実行Dialog（FD／WinFD互換） | F2 |
+| 明示Preview | V |
 | PowerShell | H |
 | コマンドプロンプト | Shift+H |
 | パス入力 | Ctrl+L |
@@ -27,6 +29,19 @@ FD／WinFD互換は、利用できる機能範囲を制限する設定ではあ�
 | 圧縮／解凍 | P / U |
 | 設定 | O / Alt+F5 |
 | Command Palette | Ctrl+Shift+P |
+
+F1〜F12とShift+F1〜F12は操作方式により既定割り当てが異なるため、後半のプロファイル別表を参照してください。
+
+Enterは`..`で親directoryへ移動し、directoryはMidFD内で開き、fileは対象別openを行います。Vは明示Preview、Xはコマンド実行Dialogです。ZはfileをWindowsの関連付けで、directoryをExplorerで開きます。ファイル一覧のdouble-clickはfileをOS既定openしますが、directoryはMidFD内で開くため、Zとはdirectoryの結果が異なります。
+
+### Functionバーの割り当て
+
+Functionバーは、操作方式（profile）・modifier・slotごとに個別変更できます。
+
+- `(無効)`はそのslotの明示的な未割り当てで、profileの既定操作へ自動的には戻りません。
+- 「選択項目を既定に戻す」は、選択中のslotだけをそのprofileの既定操作へ戻します。
+- 「現在の全割り当てを既定に戻す」は、現在のprofileの割り当て全体を既定操作へ戻します。
+- 予約されたslotは通常のCommand候補として選択できず、必要な予約状態と編集保護を維持します。
 
 ## Browser移動
 
@@ -42,7 +57,7 @@ FD／WinFD互換は、利用できる機能範囲を制限する設定ではあ�
 | パス入力 | Ctrl+L |
 | 再読込 | Ctrl+R / Shift+R |
 | filter | F / Ctrl+F / F7 |
-| QuickAccess | Q / F8 |
+| QuickAccess | Q |
 | Logdsk | L / F9 |
 | tree | T |
 
@@ -52,12 +67,14 @@ FD／WinFD互換は、利用できる機能範囲を制限する設定ではあ�
 
 | 操作 | キー |
 |---|---|
-| 開く／内蔵Viewer | Enter |
-| 関連付けで開く | Z |
-| 外部editor | E / F4 |
+| 開く／対象別open | Enter |
+| 明示Preview | V |
+| 関連付けで開く／Explorerで開く | Z |
+| コマンド実行Dialog（FD／WinFD互換） | F2 |
+| 外部editor | E |
 | copy Dialog | C / F3 |
 | move Dialog | M |
-| 名前変更 | R / F2 |
+| 名前変更 | R |
 | 削除 | D / Delete |
 | 新規folder | K |
 | 新規file | N |
@@ -116,8 +133,8 @@ FD／WinFD互換は、利用できる機能範囲を制限する設定ではあ�
 | 新規MidFD instance | Alt+F1 |
 | コントロールパネル | Alt+F3 |
 | 設定 | O / Alt+F5 |
-| Command Palette | Ctrl+Shift+P / F10 |
-| Command一覧 | F12 |
+| Command Palette | Ctrl+Shift+P |
+| Command一覧 | F12（MidFD標準） |
 | system情報 | I |
 
 ## tab・category
@@ -134,6 +151,8 @@ FD／WinFD互換は、利用できる機能範囲を制限する設定ではあ�
 | categoryを右へ移動 | Ctrl+Alt+Right |
 | categoryを左へ移動 | Ctrl+Alt+Left |
 | 新規category | Ctrl+Shift+N |
+
+ContextMenuのdirectory項目では「新しいtabで開く」を選べます。新しいtabの追加位置は設定から、現在tabの隣またはtab列末尾を選択できます。
 
 ## 表示mode
 
@@ -182,7 +201,7 @@ LargeText Viewerでは、大容量file向けの表示経路を使います。通
 
 | キー | 動作 |
 |---|---|
-| Enter / V | 動画静止画preview |
+| Enter | 動画静止画preview |
 | Ctrl+Enter | 外部再生 |
 
 ONの場合:
@@ -190,7 +209,7 @@ ONの場合:
 | キー | 動作 |
 |---|---|
 | Enter | 外部再生 |
-| Ctrl+Enter / V | 動画静止画preview |
+| Ctrl+Enter | 動画静止画preview |
 
 preview画面:
 
@@ -228,9 +247,9 @@ Shift／Ctrl／Alt＋F1〜F12は、Functionバー割り当てから個別に変�
 | キー | 既定操作 |
 |---|---|
 | F1 | Help |
-| F2 | Check / Execute |
+| F2 | eXec（Xと同じコマンド実行Dialog） |
 | F3 | Copy |
-| F4 | Edit |
+| F4 | Delete |
 | F5 | Rename |
 | F6 | Sort |
 | F7 | Filter |
@@ -245,13 +264,19 @@ Shift／Ctrl／Alt＋F1〜F12は、Functionバー割り当てから個別に変�
 | キー | 操作 |
 |---|---|
 | Shift+F1 | 属性／日時変更 |
+| Shift+F2 | system情報 |
 | Shift+F3 | Move |
+| Shift+F4 | Delete |
 | Shift+F5 | 新規folder |
-| Shift+F6 | PowerShell |
+| Shift+F6 | sHell（Command Prompt） |
 | Shift+F7 | Reload |
-| Shift+F8 / Shift+Enter | 外部editor |
+| Shift+F8 | 外部editor |
 | Shift+F9 | Preview |
 | Shift+F10 | Pack |
+| Shift+F11 | QuickAccess |
+| Shift+F12 | 未割り当て |
+
+`Shift+Enter` もFD／WinFD互換時の外部editor別名キーです。
 
 ## 外部tool Alt slot
 

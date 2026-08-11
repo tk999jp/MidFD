@@ -290,15 +290,6 @@ public sealed class FileOperationDialogCoordinator
             MessageBoxIcon.Error);
     }
 
-    public void ShowUnsupportedDirectoryOverwrite(IWin32Window owner)
-    {
-        MessageBox.Show(
-            "フォルダ同士の上書き（統合）は現在未対応です。",
-            "エラー",
-            MessageBoxButtons.OK,
-            MessageBoxIcon.Information);
-    }
-
     public void ShowInformationDialog(IWin32Window owner, string message, string title)
     {
         MessageBox.Show(message, title, MessageBoxButtons.OK, MessageBoxIcon.Information);

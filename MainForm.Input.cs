@@ -27,6 +27,11 @@ public partial class MainForm : Form
     private bool TryHandleViewerKeyDown(KeyEventArgs e)
     {
         if (_uiMode != UIMode.Viewer) return false;
+        if (_currentViewerKind == PreviewKind.CsvTsv && _delimitedGrid?.Visible == true
+            && e.KeyCode != Keys.Enter && e.KeyCode != Keys.Escape)
+        {
+            return false;
+        }
         // Ctrl+C: 表示中行または選択範囲コピー
         if (e.Control && e.KeyCode == Keys.C)
         {
@@ -223,25 +228,33 @@ public partial class MainForm : Form
 
     private bool TryHandleBrowserCmdKeyCustomBindings(Keys keyData)
     {
-        if (_uiMode != UIMode.Browser || IsCurrentDirectoryBusy())
+        return ResolveBrowserCmdKeyCustomBinding(keyData) != BrowserCommandBindingResolver.Resolution.NotMatched;
+    }
+
+    private BrowserCommandBindingResolver.Resolution ResolveBrowserCmdKeyCustomBinding(Keys keyData)
+    {
+        if (_uiMode != UIMode.Browser)
         {
-            return false;
+            return BrowserCommandBindingResolver.Resolution.NotMatched;
         }
 
         Dictionary<string, string> keyMap = ResolveBrowserKeyCommandMap();
         string keyGesture = InputSettings.ToKeyGestureText(keyData);
         if (!keyMap.TryGetValue(keyGesture, out string? commandId))
         {
-            return false;
+            return BrowserCommandBindingResolver.Resolution.NotMatched;
         }
 
         if (string.Equals(commandId, InputSettings.MouseGestureUnassignedCommandId, StringComparison.OrdinalIgnoreCase))
         {
             ShowStatusMessage($"キー割り当て無効: {keyGesture}");
-            return true;
+            return BrowserCommandBindingResolver.Resolution.MatchedRejected;
         }
 
-        return ExecuteCommandFromUi(commandId, CommandScope.Browser, $"Browser.CmdKey.Custom:{keyGesture}");
+        bool executed = ExecuteCommandFromUi(commandId, _commandRegistry.Find(commandId)?.Scope ?? CommandScope.Browser, "Browser.CmdKey.Custom:" + keyGesture);
+        return executed
+            ? BrowserCommandBindingResolver.Resolution.MatchedExecuted
+            : BrowserCommandBindingResolver.Resolution.MatchedRejected;
     }
 
     private Dictionary<string, string> ResolveBrowserKeyCommandMap()
@@ -249,22 +262,13 @@ public partial class MainForm : Form
         return BrowserCommandBindingResolver.ResolveEffectiveKeyCommandMap(
             CurrentFunctionKeyProfileValue,
             _settings.Input?.BrowserKeyCommandOverrides,
-            _commandRegistry);
+            _commandRegistry,
+            _settings.Input?.CommandLauncherShortcut);
     }
 
     private bool TryHandleBrowserCmdKeyNavigation(Keys keyData)
     {
         // 履歴移動 (Alt 系) - リストの中身の有無にかかわらず動作
-        if (keyData == (Keys.Alt | Keys.Left))
-        {
-            ExecuteHistoryBack();
-            return true;
-        }
-        if (keyData == (Keys.Alt | Keys.Right))
-        {
-            ExecuteHistoryForward();
-            return true;
-        }
         int total = _browserTotalItemCount > 0 ? _browserTotalItemCount : fileListView.Items.Count;
         if (total <= 0) return false;
         int itemsPerPage = GetBrowserItemsPerPage(out _, out int rowsPerColumn);
@@ -289,21 +293,13 @@ public partial class MainForm : Form
             SetBrowserGlobalCursorIndex(Math.Min(total - 1, _browserCursorIndex + rowsPerColumn));
             moved = true;
         }
-        else if (keyData == (Keys.Control | Keys.Home) || keyData == Keys.F11)
+        else if (keyData == Keys.F11)
         {
             return ExecuteFunctionKey(11);
         }
-        else if (keyData == (Keys.Control | Keys.End) || keyData == Keys.F12)
+        else if (keyData == Keys.F12)
         {
             return ExecuteFunctionKey(12);
-        }
-        else if (keyData == (Keys.Control | Keys.Back))
-        {
-            if (GuardClipboardBusy()) return true;
-            _previewPopup.Clear();
-            _currentPreviewTarget = null;
-            ExecuteHistoryBack();
-            return true;
         }
         else if (keyData == Keys.PageUp)
         {
@@ -324,10 +320,6 @@ public partial class MainForm : Form
         if (moved)
         {
             InvalidateRecentMultiMarkIntent();
-            if (_browserPageStartIndex == (_browserCursorIndex / Math.Max(1, itemsPerPage)) * Math.Max(1, itemsPerPage))
-            {
-                SyncBrowserSelection();
-            }
             return true;
         }
         return false;
@@ -371,25 +363,6 @@ public partial class MainForm : Form
         if (keyData == (Keys.Alt | Keys.F11)) return ExecuteFunctionKey(11, forcedModifierLayer: Keys.Alt);
         if (keyData == (Keys.Alt | Keys.F12)) return ExecuteFunctionKey(12, forcedModifierLayer: Keys.Alt);
 
-        if (TryHandleFdCompatibleShortcutAliases(keyData))
-        {
-            return true;
-        }
-        if (keyData == (Keys.Control | Keys.M))
-        {
-            if (GuardClipboardBusy()) return true;
-            OpenMarkSlotDialog();
-            return true;
-        }
-        if (keyData == (Keys.Control | Keys.R))
-        {
-            return ExecuteCurrentDirectoryReloadCommand();
-        }
-        if (keyData == (Keys.Control | Keys.F))
-        {
-            ExecuteFilter();
-            return true;
-        }
         if (keyData == Keys.F1) return ExecuteFunctionKey(1);
         if (keyData == Keys.F2) return ExecuteFunctionKey(2);
         if (keyData == Keys.F3) return ExecuteFunctionKey(3);
@@ -400,11 +373,6 @@ public partial class MainForm : Form
         if (keyData == Keys.F8) return ExecuteFunctionKey(8);
         if (keyData == Keys.F9) return ExecuteFunctionKey(9);
         if (keyData == Keys.F10) return ExecuteFunctionKey(10);
-        // Shift+R: 再読込
-        if (keyData == (Keys.Shift | Keys.R))
-        {
-            return ExecuteCurrentDirectoryReloadCommand();
-        }
         return false;
     }
 
@@ -457,32 +425,6 @@ public partial class MainForm : Form
             }
             return false;
         }
-        if (keyData == (Keys.Alt | Keys.F1))
-        {
-            return ExecuteCommandFromUi(CommandIds.AppOpenNewInstance, CommandScope.Global, "Browser.CmdKey.AltF1");
-        }
-        if (keyData == Keys.Z)
-        {
-            ExecuteZLaunch();
-            return true;
-        }
-        if (keyData == (Keys.Alt | Keys.F2))
-        {
-            return ExecuteCommandFromUi(CommandIds.BrowserOpenExplorer, CommandScope.Browser, "Browser.CmdKey.AltF2");
-        }
-        if (keyData == (Keys.Alt | Keys.F3))
-        {
-            return ExecuteCommandFromUi(CommandIds.AppOpenControlPanel, CommandScope.Global, "Browser.CmdKey.AltF3");
-        }
-        // Alt+Enter: プロパティ
-        if (keyData == (Keys.Alt | Keys.Enter))
-        {
-            if (fileListView.Items.Count > 0)
-            {
-                ExecuteProperties(ResolveSelection());
-                return true;
-            }
-        }
         return false;
     }
 
@@ -493,20 +435,9 @@ public partial class MainForm : Form
             ExecuteClipboardCopy();
             return true;
         }
-        if (keyData == (Keys.Control | Keys.X))
-        {
-            ExecuteClipboardCut();
-            return true;
-        }
         if (keyData == (Keys.Control | Keys.V))
         {
             return ExecuteCommandFromUi(CommandIds.ClipboardPaste, CommandScope.Browser, "Browser.CmdKey.CtrlV");
-        }
-        if (keyData == (Keys.Control | Keys.Shift | Keys.N))
-        {
-            if (GuardMutationBusy()) return true;
-            ExecuteCommandFromUi(CommandIds.BrowserCreateDirectory, CommandScope.Browser, "Browser.CmdKey.CtrlShiftN");
-            return true;
         }
         return false;
     }
@@ -603,10 +534,6 @@ public partial class MainForm : Form
         if (TryHandleCommandHintOverlayCmdKey(keyData))
         {
             return true;
-        }
-        if (IsCommandLauncherShortcut(keyData))
-        {
-            return ExecuteCommandFromUi(CommandIds.AppOpenCommandLauncher, CommandScope.Global, "MainForm.ProcessCmdKey.CommandLauncher");
         }
         if (_viewerInputRouter.TryHandleCmdKey(CreateViewerCmdKeyContext(), keyData)) return true;
         if (_browserInputRouter.TryHandleCmdKey(CreateBrowserCmdKeyContext(), keyData)) return true;
@@ -716,10 +643,10 @@ public partial class MainForm : Form
         {
             IsBrowserMode = _uiMode == UIMode.Browser,
             IsBrowserFocused = BrowserInputRouter.IsBrowserInputFocused(browserPanel),
-            IsAuxPreviewActive = _previewPopupVisible && _previewPopup != null && _previewPopup.Visible,
+            IsAuxPreviewActive = false,
             CanUseCommandLauncherCommands = CanUseCommandLauncherCommands(),
             TryHandleTabs = TryHandleBrowserCmdKeyTabs,
-            TryHandleCustomBindings = TryHandleBrowserCmdKeyCustomBindings,
+            TryHandleCustomBindings = ResolveBrowserCmdKeyCustomBinding,
             OpenMenuStripFromKeyboard = OpenMenuStripFromKeyboard,
             TryHandleNavigation = TryHandleBrowserCmdKeyNavigation,
             TryHandleFileOperationUndoRedo = TryHandleBrowserCmdKeyFileOperationUndoRedo,
@@ -817,74 +744,6 @@ public partial class MainForm : Form
         if (_uiMode != UIMode.Browser)
         {
             return false;
-        }
-        if (keyData == (Keys.Control | Keys.T))
-        {
-            CreateNewBrowserTab();
-            return true;
-        }
-        if (keyData == (Keys.Control | Keys.L))
-        {
-            OpenBrowserPathEntry();
-            return true;
-        }
-        if (keyData == (Keys.Control | Keys.W))
-        {
-            CloseCurrentBrowserTab();
-            return true;
-        }
-        if (keyData == (Keys.Control | Keys.Shift | Keys.N))
-        {
-            AddGeneratedBrowserTabCategory();
-            return true;
-        }
-        if (keyData == (Keys.Control | Keys.Shift | Keys.Left))
-        {
-            LogService.Info($"[BrowserTabCategory] Shortcut Key=Ctrl+Shift+Left ActiveCategory={_categoryViewState.ActiveCategoryId} Tabs={_browserTabViewState.Count} ActiveIndex={_browserTabViewState.ActiveTabIndex}");
-            SelectAdjacentBrowserTabCategory(-1);
-            return true;
-        }
-        if (keyData == (Keys.Control | Keys.Shift | Keys.Right))
-        {
-            LogService.Info($"[BrowserTabCategory] Shortcut Key=Ctrl+Shift+Right ActiveCategory={_categoryViewState.ActiveCategoryId} Tabs={_browserTabViewState.Count} ActiveIndex={_browserTabViewState.ActiveTabIndex}");
-            SelectAdjacentBrowserTabCategory(+1);
-            return true;
-        }
-        if (keyData == (Keys.Control | Keys.Left))
-        {
-            SelectAdjacentBrowserTab(-1);
-            return true;
-        }
-        if (keyData == (Keys.Control | Keys.Right))
-        {
-            SelectAdjacentBrowserTab(+1);
-            return true;
-        }
-        if (keyData == (Keys.Control | Keys.Alt | Keys.Left))
-        {
-            if (_categoryViewState.ActiveCategoryId != null)
-            {
-                MoveBrowserTabCategory(_categoryViewState.ActiveCategoryId, -1);
-            }
-            return true;
-        }
-        if (keyData == (Keys.Control | Keys.Alt | Keys.Right))
-        {
-            if (_categoryViewState.ActiveCategoryId != null)
-            {
-                MoveBrowserTabCategory(_categoryViewState.ActiveCategoryId, +1);
-            }
-            return true;
-        }
-        if (keyData == (Keys.Control | Keys.Tab))
-        {
-            SelectAdjacentBrowserTab(+1);
-            return true;
-        }
-        if (keyData == (Keys.Control | Keys.Shift | Keys.Tab))
-        {
-            SelectAdjacentBrowserTab(-1);
-            return true;
         }
         return false;
     }

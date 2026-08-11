@@ -59,9 +59,7 @@ public static class FileSystemItemFactory
     {
         return sizeFormat switch
         {
-            "Bytes" => length < 10_000
-                ? length.ToString(CultureInfo.InvariantCulture)
-                : length.ToString("#,0", CultureInfo.InvariantCulture),
+            "Bytes" => $"{length.ToString("#,0", CultureInfo.InvariantCulture)} B",
             "KB/MB" => FormatCompactSize(length),
             _ => FileOperationService.FormatSize(length)
         };

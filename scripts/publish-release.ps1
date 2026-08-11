@@ -4,12 +4,12 @@ param (
 
     [switch]$AllowDirty = $false,
 
-    [switch]$SkipTagCheck = $false,
-
     [switch]$SelfContained = $false,
 
     [string]$ArtifactsRoot = ""
 )
+
+. (Join-Path $PSScriptRoot "publish-release-preflight.ps1")
 
 # 1. Validation
 if ($ReleaseTag -notmatch '^v\d{4}\.\d{2}\.\d{2}(\.\d+)?$') {
@@ -31,22 +31,10 @@ if (-not $AllowDirty) {
     }
 }
 
-if (-not $SkipTagCheck) {
-    # Check if tag exists
-    $tagExists = git tag -l $ReleaseTag
-    if (-not $tagExists) {
-        Write-Error "Git tag '$ReleaseTag' does not exist. Create the tag first or use -SkipTagCheck."
-        exit 1
-    }
-    # Check if tag matches HEAD
-    $tagCommit = (git rev-list -n 1 $ReleaseTag)
-    if ($null -ne $tagCommit) { $tagCommit = $tagCommit.Trim() }
-    $headCommit = (git rev-parse HEAD).Trim()
-    if ($tagCommit -ne $headCommit) {
-        Write-Error "Git tag '$ReleaseTag' commit ($tagCommit) does not match HEAD ($headCommit). Use -SkipTagCheck to bypass."
-        exit 1
-    }
-}
+# 2.5 Pre-publish public contract gate. Candidate SHA is fixed once and reused below.
+# ReleaseTag is the planned public tag; tag creation is a later approved public operation.
+$candidateSha = (git rev-parse HEAD).Trim()
+Assert-PrePublishReleaseContract (Resolve-Path (Join-Path $PSScriptRoot "..")).Path $ReleaseTag $candidateSha
 
 # 3. Calculate version strings
 $parts = $ReleaseTag.Substring(1).Split('.')
@@ -192,7 +180,6 @@ function Assert-PackageContents([string]$packageRoot) {
     }
 }
 
-
 # 6. Create ZIP archive
 $zipPath = Join-Path $releaseDir "MidFD-win-x64.zip"
 Write-Host "Creating ZIP archive at: $zipPath"
@@ -224,6 +211,7 @@ Write-Host "Verifying ProductVersion in MidFD.exe..."
 $fileVersionInfo = [System.Diagnostics.FileVersionInfo]::GetVersionInfo($exePath)
 $productVersion = $fileVersionInfo.ProductVersion
 Write-Host "Found ProductVersion: $productVersion"
+Assert-PostPackageReleaseContract $extractedDest $ReleaseTag $candidateSha $productVersion
 
 # Check tag inclusion
 if ($productVersion -notmatch [regex]::Escape($ReleaseTag)) {

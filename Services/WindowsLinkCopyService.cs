@@ -1,5 +1,6 @@
 using System.ComponentModel;
 using System.Runtime.InteropServices;
+using Microsoft.Win32.SafeHandles;
 
 namespace MidFD.Services;
 
@@ -34,6 +35,55 @@ internal static class WindowsLinkCopyService
         }
     }
 
+    public static void CopyJunction(string sourcePath, string destinationPath)
+    {
+        byte[] rawData = ReadReparseData(sourcePath);
+        if (Directory.Exists(destinationPath))
+        {
+            throw new IOException($"junction destination already exists: {destinationPath}");
+        }
+
+        Directory.CreateDirectory(destinationPath);
+        try
+        {
+            using SafeFileHandle handle = OpenReparsePoint(destinationPath, 0x40000000u);
+            if (!DeviceIoControl(handle, FsctlSetReparsePoint, rawData, rawData.Length, IntPtr.Zero, 0, out _, IntPtr.Zero))
+            {
+                throw new Win32Exception(Marshal.GetLastWin32Error(), $"junction creation failed: {destinationPath}");
+            }
+        }
+        catch
+        {
+            try { Directory.Delete(destinationPath, false); } catch { }
+            throw;
+        }
+    }
+
+    private const uint FsctlGetReparsePoint = 0x000900A8;
+    private const uint FsctlSetReparsePoint = 0x000900A4;
+
+    private static byte[] ReadReparseData(string path)
+    {
+        using SafeFileHandle handle = OpenReparsePoint(path, 0x80000000u);
+        byte[] buffer = new byte[16 * 1024];
+        if (!DeviceIoControl(handle, FsctlGetReparsePoint, IntPtr.Zero, 0, buffer, buffer.Length, out uint returned, IntPtr.Zero))
+        {
+            throw new Win32Exception(Marshal.GetLastWin32Error(), $"junction metadata read failed: {path}");
+        }
+        Array.Resize(ref buffer, checked((int)returned));
+        return buffer;
+    }
+
+    private static SafeFileHandle OpenReparsePoint(string path, uint access)
+    {
+        SafeFileHandle handle = CreateFile(path, access, 0x1u | 0x2u, IntPtr.Zero, 3u, 0x02200000u, IntPtr.Zero);
+        if (handle.IsInvalid)
+        {
+            throw new Win32Exception(Marshal.GetLastWin32Error(), $"reparse handle open failed: {path}");
+        }
+        return handle;
+    }
+
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool CopyFileEx(
@@ -49,4 +99,38 @@ internal static class WindowsLinkCopyService
         string symbolicLinkFileName,
         string targetFileName,
         uint flags);
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern SafeFileHandle CreateFile(
+        string fileName,
+        uint desiredAccess,
+        uint shareMode,
+        IntPtr securityAttributes,
+        uint creationDisposition,
+        uint flagsAndAttributes,
+        IntPtr templateFile);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool DeviceIoControl(
+        SafeFileHandle device,
+        uint controlCode,
+        byte[]? input,
+        int inputSize,
+        IntPtr output,
+        int outputSize,
+        out uint bytesReturned,
+        IntPtr overlapped);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool DeviceIoControl(
+        SafeFileHandle device,
+        uint controlCode,
+        IntPtr input,
+        int inputSize,
+        byte[] output,
+        int outputSize,
+        out uint bytesReturned,
+        IntPtr overlapped);
 }

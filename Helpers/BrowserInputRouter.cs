@@ -22,7 +22,7 @@ public sealed class BrowserInputRouter
         public bool CanUseCommandLauncherCommands { get; init; }
 
         public required Func<Keys, bool> TryHandleTabs { get; init; }
-        public required Func<Keys, bool> TryHandleCustomBindings { get; init; }
+        public required Func<Keys, BrowserCommandBindingResolver.Resolution> TryHandleCustomBindings { get; init; }
         public required Action OpenMenuStripFromKeyboard { get; init; }
         public required Func<Keys, bool> TryHandleNavigation { get; init; }
         public required Func<Keys, bool> TryHandleFileOperationUndoRedo { get; init; }
@@ -47,23 +47,28 @@ public sealed class BrowserInputRouter
             return false;
         }
 
-        if (context.TryHandleTabs(keyData))
-        {
-            return true;
-        }
-
         if (keyData == Keys.F10 && !context.IsBrowserFocused)
         {
             context.OpenMenuStripFromKeyboard();
             return true;
         }
 
-        if (context.IsBrowserFocused)
+        bool acceptsBrowserShortcut = context.IsBrowserFocused || (keyData & Keys.Control) == Keys.Control;
+
+        if (acceptsBrowserShortcut)
         {
-            if (context.TryHandleCustomBindings(keyData)) return true;
+            if (context.TryHandleCustomBindings(keyData) != BrowserCommandBindingResolver.Resolution.NotMatched)
+            {
+                return true;
+            }
         }
 
-        if (context.IsBrowserFocused || context.IsAuxPreviewActive)
+        if (context.TryHandleTabs(keyData))
+        {
+            return true;
+        }
+
+        if (acceptsBrowserShortcut || context.IsAuxPreviewActive)
         {
             if (context.TryHandleNavigation(keyData))
             {
@@ -71,7 +76,7 @@ public sealed class BrowserInputRouter
             }
         }
 
-        if (context.IsBrowserFocused)
+        if (acceptsBrowserShortcut)
         {
             if (context.TryHandleFileOperationUndoRedo(keyData)) return true;
             if (context.TryHandleMarking(keyData)) return true;

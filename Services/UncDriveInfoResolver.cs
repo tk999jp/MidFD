@@ -8,6 +8,7 @@ public sealed class UncDriveInfoResolver : IDisposable
 
     private readonly object _gate = new();
     private readonly Dictionary<string, Result> _cache = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Func<string, Result> _probe;
     private System.Threading.Timer? _timer;
     private string? _pendingRoot;
     private long _pendingGeneration;
@@ -15,6 +16,16 @@ public sealed class UncDriveInfoResolver : IDisposable
     private long _requestVersion;
     private bool _inFlight;
     private bool _disposed;
+
+    public UncDriveInfoResolver()
+        : this(Probe)
+    {
+    }
+
+    internal UncDriveInfoResolver(Func<string, Result> probe)
+    {
+        _probe = probe ?? throw new ArgumentNullException(nameof(probe));
+    }
 
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     private static extern bool GetDiskFreeSpaceExW(
@@ -95,7 +106,7 @@ public sealed class UncDriveInfoResolver : IDisposable
             _inFlight = true;
         }
 
-        _ = Task.Run(() => Probe(root)).ContinueWith(task =>
+        _ = Task.Run(() => _probe(root)).ContinueWith(task =>
         {
             Result result = default;
             bool succeeded = false;

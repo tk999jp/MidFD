@@ -143,21 +143,22 @@ public partial class MainForm : Form
             return;
         }
         _browserTabCategoryContextMenu = new ContextMenuStrip();
+        _browserTabCategoryContextMenu.Closed += (_, _) => ClearBrowserTabCategoryContextState();
         _addBrowserTabCategoryContextMenuItem = new ToolStripMenuItem("カテゴリ追加");
-        _addBrowserTabCategoryContextMenuItem.ShortcutKeyDisplayString = "Ctrl+Shift+N";
-        _addBrowserTabCategoryContextMenuItem.Click += (_, _) => AddGeneratedBrowserTabCategory();
+        _addBrowserTabCategoryContextMenuItem.ShortcutKeyDisplayString = ResolveBrowserCommandShortcutHint(CommandIds.BrowserTabCategoryAdd);
+        _addBrowserTabCategoryContextMenuItem.Click += (_, _) => ExecuteCommandFromUi(CommandIds.BrowserTabCategoryAdd, CommandScope.Browser, "BrowserTabCategoryContextMenu.Add");
         _moveBrowserTabCategoryLeftContextMenuItem = new ToolStripMenuItem("左へ移動");
-        _moveBrowserTabCategoryLeftContextMenuItem.ShortcutKeyDisplayString = "Ctrl+Alt+Left";
-        _moveBrowserTabCategoryLeftContextMenuItem.Click += (_, _) => MoveBrowserTabCategoryFromContext(-1);
+        _moveBrowserTabCategoryLeftContextMenuItem.ShortcutKeyDisplayString = ResolveBrowserCommandShortcutHint(CommandIds.BrowserTabCategoryMoveLeft);
+        _moveBrowserTabCategoryLeftContextMenuItem.Click += (_, _) => ExecuteCommandFromUi(CommandIds.BrowserTabCategoryMoveLeft, CommandScope.Browser, "BrowserTabCategoryContextMenu.MoveLeft", categoryId: _categoryViewState.ContextCategoryId);
         _moveBrowserTabCategoryRightContextMenuItem = new ToolStripMenuItem("右へ移動");
-        _moveBrowserTabCategoryRightContextMenuItem.ShortcutKeyDisplayString = "Ctrl+Alt+Right";
-        _moveBrowserTabCategoryRightContextMenuItem.Click += (_, _) => MoveBrowserTabCategoryFromContext(+1);
+        _moveBrowserTabCategoryRightContextMenuItem.ShortcutKeyDisplayString = ResolveBrowserCommandShortcutHint(CommandIds.BrowserTabCategoryMoveRight);
+        _moveBrowserTabCategoryRightContextMenuItem.Click += (_, _) => ExecuteCommandFromUi(CommandIds.BrowserTabCategoryMoveRight, CommandScope.Browser, "BrowserTabCategoryContextMenu.MoveRight", categoryId: _categoryViewState.ContextCategoryId);
         _renameBrowserTabCategoryContextMenuItem = new ToolStripMenuItem("名前変更");
-        _renameBrowserTabCategoryContextMenuItem.Click += (_, _) => RenameBrowserTabCategoryFromContext();
+        _renameBrowserTabCategoryContextMenuItem.Click += (_, _) => ExecuteCommandFromUi(CommandIds.BrowserTabCategoryRename, CommandScope.Browser, "BrowserTabCategoryContextMenu.Rename", categoryId: _categoryViewState.ContextCategoryId);
         _deleteBrowserTabCategoryContextMenuItem = new ToolStripMenuItem("削除");
-        _deleteBrowserTabCategoryContextMenuItem.Click += (_, _) => DeleteBrowserTabCategoryFromContext();
+        _deleteBrowserTabCategoryContextMenuItem.Click += (_, _) => ExecuteCommandFromUi(CommandIds.BrowserTabCategoryDelete, CommandScope.Browser, "BrowserTabCategoryContextMenu.Delete", categoryId: _categoryViewState.ContextCategoryId);
         _manageBrowserTabCategoriesContextMenuItem = new ToolStripMenuItem("カテゴリ管理...");
-        _manageBrowserTabCategoriesContextMenuItem.Click += (_, _) => OpenBrowserTabCategoryManager();
+        _manageBrowserTabCategoriesContextMenuItem.Click += (_, _) => ExecuteCommandFromUi(CommandIds.BrowserTabCategoryManage, CommandScope.Browser, "BrowserTabCategoryContextMenu.Manage");
         _browserTabCategoryContextMenu.Items.AddRange(
         [
             _addBrowserTabCategoryContextMenuItem,
@@ -172,6 +173,11 @@ public partial class MainForm : Form
     }
 
     private void ShowBrowserTabCategoryContextMenu(BrowserTabStripCategoryEventArgs e)
+    {
+        ShowBrowserTabCategoryContextMenu(_browserTabStrip, e);
+    }
+
+    private void ShowBrowserTabCategoryContextMenu(Control? owner, BrowserTabStripCategoryEventArgs e)
     {
         if (_browserTabStrip == null)
         {
@@ -197,7 +203,10 @@ public partial class MainForm : Form
             _renameBrowserTabCategoryContextMenuItem,
             _deleteBrowserTabCategoryContextMenuItem,
             _browserTabCategoryContextMenu);
-        _browserTabCategoryContextMenu?.Show(_browserTabStrip, e.Location);
+        if (owner != null)
+        {
+            _browserTabCategoryContextMenu?.Show(owner, e.Location);
+        }
     }
 
     private void MoveBrowserTabCategoryFromContext(int delta)
@@ -240,7 +249,7 @@ public partial class MainForm : Form
             {
                 return;
             }
-            ToggleBrowserTabLock(_browserTabViewState.ContextTabIndex);
+            ExecuteCommandFromUi(CommandIds.BrowserTabLock, CommandScope.Browser, "BrowserTabContextMenu.Lock", contextTabIndex: _browserTabViewState.ContextTabIndex);
         };
         _toggleBrowserTabReadOnlyContextMenuItem = new ToolStripMenuItem();
         _toggleBrowserTabReadOnlyContextMenuItem.Click += (_, _) =>
@@ -249,19 +258,19 @@ public partial class MainForm : Form
             {
                 return;
             }
-            ToggleBrowserTabReadOnly(_browserTabViewState.ContextTabIndex);
+            ExecuteCommandFromUi(CommandIds.BrowserTabReadOnlyToggle, CommandScope.Browser, "BrowserTabContextMenu.ReadOnly", contextTabIndex: _browserTabViewState.ContextTabIndex);
         };
         _openBrowserTabFilterLockContextMenuItem = new ToolStripMenuItem("フィルタロック...(&L)");
         _openBrowserTabFilterLockContextMenuItem.Click += (_, _) =>
         {
             if (_browserTabViewState.ContextTabIndex < 0) return;
-            OpenTabFilterLockDialog(_browserTabViewState.ContextTabIndex);
+            ExecuteCommandFromUi(CommandIds.BrowserTabFilterLock, CommandScope.Browser, "BrowserTabContextMenu.FilterLock", contextTabIndex: _browserTabViewState.ContextTabIndex);
         };
         _clearBrowserTabFilterLockContextMenuItem = new ToolStripMenuItem("フィルタロックを解除(&U)");
         _clearBrowserTabFilterLockContextMenuItem.Click += (_, _) =>
         {
             if (_browserTabViewState.ContextTabIndex < 0) return;
-            ClearTabFilterLock(_browserTabViewState.ContextTabIndex);
+            ExecuteCommandFromUi(CommandIds.BrowserTabFilterLockClear, CommandScope.Browser, "BrowserTabContextMenu.FilterLockClear", contextTabIndex: _browserTabViewState.ContextTabIndex);
         };
         _closeBrowserTabContextMenuItem = new ToolStripMenuItem("このタブを閉じる");
         _closeBrowserTabContextMenuItem.Click += (_, _) =>
@@ -270,7 +279,7 @@ public partial class MainForm : Form
             {
                 return;
             }
-            TryCloseBrowserTab(_browserTabViewState.ContextTabIndex);
+            ExecuteCommandFromUi(CommandIds.BrowserTabClose, CommandScope.Browser, "BrowserTabContextMenu.Close", contextTabIndex: _browserTabViewState.ContextTabIndex);
         };
         _closeRightBrowserTabsContextMenuItem = new ToolStripMenuItem("右側の全てのタブを閉じる");
         _closeRightBrowserTabsContextMenuItem.Click += (_, _) =>
@@ -279,7 +288,7 @@ public partial class MainForm : Form
             {
                 return;
             }
-            CloseBrowserTabsToRight(_browserTabViewState.ContextTabIndex);
+            ExecuteCommandFromUi(CommandIds.BrowserTabCloseRight, CommandScope.Browser, "BrowserTabContextMenu.CloseRight", contextTabIndex: _browserTabViewState.ContextTabIndex);
         };
         _closeLeftBrowserTabsContextMenuItem = new ToolStripMenuItem("左側の全てのタブを閉じる");
         _closeLeftBrowserTabsContextMenuItem.Click += (_, _) =>
@@ -288,7 +297,7 @@ public partial class MainForm : Form
             {
                 return;
             }
-            CloseBrowserTabsToLeft(_browserTabViewState.ContextTabIndex);
+            ExecuteCommandFromUi(CommandIds.BrowserTabCloseLeft, CommandScope.Browser, "BrowserTabContextMenu.CloseLeft", contextTabIndex: _browserTabViewState.ContextTabIndex);
         };
         _closeOtherBrowserTabsContextMenuItem = new ToolStripMenuItem("このタブ以外を閉じる");
         _closeOtherBrowserTabsContextMenuItem.Click += (_, _) =>
@@ -297,7 +306,7 @@ public partial class MainForm : Form
             {
                 return;
             }
-            CloseOtherBrowserTabs(_browserTabViewState.ContextTabIndex);
+            ExecuteCommandFromUi(CommandIds.BrowserTabCloseOther, CommandScope.Browser, "BrowserTabContextMenu.CloseOther", contextTabIndex: _browserTabViewState.ContextTabIndex);
         };
         _browserTabContextMenu.Items.Add(_toggleBrowserTabLockContextMenuItem);
         _browserTabContextMenu.Items.Add(_toggleBrowserTabReadOnlyContextMenuItem);
@@ -346,17 +355,29 @@ public partial class MainForm : Form
         string? itemPath = item.Tag as string;
         bool canUseItemPath = item.Text != ".." && !string.IsNullOrWhiteSpace(itemPath);
         string? browserItemWorkingDirectory = canUseItemPath && itemPath != null ? GetBrowserItemWorkingDirectory(itemPath) : null;
-        bool canRegisterItem = !isReadOnly
-            && !isBusy
-            && canUseItemPath
+        bool isDirectoryItem = canUseItemPath
             && itemPath != null
             && Directory.Exists(itemPath);
-        var openItem = new ToolStripMenuItem("開く", null, (s, e) => ExecuteEnter())
+        bool canRegisterItem = !isReadOnly
+            && !isBusy
+            && isDirectoryItem;
+        bool canOpenInNewTab = !isBusy
+            && !isMultiSelectionContext
+            && isDirectoryItem;
+        var openItem = new ToolStripMenuItem("開く", null, (s, e) =>
+            ExecuteCommandFromUi(CommandIds.BrowserExecute, CommandScope.Browser, "Browser.ContextMenu.Open", selection))
         {
             Enabled = !isBusy && !isMultiSelectionContext && canUseItemPath
         };
         menu.Items.Add(openItem);
-        var openDefaultItem = new ToolStripMenuItem("既定アプリで開く", null, (s, e) => ExecuteDefaultOpen())
+        var openInNewTabItem = new ToolStripMenuItem("新しいタブで開く", null, (s, e) =>
+            ExecuteCommandFromUi(CommandIds.BrowserOpenInNewTab, CommandScope.Browser, "Browser.ContextMenu.OpenInNewTab", selection))
+        {
+            Enabled = canOpenInNewTab
+        };
+        menu.Items.Add(openInNewTabItem);
+        var openDefaultItem = new ToolStripMenuItem("既定アプリで開く", null, (s, e) =>
+            ExecuteCommandFromUi(CommandIds.BrowserDefaultOpen, CommandScope.Browser, "Browser.ContextMenu.DefaultOpen", selection))
         {
             Enabled = !isBusy && !isMultiSelectionContext && canUseItemPath
         };
@@ -421,31 +442,31 @@ public partial class MainForm : Form
         };
         menu.Items.Add(copyPathItem);
         var cutItem = new ToolStripMenuItem("切り取り", null, (s, e) =>
-            RunWithBrowserContextMenuSelection(selection, ExecuteClipboardCut))
+            ExecuteCommandFromUi(CommandIds.ClipboardCut, CommandScope.Browser, "BrowserContextMenu.Item.Cut", selection))
         {
             Enabled = !isBusy && hasSelection && !isReadOnly
         };
         menu.Items.Add(cutItem);
         var copyItem = new ToolStripMenuItem("コピー", null, (s, e) =>
-            RunWithBrowserContextMenuSelection(selection, () => _ = ExecuteCopy(selection)))
+            RunWithBrowserContextMenuSelection(selection, () => ExecuteCommandFromUi(CommandIds.FileCopy, CommandScope.Browser, "BrowserContextMenu.Item.Copy", selection)))
         {
             Enabled = !isBusy && hasSelection
         };
         menu.Items.Add(copyItem);
         var moveItem = new ToolStripMenuItem("移動", null, (s, e) =>
-            RunWithBrowserContextMenuSelection(selection, () => _ = ExecuteMove(selection)))
+            RunWithBrowserContextMenuSelection(selection, () => ExecuteCommandFromUi(CommandIds.FileMove, CommandScope.Browser, "BrowserContextMenu.Item.Move", selection)))
         {
             Enabled = !isBusy && hasSelection && !isReadOnly
         };
         menu.Items.Add(moveItem);
         var renameItem = new ToolStripMenuItem("リネーム", null, (s, e) =>
-            RunWithBrowserContextMenuSelection(selection, () => ExecuteRename(selection)))
+            RunWithBrowserContextMenuSelection(selection, () => ExecuteCommandFromUi(CommandIds.FileRename, CommandScope.Browser, "BrowserContextMenu.Item.Rename", selection)))
         {
             Enabled = !isBusy && hasSelection && !isReadOnly
         };
         menu.Items.Add(renameItem);
         var deleteItem = new ToolStripMenuItem("削除", null, (s, e) =>
-            RunWithBrowserContextMenuSelection(selection, () => _ = ExecuteDelete(permanent: false, selection)))
+            RunWithBrowserContextMenuSelection(selection, () => ExecuteCommandFromUi(CommandIds.FileDelete, CommandScope.Browser, "BrowserContextMenu.Item.Delete", selection)))
         {
             Enabled = !isBusy && hasSelection && !isReadOnly
         };
@@ -463,7 +484,7 @@ public partial class MainForm : Form
         };
         menu.Items.Add(quickAccessItem);
         menu.Items.Add(new ToolStripSeparator());
-        var propertiesItem = new ToolStripMenuItem("プロパティ", null, (s, e) => ExecuteProperties(selection))
+        var propertiesItem = new ToolStripMenuItem("プロパティ", null, (s, e) => ExecuteCommandFromUi(CommandIds.BrowserProperties, CommandScope.Browser, "BrowserContextMenu.Item.Properties", selection))
         {
             Enabled = !isBusy && selection.Count == 1
         };
@@ -486,7 +507,7 @@ public partial class MainForm : Form
         {
             Enabled = canClipboardPaste
         });
-        menu.Items.Add(new ToolStripMenuItem("新規フォルダ", null, (s, e) => ExecuteCreateDirectory())
+        menu.Items.Add(new ToolStripMenuItem("新規フォルダ", null, (s, e) => ExecuteCommandFromUi(CommandIds.BrowserCreateDirectory, CommandScope.Browser, "BrowserContextMenu.Blank.CreateDirectory"))
         {
             Enabled = !isReadOnly && !isBusy
         });
@@ -515,7 +536,7 @@ public partial class MainForm : Form
         {
             Enabled = canCurrentPath && !isBusy
         });
-        menu.Items.Add(new ToolStripMenuItem("現在のパスをコピー", null, (_, _) => CopyCurrentDirectoryFromHeader())
+        menu.Items.Add(new ToolStripMenuItem("現在のパスをコピー", null, (_, _) => ExecuteCommandFromUi(CommandIds.BrowserCopyCurrentPath, CommandScope.Browser, "BrowserContextMenu.Blank.CopyCurrentPath"))
         {
             Enabled = canCurrentPath
         });

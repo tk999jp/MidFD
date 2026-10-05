@@ -8,6 +8,8 @@ namespace MidFD.Services;
 
 public class FileListColorResolver
 {
+    public const string AutoColorSelectionKey = "AutoFromInputProfile";
+    public const string AutoColorSelectionDisplayName = "既定色";
     public static readonly string[] CoreThemes = { "MidFdStandard", "Green", "Amber", "Light" };
     public static readonly string[] BuiltInPresetKeys =
     {
@@ -84,7 +86,8 @@ public class FileListColorResolver
         {
             return "MidFdStandard";
         }
-        if (string.Equals(presetKey, "FD/WinFD互換色プリセット", StringComparison.OrdinalIgnoreCase) ||
+        if (string.Equals(presetKey, "FD/WinFD互換", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(presetKey, "FD/WinFD互換色プリセット", StringComparison.OrdinalIgnoreCase) ||
             string.Equals(presetKey, "FD/WinFD互換色", StringComparison.OrdinalIgnoreCase))
         {
             return "WinFdCompatible";
@@ -110,8 +113,9 @@ public class FileListColorResolver
         string canonical = CanonicalizePresetKey(presetKey);
         return canonical switch
         {
+            AutoColorSelectionKey => AutoColorSelectionDisplayName,
             "MidFdStandard" => "MidFD標準",
-            "WinFdCompatible" => "FD/WinFD互換色",
+            "WinFdCompatible" => "FD/WinFD互換",
             _ => presetKey
         };
     }
@@ -120,14 +124,19 @@ public class FileListColorResolver
     {
         if (string.IsNullOrWhiteSpace(displayName))
         {
-            return "MidFdStandard";
+            return AutoColorSelectionKey;
+        }
+        if (string.Equals(displayName, AutoColorSelectionDisplayName, StringComparison.OrdinalIgnoreCase))
+        {
+            return AutoColorSelectionKey;
         }
         if (string.Equals(displayName, "MidFD標準", StringComparison.OrdinalIgnoreCase) ||
             string.Equals(displayName, "MidFD標準色プリセット", StringComparison.OrdinalIgnoreCase))
         {
             return "MidFdStandard";
         }
-        if (string.Equals(displayName, "FD/WinFD互換色", StringComparison.OrdinalIgnoreCase) ||
+        if (string.Equals(displayName, "FD/WinFD互換", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(displayName, "FD/WinFD互換色", StringComparison.OrdinalIgnoreCase) ||
             string.Equals(displayName, "FD/WinFD互換色プリセット", StringComparison.OrdinalIgnoreCase))
         {
             return "WinFdCompatible";
@@ -135,8 +144,50 @@ public class FileListColorResolver
         return CanonicalizePresetKey(displayName);
     }
 
+    public static bool IsAutoColorSelection(AppSettings settings)
+    {
+        if (string.Equals(settings.Appearance.ColorSelectionMode, AppearanceSettings.AutoColorSelectionMode, StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+
+        if (!string.IsNullOrWhiteSpace(settings.Appearance.ColorSelectionMode))
+        {
+            return false;
+        }
+
+        string rawTheme = settings.Appearance.ColorTheme ?? string.Empty;
+        string legacyTheme = CanonicalizePresetKey(rawTheme);
+        return string.IsNullOrWhiteSpace(rawTheme) ||
+            string.Equals(rawTheme, "ClassicCyan", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(legacyTheme, AutoColorSelectionKey, StringComparison.OrdinalIgnoreCase) ||
+            settings.Appearance.MidFdStandardProfileColors != null ||
+            settings.Appearance.WinFdCompatibleProfileColors != null;
+    }
+
+    public static string ResolveInputProfileDefaultPresetKey(string? inputProfile)
+    {
+        return string.Equals(inputProfile, InputSettings.FdCompatibleProfileValue, StringComparison.OrdinalIgnoreCase)
+            ? "WinFdCompatible"
+            : "MidFdStandard";
+    }
+
+    public static string ResolveEffectiveColorPresetKey(AppSettings settings)
+    {
+        if (IsAutoColorSelection(settings))
+        {
+            return ResolveInputProfileDefaultPresetKey(settings.Input.FunctionKeyProfile);
+        }
+
+        return CanonicalizePresetKey(settings.Appearance.ExplicitColorPresetKey ?? settings.Appearance.ColorTheme);
+    }
+
     public static string NormalizeCoreTheme(string? themeKey, AppSettings? settings = null)
     {
+        if (settings != null && IsAutoColorSelection(settings))
+        {
+            themeKey = ResolveEffectiveColorPresetKey(settings);
+        }
         themeKey = CanonicalizePresetKey(themeKey);
         if (string.Equals(themeKey, "Light", StringComparison.OrdinalIgnoreCase))
         {
@@ -154,15 +205,10 @@ public class FileListColorResolver
 
         if (settings != null)
         {
-            var app = settings.Appearance;
-            var resolved = ResolvePresetColors(app.ColorTheme, app.CustomFileListColorPresets);
-            if (app.UseCustomFileListColors && app.CustomFileListColors != null)
+            var resolved = ResolveColors(settings);
+            if (resolved.Background != Color.Empty)
             {
-                resolved = ApplyCustomColors(resolved, app.CustomFileListColors);
-            }
-            if (GetRelativeLuminance(resolved.Background) > 0.5)
-            {
-                return "Light";
+                return GetRelativeLuminance(resolved.Background) > 0.5 ? "Light" : "MidFdStandard";
             }
         }
 
@@ -360,13 +406,26 @@ public class FileListColorResolver
 
     public static ResolvedColors ResolveColors(AppSettings settings)
     {
+        settings.Input ??= new InputSettings();
+        settings.Appearance ??= new AppearanceSettings();
         var app = settings.Appearance;
-        var resolved = ResolvePresetColors(app.ColorTheme, app.CustomFileListColorPresets);
+        string effectivePresetKey = ResolveEffectiveColorPresetKey(settings);
+        var resolved = ResolvePresetColors(effectivePresetKey, app.CustomFileListColorPresets);
+        AutoProfileColorSettings? autoColors = IsAutoColorSelection(settings)
+            ? app.GetAutoProfileColors(settings.Input.FunctionKeyProfile)
+            : null;
 
-        if (app.UseCustomFileListColors)
+        if (autoColors?.UseCustomFileListColors == true)
+        {
+            resolved = ApplyCustomColors(resolved, autoColors.FileListColors);
+        }
+        else if (!IsAutoColorSelection(settings) && app.UseCustomFileListColors)
         {
             resolved = ApplyCustomColors(resolved, app.CustomFileListColors);
+        }
 
+        if ((autoColors?.UseCustomFileListColors == true) || (!IsAutoColorSelection(settings) && app.UseCustomFileListColors))
+        {
             if (app.EnableSemanticColorAssist)
             {
                 // 自動補正は背景とほぼ同化する極端なケースに限定する。

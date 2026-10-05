@@ -214,6 +214,7 @@ public sealed class FileOperationProgressDialog : Form
             FileOperationItemProgressKind.Copy => "コピー",
             FileOperationItemProgressKind.Move => "移動",
             FileOperationItemProgressKind.Delete => "削除",
+            FileOperationItemProgressKind.Restore => "復元",
             _ => "処理"
         };
     }

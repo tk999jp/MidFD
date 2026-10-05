@@ -8,6 +8,58 @@ namespace MidFD.Services;
 
 public static class TabFilterLockService
 {
+    public static bool IsActive(string? namePattern, TabFilterLockState? filter)
+    {
+        return !string.IsNullOrWhiteSpace(namePattern) ||
+            (filter?.Enabled == true && filter.HasAnyCondition);
+    }
+
+    public static int GetConditionCount(TabFilterLockState? filter)
+    {
+        if (filter == null || !filter.Enabled)
+        {
+            return 0;
+        }
+
+        int count = 0;
+        if (filter.IncludeExtensions.Count > 0) count++;
+        if (filter.ModifiedFromLocal.HasValue) count++;
+        if (filter.ModifiedToLocal.HasValue) count++;
+        if (filter.GitUnignoredOnly) count++;
+        return count;
+    }
+
+    public static string BuildDetailSummary(TabFilterLockState? filter)
+    {
+        if (filter == null || !filter.Enabled || !filter.HasAnyCondition)
+        {
+            return string.Empty;
+        }
+
+        var parts = new List<string>();
+        if (filter.IncludeExtensions.Count > 0)
+        {
+            parts.Add(string.Join(",", filter.IncludeExtensions));
+        }
+
+        if (filter.ModifiedFromLocal.HasValue)
+        {
+            parts.Add($"{TrimToMinute(filter.ModifiedFromLocal.Value):yyyy-MM-dd HH:mm}以降");
+        }
+
+        if (filter.ModifiedToLocal.HasValue)
+        {
+            parts.Add($"{TrimToMinute(filter.ModifiedToLocal.Value):yyyy-MM-dd HH:mm}以前");
+        }
+
+        if (filter.GitUnignoredOnly)
+        {
+            parts.Add("Git unignored");
+        }
+
+        return string.Join(" | ", parts);
+    }
+
     public static DirectoryResult Apply(
         string currentDirectory,
         IEnumerable<DirectoryInfo> directories,
@@ -65,34 +117,8 @@ public static class TabFilterLockService
 
     public static string BuildSummary(TabFilterLockState? filter)
     {
-        if (filter == null || !filter.Enabled || !filter.HasAnyCondition)
-        {
-            return string.Empty;
-        }
-
-        var parts = new List<string>();
-        if (filter.IncludeExtensions.Count > 0)
-        {
-            parts.Add(string.Join(",", filter.IncludeExtensions));
-        }
-
-        if (filter.ModifiedFromLocal.HasValue)
-        {
-            parts.Add($"{TrimToMinute(filter.ModifiedFromLocal.Value):yyyy-MM-dd HH:mm}以降");
-        }
-
-        if (filter.ModifiedToLocal.HasValue)
-        {
-            parts.Add($"{TrimToMinute(filter.ModifiedToLocal.Value):yyyy-MM-dd HH:mm}以前");
-        }
-
-        if (filter.GitUnignoredOnly)
-        {
-            parts.Add("Git unignored");
-        }
-
-        string detail = string.Join(" | ", parts);
-        return string.IsNullOrWhiteSpace(detail) ? "Filter: ON" : $"Filter: {detail}";
+        string detail = BuildDetailSummary(filter);
+        return string.IsNullOrWhiteSpace(detail) ? string.Empty : $"Filter: {detail}";
     }
 
     public static DateTime TrimToMinute(DateTime value)

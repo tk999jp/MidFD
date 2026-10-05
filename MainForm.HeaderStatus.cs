@@ -27,10 +27,10 @@ public partial class MainForm
         int right = Math.Max(0, panel.ClientSize.Width - 1);
         int bottom = Math.Max(0, panel.ClientSize.Height - 1);
         int top = Math.Clamp(headerPanel.Top, 0, bottom);
-        if (FileListColorResolver.NormalizeCoreTheme(_settings.Appearance?.ColorTheme) == "Light")
+        if (FileListColorResolver.NormalizeCoreTheme(_settingsCoordinator.Value.Appearance?.ColorTheme) == "Light")
         {
-            // Light テーマ: 左右線はスキップ、下辺は SeparatorLine で弱めに描画
-            using (var pen = new Pen(MidFDColors.SeparatorLine, 1))
+            // Light テーマ: 左右線はスキップ、下辺は構造境界として BorderLine で描画
+            using (var pen = new Pen(MidFDColors.BorderLine, 1))
             {
                 // 下辺 (一覧領域の外枠として描画)
                 e.Graphics.DrawLine(pen, 0, bottom, right, bottom);
@@ -113,15 +113,15 @@ public partial class MainForm
             }
             foreach (var pair in _headerSortKeyItems)
             {
-                pair.Value.Checked = pair.Key == _currentSort;
+                pair.Value.Checked = pair.Key == _browserApplicationCoordinator.CurrentSort;
             }
             if (_headerSortAscendingItem != null)
             {
-                _headerSortAscendingItem.Checked = _sortAscending;
+                _headerSortAscendingItem.Checked = _browserApplicationCoordinator.SortAscending;
             }
             if (_headerSortDescendingItem != null)
             {
-                _headerSortDescendingItem.Checked = !_sortAscending;
+                _headerSortDescendingItem.Checked = !_browserApplicationCoordinator.SortAscending;
             }
         };
         lblSort.MouseClick += HeaderSort_MouseClick;
@@ -154,14 +154,14 @@ public partial class MainForm
         {
             return;
         }
-        bool ascending = sortKind == _currentSort ? !_sortAscending : _sortAscending;
+        bool ascending = sortKind == _browserApplicationCoordinator.CurrentSort ? !_browserApplicationCoordinator.SortAscending : _browserApplicationCoordinator.SortAscending;
         ApplySortState(sortKind, ascending);
     }
     private void ApplyHeaderSortDirection(bool ascending)
     {
         if (!GuardClipboardBusy())
         {
-            ApplySortState(_currentSort, ascending);
+            ApplySortState(_browserApplicationCoordinator.CurrentSort, ascending);
         }
     }
     private static bool IsHeaderSortText(string text)
@@ -272,12 +272,12 @@ public partial class MainForm
     }
     private string? GetCurrentDirectoryForHeaderCopy()
     {
-        string path = _navigationService.CurrentPath;
+        string path = _browserApplicationCoordinator.CurrentPath;
         return string.IsNullOrWhiteSpace(path) ? null : path;
     }
     private string? GetSelectedItemFullPathForHeaderCopy()
     {
-        string currentPath = _navigationService.CurrentPath;
+        string currentPath = _browserApplicationCoordinator.CurrentPath;
         var item = GetCurrentBrowserItem();
         if (item == null) return null;
         string name = item.Text;
@@ -323,4 +323,42 @@ public partial class MainForm
         lblName.Cursor = string.IsNullOrWhiteSpace(fullPath) ? Cursors.Default : Cursors.Hand;
     }
     #endregion
+}
+
+internal readonly record struct BrowserFilterFrameGeometry(
+    int OuterLeft,
+    int OuterTop,
+    int OuterRight,
+    int OuterBottom,
+    int InnerLeft,
+    int InnerTop,
+    int InnerRight,
+    int InnerBottom);
+
+internal static class BrowserFramePresentation
+{
+    public static bool IsFilterFrameEmphasized(string? filterPattern) =>
+        !string.IsNullOrEmpty(filterPattern) &&
+        !string.Equals(filterPattern, "None", StringComparison.Ordinal);
+
+    public static bool IsFilterFrameEmphasized(string? filterPattern, TabFilterLockState? filterLock) =>
+        TabFilterLockService.IsActive(filterPattern, filterLock);
+
+    public static BrowserFilterFrameGeometry CalculateGeometry(Size clientSize)
+    {
+        int right = Math.Max(0, clientSize.Width - 1);
+        int bottom = Math.Max(0, clientSize.Height - 1);
+        int horizontalInset = Math.Min(2, right / 2);
+        int verticalInset = Math.Min(2, bottom / 2);
+
+        return new BrowserFilterFrameGeometry(
+            0,
+            0,
+            right,
+            bottom,
+            horizontalInset,
+            verticalInset,
+            right - horizontalInset,
+            bottom - verticalInset);
+    }
 }

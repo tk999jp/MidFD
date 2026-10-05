@@ -4,15 +4,23 @@ namespace MidFD.Services;
 
 public sealed class FeatureGateService
 {
-    public FeatureGateService(FeatureProfile profile)
+    private readonly bool? _workspaceSnapshotEnabledOverride;
+
+    public FeatureGateService(FeatureProfile profile, bool? workspaceSnapshotEnabledOverride = null)
     {
         Profile = profile;
+        _workspaceSnapshotEnabledOverride = workspaceSnapshotEnabledOverride;
     }
 
     public FeatureProfile Profile { get; }
 
     public bool IsEnabled(FeatureId featureId)
     {
+        if (featureId == FeatureId.WorkspaceSnapshot && _workspaceSnapshotEnabledOverride.HasValue)
+        {
+            return _workspaceSnapshotEnabledOverride.Value;
+        }
+
         return Profile switch
         {
             FeatureProfile.Full => true,

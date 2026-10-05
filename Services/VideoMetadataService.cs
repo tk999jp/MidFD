@@ -122,22 +122,27 @@ public static class VideoMetadataService
         psi.ArgumentList.Add(videoPath);
 
         using var process = new Process { StartInfo = psi };
+        bool processStarted = false;
         try
         {
             process.Start();
-            Task<string> stdoutTask = process.StandardOutput.ReadToEndAsync(cancellationToken);
-            Task<string> stderrTask = process.StandardError.ReadToEndAsync(cancellationToken);
-            Task waitTask = process.WaitForExitAsync(cancellationToken);
-            Task completed = await Task.WhenAny(waitTask, Task.Delay(TimeoutMilliseconds, cancellationToken));
-            if (completed != waitTask)
-            {
-                TryKillProcess(process);
-                return new VideoMetadataDetails { Success = false, ErrorMessage = "ffprobe timeout" };
-            }
-
-            await waitTask;
+            processStarted = true;
+            Task<string> stdoutTask = process.StandardOutput.ReadToEndAsync();
+            Task<string> stderrTask = process.StandardError.ReadToEndAsync();
+            VideoProcessWaitOutcome waitOutcome = await VideoProcessLifetime.WaitForExitOrStopAsync(
+                process,
+                cancellationToken,
+                TimeSpan.FromMilliseconds(TimeoutMilliseconds));
             string stdout = (await stdoutTask).Trim();
             string stderr = (await stderrTask).Trim();
+            if (waitOutcome == VideoProcessWaitOutcome.TimedOut)
+            {
+                return new VideoMetadataDetails { Success = false, ErrorMessage = "ffprobe timeout" };
+            }
+            if (waitOutcome == VideoProcessWaitOutcome.Cancelled || cancellationToken.IsCancellationRequested)
+            {
+                return new VideoMetadataDetails { Success = false, ErrorMessage = "duration canceled" };
+            }
             if (process.ExitCode != 0)
             {
                 return new VideoMetadataDetails { Success = false, ErrorMessage = string.IsNullOrWhiteSpace(stderr) ? $"ffprobe exit={process.ExitCode}" : stderr };
@@ -164,6 +169,13 @@ public static class VideoMetadataService
         catch (Exception ex)
         {
             return new VideoMetadataDetails { Success = false, ErrorMessage = ex.Message };
+        }
+        finally
+        {
+            if (processStarted && !process.HasExited)
+            {
+                await VideoProcessLifetime.StopAndWaitAsync(process).ConfigureAwait(false);
+            }
         }
     }
 
@@ -319,18 +331,4 @@ public static class VideoMetadataService
         return TryParseDoubleInvariant(frameRateRaw);
     }
 
-    private static void TryKillProcess(Process process)
-    {
-        try
-        {
-            if (!process.HasExited)
-            {
-                process.Kill(entireProcessTree: true);
-            }
-        }
-        catch
-        {
-            // no-op
-        }
-    }
 }

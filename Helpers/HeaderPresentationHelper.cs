@@ -22,6 +22,7 @@ namespace MidFD.Helpers
             public string MarkCountLine { get; set; } = string.Empty;
             public string MarkSizeLine { get; set; } = string.Empty;
             public string SortFilter { get; set; } = string.Empty;
+            public bool FilterActive { get; set; }
             public string ItemAttr { get; set; } = string.Empty;
             public string FileDate { get; set; } = string.Empty;
             public string FileStats { get; set; } = string.Empty;
@@ -64,6 +65,7 @@ namespace MidFD.Helpers
             public SortKind SortKind { get; set; }
             public bool SortAscending { get; set; }
             public string FilterPattern { get; set; } = string.Empty;
+            public bool FilterUseRegex { get; set; }
             public string FilterLockSummary { get; set; } = string.Empty;
             public bool ShowExtensions { get; set; } = true;
             public bool ShowDirectoryMarker { get; set; } = true;
@@ -95,14 +97,18 @@ namespace MidFD.Helpers
             var parts = new List<string>();
 
             // Filter: active 時のみ。Mark があっても残す
-            if (!string.IsNullOrEmpty(state.FilterPattern) && state.FilterPattern != "None")
+            bool nameFilterActive = !string.IsNullOrEmpty(state.FilterPattern) && state.FilterPattern != "None";
+            bool detailFilterActive = !string.IsNullOrWhiteSpace(state.FilterLockSummary);
+            if (nameFilterActive || detailFilterActive)
             {
-                parts.Add($"F:{state.FilterPattern}");
-            }
-
-            if (!string.IsNullOrWhiteSpace(state.FilterLockSummary))
-            {
-                parts.Add(state.FilterLockSummary);
+                result.FilterActive = true;
+                string filterMode = state.FilterUseRegex ? "FILTER中(R)" : "FILTER中";
+                string summary = nameFilterActive ? state.FilterPattern : state.FilterLockSummary;
+                if (nameFilterActive && detailFilterActive)
+                {
+                    summary = $"{summary} +{state.FilterLockSummary}";
+                }
+                parts.Add($"{filterMode}: {summary} [Escで解除]");
             }
 
             // Sort: 非デフォルト時はMarkの有無に関係なく表示する。

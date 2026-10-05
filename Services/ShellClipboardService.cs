@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Drawing;
 using System.IO;
 using System.Linq;
+using System.Runtime.InteropServices;
 using System.Windows.Forms;
 
 namespace MidFD.Services
@@ -10,6 +11,48 @@ namespace MidFD.Services
     public static class ShellClipboardService
     {
         private const string PreferredDropEffectFormat = "Preferred DropEffect";
+        private const uint ClipboardFormatHDrop = 15;
+        private const uint DragQueryFileAllFiles = 0xFFFFFFFF;
+        private static readonly IClipboardStatusProbe DefaultClipboardStatusProbe = new NativeClipboardStatusProbe();
+
+        internal readonly struct ClipboardStatusSnapshot
+        {
+            public bool HasFileDrop { get; }
+            public int FileDropCount { get; }
+            public bool IsCut { get; }
+            public bool HasImage { get; }
+            public bool HasText { get; }
+
+            public ClipboardStatusSnapshot(
+                bool hasFileDrop,
+                int fileDropCount,
+                bool isCut,
+                bool hasImage,
+                bool hasText)
+            {
+                HasFileDrop = hasFileDrop;
+                FileDropCount = fileDropCount;
+                IsCut = isCut;
+                HasImage = hasImage;
+                HasText = hasText;
+            }
+        }
+
+        internal interface IClipboardStatusProbe
+        {
+            bool TryRead(out ClipboardStatusSnapshot snapshot, out string? errorMessage);
+        }
+
+        internal static bool TryGetStatus(out ClipboardStatusSnapshot snapshot, out string? errorMessage)
+            => TryGetStatus(DefaultClipboardStatusProbe, out snapshot, out errorMessage);
+
+        internal static bool TryGetStatus(
+            IClipboardStatusProbe probe,
+            out ClipboardStatusSnapshot snapshot,
+            out string? errorMessage)
+        {
+            return probe.TryRead(out snapshot, out errorMessage);
+        }
 
         public static bool HasFileDrop()
         {
@@ -143,6 +186,137 @@ namespace MidFD.Services
                 LogService.Error("TryGetText failed", ex);
                 return false;
             }
+        }
+
+        private sealed class NativeClipboardStatusProbe : IClipboardStatusProbe
+        {
+            public bool TryRead(out ClipboardStatusSnapshot snapshot, out string? errorMessage)
+            {
+                bool hasImage = false;
+                bool hasText = false;
+                bool hasFileDrop = false;
+                bool isCut = false;
+                int fileDropCount = 0;
+                errorMessage = null;
+
+                try
+                {
+                    hasImage = Clipboard.ContainsImage();
+                }
+                catch (Exception ex)
+                {
+                    errorMessage = ex.Message;
+                    LogService.Error("Clipboard status image probe failed", ex);
+                }
+
+                try
+                {
+                    hasText = Clipboard.ContainsText(TextDataFormat.UnicodeText);
+                }
+                catch (Exception ex)
+                {
+                    errorMessage ??= ex.Message;
+                    LogService.Error("Clipboard status text probe failed", ex);
+                }
+
+                bool clipboardOpened = false;
+                try
+                {
+                    clipboardOpened = OpenClipboard(IntPtr.Zero);
+                    if (!clipboardOpened)
+                    {
+                        throw new ExternalException("OpenClipboard failed.", Marshal.GetLastWin32Error());
+                    }
+
+                    IntPtr hDrop = GetClipboardData(ClipboardFormatHDrop);
+                    hasFileDrop = hDrop != IntPtr.Zero;
+                    if (hasFileDrop)
+                    {
+                        uint count = DragQueryFile(hDrop, DragQueryFileAllFiles, IntPtr.Zero, 0);
+                        fileDropCount = count > int.MaxValue ? int.MaxValue : (int)count;
+
+                        uint dropEffectFormat = RegisterClipboardFormat(PreferredDropEffectFormat);
+                        if (dropEffectFormat != 0)
+                        {
+                            isCut = ReadIsCut(GetClipboardData(dropEffectFormat));
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    errorMessage ??= ex.Message;
+                    LogService.Error("Clipboard status file-drop probe failed", ex);
+                    hasFileDrop = false;
+                    fileDropCount = 0;
+                    isCut = false;
+                }
+                finally
+                {
+                    if (clipboardOpened)
+                    {
+                        CloseClipboard();
+                    }
+                }
+
+                snapshot = new ClipboardStatusSnapshot(
+                    hasFileDrop,
+                    fileDropCount,
+                    isCut,
+                    hasImage,
+                    hasText);
+                return true;
+            }
+
+            private static bool ReadIsCut(IntPtr dropEffectHandle)
+            {
+                if (dropEffectHandle == IntPtr.Zero)
+                {
+                    return false;
+                }
+
+                IntPtr data = GlobalLock(dropEffectHandle);
+                if (data == IntPtr.Zero)
+                {
+                    return false;
+                }
+
+                try
+                {
+                    return Marshal.ReadInt32(data) == 2;
+                }
+                finally
+                {
+                    GlobalUnlock(dropEffectHandle);
+                }
+            }
+
+            [DllImport("user32.dll", SetLastError = true)]
+            [return: MarshalAs(UnmanagedType.Bool)]
+            private static extern bool OpenClipboard(IntPtr hWndNewOwner);
+
+            [DllImport("user32.dll", SetLastError = true)]
+            [return: MarshalAs(UnmanagedType.Bool)]
+            private static extern bool CloseClipboard();
+
+            [DllImport("user32.dll", SetLastError = true)]
+            private static extern IntPtr GetClipboardData(uint uFormat);
+
+            [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+            private static extern uint RegisterClipboardFormat(string lpszFormat);
+
+            [DllImport("shell32.dll", EntryPoint = "DragQueryFileW", SetLastError = true)]
+            private static extern uint DragQueryFile(
+                IntPtr hDrop,
+                uint iFile,
+                IntPtr lpszFile,
+                uint cch);
+
+            [DllImport("kernel32.dll", SetLastError = true)]
+            private static extern IntPtr GlobalLock(IntPtr hMem);
+
+            [DllImport("kernel32.dll", SetLastError = true)]
+            [return: MarshalAs(UnmanagedType.Bool)]
+            private static extern bool GlobalUnlock(IntPtr hMem);
         }
 
         internal sealed class ClipboardFileDropSnapshot

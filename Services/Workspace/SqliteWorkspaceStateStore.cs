@@ -13,6 +13,7 @@ public sealed class SqliteWorkspaceStateStore : IWorkspaceStateStore
 {
     private const string SchemaVersion = "1";
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
+    private static readonly JsonSerializerOptions UserTabGroupJsonOptions = CreateUserTabGroupJsonOptions();
     private readonly string _dbPath;
 
     public SqliteWorkspaceStateStore(string dbPath)
@@ -44,6 +45,7 @@ public sealed class SqliteWorkspaceStateStore : IWorkspaceStateStore
                 : activeCategoryId
         };
         snapshot.Categories.AddRange(categories);
+        snapshot.UserTabGroups = LoadUserTabGroups(connection);
 
         return new WorkspaceState
         {
@@ -71,6 +73,14 @@ public sealed class SqliteWorkspaceStateStore : IWorkspaceStateStore
         WriteMeta(connection, transaction, "schema_version", SchemaVersion);
         WriteMeta(connection, transaction, "active_category_id", state.RestoreSnapshot.ActiveCategoryId);
         WriteMeta(connection, transaction, "saved_at_utc", state.SavedAtUtc.ToString("O"));
+        if (state.RestoreSnapshot.UserTabGroups is { Count: > 0 } userTabGroups)
+        {
+            WriteMeta(
+                connection,
+                transaction,
+                "user_tab_groups_json",
+                JsonSerializer.Serialize(userTabGroups, UserTabGroupJsonOptions));
+        }
 
         int categoryOrder = 0;
         foreach (BrowserTabRestoreCategoryState category in state.RestoreSnapshot.Categories)
@@ -78,7 +88,7 @@ public sealed class SqliteWorkspaceStateStore : IWorkspaceStateStore
             string categoryId = string.IsNullOrWhiteSpace(category.Id)
                 ? BrowserTabSettings.DefaultCategoryId
                 : category.Id;
-            InsertCategory(connection, transaction, categoryId, category.DisplayName, categoryOrder++);
+            InsertCategory(connection, transaction, categoryId, category.DisplayName, categoryOrder++, category.ActiveTabIndex);
 
             int tabOrder = 0;
             foreach (BrowserTabSessionState tab in category.OpenTabs)
@@ -139,9 +149,11 @@ public sealed class SqliteWorkspaceStateStore : IWorkspaceStateStore
             CREATE TABLE IF NOT EXISTS workspace_categories (
                 category_id TEXT PRIMARY KEY,
                 display_name TEXT NOT NULL,
-                sort_order INTEGER NOT NULL
+                sort_order INTEGER NOT NULL,
+                active_tab_index INTEGER NOT NULL DEFAULT 0
             );
             """);
+        EnsureColumn(connection, "workspace_categories", "active_tab_index", "INTEGER NOT NULL DEFAULT 0");
         ExecuteNonQuery(connection, null, """
             CREATE TABLE IF NOT EXISTS workspace_tabs (
                 tab_id TEXT PRIMARY KEY,
@@ -181,8 +193,11 @@ public sealed class SqliteWorkspaceStateStore : IWorkspaceStateStore
         var categories = new List<BrowserTabRestoreCategoryState>();
         var categoryIds = new List<string>();
         using var command = connection.CreateCommand();
-        command.CommandText = """
-            SELECT category_id, display_name
+        string activeTabIndexColumn = HasColumn(connection, "workspace_categories", "active_tab_index")
+            ? "active_tab_index"
+            : "0";
+        command.CommandText = $"""
+            SELECT category_id, display_name, {activeTabIndexColumn}
             FROM workspace_categories
             ORDER BY sort_order ASC;
             """;
@@ -194,7 +209,8 @@ public sealed class SqliteWorkspaceStateStore : IWorkspaceStateStore
                 categories.Add(new BrowserTabRestoreCategoryState
                 {
                     Id = categoryId,
-                    DisplayName = reader.GetString(1)
+                    DisplayName = reader.GetString(1),
+                    ActiveTabIndex = reader.GetInt32(2)
                 });
                 categoryIds.Add(categoryId);
             }
@@ -206,6 +222,30 @@ public sealed class SqliteWorkspaceStateStore : IWorkspaceStateStore
         }
 
         return categories;
+    }
+
+    private static List<BrowserTabGroupRestoreState> LoadUserTabGroups(SqliteConnection connection)
+    {
+        string? groupsJson = ReadMeta(connection, "user_tab_groups_json");
+        if (string.IsNullOrWhiteSpace(groupsJson)) return new List<BrowserTabGroupRestoreState>();
+
+        try
+        {
+            return JsonSerializer.Deserialize<List<BrowserTabGroupRestoreState>>(groupsJson, UserTabGroupJsonOptions)
+                ?? new List<BrowserTabGroupRestoreState>();
+        }
+        catch (JsonException ex)
+        {
+            LogService.Warn($"[WorkspaceStore] Optional tab group state was ignored: {ex.Message}");
+            return new List<BrowserTabGroupRestoreState>();
+        }
+    }
+
+    private static JsonSerializerOptions CreateUserTabGroupJsonOptions()
+    {
+        var options = new JsonSerializerOptions(JsonOptions);
+        options.Converters.Add(new BrowserTabGroupRestoreStateListConverter());
+        return options;
     }
 
     private static List<BrowserTabSessionState> LoadTabs(SqliteConnection connection, string categoryId)
@@ -285,17 +325,18 @@ public sealed class SqliteWorkspaceStateStore : IWorkspaceStateStore
         return marks;
     }
 
-    private static void InsertCategory(SqliteConnection connection, SqliteTransaction transaction, string categoryId, string displayName, int sortOrder)
+    private static void InsertCategory(SqliteConnection connection, SqliteTransaction transaction, string categoryId, string displayName, int sortOrder, int activeTabIndex)
     {
         using var command = connection.CreateCommand();
         command.Transaction = transaction;
         command.CommandText = """
-            INSERT INTO workspace_categories (category_id, display_name, sort_order)
-            VALUES ($category_id, $display_name, $sort_order);
+            INSERT INTO workspace_categories (category_id, display_name, sort_order, active_tab_index)
+            VALUES ($category_id, $display_name, $sort_order, $active_tab_index);
             """;
         command.Parameters.AddWithValue("$category_id", categoryId);
         command.Parameters.AddWithValue("$display_name", string.IsNullOrWhiteSpace(displayName) ? categoryId : displayName);
         command.Parameters.AddWithValue("$sort_order", sortOrder);
+        command.Parameters.AddWithValue("$active_tab_index", Math.Max(0, activeTabIndex));
         command.ExecuteNonQuery();
     }
 
@@ -404,6 +445,18 @@ public sealed class SqliteWorkspaceStateStore : IWorkspaceStateStore
         {
             ExecuteNonQuery(connection, null, $"ALTER TABLE {tableName} ADD COLUMN {columnName} {columnDefinition};");
         }
+    }
+
+    private static bool HasColumn(SqliteConnection connection, string tableName, string columnName)
+    {
+        using var command = connection.CreateCommand();
+        command.CommandText = $"PRAGMA table_info({tableName});";
+        using SqliteDataReader reader = command.ExecuteReader();
+        while (reader.Read())
+        {
+            if (string.Equals(reader.GetString(1), columnName, StringComparison.OrdinalIgnoreCase)) return true;
+        }
+        return false;
     }
 
     private static List<string> DeserializeList(string json)

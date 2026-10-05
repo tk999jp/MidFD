@@ -288,9 +288,9 @@ public partial class MainForm
             recoveryBounds = lastGood;
             fallbackSource = "LastKnownGood";
         }
-        else if (IsSaneNormalBounds(new Rectangle(_settings.Window.X, _settings.Window.Y, _settings.Window.Width, _settings.Window.Height)))
+        else if (IsSaneNormalBounds(new Rectangle(_settingsCoordinator.Value.Window.X, _settingsCoordinator.Value.Window.Y, _settingsCoordinator.Value.Window.Width, _settingsCoordinator.Value.Window.Height)))
         {
-            recoveryBounds = new Rectangle(_settings.Window.X, _settings.Window.Y, _settings.Window.Width, _settings.Window.Height);
+            recoveryBounds = new Rectangle(_settingsCoordinator.Value.Window.X, _settingsCoordinator.Value.Window.Y, _settingsCoordinator.Value.Window.Width, _settingsCoordinator.Value.Window.Height);
             fallbackSource = "Settings";
         }
         else

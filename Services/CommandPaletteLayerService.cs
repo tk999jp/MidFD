@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using MidFD.Commands;
 using MidFD.Helpers;
 using MidFD.Models;
 
@@ -37,16 +38,23 @@ internal static class CommandPaletteLayerService
 
 internal interface ICommandPaletteLayerHost
 {
+    bool IsFileOperationBusy => false;
     string GetCurrentBrowserPath();
     QuickAccessStore GetQuickAccessStoreClone();
     IReadOnlyList<string> GetBackHistorySnapshot();
     IReadOnlyList<string> GetForwardHistorySnapshot();
     MarkSlotStore GetMarkSlotStoreClone();
     SelectionResult ResolveSelection();
+    IReadOnlyDictionary<string, bool> GetPassiveSelectionPathKinds();
     void NavigateToPath(string path);
     void RestoreMarksFromSlot(int slotNumber);
     void ShowArchiveContents(string archivePath);
-    Task ExecuteArchiveHashAsync(SevenZipHashAlgorithm algorithm);
+    void ExecuteCommandFromUi(
+        string commandId,
+        CommandScope scope,
+        string source,
+        SelectionResult? selectionSnapshot = null,
+        SevenZipHashAlgorithm? hashAlgorithm = null);
 }
 
 internal interface ICommandPaletteLayerProvider
@@ -267,7 +275,8 @@ internal sealed class QuickAccessLayerProvider : ICommandPaletteLayerProvider
         {
             index++;
             string status = QuickAccessService.GetEntryStatusLabel(entry, currentPath);
-            bool canExecute = !string.IsNullOrWhiteSpace(entry.Path) &&
+            bool canExecute = CommandBusyPolicy.CanMutateBrowserState(host.IsFileOperationBusy) &&
+                !string.IsNullOrWhiteSpace(entry.Path) &&
                 !string.Equals(status, "見つからない", StringComparison.OrdinalIgnoreCase);
             string displayName = string.IsNullOrWhiteSpace(entry.DisplayName)
                 ? QuickAccessService.CreateDisplayName(entry.Path)
@@ -306,9 +315,11 @@ internal sealed class QuickAccessLayerProvider : ICommandPaletteLayerProvider
                 CanExecute = canExecute ? null : () => false,
                 NonExecutableMessage = canExecute
                     ? null
-                    : string.IsNullOrWhiteSpace(entry.Path)
-                        ? "移動先が未設定です。"
-                        : "移動先が見つかりません。",
+                    : host.IsFileOperationBusy
+                        ? "ファイル操作中は実行できません。"
+                        : string.IsNullOrWhiteSpace(entry.Path)
+                            ? "移動先が未設定です。"
+                            : "移動先が見つかりません。",
                 Execute = () => host.NavigateToPath(entry.Path)
             });
         }
@@ -362,8 +373,10 @@ internal sealed class MarkSlotLayerProvider : ICommandPaletteLayerProvider
                 LayerBadge = $"M R {slot.SlotNumber}",
                 LayerKind = $"Slot {slot.SlotNumber}",
                 Category = "Mark",
-                CanExecute = slot.SlotNumber > 0 ? null : () => false,
-                NonExecutableMessage = slot.SlotNumber > 0 ? null : "このスロットは実行できません。",
+                CanExecute = slot.SlotNumber > 0 && CommandBusyPolicy.CanMutateBrowserState(host.IsFileOperationBusy) ? null : () => false,
+                NonExecutableMessage = host.IsFileOperationBusy
+                    ? "ファイル操作中は実行できません。"
+                    : slot.SlotNumber > 0 ? null : "このスロットは実行できません。",
                 Execute = () => host.RestoreMarksFromSlot(slot.SlotNumber)
             });
         }
@@ -449,10 +462,13 @@ internal sealed class ArchiveLayerProvider : ICommandPaletteLayerProvider
         out CommandPalettePresentation? presentation)
     {
         SelectionResult selection = host.ResolveSelection();
+        BrowserPassiveSelectionFacts facts = BrowserPassiveSelectionFacts.Resolve(
+            selection,
+            host.GetPassiveSelectionPathKinds(),
+            allowFileSystemFallback: false);
         var commands = new List<CommandLauncherCommand>();
-        bool hasArchiveSelection = selection.Count > 0 &&
-            selection.FullPaths.All(path => File.Exists(path) && ArchiveFileTypeHelper.IsArchive(path));
-        bool hasHashableSelection = selection.Count > 0 && selection.FullPaths.All(File.Exists) && !selection.FullPaths.Any(Directory.Exists);
+        bool hasArchiveSelection = facts.HasArchiveSelection;
+        bool hasHashableSelection = facts.HasHashableSelection;
 
         commands.Add(BuildListCommand(host, hasArchiveSelection, selection));
         commands.Add(BuildHashCommand(host, SevenZipHashAlgorithm.Sha256, hasHashableSelection, selection));
@@ -472,7 +488,10 @@ internal sealed class ArchiveLayerProvider : ICommandPaletteLayerProvider
     private static CommandLauncherCommand BuildListCommand(ICommandPaletteLayerHost host, bool canExecute, SelectionResult selection)
     {
         string path = selection.FirstPath ?? string.Empty;
-        string status = canExecute ? "一覧表示可" : BuildListUnavailableMessage(selection);
+        bool available = canExecute && CommandBusyPolicy.CanExecute(CommandBusyBehavior.Block, host.IsFileOperationBusy);
+        string status = available
+            ? "一覧表示可"
+            : host.IsFileOperationBusy ? "ファイル操作中は実行できません。" : BuildListUnavailableMessage(selection);
         return new CommandLauncherCommand
         {
             Id = "layer.archive.list",
@@ -483,8 +502,8 @@ internal sealed class ArchiveLayerProvider : ICommandPaletteLayerProvider
             LayerBadge = "A L",
             LayerKind = "List",
             Category = "Archive",
-            CanExecute = canExecute ? null : () => false,
-            NonExecutableMessage = canExecute ? null : status,
+            CanExecute = available ? null : () => false,
+            NonExecutableMessage = available ? null : status,
             Execute = () => host.ShowArchiveContents(path)
         };
     }
@@ -505,9 +524,10 @@ internal sealed class ArchiveLayerProvider : ICommandPaletteLayerProvider
             _ => "SHA256"
         };
 
-        string status = canExecute
+        bool available = canExecute && CommandBusyPolicy.CanStartFileOperation(host.IsFileOperationBusy);
+        string status = available
             ? $"{algorithmName} 計算可"
-            : BuildHashUnavailableMessage(selection);
+            : host.IsFileOperationBusy ? "ファイル操作中は実行できません。" : BuildHashUnavailableMessage(selection);
         return new CommandLauncherCommand
         {
             Id = $"layer.archive.hash.{algorithmName.ToLowerInvariant()}",
@@ -518,9 +538,17 @@ internal sealed class ArchiveLayerProvider : ICommandPaletteLayerProvider
             LayerBadge = $"A H {algorithmName}",
             LayerKind = algorithmName,
             Category = "Archive",
-            CanExecute = canExecute ? null : () => false,
-            NonExecutableMessage = canExecute ? null : status,
-            Execute = () => _ = host.ExecuteArchiveHashAsync(algorithm)
+            CanExecute = () => canExecute && CommandBusyPolicy.CanStartFileOperation(host.IsFileOperationBusy),
+            NonExecutableMessage = canExecute ? null : BuildHashUnavailableMessage(selection),
+            NonExecutableMessageProvider = () => host.IsFileOperationBusy
+                ? "ファイル操作中は実行できません。"
+                : null,
+            Execute = () => host.ExecuteCommandFromUi(
+                CommandIds.ArchiveHash,
+                CommandScope.Browser,
+                "CommandPalette.Layer.ArchiveHash",
+                selection,
+                hashAlgorithm: algorithm)
         };
     }
 
@@ -548,27 +576,12 @@ internal sealed class ArchiveLayerProvider : ICommandPaletteLayerProvider
             return "アーカイブ一覧を開くには、ZIPなどのアーカイブファイルを選択してください。";
         }
 
-        if (selection.FullPaths.Any(path => !File.Exists(path)))
-        {
-            return "アーカイブ一覧を開くには、ZIPなどのアーカイブファイルを選択してください。";
-        }
-
         return "アーカイブ一覧を開くには、ZIPなどのアーカイブファイルを選択してください。";
     }
 
     private static string BuildHashUnavailableMessage(SelectionResult selection)
     {
         if (selection.Count == 0)
-        {
-            return "ハッシュを計算するファイルが選択されていません。";
-        }
-
-        if (selection.FullPaths.Any(Directory.Exists))
-        {
-            return "ハッシュを計算するファイルが選択されていません。";
-        }
-
-        if (selection.FullPaths.Any(path => !File.Exists(path)))
         {
             return "ハッシュを計算するファイルが選択されていません。";
         }

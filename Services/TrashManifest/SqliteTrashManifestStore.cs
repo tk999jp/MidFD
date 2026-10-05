@@ -260,7 +260,6 @@ internal sealed class SqliteTrashManifestStore : ITrashManifestStore
     {
         var record = manifest.Records.FirstOrDefault(r => string.Equals(r.TrashPath, trashPath, StringComparison.OrdinalIgnoreCase));
         if (record == null) return false;
-        record.Status = status;
 
         try
         {
@@ -270,7 +269,14 @@ internal sealed class SqliteTrashManifestStore : ITrashManifestStore
             command.CommandText = "UPDATE trash_records SET status = @status WHERE trash_path = @tp";
             command.Parameters.AddWithValue("@status", status.ToString());
             command.Parameters.AddWithValue("@tp", trashPath);
-            return command.ExecuteNonQuery() > 0;
+            int affected = command.ExecuteNonQuery();
+            if (affected <= 0)
+            {
+                return false;
+            }
+
+            record.Status = status;
+            return true;
         }
         catch (Exception ex)
         {
@@ -284,15 +290,7 @@ internal sealed class SqliteTrashManifestStore : ITrashManifestStore
         var paths = trashPaths.ToList();
         if (paths.Count == 0) return 0;
 
-        // Update memory
-        var pathSet = new HashSet<string>(paths, StringComparer.OrdinalIgnoreCase);
-        foreach (var record in manifest.Records)
-        {
-            if (pathSet.Contains(record.TrashPath))
-            {
-                record.Status = status;
-            }
-        }
+        var updatedPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
         // Update DB
         try
@@ -312,10 +310,24 @@ internal sealed class SqliteTrashManifestStore : ITrashManifestStore
             {
                 command.Parameters["@status"].Value = status.ToString();
                 command.Parameters["@tp"].Value = path;
-                updated += command.ExecuteNonQuery();
+                int affected = command.ExecuteNonQuery();
+                updated += affected;
+                if (affected > 0)
+                {
+                    updatedPaths.Add(path);
+                }
             }
 
             transaction.Commit();
+
+            foreach (var record in manifest.Records)
+            {
+                if (updatedPaths.Contains(record.TrashPath))
+                {
+                    record.Status = status;
+                }
+            }
+
             return updated;
         }
         catch (Exception ex)

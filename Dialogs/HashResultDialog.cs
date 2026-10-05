@@ -14,7 +14,7 @@ public sealed class HashResultDialog : Form
     private readonly string _targetSummary;
     private readonly SevenZipHashAlgorithm _algorithm;
     private readonly string _output;
-    private readonly IReadOnlyList<HashDisplayItem> _hashItems;
+    private readonly IReadOnlyList<HashResultItem> _hashItems;
 
     private readonly ListView _hashListView;
     private readonly TextBox _outputTextBox;
@@ -30,7 +30,7 @@ public sealed class HashResultDialog : Form
         _targetSummary = targetSummary;
         _algorithm = algorithm;
         _output = output;
-        _hashItems = ExtractHashItems();
+        _hashItems = HashResultParser.Parse(output, algorithm);
 
         Text = "CRC/SHA 計算結果";
         FormBorderStyle = FormBorderStyle.Sizable;
@@ -296,7 +296,7 @@ public sealed class HashResultDialog : Form
 
     private void CopySelectedHashOrShowInfo()
     {
-        HashDisplayItem? item = GetSelectedHashItem();
+        HashResultItem? item = GetSelectedHashItem();
         if (item != null)
         {
             Clipboard.SetText(item.HashValue);
@@ -331,7 +331,7 @@ public sealed class HashResultDialog : Form
         return (value ?? string.Empty).Replace("\"", "\"\"");
     }
 
-    private HashDisplayItem? GetSelectedHashItem()
+    private HashResultItem? GetSelectedHashItem()
     {
         if (_hashListView.SelectedIndices.Count == 0)
         {
@@ -357,160 +357,4 @@ public sealed class HashResultDialog : Form
         };
     }
 
-    private IReadOnlyList<HashDisplayItem> ExtractHashItems()
-    {
-        try
-        {
-            if (!TryParseRows(out var rows) || rows.Count == 0)
-            {
-                return Array.Empty<HashDisplayItem>();
-            }
-
-            var items = new List<HashDisplayItem>();
-            foreach (var row in rows)
-            {
-                foreach (var hash in row.Hashes)
-                {
-                    if (string.IsNullOrWhiteSpace(hash.Value))
-                    {
-                        continue;
-                    }
-
-                    items.Add(new HashDisplayItem(
-                        row.FileName,
-                        NormalizeHashLabel(hash.Key),
-                        hash.Value));
-                }
-            }
-
-            return items;
-        }
-        catch
-        {
-            return Array.Empty<HashDisplayItem>();
-        }
-    }
-
-    private static string NormalizeHashLabel(string value)
-    {
-        return value.ToUpperInvariant() switch
-        {
-            "CRC32" => "CRC-32",
-            "CRC64" => "CRC-64",
-            "SHA1" => "SHA-1",
-            "SHA256" => "SHA-256",
-            _ => value
-        };
-    }
-
-    private bool TryParseRows(out List<RowData> rows)
-    {
-        rows = new List<RowData>();
-        var lines = _output.Split(new[] { "\r\n", "\r", "\n" }, StringSplitOptions.None);
-        int startLine = -1;
-        int endLine = -1;
-
-        for (int i = 0; i < lines.Length; i++)
-        {
-            if (lines[i].StartsWith("---------"))
-            {
-                if (startLine == -1)
-                {
-                    startLine = i + 1;
-                }
-                else
-                {
-                    endLine = i;
-                    break;
-                }
-            }
-        }
-
-        if (startLine == -1 || endLine == -1 || startLine >= endLine)
-        {
-            return false;
-        }
-
-        var dashedLine = lines[startLine - 1];
-        var headerLine = lines[startLine - 2];
-        var columns = ParseColumns(headerLine, dashedLine);
-
-        for (int i = startLine; i < endLine; i++)
-        {
-            var row = ExtractRowData(lines[i], columns);
-            if (row != null)
-            {
-                rows.Add(row);
-            }
-        }
-
-        return rows.Count > 0;
-    }
-
-    private static List<ColumnInfo> ParseColumns(string headerLine, string dashedLine)
-    {
-        var columns = new List<ColumnInfo>();
-        int currentStart = 0;
-
-        for (int i = 0; i < dashedLine.Length; i++)
-        {
-            if (dashedLine[i] == ' ')
-            {
-                if (i > currentStart)
-                {
-                    string name = headerLine.Substring(currentStart, i - currentStart).Trim();
-                    columns.Add(new ColumnInfo(name, currentStart, i - currentStart));
-                }
-
-                currentStart = i + 1;
-                while (currentStart < dashedLine.Length && dashedLine[currentStart] == ' ')
-                {
-                    currentStart++;
-                }
-                i = currentStart - 1;
-            }
-        }
-
-        if (currentStart < headerLine.Length)
-        {
-            columns.Add(new ColumnInfo(headerLine.Substring(currentStart).Trim(), currentStart, -1));
-        }
-
-        return columns;
-    }
-
-    private static RowData? ExtractRowData(string line, List<ColumnInfo> columns)
-    {
-        var hashes = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-        string fileName = string.Empty;
-
-        foreach (var col in columns)
-        {
-            if (col.Start >= line.Length)
-            {
-                continue;
-            }
-
-            string value = col.Length == -1
-                ? line.Substring(col.Start).Trim()
-                : line.Substring(col.Start, Math.Min(col.Length, line.Length - col.Start)).Trim();
-
-            if (col.Name.Equals("Name", StringComparison.OrdinalIgnoreCase))
-            {
-                fileName = value;
-            }
-            else if (!col.Name.Equals("Size", StringComparison.OrdinalIgnoreCase))
-            {
-                hashes[col.Name] = value;
-            }
-        }
-
-        return string.IsNullOrEmpty(fileName) || hashes.Count == 0
-            ? null
-            : new RowData(fileName, hashes);
-    }
-
-    private sealed record HashDisplayItem(string Target, string Algorithm, string HashValue);
-    private sealed record ColumnInfo(string Name, int Start, int Length);
-    private sealed record RowData(string FileName, Dictionary<string, string> Hashes);
 }

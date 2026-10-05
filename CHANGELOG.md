@@ -2,6 +2,28 @@
 
 利用者向けの主な変更概要です。内部の開発ログやtest追加は原則として記載しません。
 
+## v2026.10.05 — 内容検索・Browser操作・一覧表示の改善
+
+### 追加・操作変更
+- 配下fileの内容検索、文字コード選択（Auto／UTF-8／Shift_JIS／UTF-16 LE／UTF-16 BE）、検索中の結果表示とPreview。結果Filter／一覧出力は検索完了後に利用。
+- 内容検索用ripgrep 15.2.0を同梱。実際のengine／version表示、PATH上のrgと内蔵検索へのfallback。PCRE2は非対応。
+- 一覧Filterと配下Searchの独立した条件入力、検索結果からの確認tab／Preview／再検索／一覧出力。
+- タブ間の戻る／進む／履歴一覧、同カテゴリ内のタブグループと復元、複数directoryの一括タブ追加。ファイル操作とタブ追加を共通Undo／Redoで直前順に処理。
+- @による頭文字ジャンプ、Windows「プログラムから開く」、マークfileの既定アプリ一括起動、Explorerで対象表示、OS file clipboardコピーの操作整合。
+- 新規fileの拡張子preset設定、入力割り当てのキー別編集、profile連動配色とprofile別custom色保持、Workspace Snapshotの個別ON／OFF。
+- 一覧表示に拡張子の開始位置を揃える「拡張子整列」modeを追加。
+- eXecのCommand／Arguments／Working Directory独立指定と、未設定・不存在の外部Editorからnotepadへのfallback表示。
+
+### 修正
+- 未対応settings payloadと読込失敗dataの上書き保護、Snapshot同名importの保護。
+- 多量Markのタブ復元、KDSL_RESULT「変更なし」のMark保持、filesystem rootを指定する取込。
+- 自己／子孫へのcopy・move拒否、外部FileDropの一時source保持、Outlook添付dropの部分結果反映、管理ゴミ箱の復元cancel・maintenance競合。
+- Text PreviewのURL処理、LargeTextの超長行・境界hit検索、検索変更後の古い結果、画像切替後の減色結果と動画Preview終了処理。
+
+### 配布・互換性
+- rg.exeとripgrep license／manifestを配布し、固定bundleのversion／SHA-256をpackage生成時に検証。build時のrg network downloadは不要。
+- .NET 10 Desktop Runtime、Portable／Installed保存root、settings payload version 1を維持。7-Zip／ffmpeg／ffprobe／ffplay等の外部toolの扱いは変更しません。
+
 ## v2026.08.11 — 縦型タブ・Browser操作・Viewerの改善
 
 ### Browser・ファイル操作

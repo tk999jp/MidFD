@@ -31,6 +31,7 @@ public sealed class WorkspaceSnapshotStorage
     {
         if (!File.Exists(_dbPath)) return Array.Empty<(WorkspaceSnapshotEntry Entry, string PayloadJson)>();
         using SqliteConnection connection = OpenReadOnlyConnection();
+        if (!HasSnapshotTable(connection)) return Array.Empty<(WorkspaceSnapshotEntry Entry, string PayloadJson)>();
         using var command = connection.CreateCommand();
         string columns = includePayload
             ? "snapshot_id, name, created_at_utc, updated_at_utc, category_count, tab_count, marked_count, active_path, payload_json"
@@ -100,6 +101,11 @@ public sealed class WorkspaceSnapshotStorage
             return false;
         }
         using SqliteConnection connection = OpenReadOnlyConnection();
+        if (!HasSnapshotTable(connection))
+        {
+            errorMessage = "スナップショットの内容が見つかりません。";
+            return false;
+        }
         using var command = connection.CreateCommand();
         command.CommandText = """
             SELECT payload_json
@@ -166,10 +172,59 @@ public sealed class WorkspaceSnapshotStorage
         return true;
     }
 
+    internal bool TrySaveSnapshotIfNameAvailable(
+        string name,
+        WorkspaceState state,
+        out bool nameAlreadyExists,
+        out string errorMessage)
+    {
+        nameAlreadyExists = false;
+        errorMessage = string.Empty;
+        if (string.IsNullOrWhiteSpace(name))
+        {
+            errorMessage = "スナップショット名を入力してください。";
+            return false;
+        }
+        if (!HasRestorableTabs(state))
+        {
+            errorMessage = "保存できるWorkspace状態がありません。";
+            return false;
+        }
+
+        string trimmedName = name.Trim();
+        string payloadJson = JsonSerializer.Serialize(state, JsonOptions);
+        WorkspaceSnapshotEntry summary = CreateSummary(Guid.NewGuid().ToString("D"), trimmedName, state);
+        using SqliteConnection connection = OpenInitializedConnection();
+        using var command = connection.CreateCommand();
+        command.CommandText = """
+            INSERT INTO workspace_snapshots (
+                snapshot_id, name, created_at_utc, updated_at_utc, category_count, tab_count, marked_count, active_path, payload_json)
+            VALUES (
+                $snapshot_id, $name, $created_at_utc, $updated_at_utc, $category_count, $tab_count, $marked_count, $active_path, $payload_json)
+            ON CONFLICT(name) DO NOTHING;
+            """;
+        command.Parameters.AddWithValue("$snapshot_id", summary.SnapshotId);
+        command.Parameters.AddWithValue("$name", summary.Name);
+        command.Parameters.AddWithValue("$created_at_utc", summary.CreatedAtUtc.ToString("O"));
+        command.Parameters.AddWithValue("$updated_at_utc", summary.UpdatedAtUtc.ToString("O"));
+        command.Parameters.AddWithValue("$category_count", summary.CategoryCount);
+        command.Parameters.AddWithValue("$tab_count", summary.TabCount);
+        command.Parameters.AddWithValue("$marked_count", summary.MarkedCount);
+        command.Parameters.AddWithValue("$active_path", string.IsNullOrWhiteSpace(summary.ActivePath) ? DBNull.Value : summary.ActivePath);
+        command.Parameters.AddWithValue("$payload_json", payloadJson);
+        if (command.ExecuteNonQuery() == 0)
+        {
+            nameAlreadyExists = true;
+            return false;
+        }
+        return true;
+    }
+
     public bool ExistsByName(string name)
     {
         if (!File.Exists(_dbPath)) return false;
         using SqliteConnection connection = OpenReadOnlyConnection();
+        if (!HasSnapshotTable(connection)) return false;
         using var command = connection.CreateCommand();
         command.CommandText = "SELECT COUNT(1) FROM workspace_snapshots WHERE name = $name;";
         command.Parameters.AddWithValue("$name", name.Trim());
@@ -246,10 +301,17 @@ public sealed class WorkspaceSnapshotStorage
 
     private SqliteConnection OpenReadOnlyConnection()
     {
-        string immutableUri = $"file:{Path.GetFullPath(_dbPath).Replace('\\', '/')}?immutable=1";
-        var connection = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = immutableUri, Mode = SqliteOpenMode.ReadOnly, Pooling = false }.ToString());
+        var connection = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = _dbPath, Mode = SqliteOpenMode.ReadOnly, Pooling = false }.ToString());
         connection.Open();
         return connection;
+    }
+
+    private static bool HasSnapshotTable(SqliteConnection connection)
+    {
+        using var command = connection.CreateCommand();
+        command.CommandText = "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = $table_name LIMIT 1;";
+        command.Parameters.AddWithValue("$table_name", "workspace_snapshots");
+        return command.ExecuteScalar() is not null;
     }
 
     private static WorkspaceSnapshotEntry CreateSummary(string snapshotId, string name, WorkspaceState state)

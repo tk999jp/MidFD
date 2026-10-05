@@ -14,17 +14,17 @@ public partial class MainForm
     private void ApplyColorSettings()
     {
         // UIクロームは一覧配色に追従し、Viewer は従来のテーマ基調を維持する。
-        MidFDColors.ApplyTheme(FileListColorResolver.NormalizeCoreTheme(_settings.Appearance?.ColorTheme));
+        MidFDColors.ApplyTheme(FileListColorResolver.NormalizeCoreTheme(_settingsCoordinator.Value.Appearance?.ColorTheme));
 
-        var uiThemeColors = UiThemeResolver.Resolve(_settings.Appearance);
+        var uiThemeColors = UiThemeResolver.Resolve(_settingsCoordinator.Value.Appearance);
         MidFDColors.BorderLine = uiThemeColors.BorderColor;
         MidFDColors.SeparatorLine = uiThemeColors.SeparatorColor;
         MidFDColors.ViewerBack = uiThemeColors.ViewerBackColor;
         MidFDColors.ViewerFore = uiThemeColors.ViewerForeColor;
 
-        _resolvedColors = FileListColorResolver.ResolveColors(_settings);
+        _resolvedColors = FileListColorResolver.ResolveColors(_settingsCoordinator.Value);
 
-        var headerColors = HeaderColorPaletteResolver.Resolve(_settings.Appearance);
+        var headerColors = HeaderColorPaletteResolver.Resolve(_settingsCoordinator.Value.Appearance);
         _breadcrumbPathControl?.ApplyThemeColors(
             uiThemeColors.HeaderBackColor,
             headerColors.HeaderPathFore,
@@ -56,12 +56,12 @@ public partial class MainForm
         fileListView.BackColor = _resolvedColors.Background;
         browserPanel.ForeColor = _resolvedColors.NormalFile;
         browserPanel.BackColor = _resolvedColors.Background;
-        string menuPreset = UiThemeResolver.MapFromDisplayColor(_settings.Appearance?.ColorTheme);
+        string menuPreset = UiThemeResolver.MapFromDisplayColor(_settingsCoordinator.Value.Appearance?.ColorTheme);
         var menuThemeColors = UiThemeResolver.Resolve(menuPreset);
         mainMenuStrip.BackColor = menuThemeColors.ChromeBackColor;
         mainMenuStrip.ForeColor = menuThemeColors.ChromeForeColor;
         ApplyMenuStripRenderer(
-            FileListColorResolver.NormalizeCoreTheme(_settings.Appearance?.ColorTheme, _settings) == "Light",
+            FileListColorResolver.NormalizeCoreTheme(_settingsCoordinator.Value.Appearance?.ColorTheme, _settingsCoordinator.Value) == "Light",
             menuThemeColors.ChromeForeColor);
         foreach (ToolStripItem item in mainMenuStrip.Items)
         {

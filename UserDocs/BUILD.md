@@ -67,12 +67,12 @@ PowerShell から直接起動する場合は、次のように実行できます
 
 この画面では以下の項目をまとめて設定できます。
 
-- **操作プリセット（キー操作体系）**: 標準的なショートカット操作（標準）か、Fキー中心の操作体系（FD互換）かを選択できます。
-- **動画ファイルの Enter 動作**: 動画ファイルを選択して Enter キーを押したときの動作（内蔵プレビュー、外部プレイヤー等）を設定できます。
-- **初期オプション（高度な使い方）**: 起動時に前回の状態を復元する設定や、追加のファイル操作機能の有効/無効をチェックボックスで選択できます。
-- **外部連携パス**: 7-Zip や外部テキストエディタ、ターミナル等の実行ファイルパスを自動検出または手動指定できます。
+- **機能範囲**: 初回は「便利機能まで使う（推奨）」presetが選択され、前回状態復元、mouse gesture、Functionバー説明、動画のEnter外部再生、breadcrumb表示がONになります。
+- **注意が必要な機能**: MidFD管理ゴミ箱、Drag ZIP、内容一覧manifest、clipboard text貼り付けは上記presetではOFFです。Full presetではONになり、各項目は個別に変更できます。
+- **Workspace Snapshot**: 独立したcheckboxで切り替えます。PracticalStable presetでは既定OFF、Full presetでは既定ONです。
+- **操作方式／外部アプリ**: MidFD標準またはFD互換を選択できます。外部アプリ欄は7-Zip実行file、動画tool folder、外部editor実行fileを設定し、自動検出状態も確認できます。
 
-通常は操作プリセットをお好みに合わせて選択し、初期オプションはチェックを外した状態でセットアップを完了することを推奨します。
+初回セットアップの推奨状態は画面の「便利機能まで使う（推奨）」presetに一致します。設定は後から個別に変更できます。
 
 設定は後から「設定」画面でいつでも個別に変更可能です。また、初回セットアップ画面自体を設定画面の「起動・ログ」から再表示することもできます。
 
@@ -109,6 +109,8 @@ bin\Release\net10.0-windows\publish\
 単一ファイル化などの詳細な配布設定は、今後の公開方針に合わせて変更される可能性があります。
 
 ## Release ZIP 作成 (scripts/publish-release.ps1)
+
+内容検索用ripgrep 15.2.0はrepository内の固定bundleからbuild／publish出力へコピーします。build時にrgをnetwork downloadしません。配布rootの `rg.exe` と `licenses/ripgrep/` の `LICENSE-MIT`、`UNLICENSE`、`COPYING`、`manifest.json` を保持します。release scriptは共通の `scripts/ripgrep-bundle.ps1` でversionとSHA-256を検証します。利用者によるrgの別途導入は不要です。
 
 Release Candidate ZIPを作成する場合は、以下のPowerShellスクリプト（正本経路）を使用します。生成元はcleanなcommit済みHEADです。`ReleaseTag`は予定公開tagであり、Candidate生成時点でGit tagは作成しません。
 
@@ -157,7 +159,8 @@ MidFD は、実行環境に設定ファイルを作成します。
 
 | ファイル                | 内容      |
 | ------------------- | ------- |
-| settings.json       | 基本設定    |
+| `<active-profile>\Data\Settings\settings.db` | 基本設定（SQLite） |
+| settings.json       | 旧設定のmigration／import元（既存fileのみ） |
 | external_tools.json | 外部ツール定義 |
 
 個人環境のパスや外部ツール設定が含まれる場合があるため、公開リポジトリへ誤って含めないよう注意してください。

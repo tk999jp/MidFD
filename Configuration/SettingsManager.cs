@@ -570,7 +570,11 @@ public static class SettingsManager
 
         var normalizedSnapshot = new BrowserTabRestoreSnapshot
         {
-            ActiveCategoryId = ResolveActiveCategoryId(sourceSnapshot.ActiveCategoryId, orderedCategoryIds)
+            ActiveCategoryId = ResolveActiveCategoryId(sourceSnapshot.ActiveCategoryId, orderedCategoryIds),
+            UserTabGroups = (sourceSnapshot.UserTabGroups ?? new List<BrowserTabGroupRestoreState>())
+                .Where(static group => group != null)
+                .Select(static group => group.Clone())
+                .ToList()
         };
 
         foreach (string categoryId in orderedCategoryIds)

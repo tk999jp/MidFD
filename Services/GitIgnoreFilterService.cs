@@ -47,8 +47,8 @@ public static class GitIgnoreFilterService
             return true;
         }
 
-        string stdin = string.Join(Environment.NewLine, pathPairs.Select(static pair => pair.RelativePath)) + Environment.NewLine;
-        bool completed = TryRunGit(repoRoot, "check-ignore --stdin", stdin, out string output, out string error, out int exitCode);
+        string stdin = string.Join('\0', pathPairs.Select(static pair => pair.RelativePath)) + '\0';
+        bool completed = TryRunGit(repoRoot, "check-ignore -z --stdin", stdin, out string output, out string error, out int exitCode);
         if (!completed)
         {
             warning = "Git ignore 判定に失敗したため、Git条件は適用しませんでした。";
@@ -63,7 +63,7 @@ public static class GitIgnoreFilterService
         }
 
         var ignoredRelatives = output
-            .Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries)
+            .Split('\0', StringSplitOptions.RemoveEmptyEntries)
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
 
         foreach (var pair in pathPairs)
@@ -95,6 +95,9 @@ public static class GitIgnoreFilterService
                 RedirectStandardOutput = true,
                 RedirectStandardError = true,
                 RedirectStandardInput = stdin != null,
+                StandardInputEncoding = stdin != null ? new System.Text.UTF8Encoding(false) : null,
+                StandardOutputEncoding = new System.Text.UTF8Encoding(false, true),
+                StandardErrorEncoding = new System.Text.UTF8Encoding(false),
                 CreateNoWindow = true
             };
 

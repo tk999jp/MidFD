@@ -4,6 +4,7 @@ using MidFD.Services;
 using MidFD.Dialogs;
 using MidFD.Commands;
 using MidFD.Models;
+using MidFD.Runtime;
 
 namespace MidFD;
 
@@ -18,6 +19,7 @@ public class SettingsForm : Form
         "Yesterday all my troubles seemed so far away.";
 
     private readonly AppSettings _settings;
+    private readonly ISettingsApplicationPort _settingsApplication;
 
     private readonly TextBox _sevenZipPathBox;
     private readonly ComboBox _packDialogModeCombo;
@@ -33,6 +35,7 @@ public class SettingsForm : Form
     private ComboBox _browserTabLayoutModeCombo = null!;
     private ComboBox _browserTabNewPositionCombo = null!;
     private NumericUpDown _browserTabNavigationWidthBox = null!;
+    private NumericUpDown _browserTabMultiDirectoryOpenThresholdBox = null!;
     private readonly ComboBox _viewerFontCombo;
     private readonly NumericUpDown _viewerFontSizeBox;
     private readonly ComboBox _colorThemeCombo;
@@ -45,6 +48,7 @@ public class SettingsForm : Form
     private readonly CheckBox _showFunctionBarCheckBox;
     private readonly CheckBox _showBrowserToolbarCheckBox;
     private readonly CheckBox _showPathAsBreadcrumbCheckBox;
+    private CheckBox _workspaceSnapshotEnabledCheckBox = null!;
     private readonly ComboBox _fileDisplayModeCombo;
     private readonly ComboBox _dateFormatCombo;
     private readonly ComboBox _sizeFormatCombo;
@@ -119,6 +123,8 @@ public class SettingsForm : Form
     private readonly Panel _functionBarPreviewPanel;
     private bool _updatingColorFromUi;
     private bool _suppressColorUiEvents;
+    private bool _suppressWorkspaceSnapshotSettingEvents;
+    private bool _workspaceSnapshotOverrideEdited;
     private bool _fileListCustomColorsEnabledForSave;
 
     public enum InitialTab
@@ -135,43 +141,26 @@ public class SettingsForm : Form
     public event EventHandler? OpenManagedTrashDialogRequested;
     public bool ImportedSettingsApplied { get; private set; }
 
-    public SettingsForm(AppSettings settings, FeatureProfile effectiveProfile, InitialTab initialTab = InitialTab.Display)
+    public SettingsForm(
+        AppSettings settings,
+        FeatureProfile effectiveProfile,
+        InitialTab initialTab = InitialTab.Display)
+        : this(settings, effectiveProfile, initialTab, new SettingsApplicationCoordinator())
+    {
+    }
+
+    internal SettingsForm(
+        AppSettings settings,
+        FeatureProfile effectiveProfile,
+        InitialTab initialTab,
+        ISettingsApplicationPort? settingsApplication = null)
     {
         ArgumentNullException.ThrowIfNull(settings);
-        _settings = settings.Clone();
-        _settings.Profile = FeatureProfileService.ToSettingValue(effectiveProfile);
-        _settings.Appearance ??= new AppearanceSettings();
-        _settings.Logging ??= new LoggingSettings();
-        _settings.Preview ??= new PreviewSettings();
-        _settings.Session ??= new SessionSettings();
-        _settings.Input ??= new InputSettings();
-        _settings.SevenZip ??= new SevenZipSettings();
-        _settings.ExternalTools ??= new ExternalToolsSettings();
-        _settings.FileOperations ??= new FileOperationsSettings();
-        _settings.BrowserTabs ??= new BrowserTabSettings();
-        _settings.Fonts ??= new FontSettings();
-        _settings.Input.MouseGestureCommandMap ??= new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-        _settings.Input.BrowserKeyCommandOverrides ??= new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
-        InputSettings.NormalizeAndMigrateFunctionKeyChords(_settings.Input);
-        _settings.Input.FunctionBarCommandOverridesStandard ??= new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
-        _settings.Input.FunctionBarCommandOverridesFdCompatible ??= new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
-        _settings.Input.FunctionBarCommandOverridesShiftStandard ??= new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
-        _settings.Input.FunctionBarCommandOverridesShiftFdCompatible ??= new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
-        _settings.Input.FunctionBarCommandOverridesCtrlStandard ??= new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
-        _settings.Input.FunctionBarCommandOverridesCtrlFdCompatible ??= new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
-        _settings.Input.FunctionBarCommandOverridesAltStandard ??= new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
-        _settings.Input.FunctionBarCommandOverridesAltFdCompatible ??= new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
-        _settings.Input.FunctionBarLabelOverridesStandard ??= new Dictionary<string, FunctionBarLabelOverride>(StringComparer.OrdinalIgnoreCase);
-        _settings.Input.FunctionBarLabelOverridesFdCompatible ??= new Dictionary<string, FunctionBarLabelOverride>(StringComparer.OrdinalIgnoreCase);
-        _settings.Input.FunctionBarLabelOverridesShiftStandard ??= new Dictionary<string, FunctionBarLabelOverride>(StringComparer.OrdinalIgnoreCase);
-        _settings.Input.FunctionBarLabelOverridesShiftFdCompatible ??= new Dictionary<string, FunctionBarLabelOverride>(StringComparer.OrdinalIgnoreCase);
-        _settings.Input.FunctionBarLabelOverridesCtrlStandard ??= new Dictionary<string, FunctionBarLabelOverride>(StringComparer.OrdinalIgnoreCase);
-        _settings.Input.FunctionBarLabelOverridesCtrlFdCompatible ??= new Dictionary<string, FunctionBarLabelOverride>(StringComparer.OrdinalIgnoreCase);
-        _settings.Input.FunctionBarLabelOverridesAltStandard ??= new Dictionary<string, FunctionBarLabelOverride>(StringComparer.OrdinalIgnoreCase);
-        _settings.Input.FunctionBarLabelOverridesAltFdCompatible ??= new Dictionary<string, FunctionBarLabelOverride>(StringComparer.OrdinalIgnoreCase);
+        _settingsApplication = settingsApplication ?? new SettingsApplicationCoordinator();
+        _settings = _settingsApplication.CreateSettingsDraft(settings, effectiveProfile);
 
-        _mouseGestureCommandMapDraft = InputSettings.NormalizeMouseGestureCommandMap(_settings.Input.MouseGestureCommandMap);
-        _browserKeyCommandOverridesDraft = InputSettings.NormalizeBrowserKeyCommandOverrides(_settings.Input.BrowserKeyCommandOverrides);
+        _mouseGestureCommandMapDraft = new Dictionary<string, string>(_settings.Input.MouseGestureCommandMap, StringComparer.OrdinalIgnoreCase);
+        _browserKeyCommandOverridesDraft = new Dictionary<string, List<string>>(_settings.Input.BrowserKeyCommandOverrides, StringComparer.OrdinalIgnoreCase);
         _functionBarCommandOverridesStandardDraft = new Dictionary<string, string?>(_settings.Input.FunctionBarCommandOverridesStandard, StringComparer.OrdinalIgnoreCase);
         _functionBarCommandOverridesFdCompatibleDraft = new Dictionary<string, string?>(_settings.Input.FunctionBarCommandOverridesFdCompatible, StringComparer.OrdinalIgnoreCase);
         _functionBarLabelOverridesStandardDraft = _settings.Input.FunctionBarLabelOverridesStandard.ToDictionary(kv => kv.Key, kv => kv.Value.Clone(), StringComparer.OrdinalIgnoreCase);
@@ -243,6 +232,13 @@ public class SettingsForm : Form
         (_filerFontCombo, _filerFontSizeBox, _browserTabFontSizeBox, _browserTabWidthBox, _showBrowserTabCategoryRowCheckBox, _showExtensionsCheckBox, _showDirectoryMarkerCheckBox, _showHiddenFilesCheckBox, _showItemIconsCheckBox, _useUnderlineCursorCheckBox, _showFunctionBarCheckBox, _showBrowserToolbarCheckBox, _showPathAsBreadcrumbCheckBox, _fileDisplayModeCombo, _dateFormatCombo, _sizeFormatCombo,
          _viewerFontCombo, _viewerFontSizeBox, _viewerWordWrapCheckBox, _markdownViewerModeCombo, _reuseImageViewerCheckBox, _closeImageViewerOnNonImageCheckBox, _rememberImageViewerBoundsCheckBox)
             = BuildDisplayAndPreviewTab(tabDisplay, fonts, dateFormats, sizeFormats);
+        _workspaceSnapshotEnabledCheckBox.CheckedChanged += (_, _) =>
+        {
+            if (!_suppressWorkspaceSnapshotSettingEvents)
+            {
+                _workspaceSnapshotOverrideEdited = true;
+            }
+        };
 
         ColorTabResult colorTabResult = BuildColorTab(tabColor);
         _enableColorAssistCheckBox = colorTabResult.EnableColorAssistCheckBox;
@@ -346,7 +342,7 @@ public class SettingsForm : Form
             AddExtension = true
         };
         if (dialog.ShowDialog(this) != DialogResult.OK) return;
-        SettingsSqliteStore.SettingsTransferResult result = SettingsManager.Export(dialog.FileName, _settings);
+        SettingsSqliteStore.SettingsTransferResult result = _settingsApplication.ExportSettings(dialog.FileName, _settings);
         if (!result.Succeeded)
         {
             MessageBox.Show(this, result.UserMessage, "設定エクスポート", MessageBoxButtons.OK, MessageBoxIcon.Error);
@@ -361,7 +357,7 @@ public class SettingsForm : Form
             CheckFileExists = true
         };
         if (dialog.ShowDialog(this) != DialogResult.OK) return;
-        SettingsSqliteStore.SettingsTransferResult result = SettingsManager.ReadImport(dialog.FileName);
+        SettingsSqliteStore.SettingsTransferResult result = _settingsApplication.ReadImportedSettings(dialog.FileName);
         if (!result.Succeeded)
         {
             MessageBox.Show(this, result.UserMessage, "設定インポート", MessageBoxButtons.OK, MessageBoxIcon.Error);
@@ -378,7 +374,7 @@ public class SettingsForm : Form
 
         if (!ConfirmPayloadReplacement()) return;
 
-        SettingsSqliteStore.SettingsTransferResult applyResult = SettingsManager.ApplyImportedSettings(result.Settings!, allowProtectedReplacement: true);
+        SettingsSqliteStore.SettingsTransferResult applyResult = _settingsApplication.ApplyImportedSettings(result.Settings!);
         if (!applyResult.Succeeded)
         {
             MessageBox.Show(this, applyResult.UserMessage, "設定インポート", MessageBoxButtons.OK, MessageBoxIcon.Error);
@@ -445,9 +441,9 @@ public class SettingsForm : Form
         top += rowH + 8;
 
         int fileListPreviewTop = top + 4;
-        var fileListFontSample = CreateFontSampleTextBox(new Point(16, fileListPreviewTop), new Size(460, 104), FontPreviewSampleText);
+        var fileListFontSample = CreateFontSampleTextBox(new Point(16, fileListPreviewTop), new Size(460, 80), FontPreviewSampleText);
         groupList.Controls.Add(fileListFontSample);
-        top += 112;
+        top += 88;
 
         AddLabel(groupList, "タブ文字サイズ:", top, lblW);
         var browserTabFontSize = AddNumericUpDown(groupList, inpX, top, 72, (decimal)_settings.BrowserTabs.TabFontSize, min: 0.1m, max: 9999m, decimalPlaces: 1, increment: 0.5m);
@@ -485,6 +481,21 @@ public class SettingsForm : Form
         top += rowH;
         AddLabel(groupList, "縦navigation幅:", top, lblW);
         _browserTabNavigationWidthBox = AddNumericUpDown(groupList, inpX, top, 72, _settings.BrowserTabs.NavigationWidth, min: 120m, max: 600m, decimalPlaces: 0, increment: 10m);
+        top += rowH + 8;
+        AddLabel(groupList, "一括Open確認:", top, 150);
+        _browserTabMultiDirectoryOpenThresholdBox = AddNumericUpDown(
+            groupList,
+            inpX + 60,
+            top,
+            72,
+            Math.Max(
+                BrowserTabSettings.MinimumMultiDirectoryOpenConfirmationThreshold,
+                _settings.BrowserTabs.MultiDirectoryOpenConfirmationThreshold),
+            min: BrowserTabSettings.MinimumMultiDirectoryOpenConfirmationThreshold,
+            max: int.MaxValue,
+            decimalPlaces: 0,
+            increment: 1m);
+        AddHintLabel(groupList, inpX + 140, top - 1, 230, "指定件数以上で確認", 28);
         top += rowH + 8;
         AddLabel(groupList, "新しいタブを開く位置:", top, lblW + 20);
         _browserTabNewPositionCombo = AddComboBox(groupList, inpX + 20, top, 190,
@@ -526,7 +537,8 @@ public class SettingsForm : Form
         var sizeFormat = AddComboBox(groupList, inpX, top, 248, sizeFormats, _settings.Appearance.SizeFormat);
         top += rowH + 16;
 
-        AddHintLabel(groupList, 16, top, 460, "※ 配色は「配色」タブで設定します。");
+        Label paletteHint = AddHintLabel(groupList, 16, top, 460, "※ 配色は「配色」タブで設定します。");
+        groupList.Height = paletteHint.Bottom + 8;
 
         // --- Right Top: Viewer ---
         var groupViewer = new GroupBox { Text = "ビューア", Location = new Point(520, 6), Size = new Size(500, 180) };
@@ -591,6 +603,23 @@ public class SettingsForm : Form
         var rememberBounds = AddCheckBox(groupViewer, "ビューアの位置/サイズを記憶する", checkX, top, _settings.Preview.RememberImageViewerBounds);
         groupViewer.Height = rememberBounds.Bottom + 16;
 
+        var groupWorkspaceSnapshot = new GroupBox
+        {
+            Text = "機能",
+            Location = new Point(520, groupViewer.Bottom + 8),
+            Size = new Size(500, 72)
+        };
+        tab.Controls.Add(groupWorkspaceSnapshot);
+        _workspaceSnapshotEnabledCheckBox = AddCheckBox(
+            groupWorkspaceSnapshot,
+            "Workspace Snapshotを有効にする",
+            16,
+            24,
+            new FeatureGateService(
+                FeatureProfileService.ResolveProfile(_settings.Profile),
+                _settings.WorkspaceSnapshotEnabledOverride).IsEnabled(FeatureId.WorkspaceSnapshot));
+        AddHintLabel(groupWorkspaceSnapshot, 260, 23, 220, "現在のWorkspace全体を保存", 24);
+
         return (filerFont, filerSize, browserTabFontSize, browserTabWidth, showBrowserTabCategoryRow, showExtensions, showDirectoryMarker, showHiddenFiles, showItemIcons, useUnderlineCursor, showFunctionBar, showBrowserToolbar, showPathAsBreadcrumb, fileDisplayMode, dateFormat, sizeFormat,
                 viewerFont, viewerSize, viewerWordWrap, markdownViewerMode, reuseImageViewer, closeOnNonImage, rememberBounds);
     }
@@ -602,7 +631,7 @@ public class SettingsForm : Form
         int rowH = 28;
 
         // --- Left: File Operation ---
-        var groupFile = new GroupBox { Text = "ファイル操作", Location = new Point(8, 6), Size = new Size(490, 560) };
+        var groupFile = new GroupBox { Text = "ファイル操作", Location = new Point(8, 6), Size = new Size(490, 620) };
         tab.Controls.Add(groupFile);
 
         int top = 28;
@@ -710,6 +739,17 @@ public class SettingsForm : Form
         top += rowH - 4;
         Label clipboardHint = AddWrappedHintLabel(groupFile, 32, top, 430, "Ctrl+Vで .txt ファイルを作成します。\n誤作成防止のため通常はOFF推奨です。");
         top = clipboardHint.Bottom + 18;
+
+        var newFileExtensionsButton = new Button
+        {
+            Text = "新規作成の拡張子...",
+            Location = new Point(32, top),
+            Size = new Size(220, 28)
+        };
+        newFileExtensionsButton.Click += (_, _) => OpenNewFileExtensionsDialog();
+        groupFile.Controls.Add(newFileExtensionsButton);
+        top += rowH + 4;
+        top = AddWrappedHintLabel(groupFile, 32, top, 430, "右クリックの「新規作成」に表示する拡張子を管理します。\nファイル内容のtemplateは設定しません。").Bottom + 12;
 
         var sectionDragZip = new Label
         {
@@ -852,32 +892,40 @@ public class SettingsForm : Form
             return;
         }
 
-        _suppressColorUiEvents = true;
-        try
-        {
-            string profileValue = _embeddedInputAssignmentView.SelectedProfileValue;
-            string targetPresetKey = string.Equals(profileValue, InputSettings.FdCompatibleProfileValue, StringComparison.OrdinalIgnoreCase)
-                 ? "WinFdCompatible"
-                 : "MidFdStandard";
+        _fileListCustomColorsEnabledForSave = GetCurrentAutoProfileColors()?.UseCustomFileListColors == true;
+        UpdateColorTabUiFromModel();
+        UpdatePreview();
+        ForceRefreshColorTabControls();
+    }
 
-            _settings.Appearance.ColorTheme = targetPresetKey;
+    private bool IsCurrentAutoColorSelection()
+    {
+        return FileListColorResolver.IsAutoColorSelection(_settings);
+    }
 
-            _settings.Appearance.CustomFunctionBarBackColor = null;
-            _settings.Appearance.CustomFunctionBarForeColor = null;
+    private string GetCurrentInputProfileValue()
+    {
+        return _embeddedInputAssignmentView?.SelectedProfileValue ?? _settings.Input.FunctionKeyProfile;
+    }
 
-            string displayPresetName = FileListColorResolver.GetPresetDisplayName(targetPresetKey);
-            int idx = _colorThemeCombo.FindStringExact(displayPresetName);
-            if (idx >= 0)
-            {
-                _colorThemeCombo.SelectedIndex = idx;
-            }
-        }
-        finally
-        {
-            _suppressColorUiEvents = false;
-        }
+    private AutoProfileColorSettings? GetCurrentAutoProfileColors()
+    {
+        return IsCurrentAutoColorSelection()
+            ? _settings.Appearance.GetAutoProfileColors(GetCurrentInputProfileValue())
+            : null;
+    }
 
-        ApplySelectedColorPresetToEditor(forceRefresh: true);
+    private CustomFileListColorSettings? GetCurrentCustomFileListColors()
+    {
+        AutoProfileColorSettings? autoColors = GetCurrentAutoProfileColors();
+        return autoColors?.FileListColors ?? (!IsCurrentAutoColorSelection() ? _settings.Appearance.CustomFileListColors : null);
+    }
+
+    private CustomFileListColorSettings GetOrCreateCurrentCustomFileListColors()
+    {
+        return IsCurrentAutoColorSelection()
+            ? _settings.Appearance.GetOrCreateAutoProfileColors(GetCurrentInputProfileValue()).FileListColors
+            : _settings.Appearance.CustomFileListColors;
     }
 
     private void SyncInputAssignmentDraftFromEmbeddedView()
@@ -888,8 +936,8 @@ public class SettingsForm : Form
         }
 
         InputSettings result = _embeddedInputAssignmentView.ResultSettings;
-        _settings.Input.BrowserKeyCommandOverrides = InputSettings.NormalizeBrowserKeyCommandOverrides(result.BrowserKeyCommandOverrides);
-        _settings.Input.MouseGestureCommandMap = InputSettings.NormalizeMouseGestureCommandMap(result.MouseGestureCommandMap);
+        _settings.Input.BrowserKeyCommandOverrides = result.BrowserKeyCommandOverrides;
+        _settings.Input.MouseGestureCommandMap = result.MouseGestureCommandMap;
         _settings.Input.FunctionBarCommandOverridesStandard = new Dictionary<string, string?>(result.FunctionBarCommandOverridesStandard, StringComparer.OrdinalIgnoreCase);
         _settings.Input.FunctionBarCommandOverridesFdCompatible = new Dictionary<string, string?>(result.FunctionBarCommandOverridesFdCompatible, StringComparer.OrdinalIgnoreCase);
         _settings.Input.FunctionBarCommandOverridesShiftStandard = new Dictionary<string, string?>(result.FunctionBarCommandOverridesShiftStandard, StringComparer.OrdinalIgnoreCase);
@@ -907,10 +955,10 @@ public class SettingsForm : Form
         _settings.Input.FunctionBarLabelOverridesAltStandard = result.FunctionBarLabelOverridesAltStandard.ToDictionary(kv => kv.Key, kv => kv.Value.Clone(), StringComparer.OrdinalIgnoreCase);
         _settings.Input.FunctionBarLabelOverridesAltFdCompatible = result.FunctionBarLabelOverridesAltFdCompatible.ToDictionary(kv => kv.Key, kv => kv.Value.Clone(), StringComparer.OrdinalIgnoreCase);
 
-        InputSettings.NormalizeAndMigrateFunctionKeyChords(_settings.Input);
+        _settingsApplication.NormalizeSettingsDraft(_settings);
 
-        _browserKeyCommandOverridesDraft = InputSettings.NormalizeBrowserKeyCommandOverrides(_settings.Input.BrowserKeyCommandOverrides);
-        _mouseGestureCommandMapDraft = InputSettings.NormalizeMouseGestureCommandMap(_settings.Input.MouseGestureCommandMap);
+        _browserKeyCommandOverridesDraft = new Dictionary<string, List<string>>(_settings.Input.BrowserKeyCommandOverrides, StringComparer.OrdinalIgnoreCase);
+        _mouseGestureCommandMapDraft = new Dictionary<string, string>(_settings.Input.MouseGestureCommandMap, StringComparer.OrdinalIgnoreCase);
         _functionBarCommandOverridesStandardDraft = new Dictionary<string, string?>(_settings.Input.FunctionBarCommandOverridesStandard, StringComparer.OrdinalIgnoreCase);
         _functionBarCommandOverridesFdCompatibleDraft = new Dictionary<string, string?>(_settings.Input.FunctionBarCommandOverridesFdCompatible, StringComparer.OrdinalIgnoreCase);
         _functionBarCommandOverridesShiftStandardDraft = new Dictionary<string, string?>(_settings.Input.FunctionBarCommandOverridesShiftStandard, StringComparer.OrdinalIgnoreCase);
@@ -1149,15 +1197,17 @@ public class SettingsForm : Form
         return label;
     }
 
-    private void AddHintLabel(Control parent, int x, int y, int width, string text, int height = 36)
+    private Label AddHintLabel(Control parent, int x, int y, int width, string text, int height = 36)
     {
-        parent.Controls.Add(new Label
+        var label = new Label
         {
             Text = text,
             Location = new Point(x, y),
             Size = new Size(width, height),
             ForeColor = SystemColors.GrayText
-        });
+        };
+        parent.Controls.Add(label);
+        return label;
     }
 
     private Label AddWrappedHintLabel(Control parent, int x, int y, int width, string text)
@@ -1335,17 +1385,29 @@ public class SettingsForm : Form
         cb.Items.Add("ファイル名のみ");
         cb.Items.Add("サイズ");
         cb.Items.Add("サイズ・更新日時");
+        cb.Items.Add("拡張子整列");
 
-        cb.SelectedIndex = current switch
-        {
-            BrowserFileDisplayMode.NameSize => 1,
-            BrowserFileDisplayMode.NameSizeDate => 2,
-            _ => 0
-        };
+        cb.SelectedIndex = ResolveFileDisplayModeSelectionIndex(current);
 
         parent.Controls.Add(cb);
         return cb;
     }
+
+    internal static int ResolveFileDisplayModeSelectionIndex(BrowserFileDisplayMode mode) => mode switch
+    {
+        BrowserFileDisplayMode.NameSize => 1,
+        BrowserFileDisplayMode.NameSizeDate => 2,
+        BrowserFileDisplayMode.NameExtensionAligned => 3,
+        _ => 0
+    };
+
+    internal static BrowserFileDisplayMode ResolveFileDisplayModeSelection(int selectedIndex) => selectedIndex switch
+    {
+        1 => BrowserFileDisplayMode.NameSize,
+        2 => BrowserFileDisplayMode.NameSizeDate,
+        3 => BrowserFileDisplayMode.NameExtensionAligned,
+        _ => BrowserFileDisplayMode.NameOnly
+    };
 
     private static Font? CreatePreviewFont(string familyName, float size)
     {
@@ -1438,6 +1500,126 @@ public class SettingsForm : Form
     }
 
     private sealed record MouseGestureItem(string GestureId, string DisplayName);
+
+    private void OpenNewFileExtensionsDialog()
+    {
+        var working = new List<string>(_settings.FileOperations.NewFileExtensions ?? FileOperationsSettings.DefaultNewFileExtensions);
+        using var dialog = new Form
+        {
+            Text = "新規作成の拡張子",
+            StartPosition = FormStartPosition.CenterParent,
+            FormBorderStyle = FormBorderStyle.FixedDialog,
+            MaximizeBox = false,
+            MinimizeBox = false,
+            ClientSize = new Size(520, 430)
+        };
+
+        var list = new ListBox
+        {
+            Location = new Point(16, 16),
+            Size = new Size(300, 300)
+        };
+        dialog.Controls.Add(list);
+
+        var input = new TextBox
+        {
+            Location = new Point(332, 16),
+            Size = new Size(168, 24)
+        };
+        dialog.Controls.Add(input);
+
+        var error = new Label
+        {
+            ForeColor = Color.Firebrick,
+            Location = new Point(332, 48),
+            Size = new Size(168, 96),
+            AutoEllipsis = true
+        };
+        dialog.Controls.Add(error);
+
+        void RefreshList()
+        {
+            list.Items.Clear();
+            list.Items.AddRange(working.Cast<object>().ToArray());
+            list.SelectedIndex = working.Count > 0 ? Math.Clamp(list.SelectedIndex, 0, working.Count - 1) : -1;
+        }
+
+        var add = new Button { Text = "追加", Location = new Point(332, 160), Size = new Size(80, 28) };
+        add.Click += (_, _) =>
+        {
+            if (!NewFileExtensionHelper.TryNormalize(input.Text, out string normalized, out string errorMessage))
+            {
+                error.Text = errorMessage;
+                return;
+            }
+
+            if (working.Contains(normalized, StringComparer.OrdinalIgnoreCase))
+            {
+                error.Text = "同じ拡張子は追加できません。";
+                return;
+            }
+
+            working.Add(normalized);
+            input.Clear();
+            error.Text = string.Empty;
+            RefreshList();
+            list.SelectedIndex = working.Count - 1;
+        };
+        dialog.Controls.Add(add);
+
+        var delete = new Button { Text = "削除", Location = new Point(332, 196), Size = new Size(80, 28) };
+        delete.Click += (_, _) =>
+        {
+            if (list.SelectedIndex < 0) return;
+            working.RemoveAt(list.SelectedIndex);
+            error.Text = string.Empty;
+            RefreshList();
+        };
+        dialog.Controls.Add(delete);
+
+        var up = new Button { Text = "上へ", Location = new Point(420, 160), Size = new Size(80, 28) };
+        up.Click += (_, _) =>
+        {
+            int index = list.SelectedIndex;
+            if (index <= 0) return;
+            (working[index - 1], working[index]) = (working[index], working[index - 1]);
+            RefreshList();
+            list.SelectedIndex = index - 1;
+        };
+        dialog.Controls.Add(up);
+
+        var down = new Button { Text = "下へ", Location = new Point(420, 196), Size = new Size(80, 28) };
+        down.Click += (_, _) =>
+        {
+            int index = list.SelectedIndex;
+            if (index < 0 || index >= working.Count - 1) return;
+            (working[index], working[index + 1]) = (working[index + 1], working[index]);
+            RefreshList();
+            list.SelectedIndex = index + 1;
+        };
+        dialog.Controls.Add(down);
+
+        var hint = new Label
+        {
+            Text = "txt と入力すると .txt として保存します。\n空欄・「.」・パス区切り・不正な文字は登録できません。",
+            Location = new Point(332, 244),
+            Size = new Size(168, 70)
+        };
+        dialog.Controls.Add(hint);
+
+        var ok = new Button { Text = "OK", DialogResult = DialogResult.OK, Location = new Point(332, 370), Size = new Size(80, 32) };
+        var cancel = new Button { Text = "キャンセル", DialogResult = DialogResult.Cancel, Location = new Point(420, 370), Size = new Size(80, 32) };
+        dialog.Controls.Add(ok);
+        dialog.Controls.Add(cancel);
+        dialog.AcceptButton = ok;
+        dialog.CancelButton = cancel;
+
+        RefreshList();
+        if (dialog.ShowDialog(this) == DialogResult.OK)
+        {
+            _settings.FileOperations.NewFileExtensions = working;
+        }
+    }
 
     private static readonly MouseGestureItem[] MouseGestureItems =
     {
@@ -2037,10 +2219,15 @@ public class SettingsForm : Form
     {
         SyncInputAssignmentDraftFromEmbeddedView();
 
+        if (_workspaceSnapshotOverrideEdited)
+        {
+            _settings.WorkspaceSnapshotEnabledOverride = _workspaceSnapshotEnabledCheckBox.Checked;
+        }
+
         _settings.Input.FunctionKeyProfile = _embeddedInputAssignmentView.SelectedProfileValue;
         _settings.Input.EnableMouseGestures = _enableMouseGesturesCheckBox.Checked;
-        _settings.Input.MouseGestureCommandMap = InputSettings.NormalizeMouseGestureCommandMap(_mouseGestureCommandMapDraft);
-        _settings.Input.BrowserKeyCommandOverrides = InputSettings.NormalizeBrowserKeyCommandOverrides(_browserKeyCommandOverridesDraft);
+        _settings.Input.MouseGestureCommandMap = new Dictionary<string, string>(_mouseGestureCommandMapDraft, StringComparer.OrdinalIgnoreCase);
+        _settings.Input.BrowserKeyCommandOverrides = new Dictionary<string, List<string>>(_browserKeyCommandOverridesDraft, StringComparer.OrdinalIgnoreCase);
         _settings.Input.FunctionBarCommandOverridesStandard = new Dictionary<string, string?>(_functionBarCommandOverridesStandardDraft, StringComparer.OrdinalIgnoreCase);
         _settings.Input.FunctionBarCommandOverridesFdCompatible = new Dictionary<string, string?>(_functionBarCommandOverridesFdCompatibleDraft, StringComparer.OrdinalIgnoreCase);
         _settings.Input.FunctionBarCommandOverridesShiftStandard = new Dictionary<string, string?>(_functionBarCommandOverridesShiftStandardDraft, StringComparer.OrdinalIgnoreCase);
@@ -2049,7 +2236,6 @@ public class SettingsForm : Form
         _settings.Input.FunctionBarCommandOverridesCtrlFdCompatible = new Dictionary<string, string?>(_functionBarCommandOverridesCtrlFdCompatibleDraft, StringComparer.OrdinalIgnoreCase);
         _settings.Input.FunctionBarCommandOverridesAltStandard = new Dictionary<string, string?>(_functionBarCommandOverridesAltStandardDraft, StringComparer.OrdinalIgnoreCase);
         _settings.Input.FunctionBarCommandOverridesAltFdCompatible = new Dictionary<string, string?>(_functionBarCommandOverridesAltFdCompatibleDraft, StringComparer.OrdinalIgnoreCase);
-        InputSettings.NormalizeAndMigrateFunctionKeyChords(_settings.Input);
         _settings.Input.FunctionBarLabelOverridesStandard = _functionBarLabelOverridesStandardDraft.ToDictionary(kv => kv.Key, kv => kv.Value.Clone(), StringComparer.OrdinalIgnoreCase);
         _settings.Input.FunctionBarLabelOverridesFdCompatible = _functionBarLabelOverridesFdCompatibleDraft.ToDictionary(kv => kv.Key, kv => kv.Value.Clone(), StringComparer.OrdinalIgnoreCase);
         _settings.Input.FunctionBarLabelOverridesShiftStandard = _functionBarLabelOverridesShiftStandardDraft.ToDictionary(kv => kv.Key, kv => kv.Value.Clone(), StringComparer.OrdinalIgnoreCase);
@@ -2086,12 +2272,28 @@ public class SettingsForm : Form
         _settings.BrowserTabs.LayoutMode = _browserTabLayoutModeCombo.SelectedIndex == 1 ? BrowserTabLayoutMode.Vertical : BrowserTabLayoutMode.Horizontal;
         _settings.BrowserTabs.NewTabPosition = _browserTabNewPositionCombo.SelectedIndex == 1 ? BrowserTabNewPosition.End : BrowserTabNewPosition.NextToActive;
         _settings.BrowserTabs.NavigationWidth = (int)_browserTabNavigationWidthBox.Value;
+        _settings.BrowserTabs.MultiDirectoryOpenConfirmationThreshold = Math.Max(
+            BrowserTabSettings.MinimumMultiDirectoryOpenConfirmationThreshold,
+            (int)_browserTabMultiDirectoryOpenThresholdBox.Value);
         _settings.Fonts.ViewerFontFamily = _viewerFontCombo.Text;
         _settings.Fonts.ViewerFontSize = (float)_viewerFontSizeBox.Value;
 
         PersistEditedFileListColorsAsPresetIfNeeded();
-        _settings.Appearance.ColorTheme = FileListColorResolver.CanonicalizePresetKey(_colorThemeCombo.Text);
-        _settings.Appearance.UseCustomFileListColors = _fileListCustomColorsEnabledForSave;
+        string selectedColorKey = FileListColorResolver.GetPresetKeyFromDisplayName(_colorThemeCombo.Text);
+        if (string.Equals(selectedColorKey, FileListColorResolver.AutoColorSelectionKey, StringComparison.OrdinalIgnoreCase))
+        {
+            _settings.Appearance.ColorSelectionMode = AppearanceSettings.AutoColorSelectionMode;
+            _settings.Appearance.ExplicitColorPresetKey = null;
+            _settings.Appearance.ColorTheme = FileListColorResolver.ResolveInputProfileDefaultPresetKey(_settings.Input.FunctionKeyProfile);
+        }
+        else
+        {
+            string canonicalPresetKey = FileListColorResolver.CanonicalizePresetKey(selectedColorKey);
+            _settings.Appearance.ColorSelectionMode = AppearanceSettings.ExplicitColorSelectionMode;
+            _settings.Appearance.ExplicitColorPresetKey = canonicalPresetKey;
+            _settings.Appearance.ColorTheme = canonicalPresetKey;
+            _settings.Appearance.UseCustomFileListColors = _fileListCustomColorsEnabledForSave;
+        }
         _settings.Appearance.EnableSemanticColorAssist = _enableColorAssistCheckBox.Checked;
         _settings.Appearance.ShowBrowserTabCategoryRow = _showBrowserTabCategoryRowCheckBox.Checked;
         _settings.Appearance.ShowFunctionBar = _showFunctionBarCheckBox.Checked;
@@ -2102,12 +2304,7 @@ public class SettingsForm : Form
         _settings.Appearance.ShowHiddenFiles = _showHiddenFilesCheckBox.Checked;
         _settings.Appearance.ShowItemIcons = _showItemIconsCheckBox.Checked;
         _settings.Appearance.UseUnderlineCursor = _useUnderlineCursorCheckBox.Checked;
-        _settings.Appearance.FileDisplayMode = _fileDisplayModeCombo.SelectedIndex switch
-        {
-            1 => BrowserFileDisplayMode.NameSize,
-            2 => BrowserFileDisplayMode.NameSizeDate,
-            _ => BrowserFileDisplayMode.NameOnly
-        };
+        _settings.Appearance.FileDisplayMode = ResolveFileDisplayModeSelection(_fileDisplayModeCombo.SelectedIndex);
         _settings.Appearance.ShowFileSizeAndDateInBrowser = _settings.Appearance.FileDisplayMode == BrowserFileDisplayMode.NameSizeDate;
         _settings.Appearance.DateFormat = _dateFormatCombo.Text;
         _settings.Appearance.SizeFormat = _sizeFormatCombo.Text;
@@ -2182,10 +2379,7 @@ public class SettingsForm : Form
             return false;
         }
 
-        SettingsSqliteStore.SettingsSaveResult saveResult = SettingsManager.TrySave(
-            _settings,
-            SettingsManager.SettingsSaveIntent.Explicit,
-            allowProtectedReplacement: true);
+        SettingsSqliteStore.SettingsSaveResult saveResult = _settingsApplication.TrySaveExplicit(_settings);
         if (saveResult.Succeeded)
         {
             if (!saveResult.BackupSucceeded)
@@ -2210,7 +2404,7 @@ public class SettingsForm : Form
 
     private bool ConfirmPayloadReplacement()
     {
-        SettingsManager.PayloadProtectionInfo? protection = SettingsManager.CurrentPayloadProtection;
+        SettingsPayloadProtectionInfo? protection = _settingsApplication.CurrentPayloadProtection;
         if (protection == null)
         {
             return true;
@@ -2219,7 +2413,7 @@ public class SettingsForm : Form
         string detected = protection.PayloadVersion?.ToString() ?? "不明";
         return MessageBox.Show(
             this,
-            $"未対応の設定形式(PayloadVersion={detected})を現行形式(PayloadVersion={SettingsSqliteStore.CurrentPayloadVersion})へ置換します。\n既存のbackup世代管理は維持されます。",
+            $"未対応の設定形式(PayloadVersion={detected})を現行形式(PayloadVersion={_settingsApplication.CurrentPayloadVersion})へ置換します。\n既存のbackup世代管理は維持されます。",
             "設定形式の置換確認",
             MessageBoxButtons.YesNo,
             MessageBoxIcon.Warning,
@@ -2263,7 +2457,11 @@ public class SettingsForm : Form
             return;
         }
 
-        string currentThemeKey = _colorThemeCombo.Text;
+        if (IsCurrentAutoColorSelection())
+        {
+            return;
+        }
+        string currentThemeKey = FileListColorResolver.GetPresetKeyFromDisplayName(_colorThemeCombo.Text);
         string targetPresetName;
 
         if (FileListColorResolver.TryGetUserPresetName(currentThemeKey, out string? userPresetName) &&
@@ -2414,6 +2612,9 @@ public class SettingsForm : Form
         setupSettings.Session.RestoreWindowBounds = _restoreWindowBoundsCheckBox.Checked;
         setupSettings.Session.RestoreColumnCount = _restoreColumnCountCheckBox.Checked;
         setupSettings.Session.RestoreSort = _restoreSortCheckBox.Checked;
+        setupSettings.WorkspaceSnapshotEnabledOverride = _workspaceSnapshotOverrideEdited
+            ? _workspaceSnapshotEnabledCheckBox.Checked
+            : _settings.WorkspaceSnapshotEnabledOverride;
 
         using var dialog = new FeatureProfileSelectionDialog(setupSettings, isFirstLaunch: false);
         if (dialog.ShowDialog(this) != DialogResult.OK)
@@ -2421,6 +2622,12 @@ public class SettingsForm : Form
             return;
         }
 
+        _settings.Profile = FeatureProfileService.ToSettingValue(dialog.SelectedProfile);
+        _settings.WorkspaceSnapshotEnabledOverride = dialog.WorkspaceSnapshotEnabledOverride;
+        _suppressWorkspaceSnapshotSettingEvents = true;
+        _workspaceSnapshotEnabledCheckBox.Checked = dialog.WorkspaceSnapshotEnabled;
+        _suppressWorkspaceSnapshotSettingEvents = false;
+        _workspaceSnapshotOverrideEdited = false;
         _embeddedInputAssignmentView.SelectedProfileValue = dialog.UseFdCompatibleFunctionKeys ? InputSettings.FdCompatibleProfileValue : InputSettings.StandardProfileValue;
         _videoEnterPlaysExternalCheckBox.Checked = dialog.VideoEnterPlaysExternal;
         _showPathAsBreadcrumbCheckBox.Checked = dialog.ShowPathAsBreadcrumb;
@@ -2863,12 +3070,28 @@ public class SettingsForm : Form
     private AppSettings BuildColorTabPreviewSettings()
     {
         var previewSettings = _settings.Clone();
+        if (_embeddedInputAssignmentView != null)
+        {
+            previewSettings.Input.FunctionKeyProfile = _embeddedInputAssignmentView.SelectedProfileValue;
+        }
         bool enableColorAssist = _enableColorAssistCheckBox != null
             ? _enableColorAssistCheckBox.Checked
             : _settings.Appearance.EnableSemanticColorAssist;
-        previewSettings.Appearance.UseCustomFileListColors = _fileListCustomColorsEnabledForSave;
         previewSettings.Appearance.EnableSemanticColorAssist = enableColorAssist;
-        previewSettings.Appearance.ColorTheme = FileListColorResolver.CanonicalizePresetKey(_colorThemeCombo?.Text ?? _settings.Appearance.ColorTheme);
+        string selectedColorKey = FileListColorResolver.GetPresetKeyFromDisplayName(_colorThemeCombo?.Text ?? string.Empty);
+        if (string.Equals(selectedColorKey, FileListColorResolver.AutoColorSelectionKey, StringComparison.OrdinalIgnoreCase))
+        {
+            previewSettings.Appearance.ColorSelectionMode = AppearanceSettings.AutoColorSelectionMode;
+            previewSettings.Appearance.ExplicitColorPresetKey = null;
+            previewSettings.Appearance.ColorTheme = FileListColorResolver.ResolveInputProfileDefaultPresetKey(previewSettings.Input.FunctionKeyProfile);
+        }
+        else
+        {
+            previewSettings.Appearance.ColorSelectionMode = AppearanceSettings.ExplicitColorSelectionMode;
+            previewSettings.Appearance.ExplicitColorPresetKey = FileListColorResolver.CanonicalizePresetKey(selectedColorKey);
+            previewSettings.Appearance.ColorTheme = previewSettings.Appearance.ExplicitColorPresetKey;
+            previewSettings.Appearance.UseCustomFileListColors = _fileListCustomColorsEnabledForSave;
+        }
         return previewSettings;
     }
 
@@ -2966,11 +3189,21 @@ public class SettingsForm : Form
         var resolved = FileListColorResolver.ResolveColors(previewSettings);
         string themeNormalized = FileListColorResolver.NormalizeCoreTheme(previewSettings.Appearance.ColorTheme, previewSettings);
         bool isLightTheme = themeNormalized == "Light";
-        bool isWinFdCompatible = FunctionKeyProfileService.ResolveProfile(previewSettings.Input.FunctionKeyProfile) == FunctionKeyProfile.FDCompatible;
+        string effectivePresetKey = FileListColorResolver.ResolveEffectiveColorPresetKey(previewSettings);
 
-        Color accentColor = resolved.Directory;
-        Color? customBackColor = UiThemeResolver.TryParseColor(previewSettings.Appearance.CustomFunctionBarBackColor);
-        Color? customForeColor = UiThemeResolver.TryParseColor(previewSettings.Appearance.CustomFunctionBarForeColor);
+        Color? customBackColor;
+        Color? customForeColor;
+        if (FileListColorResolver.IsAutoColorSelection(previewSettings))
+        {
+            AutoProfileColorSettings? autoColors = previewSettings.Appearance.GetAutoProfileColors(previewSettings.Input.FunctionKeyProfile);
+            customBackColor = UiThemeResolver.TryParseColor(autoColors?.CustomFunctionBarBackColor);
+            customForeColor = UiThemeResolver.TryParseColor(autoColors?.CustomFunctionBarForeColor);
+        }
+        else
+        {
+            customBackColor = UiThemeResolver.TryParseColor(previewSettings.Appearance.CustomFunctionBarBackColor);
+            customForeColor = UiThemeResolver.TryParseColor(previewSettings.Appearance.CustomFunctionBarForeColor);
+        }
         bool hasCustomFunctionBarColors = customBackColor.HasValue || customForeColor.HasValue;
 
         if (hasCustomFunctionBarColors)
@@ -2993,21 +3226,24 @@ public class SettingsForm : Form
             return new FunctionPreviewPalette(Color.Black, Color.Gray, Color.White, Color.Black);
         }
         var resolved = FileListColorResolver.ResolveColors(previewSettings);
-        string themeNormalized = FileListColorResolver.NormalizeCoreTheme(previewSettings.Appearance.ColorTheme, previewSettings);
+        string effectivePresetKey = FileListColorResolver.ResolveEffectiveColorPresetKey(previewSettings);
+        string themeNormalized = FileListColorResolver.NormalizeCoreTheme(effectivePresetKey, previewSettings);
         bool isLightTheme = themeNormalized == "Light";
-        bool isWinFdCompatible = FunctionKeyProfileService.ResolveProfile(previewSettings.Input.FunctionKeyProfile) == FunctionKeyProfile.FDCompatible;
-
-        string theme = previewSettings.Appearance?.ColorTheme ?? string.Empty;
-        if (string.Equals(theme, "WinFdCompatible", StringComparison.OrdinalIgnoreCase))
-        {
-            isWinFdCompatible = true;
-        }
-        else if (string.Equals(theme, "MidFdStandard", StringComparison.OrdinalIgnoreCase))
-        {
-            isWinFdCompatible = false;
-        }
+        bool isWinFdCompatible = string.Equals(effectivePresetKey, "WinFdCompatible", StringComparison.OrdinalIgnoreCase);
 
         Color accentColor = resolved.Directory;
+
+        if (isWinFdCompatible &&
+            !isLightTheme &&
+            string.Equals(effectivePresetKey, "WinFdCompatible", StringComparison.OrdinalIgnoreCase))
+        {
+            FunctionBarColorPalette palette = FunctionBarColorResolver.ResolveFdCompatibleDarkDefault(resolved.Background, resolved.Directory);
+            return new FunctionPreviewPalette(
+                palette.BackColor,
+                palette.EnabledBackColor,
+                palette.EnabledTextColor,
+                palette.BorderColor);
+        }
 
         if (isWinFdCompatible)
         {
@@ -3050,7 +3286,7 @@ public class SettingsForm : Form
                 Color.FromArgb(198, 198, 198));
         }
 
-        (Color previewButtonBack, Color previewButtonFore, Color previewButtonBorder) = ResolveDarkStandardFunctionPreviewColors(previewSettings.Appearance!.ColorTheme, resolved);
+        (Color previewButtonBack, Color previewButtonFore, Color previewButtonBorder) = ResolveDarkStandardFunctionPreviewColors(effectivePresetKey, resolved);
         return new FunctionPreviewPalette(
             resolved.Background,
             previewButtonBack,
@@ -3064,7 +3300,7 @@ public class SettingsForm : Form
         _updatingColorFromUi = true;
         try
         {
-            ReloadPresetsCombo(_settings.Appearance.ColorTheme);
+            ReloadPresetsCombo();
             _enableColorAssistCheckBox.Checked = _settings.Appearance.EnableSemanticColorAssist;
             if (_fileListColorFieldListBox.Items.Count > 0)
             {
@@ -3117,13 +3353,17 @@ public class SettingsForm : Form
             return GetFunctionFieldColor(item.PropertyName);
         }
 
-        string? hex = GetPropertyValue(_settings.Appearance.CustomFileListColors, item.PropertyName);
+        CustomFileListColorSettings? customColors = GetCurrentCustomFileListColors();
+        string? hex = customColors == null ? null : GetPropertyValue(customColors, item.PropertyName);
         if (FileListColorResolver.ParseHexColor(hex) is Color c)
         {
             return c;
         }
 
-        var defaultColors = FileListColorResolver.ResolvePresetColors(_colorThemeCombo.Text, _settings.Appearance.CustomFileListColorPresets);
+        AppSettings previewSettings = BuildColorTabPreviewSettings();
+        var defaultColors = FileListColorResolver.ResolvePresetColors(
+            FileListColorResolver.ResolveEffectiveColorPresetKey(previewSettings),
+            previewSettings.Appearance.CustomFileListColorPresets);
         return item.PropertyName switch
         {
             nameof(CustomFileListColorSettings.Background) => defaultColors.Background,
@@ -3145,12 +3385,18 @@ public class SettingsForm : Form
     private Color GetFunctionFieldColor(string propertyName)
     {
         FunctionPreviewPalette palette = ResolveDefaultFunctionPreviewPalette(BuildColorTabPreviewSettings());
+        AutoProfileColorSettings? autoColors = GetCurrentAutoProfileColors();
+        string? customColor = propertyName == nameof(AppearanceSettings.CustomFunctionBarBackColor)
+            ? autoColors?.CustomFunctionBarBackColor ?? (!IsCurrentAutoColorSelection() ? _settings.Appearance.CustomFunctionBarBackColor : null)
+            : propertyName == nameof(AppearanceSettings.CustomFunctionBarForeColor)
+                ? autoColors?.CustomFunctionBarForeColor ?? (!IsCurrentAutoColorSelection() ? _settings.Appearance.CustomFunctionBarForeColor : null)
+                : null;
         return propertyName switch
         {
             nameof(AppearanceSettings.CustomFunctionBarBackColor) =>
-                UiThemeResolver.TryParseColor(_settings.Appearance.CustomFunctionBarBackColor) ?? palette.ButtonBackColor,
+                UiThemeResolver.TryParseColor(customColor) ?? palette.ButtonBackColor,
             nameof(AppearanceSettings.CustomFunctionBarForeColor) =>
-                UiThemeResolver.TryParseColor(_settings.Appearance.CustomFunctionBarForeColor) ?? palette.ButtonForeColor,
+                UiThemeResolver.TryParseColor(customColor) ?? palette.ButtonForeColor,
             _ => palette.ButtonBackColor
         };
     }
@@ -3165,22 +3411,78 @@ public class SettingsForm : Form
         target.GetType().GetProperty(propertyName)?.SetValue(target, value);
     }
 
+    private CustomFileListColorSettings GetCurrentFileListColorsForPreset()
+    {
+        AutoProfileColorSettings? autoColors = GetCurrentAutoProfileColors();
+        if (autoColors == null)
+        {
+            return _settings.Appearance.CustomFileListColors.Clone();
+        }
+
+        if (autoColors.UseCustomFileListColors)
+        {
+            return autoColors.FileListColors.Clone();
+        }
+
+        var resolved = FileListColorResolver.ResolvePresetColors(
+            FileListColorResolver.ResolveInputProfileDefaultPresetKey(GetCurrentInputProfileValue()),
+            _settings.Appearance.CustomFileListColorPresets);
+        return new CustomFileListColorSettings
+        {
+            Background = FileListColorResolver.ToHexColor(resolved.Background),
+            NormalFile = FileListColorResolver.ToHexColor(resolved.NormalFile),
+            Directory = FileListColorResolver.ToHexColor(resolved.Directory),
+            ReadOnly = FileListColorResolver.ToHexColor(resolved.ReadOnly),
+            Hidden = FileListColorResolver.ToHexColor(resolved.Hidden),
+            System = FileListColorResolver.ToHexColor(resolved.System),
+            Marked = FileListColorResolver.ToHexColor(resolved.Marked),
+            SelectedBackground = FileListColorResolver.ToHexColor(resolved.SelectedBackground),
+            SelectedForeground = FileListColorResolver.ToHexColor(resolved.SelectedForeground),
+            StatusNormal = FileListColorResolver.ToHexColor(resolved.StatusNormal),
+            StatusResult = FileListColorResolver.ToHexColor(resolved.StatusResult),
+            StatusError = FileListColorResolver.ToHexColor(resolved.StatusError)
+        };
+    }
+
     private void SetCurrentFieldColor(ColorFieldItem item, Color color)
     {
         if (item.IsFunctionColor)
         {
+            AutoProfileColorSettings? autoFunctionColors = IsCurrentAutoColorSelection()
+                ? _settings.Appearance.GetOrCreateAutoProfileColors(GetCurrentInputProfileValue())
+                : null;
             if (item.PropertyName == nameof(AppearanceSettings.CustomFunctionBarBackColor))
             {
-                _settings.Appearance.CustomFunctionBarBackColor = UiThemeResolver.ToHexString(color);
+                if (autoFunctionColors != null)
+                {
+                    autoFunctionColors.CustomFunctionBarBackColor = UiThemeResolver.ToHexString(color);
+                }
+                else
+                {
+                    _settings.Appearance.CustomFunctionBarBackColor = UiThemeResolver.ToHexString(color);
+                }
             }
             else if (item.PropertyName == nameof(AppearanceSettings.CustomFunctionBarForeColor))
             {
-                _settings.Appearance.CustomFunctionBarForeColor = UiThemeResolver.ToHexString(color);
+                if (autoFunctionColors != null)
+                {
+                    autoFunctionColors.CustomFunctionBarForeColor = UiThemeResolver.ToHexString(color);
+                }
+                else
+                {
+                    _settings.Appearance.CustomFunctionBarForeColor = UiThemeResolver.ToHexString(color);
+                }
             }
             return;
         }
 
-        SetPropertyValue(_settings.Appearance.CustomFileListColors, item.PropertyName, FileListColorResolver.ToHexColor(color));
+        CustomFileListColorSettings customColors = GetOrCreateCurrentCustomFileListColors();
+        SetPropertyValue(customColors, item.PropertyName, FileListColorResolver.ToHexColor(color));
+        AutoProfileColorSettings? autoColors = GetCurrentAutoProfileColors();
+        if (autoColors != null)
+        {
+            autoColors.UseCustomFileListColors = true;
+        }
     }
 
     private void ReloadPresetsCombo(string? selectPresetKey = null)
@@ -3192,6 +3494,7 @@ public class SettingsForm : Form
 
         _updatingColorFromUi = true;
         _colorThemeCombo.Items.Clear();
+        _colorThemeCombo.Items.Add(FileListColorResolver.AutoColorSelectionDisplayName);
 
         foreach (var key in FileListColorResolver.BuiltInPresetKeys)
         {
@@ -3203,7 +3506,10 @@ public class SettingsForm : Form
             _colorThemeCombo.Items.Add(FileListColorResolver.MakeUserPresetKey(preset.Name));
         }
 
-        string target = FileListColorResolver.CanonicalizePresetKey(selectPresetKey ?? _settings.Appearance.ColorTheme);
+        string target = selectPresetKey ?? (IsCurrentAutoColorSelection()
+            ? FileListColorResolver.AutoColorSelectionKey
+            : _settings.Appearance.ExplicitColorPresetKey ?? _settings.Appearance.ColorTheme);
+        target = FileListColorResolver.CanonicalizePresetKey(target);
         int idx = _colorThemeCombo.FindStringExact(FileListColorResolver.GetPresetDisplayName(target));
         if (idx >= 0)
         {
@@ -3229,7 +3535,11 @@ public class SettingsForm : Form
         {
             return;
         }
-        string theme = _settings.Appearance.ColorTheme ?? string.Empty;
+        if (FileListColorResolver.IsAutoColorSelection(_settings))
+        {
+            return;
+        }
+        string theme = FileListColorResolver.ResolveEffectiveColorPresetKey(_settings);
         if (string.Equals(theme, "MidFdStandard", StringComparison.OrdinalIgnoreCase) ||
             string.Equals(theme, "WinFdCompatible", StringComparison.OrdinalIgnoreCase))
         {
@@ -3249,7 +3559,25 @@ public class SettingsForm : Form
 
         string selectedPreset = _colorThemeCombo.Text;
         string presetKey = FileListColorResolver.GetPresetKeyFromDisplayName(selectedPreset);
-        _settings.Appearance.ColorTheme = FileListColorResolver.CanonicalizePresetKey(presetKey);
+        if (string.Equals(presetKey, FileListColorResolver.AutoColorSelectionKey, StringComparison.OrdinalIgnoreCase))
+        {
+            _settings.Appearance.ColorSelectionMode = AppearanceSettings.AutoColorSelectionMode;
+            _settings.Appearance.ExplicitColorPresetKey = null;
+            _fileListCustomColorsEnabledForSave = GetCurrentAutoProfileColors()?.UseCustomFileListColors == true;
+            UpdateDeleteButtonState();
+            UpdateColorTabUiFromModel();
+            UpdatePreview();
+
+            if (forceRefresh)
+            {
+                ForceRefreshColorTabControls();
+            }
+            return;
+        }
+
+        _settings.Appearance.ColorSelectionMode = AppearanceSettings.ExplicitColorSelectionMode;
+        _settings.Appearance.ExplicitColorPresetKey = FileListColorResolver.CanonicalizePresetKey(presetKey);
+        _settings.Appearance.ColorTheme = _settings.Appearance.ExplicitColorPresetKey;
         _fileListCustomColorsEnabledForSave = false;
 
         var resolved = FileListColorResolver.ResolvePresetColors(selectedPreset, _settings.Appearance.CustomFileListColorPresets);
@@ -3446,14 +3774,14 @@ public class SettingsForm : Form
             var target = _settings.Appearance.CustomFileListColorPresets.FirstOrDefault(p => string.Equals(p.Name, targetName, StringComparison.OrdinalIgnoreCase));
             if (target != null)
             {
-                target.Colors = _settings.Appearance.CustomFileListColors.Clone();
+                target.Colors = GetCurrentFileListColorsForPreset();
             }
             else
             {
                 var newPreset = new CustomFileListColorPreset
                 {
                     Name = targetName,
-                    Colors = _settings.Appearance.CustomFileListColors.Clone()
+                    Colors = GetCurrentFileListColorsForPreset()
                 };
                 _settings.Appearance.CustomFileListColorPresets.Add(newPreset);
             }
@@ -3463,7 +3791,7 @@ public class SettingsForm : Form
             var newPreset = new CustomFileListColorPreset
             {
                 Name = targetName,
-                Colors = _settings.Appearance.CustomFileListColors.Clone()
+                Colors = GetCurrentFileListColorsForPreset()
             };
             _settings.Appearance.CustomFileListColorPresets.Add(newPreset);
         }
@@ -3588,26 +3916,13 @@ public class SettingsForm : Form
             _settings.Appearance.CustomFileListColorPresets.Remove(target);
         }
 
-        string fallbackKey = "ClassicCyan";
-        _settings.Appearance.ColorTheme = fallbackKey;
+        _settings.Appearance.ColorSelectionMode = AppearanceSettings.AutoColorSelectionMode;
+        _settings.Appearance.ExplicitColorPresetKey = null;
+        _settings.Appearance.ColorTheme = FileListColorResolver.ResolveInputProfileDefaultPresetKey(GetCurrentInputProfileValue());
         _fileListCustomColorsEnabledForSave = false;
 
-        ReloadPresetsCombo(fallbackKey);
-
-        var resolved = FileListColorResolver.ResolvePresetColors(fallbackKey, _settings.Appearance.CustomFileListColorPresets);
-        _settings.Appearance.CustomFileListColors.Background = FileListColorResolver.ToHexColor(resolved.Background);
-        _settings.Appearance.CustomFileListColors.NormalFile = FileListColorResolver.ToHexColor(resolved.NormalFile);
-        _settings.Appearance.CustomFileListColors.Directory = FileListColorResolver.ToHexColor(resolved.Directory);
-        _settings.Appearance.CustomFileListColors.ReadOnly = FileListColorResolver.ToHexColor(resolved.ReadOnly);
-        _settings.Appearance.CustomFileListColors.Hidden = FileListColorResolver.ToHexColor(resolved.Hidden);
-        _settings.Appearance.CustomFileListColors.System = FileListColorResolver.ToHexColor(resolved.System);
-        _settings.Appearance.CustomFileListColors.Marked = FileListColorResolver.ToHexColor(resolved.Marked);
-        _settings.Appearance.CustomFileListColors.SelectedBackground = FileListColorResolver.ToHexColor(resolved.SelectedBackground);
-        _settings.Appearance.CustomFileListColors.SelectedForeground = FileListColorResolver.ToHexColor(resolved.SelectedForeground);
-        _settings.Appearance.CustomFileListColors.StatusNormal = FileListColorResolver.ToHexColor(resolved.StatusNormal);
-        _settings.Appearance.CustomFileListColors.StatusResult = FileListColorResolver.ToHexColor(resolved.StatusResult);
-        _settings.Appearance.CustomFileListColors.StatusError = FileListColorResolver.ToHexColor(resolved.StatusError);
-        ApplyDefaultFunctionColorsFromCurrentTheme();
+        ReloadPresetsCombo(FileListColorResolver.AutoColorSelectionKey);
+        ApplySelectedColorPresetToEditor(forceRefresh: true);
 
         UpdateColorTabUiFromModel();
         UpdatePreview();
@@ -3619,7 +3934,23 @@ public class SettingsForm : Form
         {
             return;
         }
-        string currentTheme = _colorThemeCombo.Text;
+        if (IsCurrentAutoColorSelection())
+        {
+            AutoProfileColorSettings? autoColors = _settings.Appearance.GetAutoProfileColors(GetCurrentInputProfileValue());
+            if (autoColors != null)
+            {
+                autoColors.UseCustomFileListColors = false;
+                autoColors.FileListColors = new CustomFileListColorSettings();
+                autoColors.CustomFunctionBarBackColor = null;
+                autoColors.CustomFunctionBarForeColor = null;
+            }
+            _fileListCustomColorsEnabledForSave = false;
+            UpdateColorTabUiFromModel();
+            UpdatePreview();
+            ForceRefreshColorTabControls();
+            return;
+        }
+        string currentTheme = FileListColorResolver.CanonicalizePresetKey(_colorThemeCombo.Text);
         var resolved = FileListColorResolver.ResolvePresetColors(currentTheme, _settings.Appearance.CustomFileListColorPresets);
 
         _settings.Appearance.CustomFileListColors.Background = FileListColorResolver.ToHexColor(resolved.Background);

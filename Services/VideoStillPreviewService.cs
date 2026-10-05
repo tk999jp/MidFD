@@ -115,103 +115,81 @@ public static class VideoStillPreviewService
         processStartInfo.ArgumentList.Add(tempOutputPath);
 
         using var process = new Process { StartInfo = processStartInfo, EnableRaisingEvents = true };
+        bool outputPublished = false;
+        bool processStarted = false;
+        Task<string>? standardOutputTask = null;
+        Task<string>? standardErrorTask = null;
         try
         {
             process.Start();
+            processStarted = true;
+            standardOutputTask = process.StandardOutput.ReadToEndAsync();
+            standardErrorTask = process.StandardError.ReadToEndAsync();
+            VideoProcessWaitOutcome waitOutcome = await VideoProcessLifetime.WaitForExitOrStopAsync(
+                process,
+                cancellationToken,
+                TimeSpan.FromMilliseconds(DefaultTimeoutMilliseconds));
+            string stdErr = await standardErrorTask;
+            _ = await standardOutputTask;
+
+            if (waitOutcome == VideoProcessWaitOutcome.Cancelled)
+            {
+                return new VideoStillPreviewResult { Success = false, ErrorMessage = "動画定点プレビュー生成を中断しました。" };
+            }
+            if (waitOutcome == VideoProcessWaitOutcome.TimedOut)
+            {
+                return new VideoStillPreviewResult
+                {
+                    Success = false,
+                    ErrorMessage = string.IsNullOrWhiteSpace(stdErr) ? "動画定点プレビュー生成がタイムアウトしました。" : stdErr.Trim()
+                };
+            }
+            if (cancellationToken.IsCancellationRequested)
+            {
+                return new VideoStillPreviewResult { Success = false, ErrorMessage = "動画定点プレビュー生成を中断しました。" };
+            }
+            if (process.ExitCode != 0)
+            {
+                return new VideoStillPreviewResult
+                {
+                    Success = false,
+                    ErrorMessage = string.IsNullOrWhiteSpace(stdErr) ? $"ffmpeg 実行エラー (code={process.ExitCode})" : stdErr.Trim()
+                };
+            }
+            if (!File.Exists(tempOutputPath))
+            {
+                return new VideoStillPreviewResult { Success = false, ErrorMessage = "動画定点プレビュー画像を生成できませんでした。" };
+            }
+
+            try
+            {
+                File.Move(tempOutputPath, outputPath, overwrite: true);
+                outputPublished = true;
+            }
+            catch (IOException) when (File.Exists(outputPath))
+            {
+                return new VideoStillPreviewResult { Success = true, FromCache = true, ImagePath = outputPath };
+            }
+            catch (Exception ex)
+            {
+                return new VideoStillPreviewResult { Success = false, ErrorMessage = $"プレビュー画像の保存に失敗しました: {ex.Message}" };
+            }
+
+            return new VideoStillPreviewResult { Success = true, FromCache = false, ImagePath = outputPath };
+        }
+        catch (OperationCanceledException)
+        {
+            return new VideoStillPreviewResult { Success = false, ErrorMessage = "動画定点プレビュー生成を中断しました。" };
         }
         catch (Exception ex)
         {
-            return new VideoStillPreviewResult
-            {
-                Success = false,
-                ErrorMessage = $"ffmpeg 実行に失敗しました: {ex.Message}"
-            };
+            return new VideoStillPreviewResult { Success = false, ErrorMessage = $"ffmpeg 実行に失敗しました: {ex.Message}" };
         }
-
-        Task<string> standardOutputTask = process.StandardOutput.ReadToEndAsync();
-        Task<string> standardErrorTask = process.StandardError.ReadToEndAsync();
-        Task waitForExitTask = process.WaitForExitAsync(cancellationToken);
-
-        Task completed = await Task.WhenAny(waitForExitTask, Task.Delay(DefaultTimeoutMilliseconds, cancellationToken));
-        if (completed != waitForExitTask)
+        finally
         {
-            TryKillProcess(process);
-            string timeoutError = await standardErrorTask;
-            TryDeleteFile(tempOutputPath);
-            return new VideoStillPreviewResult
-            {
-                Success = false,
-                ErrorMessage = string.IsNullOrWhiteSpace(timeoutError)
-                    ? "動画定点プレビュー生成がタイムアウトしました。"
-                    : timeoutError.Trim()
-            };
+            if (processStarted && !process.HasExited) await VideoProcessLifetime.StopAndWaitAsync(process);
+            if (!outputPublished) TryDeleteFile(tempOutputPath);
         }
-
-        await waitForExitTask;
-        string stdErr = await standardErrorTask;
-        _ = await standardOutputTask;
-
-        if (cancellationToken.IsCancellationRequested)
-        {
-            TryDeleteFile(tempOutputPath);
-            return new VideoStillPreviewResult
-            {
-                Success = false,
-                ErrorMessage = "動画定点プレビュー生成を中断しました。"
-            };
-        }
-
-        if (process.ExitCode != 0)
-        {
-            TryDeleteFile(tempOutputPath);
-            return new VideoStillPreviewResult
-            {
-                Success = false,
-                ErrorMessage = string.IsNullOrWhiteSpace(stdErr)
-                    ? $"ffmpeg 実行エラー (code={process.ExitCode})"
-                    : stdErr.Trim()
-            };
-        }
-
-        if (!File.Exists(tempOutputPath))
-        {
-            return new VideoStillPreviewResult
-            {
-                Success = false,
-                ErrorMessage = "動画定点プレビュー画像を生成できませんでした。"
-            };
-        }
-
-        try
-        {
-            File.Move(tempOutputPath, outputPath, overwrite: true);
-        }
-        catch (IOException) when (File.Exists(outputPath))
-        {
-            TryDeleteFile(tempOutputPath);
-            return new VideoStillPreviewResult
-            {
-                Success = true,
-                FromCache = true,
-                ImagePath = outputPath
-            };
-        }
-        catch (Exception ex)
-        {
-            TryDeleteFile(tempOutputPath);
-            return new VideoStillPreviewResult
-            {
-                Success = false,
-                ErrorMessage = $"プレビュー画像の保存に失敗しました: {ex.Message}"
-            };
-        }
-
-        return new VideoStillPreviewResult
-        {
-            Success = true,
-            FromCache = false,
-            ImagePath = outputPath
-        };
     }
 
     private static string BuildCachePath(string videoPath, int seconds, string cacheDirectory)
@@ -221,21 +199,6 @@ public static class VideoStillPreviewService
         byte[] bytes = SHA256.HashData(Encoding.UTF8.GetBytes(key));
         string hash = Convert.ToHexString(bytes).ToLowerInvariant();
         return Path.Combine(cacheDirectory, $"{hash}.png");
-    }
-
-    private static void TryKillProcess(Process process)
-    {
-        try
-        {
-            if (!process.HasExited)
-            {
-                process.Kill(entireProcessTree: true);
-            }
-        }
-        catch
-        {
-            // no-op
-        }
     }
 
     private static void TryDeleteFile(string path)

@@ -168,9 +168,7 @@ public class InputSettings
                 continue;
             }
 
-            string normalizedCommandId = string.Equals(value, LegacyBrowserCheckExecuteCommandId, StringComparison.OrdinalIgnoreCase)
-                ? CommandIds.BrowserExecute
-                : value ?? string.Empty;
+            string normalizedCommandId = NormalizeCommandId(value ?? string.Empty);
             if (!result.ContainsKey(normalizedKey) || string.Equals(result[normalizedKey], LegacyBrowserCheckExecuteCommandId, StringComparison.OrdinalIgnoreCase))
             {
                 result[normalizedKey] = normalizedCommandId;
@@ -216,10 +214,10 @@ public class InputSettings
                 continue;
             }
 
-            bool isLegacyCommandId = string.Equals(commandId.Trim(), LegacyBrowserCheckExecuteCommandId, StringComparison.OrdinalIgnoreCase);
             string normalizedCommandId = NormalizeCommandId(commandId);
-            if (isLegacyCommandId &&
-                source.Keys.Any(key => string.Equals(key.Trim(), CommandIds.BrowserExecute, StringComparison.OrdinalIgnoreCase)))
+            if ((!string.Equals(commandId.Trim(), normalizedCommandId, StringComparison.OrdinalIgnoreCase)) &&
+                source.Keys.Any(key => string.Equals(NormalizeCommandId(key), normalizedCommandId, StringComparison.OrdinalIgnoreCase) &&
+                    !string.Equals(key.Trim(), commandId.Trim(), StringComparison.OrdinalIgnoreCase)))
             {
                 continue;
             }
@@ -408,24 +406,37 @@ public class InputSettings
     private static string NormalizeCommandId(string commandId)
     {
         string normalized = commandId.Trim();
-        return string.Equals(normalized, LegacyBrowserCheckExecuteCommandId, StringComparison.OrdinalIgnoreCase)
-            ? CommandIds.BrowserExecute
-            : normalized;
+        if (string.Equals(normalized, LegacyBrowserCheckExecuteCommandId, StringComparison.OrdinalIgnoreCase))
+        {
+            return CommandIds.BrowserExecute;
+        }
+        if (string.Equals(normalized, CommandIds.BrowserTabFilterLock, StringComparison.OrdinalIgnoreCase))
+        {
+            return CommandIds.BrowserFilter;
+        }
+        if (string.Equals(normalized, CommandIds.BrowserTabFilterLockClear, StringComparison.OrdinalIgnoreCase))
+        {
+            return CommandIds.BrowserFilterClear;
+        }
+        return normalized;
     }
 
     private static void MigrateLegacyCommandId<T>(Dictionary<string, T> map)
     {
-        if (!map.TryGetValue(LegacyBrowserCheckExecuteCommandId, out T? legacyValue))
+        foreach (string legacyId in map.Keys.ToArray())
         {
-            return;
-        }
+            string normalizedId = NormalizeCommandId(legacyId);
+            if (string.Equals(legacyId, normalizedId, StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
 
-        if (!map.ContainsKey(CommandIds.BrowserExecute))
-        {
-            map[CommandIds.BrowserExecute] = legacyValue;
+            if (!map.ContainsKey(normalizedId) && map.TryGetValue(legacyId, out T? legacyValue))
+            {
+                map[normalizedId] = legacyValue;
+            }
+            map.Remove(legacyId);
         }
-
-        map.Remove(LegacyBrowserCheckExecuteCommandId);
     }
 
     public static List<string> NormalizeBrowserKeyGestures(IEnumerable<string>? source)
@@ -572,6 +583,8 @@ public class InputSettings
             [CommandIds.BrowserOpenCommandDialog] = new[] { "X" },
             [CommandIds.BrowserTabPrevious] = new[] { "Ctrl+Left", "Ctrl+Shift+Tab" },
             [CommandIds.BrowserTabNext] = new[] { "Ctrl+Right", "Ctrl+Tab" },
+            [CommandIds.BrowserTabHistoryBack] = new[] { "Alt+Shift+Left" },
+            [CommandIds.BrowserTabHistoryForward] = new[] { "Alt+Shift+Right" },
             [CommandIds.BrowserChangeAttributes] = new[] { "A" },
             [CommandIds.BrowserOpenShell] = new[] { "H" },
             [CommandIds.BrowserOpenCommandPrompt] = new[] { "Shift+H" },
@@ -582,7 +595,8 @@ public class InputSettings
             [CommandIds.BrowserCreateFile] = new[] { "N" },
             [CommandIds.BrowserPreview] = new[] { "V" },
             [CommandIds.BrowserSort] = new[] { "S" },
-            [CommandIds.BrowserFilter] = new[] { "F", "Ctrl+F" },
+            [CommandIds.BrowserFilter] = new[] { "F" },
+            [CommandIds.BrowserSearch] = new[] { "Ctrl+F" },
             [CommandIds.BrowserTree] = new[] { "T" },
             [CommandIds.BrowserQuickAccess] = new[] { "Q" },
             [CommandIds.BrowserLogdisk] = new[] { "L" },

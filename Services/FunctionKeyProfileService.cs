@@ -6,6 +6,36 @@ namespace MidFD.Services;
 
 public static class FunctionKeyProfileService
 {
+    internal static void RemoveCommandAssignments(
+        string commandId,
+        FunctionKeyProfile profile,
+        Dictionary<string, string?> normalOverrides,
+        Dictionary<string, string?> shiftOverrides,
+        Dictionary<string, string?> ctrlOverrides,
+        Dictionary<string, string?> altOverrides)
+    {
+        foreach ((Dictionary<string, string?> map, bool isShift, bool isCtrl, bool isAlt) in new[]
+                 {
+                     (normalOverrides, false, false, false),
+                     (shiftOverrides, true, false, false),
+                     (ctrlOverrides, false, true, false),
+                     (altOverrides, false, false, true)
+                 })
+        {
+            for (int slot = 1; slot <= 12; slot++)
+            {
+                string key = $"F{slot}";
+                string? effectiveCommandId = map.TryGetValue(key, out string? value) && !string.IsNullOrWhiteSpace(value)
+                    ? value
+                    : ResolveDefinition(profile, slot, isShift, isCtrl, isAlt)?.CommandId;
+                if (string.Equals(effectiveCommandId, commandId, StringComparison.OrdinalIgnoreCase))
+                {
+                    map[key] = InputSettings.MouseGestureUnassignedCommandId;
+                }
+            }
+        }
+    }
+
     internal static bool IsExplicitUnassigned(string? commandId)
     {
         return string.Equals(commandId, InputSettings.MouseGestureUnassignedCommandId, StringComparison.OrdinalIgnoreCase);
@@ -39,7 +69,7 @@ public static class FunctionKeyProfileService
         Add(FunctionKeyProfile.Standard, false, false, false,
             CommandIds.BrowserShowHelp, CommandIds.FileRename, CommandIds.FileCopy,
             CommandIds.BrowserOpenExternalEditor, CommandIds.BrowserReload, CommandIds.BrowserSort,
-            CommandIds.BrowserFilter, CommandIds.BrowserQuickAccess, CommandIds.BrowserLogdisk,
+            CommandIds.BrowserSearch, CommandIds.BrowserQuickAccess, CommandIds.BrowserLogdisk,
             CommandIds.AppOpenCommandLauncher, CommandIds.BrowserOpenMarkSlot, CommandIds.AppOpenCommandList);
         Add(FunctionKeyProfile.Standard, true, false, false,
             CommandIds.AppOpenSystemInformation, CommandIds.FileRename, CommandIds.BrowserFilter,
@@ -53,7 +83,7 @@ public static class FunctionKeyProfileService
         Add(FunctionKeyProfile.FDCompatible, false, false, false,
             CommandIds.BrowserShowHelp, CommandIds.BrowserOpenCommandDialog, CommandIds.FileCopy,
             CommandIds.FileDelete, CommandIds.FileRename, CommandIds.BrowserSort,
-            CommandIds.BrowserFilter, CommandIds.BrowserTree, CommandIds.BrowserLogdisk,
+            CommandIds.BrowserSearch, CommandIds.BrowserTree, CommandIds.BrowserLogdisk,
             CommandIds.ArchiveUnpack, CommandIds.BrowserCursorTop, CommandIds.BrowserCursorBottom);
         Add(FunctionKeyProfile.FDCompatible, true, false, false,
             CommandIds.BrowserChangeAttributes, CommandIds.AppOpenSystemInformation, CommandIds.FileMove,
@@ -169,6 +199,7 @@ public static class FunctionKeyProfileService
             CommandIds.BrowserChangeAttributes => "attr",
             CommandIds.BrowserSort => "sort",
             CommandIds.BrowserFilter => "filt",
+            CommandIds.BrowserSearch => "srch",
             CommandIds.BrowserTree => "tree",
             CommandIds.BrowserQuickAccess => "qacc",
             CommandIds.BrowserLogdisk => "logd",

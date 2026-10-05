@@ -10,93 +10,40 @@ namespace MidFD.Helpers;
 /// </summary>
 public sealed class FileOperationDialogCoordinator
 {
-    public bool TrySelectDestinationDirectory(
+    public string? RequestDestinationDirectory(
         IWin32Window owner,
-        NavigationService navigationService,
-        string prompt,
-        string title,
-        string operationDisplayName,
-        string canceledMessage,
-        Action<string> showStatusMessage,
+        string operationName,
+        string currentPath,
         string? summaryText,
         string? warningText,
-        IReadOnlyList<string>? directoryHistory,
-        out string normalizedDestinationDirectory,
-        out bool needsCreateDirectory)
+        IReadOnlyList<string>? directoryHistory)
     {
-        normalizedDestinationDirectory = string.Empty;
-        needsCreateDirectory = false;
-
-        string? input;
-        if (directoryHistory != null)
-        {
-            input = MoveDestinationDialog.Show(
+        string prompt = $"{operationName}先ディレクトリを入力してください:";
+        return directoryHistory != null
+            ? MoveDestinationDialog.Show(
                 prompt,
-                title,
-                navigationService.CurrentPath,
+                operationName,
+                currentPath,
                 directoryHistory,
                 summaryText,
-                warningText);
-        }
-        else
-        {
-            input = SimpleInputDialog.ShowNullable(
+                warningText)
+            : SimpleInputDialog.ShowNullable(
                 prompt,
-                title,
-                navigationService.CurrentPath,
-                new SimpleInputDialog.DisplayOptions(summaryText, warningText, EnableDirectoryCompletion: true));
-        }
-        if (string.IsNullOrWhiteSpace(input))
-        {
-            showStatusMessage(canceledMessage);
-            return false;
-        }
-
-        normalizedDestinationDirectory = navigationService.NormalizeDestinationDirectory(input);
-        string? validationError = FileOperationPresentationHelper.GetDestinationPathErrorMessage(
-            input,
-            navigationService.CurrentPath,
-            normalizedDestinationDirectory,
-            operationDisplayName);
-
-        if (!string.IsNullOrEmpty(validationError))
-        {
-            MessageBox.Show(validationError, "エラー", MessageBoxButtons.OK, MessageBoxIcon.Information);
-            normalizedDestinationDirectory = string.Empty;
-            return false;
-        }
-
-        needsCreateDirectory = !Directory.Exists(normalizedDestinationDirectory);
-        return true;
+                operationName,
+                currentPath,
+                new SimpleInputDialog.DisplayOptions(
+                    summaryText,
+                    warningText,
+                    EnableDirectoryCompletion: true));
     }
 
-    public bool EnsureDestinationDirectory(
+    public bool ConfirmCreateDirectory(
         IWin32Window owner,
-        string destinationDirectory,
-        bool needsCreateDirectory)
+        string destinationDirectory)
     {
-        if (!needsCreateDirectory)
-        {
-            return true;
-        }
-
         string message = FileOperationPresentationHelper.GetCreateDirectoryConfirmationMessage(destinationDirectory);
         DialogResult result = ShowCreateDirectoryConfirmationDialog(owner, message);
-        if (result != DialogResult.Yes)
-        {
-            return false;
-        }
-
-        try
-        {
-            Directory.CreateDirectory(destinationDirectory);
-            return true;
-        }
-        catch (Exception ex)
-        {
-            MessageBox.Show($"ディレクトリの作成に失敗しました: {ex.Message}", "エラー", MessageBoxButtons.OK, MessageBoxIcon.Error);
-            return false;
-        }
+        return result == DialogResult.Yes;
     }
 
     private DialogResult ShowCreateDirectoryConfirmationDialog(IWin32Window owner, string message)

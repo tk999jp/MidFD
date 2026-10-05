@@ -1,4 +1,3 @@
-using System.Windows.Forms;
 using MidFD.Models;
 
 namespace MidFD.Services;
@@ -51,7 +50,7 @@ internal static class BrowserIncomingDragResolver
         {
             return new BrowserIncomingDragDecision
             {
-                Effect = DragDropEffects.Copy,
+                Effect = BrowserDragDropEffect.Copy,
                 Intent = BrowserDragDropIntent.Copy,
                 Reason = hasImageData ? "imageAccepted" : "imageUrlAccepted",
                 StatusText = "Drag: Copy"
@@ -63,7 +62,7 @@ internal static class BrowserIncomingDragResolver
         {
             return new BrowserIncomingDragDecision
             {
-                Effect = DragDropEffects.Copy | DragDropEffects.Move,
+                Effect = BrowserDragDropEffect.Copy | BrowserDragDropEffect.Move,
                 Intent = BrowserDragDropIntent.Prompt,
                 Reason = "rightDragPrompt",
                 StatusText = "Drag: 操作を選択",
@@ -75,7 +74,7 @@ internal static class BrowserIncomingDragResolver
         {
             return new BrowserIncomingDragDecision
             {
-                Effect = DragDropEffects.Move,
+                Effect = BrowserDragDropEffect.Move,
                 Intent = BrowserDragDropIntent.Move,
                 Reason = "shiftMove",
                 StatusText = "Drag: Move",
@@ -85,7 +84,7 @@ internal static class BrowserIncomingDragResolver
 
         return new BrowserIncomingDragDecision
         {
-            Effect = DragDropEffects.Copy,
+            Effect = BrowserDragDropEffect.Copy,
             Intent = BrowserDragDropIntent.Copy,
             Reason = (keyState & ControlMask) != 0 ? "ctrlCopy" : "defaultCopy",
             StatusText = "Drag: Copy",
@@ -97,7 +96,7 @@ internal static class BrowserIncomingDragResolver
     {
         return new BrowserIncomingDragDecision
         {
-            Effect = DragDropEffects.None,
+            Effect = BrowserDragDropEffect.None,
             Intent = BrowserDragDropIntent.None,
             Reason = reason,
             StatusText = "Drag: Drop不可"

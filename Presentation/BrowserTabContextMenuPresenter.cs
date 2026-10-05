@@ -5,6 +5,28 @@ namespace MidFD.Presentation;
 
 public static class BrowserTabContextMenuPresenter
 {
+    public static ToolStripMenuItem CreateWorkspaceSnapshotSaveItem(Action saveCurrentWorkspace)
+    {
+        var item = new ToolStripMenuItem("現在のWorkspaceをスナップショット保存...");
+        item.Click += (_, _) => saveCurrentWorkspace();
+        return item;
+    }
+
+    public static void ApplyWorkspaceSnapshotAvailability(
+        bool enabled,
+        ToolStripMenuItem? saveItem,
+        ToolStripSeparator? separator)
+    {
+        if (saveItem != null)
+        {
+            saveItem.Visible = enabled;
+        }
+        if (separator != null)
+        {
+            separator.Visible = enabled;
+        }
+    }
+
     public static void ApplyCategoryState(
         BrowserTabCategoryContextMenuState state,
         ToolStripMenuItem? moveLeftItem,

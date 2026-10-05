@@ -283,6 +283,12 @@ public sealed class BrowserTabStrip : Control
         Invalidate(invalidBounds.IsEmpty ? ClientRectangle : invalidBounds);
     }
 
+    internal BrowserTabStripItem? GetTabItem(int index)
+        => index >= 0 && index < _tabs.Count ? _tabs[index] : null;
+
+    internal int FindBrowserTabProjectionIndex(Guid browserTabId)
+        => _tabs.FindIndex(item => item.Kind == BrowserTabStripItemKind.Browser && item.BrowserTabId == browserTabId);
+
     private Rectangle GetTabBounds(int index)
     {
         int visibleIndex = _tabBoundIndexes.IndexOf(index);
@@ -543,7 +549,7 @@ public sealed class BrowserTabStrip : Control
         {
             _activeTabLeftClickCandidate = e.Button == MouseButtons.Left && tabIndex == _selectedIndex;
             SelectedIndex = tabIndex;
-            if (e.Button == MouseButtons.Left)
+            if (e.Button == MouseButtons.Left && _tabs[tabIndex].Kind != BrowserTabStripItemKind.UnifiedSearch)
             {
                 _dragStartIndex = tabIndex;
                 _dragMouseDownPoint = e.Location;
@@ -594,7 +600,10 @@ public sealed class BrowserTabStrip : Control
             int dragStartIndex = _dragStartIndex;
             int targetIndex = ResolveDropTargetIndex(dragStartIndex, _dragHoverInsertionIndex);
             ResetDragReorderState();
-            if (dragStartIndex >= 0 && targetIndex >= 0 && dragStartIndex != targetIndex)
+            if (dragStartIndex >= 0 && targetIndex >= 0 && dragStartIndex != targetIndex
+                && dragStartIndex < _tabs.Count && targetIndex < _tabs.Count
+                && _tabs[dragStartIndex].Kind == BrowserTabStripItemKind.Browser
+                && _tabs[targetIndex].Kind == BrowserTabStripItemKind.Browser)
             {
                 TabReordered?.Invoke(this, new BrowserTabStripReorderEventArgs(dragStartIndex, targetIndex));
                 return;
@@ -1735,13 +1744,23 @@ public sealed record BrowserTabStripCategoryItem(
     string? ToolTipText,
     BrowserTabStripCategoryItemKind Kind = BrowserTabStripCategoryItemKind.Category);
 
+public enum BrowserTabStripItemKind
+{
+    Browser,
+    UnifiedSearch
+}
+
 public sealed record BrowserTabStripItem(
     string Text,
     string? ToolTipText,
     string? CanonicalPath = null,
     string Prefix = "",
     string? BaseTitle = null,
-    string? RelativeSuffix = null);
+    string? RelativeSuffix = null,
+    BrowserTabStripItemKind Kind = BrowserTabStripItemKind.Browser,
+    string? RuntimeIdentity = null,
+    Guid? BrowserTabId = null,
+    Guid? SourceTabId = null);
 
 public sealed class BrowserTabStripCategoryEventArgs : EventArgs
 {
@@ -1765,16 +1784,25 @@ public sealed class BrowserTabStripCategoryEventArgs : EventArgs
 
 public sealed class BrowserTabStripMouseEventArgs : EventArgs
 {
-    public BrowserTabStripMouseEventArgs(int tabIndex, MouseButtons button, Point location)
+    public BrowserTabStripMouseEventArgs(
+        int tabIndex,
+        MouseButtons button,
+        Point location,
+        string? categoryId = null,
+        Guid? browserTabId = null)
     {
         TabIndex = tabIndex;
         Button = button;
         Location = location;
+        CategoryId = categoryId;
+        BrowserTabId = browserTabId;
     }
 
     public int TabIndex { get; }
     public MouseButtons Button { get; }
     public Point Location { get; }
+    public string? CategoryId { get; }
+    public Guid? BrowserTabId { get; }
 }
 
 public sealed class BrowserTabStripReorderEventArgs : EventArgs

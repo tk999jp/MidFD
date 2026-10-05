@@ -10,6 +10,7 @@ param (
 )
 
 $ErrorActionPreference = "Stop"
+. (Join-Path $PSScriptRoot 'ripgrep-bundle.ps1')
 
 $rootDir = Resolve-Path (Join-Path $PSScriptRoot "..")
 $artifactsDir = Join-Path $rootDir "artifacts"
@@ -83,6 +84,7 @@ foreach ($currentMode in $modes) {
     $verifyRoot = Join-Path $tempRoot "verify-$modeLower"
     if (Test-Path $verifyRoot) { Remove-Item -Recurse -Force $verifyRoot }
     Expand-Archive -Path $zipPath -DestinationPath $verifyRoot -Force
+    Assert-RipgrepBundle -PackageRoot $verifyRoot
 
     if (-not (Test-Path (Join-Path $verifyRoot "MidFD.exe"))) {
         throw "Package verification failed for ${currentMode}: MidFD.exe is missing."

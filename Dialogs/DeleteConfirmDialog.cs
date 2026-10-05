@@ -99,7 +99,6 @@ internal static class DeleteConfirmDialog
                 ? (usePermanentDelete ? "完全削除(Alt+Y)" : "はい(Alt+Y)")
                 : "はい(&Y)",
             MinimumSize = new Size(96, 30),
-            DialogResult = DialogResult.Yes,
             TabIndex = 0
         };
         Button noButton = new()
@@ -109,6 +108,8 @@ internal static class DeleteConfirmDialog
             DialogResult = DialogResult.No,
             TabIndex = 1
         };
+
+        form.ConfigureApprovalButton(yesButton);
 
         form.Controls.Add(yesButton);
         form.Controls.Add(noButton);
@@ -135,11 +136,29 @@ internal static class DeleteConfirmDialog
         return form.ShowDialog(owner);
     }
 
-    private sealed class DeleteConfirmForm : Form
+    internal sealed class DeleteConfirmForm : Form
     {
+        private Button? _approvalButton;
+        private bool _altYesAuthorized;
+
         [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
         [Browsable(false)]
         public bool RequireAltYes { get; set; }
+
+        internal Button ApprovalButton => _approvalButton
+            ?? throw new InvalidOperationException("The approval button has not been configured.");
+
+        internal void ConfigureApprovalButton(Button approvalButton)
+        {
+            _approvalButton = approvalButton;
+            approvalButton.DialogResult = RequireAltYes ? DialogResult.None : DialogResult.Yes;
+        }
+
+        internal bool ProcessKeyForTest(Keys keyData)
+        {
+            Message msg = default;
+            return ProcessCmdKey(ref msg, keyData);
+        }
 
         protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
         {
@@ -154,21 +173,43 @@ internal static class DeleteConfirmDialog
                 {
                     if (modifiers == Keys.Alt)
                     {
-                        // Alt+Y のみ許可
+                        _altYesAuthorized = true;
                         this.DialogResult = DialogResult.Yes;
                         this.Close();
                         return true;
                     }
 
-                    if (modifiers == Keys.None || modifiers == Keys.Shift)
-                    {
-                        // 単独 Y または Shift+Y は握り潰す
-                        return true;
-                    }
+                    // Alt を伴わない Y 系列は、mnemonic／入力経路に関係なく承認しない。
+                    return true;
                 }
             }
 
             return base.ProcessCmdKey(ref msg, keyData);
         }
+
+        protected override void OnFormClosing(FormClosingEventArgs e)
+        {
+            if (RequireAltYes && DialogResult == DialogResult.Yes && !_altYesAuthorized)
+            {
+                DialogResult = DialogResult.None;
+                e.Cancel = true;
+                return;
+            }
+
+            base.OnFormClosing(e);
+        }
+    }
+
+    internal static DeleteConfirmForm CreateTestForm(bool requireAltYes)
+    {
+        DeleteConfirmForm form = new() { RequireAltYes = requireAltYes };
+        Button approvalButton = new() { Text = requireAltYes ? "はい(Alt+Y)" : "はい(&Y)" };
+        Button noButton = new() { Text = "いいえ(&N)", DialogResult = DialogResult.No };
+        form.ConfigureApprovalButton(approvalButton);
+        form.Controls.Add(approvalButton);
+        form.Controls.Add(noButton);
+        form.AcceptButton = noButton;
+        form.CancelButton = noButton;
+        return form;
     }
 }

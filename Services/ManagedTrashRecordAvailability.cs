@@ -27,7 +27,7 @@ internal static class ManagedTrashRecordAvailabilityService
     {
         ArgumentNullException.ThrowIfNull(record);
         ArgumentNullException.ThrowIfNull(pathValidator);
-        pathExists ??= static path => File.Exists(path) || Directory.Exists(path);
+        pathExists ??= static path => ReparsePointHelper.Exists(path) || File.Exists(path) || Directory.Exists(path);
 
         if (record.Status != TrashRecordStatus.InTrash)
         {

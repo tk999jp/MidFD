@@ -17,14 +17,6 @@ public sealed class BrowserNavigationCoordinator
         public bool SuppressRecent { get; init; }
     }
 
-    public sealed class ExecutionContext
-    {
-        public required Func<string, bool> PrepareUnlockedTabForLocationChange { get; init; }
-        public required Func<string, string?, bool, bool, bool> LoadDirectory { get; init; }
-        public Action? OnNavigationSucceeded { get; init; }
-        public Action<string>? OnDirectoryMissing { get; init; }
-    }
-
     public DirectoryNavigationRequest? CreateParentNavigationRequest(string currentPath)
     {
         var parent = Directory.GetParent(currentPath);
@@ -58,35 +50,4 @@ public sealed class BrowserNavigationCoordinator
         };
     }
 
-    public bool Execute(DirectoryNavigationRequest? request, ExecutionContext context)
-    {
-        if (request == null)
-        {
-            return false;
-        }
-
-        if (!Directory.Exists(request.TargetPath))
-        {
-            context.OnDirectoryMissing?.Invoke(request.TargetPath);
-            return false;
-        }
-
-        if (!context.PrepareUnlockedTabForLocationChange(request.TargetPath))
-        {
-            return true;
-        }
-
-        bool loaded = context.LoadDirectory(
-            request.TargetPath,
-            request.FocusTargetName,
-            request.IsHistoryNavigation,
-            request.SuppressRecent);
-
-        if (loaded)
-        {
-            context.OnNavigationSucceeded?.Invoke();
-        }
-
-        return loaded;
-    }
 }

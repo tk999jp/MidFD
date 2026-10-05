@@ -142,6 +142,7 @@ internal sealed class DirectoryPathCompletionController : IDisposable
 
     public void CloseCompletionPopup()
     {
+        InvalidateCandidateRequest();
         ClosePopup();
     }
 
@@ -211,6 +212,7 @@ internal sealed class DirectoryPathCompletionController : IDisposable
             _editor.RefreshHandle();
             if (!HasFocusWithinEditorOrPopup())
             {
+                InvalidateCandidateRequest();
                 ClosePopup();
             }
         }));
@@ -593,8 +595,24 @@ internal sealed class DirectoryPathCompletionController : IDisposable
         }
         catch
         {
-            ClosePopup();
+            if (requestVersion == _candidateRequestVersion)
+            {
+                ClosePopup();
+            }
             return false;
+        }
+    }
+
+    private void InvalidateCandidateRequest()
+    {
+        _candidateRequestVersion++;
+        try
+        {
+            _candidateCts?.Cancel();
+        }
+        catch
+        {
+            // Ignore cancellation races while closing the popup.
         }
     }
 
@@ -688,6 +706,7 @@ internal sealed class DirectoryPathCompletionController : IDisposable
 
     private void ClosePopup()
     {
+        InvalidateCandidateRequest();
         if (_popupForm.IsDisposed)
         {
             _currentDirPath = null;

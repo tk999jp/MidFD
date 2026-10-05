@@ -43,16 +43,20 @@ public static class MarkSlotStorage
         }
     }
 
-    public static void Save(MarkSlotStore store, int slotCount)
+    public static bool Save(MarkSlotStore store, int slotCount) => Save(store, slotCount, MarkSlotFilePath);
+
+    internal static bool Save(MarkSlotStore store, int slotCount, string filePath)
     {
         try
         {
             string json = JsonSerializer.Serialize(Sanitize(store, slotCount), JsonOptions);
-            File.WriteAllText(MarkSlotFilePath, json);
+            File.WriteAllText(filePath, json);
+            return true;
         }
         catch (Exception ex)
         {
-            LogService.Error("Failed to save markslots.json.", ex);
+            LogService.Error($"Failed to save markslots.json to '{filePath}'.", ex);
+            return false;
         }
     }
 

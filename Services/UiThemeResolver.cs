@@ -57,6 +57,9 @@ internal static class UiThemeResolver
         };
         var listColors = FileListColorResolver.ResolveColors(tempSettings);
         string canonicalPreset = FileListColorResolver.CanonicalizePresetKey(appearance.ColorTheme);
+        Color separatorColor = string.Equals(canonicalPreset, "Light", StringComparison.OrdinalIgnoreCase)
+            ? baseColors.SeparatorColor
+            : listColors.NormalFile;
 
         if (string.Equals(canonicalPreset, "MidFdStandard", StringComparison.OrdinalIgnoreCase))
         {
@@ -99,7 +102,7 @@ internal static class UiThemeResolver
             ViewerStatusBackColor = baseColors.ViewerStatusBackColor,
             ViewerStatusForeColor = baseColors.ViewerStatusForeColor,
             BorderColor = baseColors.BorderColor,
-            SeparatorColor = listColors.NormalFile
+            SeparatorColor = separatorColor
         };
 
         // 手動指定色が有効な場合、ファイラー/ビューア色を上書きする
@@ -288,8 +291,8 @@ internal static class UiThemeResolver
                 ViewerForeColor = Color.Black,
                 ViewerStatusBackColor = Color.FromArgb(240, 240, 240),
                 ViewerStatusForeColor = Color.Black,
-                BorderColor = Color.FromArgb(220, 220, 220),
-                SeparatorColor = Color.FromArgb(200, 200, 200)
+                BorderColor = Color.FromArgb(200, 200, 200),
+                SeparatorColor = Color.FromArgb(220, 220, 220)
             },
             // "MidFD標準" またはデフォルト: 黒+シアン基調（従来MidFD寄り）
             _ => new UiThemeColors

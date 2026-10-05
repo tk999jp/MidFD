@@ -1,0 +1,8 @@
+{
+  "version": "15.2.0",
+  "upstreamRepository": "https://github.com/BurntSushi/ripgrep",
+  "upstreamAsset": "ripgrep-15.2.0-x86_64-pc-windows-msvc.zip",
+  "archiveSha256": "71B2FEF860ABE467217A538FF31DE02F5258807C0129F771846F87BD029AAFC5",
+  "executableSha256": "14231169855EC5205CF5A1B6F1DB358FF4AED4247C86B69CE8AAE647C77F6680",
+  "architecture": "win-x64"
+}

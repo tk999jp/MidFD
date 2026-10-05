@@ -2,123 +2,22 @@ using MidFD.Helpers;
 using MidFD.Models;
 using MidFD.Presentation;
 using MidFD.Services;
+using MidFD.Runtime;
 
 namespace MidFD;
 
 public partial class MainForm
 {
-    internal enum BrowserDropItemClassification
-    {
-        Success,
-        Skip,
-        Fail,
-        Cancel,
-        NoOp
-    }
-
-    internal readonly record struct BrowserDropItemResult(
-        BrowserDropItemClassification Classification,
-        bool Partial,
-        int NestedSkipCount,
-        int NestedFailCount);
-
-    internal readonly record struct BrowserDropCounters(
-        int SuccessCount = 0,
-        int SkipCount = 0,
-        int FailCount = 0,
-        int CancelCount = 0,
-        int NoOpCount = 0,
-        int PartialSkipCount = 0,
-        int PartialCancelCount = 0,
-        int PartialFailCount = 0,
-        int NestedSkipCount = 0,
-        int NestedFailCount = 0)
-    {
-        public BrowserDropCounters Add(BrowserDropItemResult item)
-        {
-            return item.Classification switch
-            {
-                BrowserDropItemClassification.Success => this with { SuccessCount = SuccessCount + 1 },
-                BrowserDropItemClassification.Skip => this with
-                {
-                    SkipCount = SkipCount + 1,
-                    PartialSkipCount = PartialSkipCount + (item.Partial ? 1 : 0)
-                },
-                BrowserDropItemClassification.Fail => this with
-                {
-                    FailCount = FailCount + 1,
-                    PartialFailCount = PartialFailCount + (item.Partial ? 1 : 0)
-                },
-                BrowserDropItemClassification.Cancel => this with
-                {
-                    CancelCount = CancelCount + 1,
-                    PartialCancelCount = PartialCancelCount + (item.Partial ? 1 : 0)
-                },
-                BrowserDropItemClassification.NoOp => this with { NoOpCount = NoOpCount + 1 },
-                _ => this
-            } with
-            {
-                NestedSkipCount = NestedSkipCount + item.NestedSkipCount,
-                NestedFailCount = NestedFailCount + item.NestedFailCount
-            };
-        }
-    }
-
-    internal static BrowserDropItemResult ClassifyDirectoryMergeResult(
-        int successCount,
-        int skipCount,
-        int failCount,
-        bool canceled)
-    {
-        if (canceled)
-        {
-            return new BrowserDropItemResult(
-                BrowserDropItemClassification.Cancel,
-                successCount > 0,
-                skipCount,
-                failCount);
-        }
-
-        if (failCount > 0)
-        {
-            return new BrowserDropItemResult(
-                BrowserDropItemClassification.Fail,
-                successCount > 0,
-                skipCount,
-                failCount);
-        }
-
-        if (successCount > 0 && skipCount > 0)
-        {
-            return new BrowserDropItemResult(
-                BrowserDropItemClassification.Skip,
-                true,
-                skipCount,
-                0);
-        }
-
-        if (skipCount > 0)
-        {
-            return new BrowserDropItemResult(
-                BrowserDropItemClassification.Skip,
-                false,
-                skipCount,
-                0);
-        }
-
-        return new BrowserDropItemResult(
-            BrowserDropItemClassification.Success,
-            false,
-            0,
-            0);
-    }
-
-    internal static BrowserDropItemClassification ClassifyBrowserDropTypeMismatch(bool sourceIsDirectory, bool destinationIsDirectory)
-    {
-        return sourceIsDirectory != destinationIsDirectory
-            ? BrowserDropItemClassification.Fail
-            : BrowserDropItemClassification.Success;
-    }
+    private sealed record BrowserAsyncDropPayload(
+        string[] Files,
+        string[] OutlookAttachmentNames,
+        int KeyState,
+        Point DropPoint,
+        bool InternalMarkerPresent,
+        bool FileDropPresent,
+        bool HasImageData,
+        bool HasPotentialUrlData,
+        bool IsOutlookAttachmentDrop);
 
     internal static string FormatBrowserDropResult(
         string operationLabel,
@@ -151,7 +50,7 @@ public partial class MainForm
     private void HandleBrowserPanelDragEnterOrOver(DragEventArgs e, string operationName)
     {
         BrowserIncomingDragDecision decision = ResolveIncomingBrowserDragDecision(e);
-        e.Effect = decision.Effect;
+        e.Effect = ToWinFormsDragDropEffects(decision.Effect);
         if (decision.Intent != BrowserDragDropIntent.None)
         {
             _currentIncomingDragDecision = decision;
@@ -159,34 +58,79 @@ public partial class MainForm
         RefreshBrowserStatusSummary(decision.StatusText);
         LogService.Info(DragDropDataObjectDiagnosticHelper.GetDiagnosticLog(
             operationName,
-            _uiMode.ToString(),
+            _viewerApplicationCoordinator.Mode.ToString(),
             IsActiveBrowserTabReadOnly(),
-            _isClipboardBusy,
+            _fileOperationApplicationCoordinator.IsClipboardBusy,
             HasInternalDragArchiveMarker(e.Data),
             e.Data,
             e.Effect,
             decision.Reason));
     }
 
+    private static DragDropEffects ToWinFormsDragDropEffects(BrowserDragDropEffect effect) =>
+        (DragDropEffects)(int)effect;
+
     private BrowserIncomingDragDecision ResolveIncomingBrowserDragDecision(DragEventArgs e)
     {
-        return BrowserIncomingDragResolver.Resolve(
-            _uiMode == UIMode.Browser,
-            IsActiveBrowserTabReadOnly(),
-            _isClipboardBusy,
-            HasInternalDragArchiveMarker(e.Data),
-            e.Data != null && e.Data.GetDataPresent(DataFormats.FileDrop),
-            BrowserImageDropService.HasImageData(e.Data),
-            BrowserDropUrlResolverService.HasPotentialUrlData(e.Data),
-            OutlookAttachmentDropService.IsOutlookAttachmentDrop(e.Data),
+        IDataObject? data = e.Data;
+        return ResolveIncomingBrowserDragDecision(
+            HasInternalDragArchiveMarker(data),
+            data != null && data.GetDataPresent(DataFormats.FileDrop),
+            BrowserImageDropService.HasImageData(data),
+            BrowserDropUrlResolverService.HasPotentialUrlData(data),
+            OutlookAttachmentDropService.IsOutlookAttachmentDrop(data),
             e.KeyState);
+    }
+
+    private BrowserIncomingDragDecision ResolveIncomingBrowserDragDecision(
+        bool internalMarkerPresent,
+        bool fileDropPresent,
+        bool hasImageData,
+        bool hasPotentialUrlData,
+        bool isOutlookAttachmentDrop,
+        int keyState)
+    {
+        return BrowserIncomingDragResolver.Resolve(
+            _viewerApplicationCoordinator.Mode == ViewerApplicationMode.Browser,
+            IsActiveBrowserTabReadOnly(),
+            _fileOperationApplicationCoordinator.IsClipboardBusy,
+            internalMarkerPresent,
+            fileDropPresent,
+            hasImageData,
+            hasPotentialUrlData,
+            isOutlookAttachmentDrop,
+            keyState);
     }
 
     private BrowserIncomingDragDecision ResolveIncomingDropDecision(DragEventArgs e)
     {
+        IDataObject? data = e.Data;
+        return ResolveIncomingDropDecision(
+            HasInternalDragArchiveMarker(data),
+            data != null && data.GetDataPresent(DataFormats.FileDrop),
+            BrowserImageDropService.HasImageData(data),
+            BrowserDropUrlResolverService.HasPotentialUrlData(data),
+            OutlookAttachmentDropService.IsOutlookAttachmentDrop(data),
+            e.KeyState);
+    }
+
+    private BrowserIncomingDragDecision ResolveIncomingDropDecision(
+        bool internalMarkerPresent,
+        bool fileDropPresent,
+        bool hasImageData,
+        bool hasPotentialUrlData,
+        bool isOutlookAttachmentDrop,
+        int keyState)
+    {
         // Drop event keyState might lose right mouse button flag (2) or modifier keys.
         // If DragOver remembered a Prompt or Move decision, prefer that.
-        var eventDecision = ResolveIncomingBrowserDragDecision(e);
+        var eventDecision = ResolveIncomingBrowserDragDecision(
+            internalMarkerPresent,
+            fileDropPresent,
+            hasImageData,
+            hasPotentialUrlData,
+            isOutlookAttachmentDrop,
+            keyState);
         if (_currentIncomingDragDecision != null)
         {
             // Only override if the current event is less specific (e.g. falls back to default Copy)
@@ -207,6 +151,9 @@ public partial class MainForm
     }
 
     private BrowserDropAction ResolveBrowserDropAction(DragEventArgs e, BrowserIncomingDragDecision decision)
+        => ResolveBrowserDropAction(new Point(e.X, e.Y), decision);
+
+    private BrowserDropAction ResolveBrowserDropAction(Point dropPoint, BrowserIncomingDragDecision decision)
     {
         if (decision.Intent != BrowserDragDropIntent.Prompt)
         {
@@ -218,7 +165,352 @@ public partial class MainForm
             };
         }
 
-        return BrowserDropActionMenuPresenter.Show(this, new Point(e.X, e.Y));
+        return BrowserDropActionMenuPresenter.Show(this, dropPoint);
+    }
+
+    private void BrowserPanel_AsyncDragDrop(object? sender, DragEventArgs e)
+    {
+        try
+        {
+            LogService.Info($"[ExternalDropAsync] callbackReceived=True, thread={Environment.CurrentManagedThreadId}");
+            IDataObject? data = e.Data;
+            if (data == null)
+            {
+                return;
+            }
+
+            bool fileDropPresent = data.GetDataPresent(DataFormats.FileDrop);
+            bool outlookAttachmentDrop = OutlookAttachmentDropService.IsOutlookAttachmentDrop(data);
+            if (!fileDropPresent && !outlookAttachmentDrop)
+            {
+                return;
+            }
+
+            string[] files = Array.Empty<string>();
+            string[] outlookAttachmentNames = Array.Empty<string>();
+            if (outlookAttachmentDrop)
+            {
+                // Virtual data is valid only during this callback. Snapshot descriptor names here;
+                // FileContents is consumed later in the same callback by ProcessDrop.
+                outlookAttachmentNames = OutlookAttachmentDropService.GetAttachmentNames(data).ToArray();
+            }
+            else if (fileDropPresent)
+            {
+                string[]? fileDropFiles = data.GetData(DataFormats.FileDrop) as string[];
+                if (fileDropFiles == null || fileDropFiles.Length == 0)
+                {
+                    return;
+                }
+
+                files = fileDropFiles.ToArray();
+            }
+
+            var payload = new BrowserAsyncDropPayload(
+                files,
+                outlookAttachmentNames,
+                e.KeyState,
+                new Point(e.X, e.Y),
+                HasInternalDragArchiveMarker(data),
+                FileDropPresent: fileDropPresent,
+                BrowserImageDropService.HasImageData(data),
+                BrowserDropUrlResolverService.HasPotentialUrlData(data),
+                IsOutlookAttachmentDrop: outlookAttachmentDrop);
+            LogService.Info(
+                $"[ExternalDropAsync] nativeDataObject=True, asyncCapability=True, asyncMode=True, " +
+                $"getAsyncMode=WinForms, startOperation=WinForms, fileDropCount={payload.Files.Length}, " +
+                $"outlookAttachmentDrop={payload.IsOutlookAttachmentDrop}, outlookAttachmentCount={payload.OutlookAttachmentNames.Length}, " +
+                $"internalMarkerPresent={payload.InternalMarkerPresent}");
+
+            if (payload.IsOutlookAttachmentDrop)
+            {
+                ProcessBrowserAsyncOutlookDrop(data, payload);
+                LogService.Info("[ExternalDropAsync] outlookRoute=completed, endOperation=WinForms");
+                return;
+            }
+
+            if (!browserPanel.InvokeRequired)
+            {
+                LogService.Info("[ExternalDropAsync] callbackOnUiThread=True, operationNotStarted=True");
+                return;
+            }
+
+            var completion = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            try
+            {
+                browserPanel.BeginInvoke(new Action(() => HandleBrowserAsyncDragDropOnUi(payload, completion)));
+            }
+            catch (Exception ex)
+            {
+                LogService.Error("[ExternalDropAsync] UI dispatch failed", ex);
+                return;
+            }
+
+            completion.Task.GetAwaiter().GetResult();
+            LogService.Info("[ExternalDropAsync] operationCompleted=True, endOperation=WinForms");
+        }
+        catch (Exception ex)
+        {
+            LogService.Error("[ExternalDropAsync] data extraction failed", ex);
+        }
+    }
+
+    private sealed record BrowserAsyncOutlookPreparation(
+        string TargetDirectory);
+
+    private void ProcessBrowserAsyncOutlookDrop(
+        IDataObject data,
+        BrowserAsyncDropPayload payload)
+    {
+        BrowserAsyncOutlookPreparation? preparation = InvokeBrowserUi(
+            () => ResolveBrowserAsyncOutlookDropPreparation(payload));
+        if (preparation == null)
+        {
+            return;
+        }
+
+        OutlookAttachmentDropResult dropResult = OutlookAttachmentDropService.ProcessDrop(
+            data,
+            preparation.TargetDirectory,
+            fileName => InvokeBrowserUi(() =>
+            {
+                string overwriteMessage = FileOperationPresentationHelper.GetOverwriteConfirmationMessage(fileName);
+                DialogResult overwriteResult = MessageBox.Show(
+                    overwriteMessage,
+                    "確認",
+                    MessageBoxButtons.YesNoCancel,
+                    MessageBoxIcon.Warning);
+                return overwriteResult == DialogResult.Yes
+                    ? OverwriteConfirmResult.Yes
+                    : overwriteResult == DialogResult.No
+                        ? OverwriteConfirmResult.No
+                        : OverwriteConfirmResult.Cancel;
+            }),
+            showTypeMismatch: destinationPath => InvokeBrowserUi(() =>
+                MessageBox.Show(
+                    $"型が異なるため上書きできません。\n宛先: {destinationPath}",
+                    "上書きエラー",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Error)),
+            showCopyFailure: (fileName, exception) => InvokeBrowserUi(() =>
+                MessageBox.Show(
+                    $"コピー失敗: {fileName}\n{exception?.Message ?? "添付データを保存できませんでした。"}",
+                    "エラー",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Error)));
+
+        LogService.Info(
+            $"[ExternalDropAsync] outlookRoute=processed, success={dropResult.AllSucceeded}, " +
+            $"attachmentCount={dropResult.AttachmentCount}, processedCount={dropResult.ProcessedCount}, " +
+            $"successCount={dropResult.SuccessCount}, failureCount={dropResult.FailureCount}, " +
+            $"canceled={dropResult.WasCanceled}, classification={dropResult.Classification}");
+        if (!dropResult.AnySucceeded)
+        {
+            return;
+        }
+
+        BeginBrowserUi(() =>
+        {
+            if (dropResult.AllSucceeded)
+            {
+                ShowStatusMessage("仮想ファイルのコピーが完了しました。");
+            }
+
+            string? focusTarget = dropResult.SuccessfulFileNames.Count > 0
+                ? dropResult.SuccessfulFileNames[0]
+                : null;
+            LoadDirectory(preparation.TargetDirectory, focusTarget);
+        });
+    }
+
+    private BrowserAsyncOutlookPreparation? ResolveBrowserAsyncOutlookDropPreparation(
+        BrowserAsyncDropPayload payload)
+    {
+        if (payload.InternalMarkerPresent)
+        {
+            return null;
+        }
+
+        if (_viewerApplicationCoordinator.Mode != ViewerApplicationMode.Browser)
+        {
+            return null;
+        }
+
+        if (GuardReadOnlyBrowserTab("ファイル取り込み"))
+        {
+            return null;
+        }
+
+        if (_fileOperationApplicationCoordinator.IsClipboardBusy
+            || string.IsNullOrEmpty(_browserApplicationCoordinator.CurrentPath))
+        {
+            return null;
+        }
+
+        BrowserIncomingDragDecision decision = ResolveIncomingBrowserDragDecision(
+            payload.InternalMarkerPresent,
+            payload.FileDropPresent,
+            payload.HasImageData,
+            payload.HasPotentialUrlData,
+            payload.IsOutlookAttachmentDrop,
+            payload.KeyState);
+        if (decision.Intent == BrowserDragDropIntent.None)
+        {
+            ShowStatusMessage("ドロップ不可な操作または状態です。");
+            return null;
+        }
+
+        _integrationSeam?.Observer?.OnOutlookAttachmentDropRouted();
+        if (payload.OutlookAttachmentNames.Length == 0)
+        {
+            LogService.Warn("[OutlookDrop] No attachment names resolved.");
+            return null;
+        }
+
+        string targetDirectory = _browserApplicationCoordinator.CurrentPath!;
+        return new BrowserAsyncOutlookPreparation(targetDirectory);
+    }
+
+    private T InvokeBrowserUi<T>(Func<T> action)
+    {
+        if (!IsHandleCreated || IsDisposed || Disposing)
+        {
+            throw new InvalidOperationException("Browser UI is not available for async drop processing.");
+        }
+
+        return InvokeRequired ? (T)Invoke(action)! : action();
+    }
+
+    private void InvokeBrowserUi(Action action)
+    {
+        if (!IsHandleCreated || IsDisposed || Disposing)
+        {
+            throw new InvalidOperationException("Browser UI is not available for async drop processing.");
+        }
+
+        if (InvokeRequired)
+        {
+            Invoke(action);
+            return;
+        }
+
+        action();
+    }
+
+    private void BeginBrowserUi(Action action)
+    {
+        if (!IsHandleCreated || IsDisposed || Disposing)
+        {
+            return;
+        }
+
+        try
+        {
+            BeginInvoke(action);
+        }
+        catch (ObjectDisposedException ex)
+        {
+            LogService.Error("[ExternalDropAsync] UI dispatch after Outlook drop failed", ex);
+        }
+        catch (InvalidOperationException ex)
+        {
+            LogService.Error("[ExternalDropAsync] UI dispatch after Outlook drop failed", ex);
+        }
+    }
+
+    internal void DispatchExternalFileDrop(
+        IDataObject data,
+        int keyState = 0,
+        int x = 0,
+        int y = 0,
+        DragDropEffects allowedEffect = DragDropEffects.Copy,
+        DragDropEffects effect = DragDropEffects.Copy)
+    {
+        if (InvokeRequired)
+        {
+            throw new InvalidOperationException("External Drop must be dispatched on the MainForm UI thread.");
+        }
+
+        BrowserPanel_DragDrop(
+            browserPanel,
+            new DragEventArgs(data, keyState, x, y, allowedEffect, effect));
+    }
+
+    internal void DispatchExternalAsyncDrop(
+        IDataObject data,
+        int keyState = 0,
+        int x = 0,
+        int y = 0,
+        DragDropEffects allowedEffect = DragDropEffects.Copy,
+        DragDropEffects effect = DragDropEffects.Copy)
+    {
+        if (!InvokeRequired)
+        {
+            throw new InvalidOperationException("External async Drop must be dispatched off the MainForm UI thread.");
+        }
+
+        browserPanel.OnAsyncDragDrop(
+            new DragEventArgs(data, keyState, x, y, allowedEffect, effect));
+    }
+
+    private void HandleBrowserAsyncDragDropOnUi(
+        BrowserAsyncDropPayload payload,
+        TaskCompletionSource<bool> completion)
+    {
+        bool operationCompletionPending = false;
+        try
+        {
+            if (payload.InternalMarkerPresent || !payload.FileDropPresent)
+            {
+                return;
+            }
+
+            if (_viewerApplicationCoordinator.Mode != ViewerApplicationMode.Browser)
+            {
+                return;
+            }
+
+            if (GuardReadOnlyBrowserTab("ファイル取り込み"))
+            {
+                return;
+            }
+
+            if (_fileOperationApplicationCoordinator.IsClipboardBusy
+                || string.IsNullOrEmpty(_browserApplicationCoordinator.CurrentPath))
+            {
+                return;
+            }
+
+            BrowserIncomingDragDecision decision = ResolveIncomingDropDecision(
+                payload.InternalMarkerPresent,
+                payload.FileDropPresent,
+                payload.HasImageData,
+                payload.HasPotentialUrlData,
+                payload.IsOutlookAttachmentDrop,
+                payload.KeyState);
+            if (decision.Intent == BrowserDragDropIntent.None)
+            {
+                ShowStatusMessage("ドロップ不可な操作または状態です。");
+                return;
+            }
+
+            BrowserDropAction action = ResolveBrowserDropAction(payload.DropPoint, decision);
+            TryHandleBrowserFileDrop(
+                payload.Files,
+                action,
+                () => completion.TrySetResult(true),
+                out operationCompletionPending);
+        }
+        catch (Exception ex)
+        {
+            LogService.Error("[ExternalDropAsync] UI operation setup failed", ex);
+        }
+        finally
+        {
+            if (!operationCompletionPending)
+            {
+                completion.TrySetResult(true);
+            }
+        }
     }
 
     private bool TryHandleBrowserFileDrop(DragEventArgs e, BrowserIncomingDragDecision decision)
@@ -241,160 +533,186 @@ public partial class MainForm
             return true;
         }
 
-        string operationLabel = action == BrowserDropAction.Move ? "移動" : "コピー";
+        return TryHandleBrowserFileDrop(
+            files,
+            action,
+            completionCallback: null,
+            out _,
+            waitForCompletion: true);
+    }
 
-        BrowserDropCounters counters = new();
-        var successfulCreatedFilePaths = new List<string>();
-        var successfulMoveUndoItems = new List<(string SourcePath, string DestinationPath)>();
-
-        foreach (var sourcePath in files)
+    private bool TryHandleBrowserFileDrop(
+        string[] files,
+        BrowserDropAction action,
+        Action? completionCallback,
+        out bool operationCompletionPending,
+        bool waitForCompletion = false)
+    {
+        operationCompletionPending = false;
+        if (action == BrowserDropAction.Cancel)
         {
-            string fileName = Path.GetFileName(sourcePath);
-            string destPath = Path.Combine(_navigationService.CurrentPath, fileName);
-            if (string.Equals(Path.GetFullPath(sourcePath), Path.GetFullPath(destPath), StringComparison.OrdinalIgnoreCase))
+            ShowStatusMessage("ドロップ操作はキャンセルされました。");
+            completionCallback?.Invoke();
+            return true;
+        }
+
+        var selection = new SelectionResult(files, hasMarkedSelection: files.Length > 1);
+        SyncExternalDropWait? syncWait = waitForCompletion ? new SyncExternalDropWait() : null;
+        Action? effectiveCompletionCallback = completionCallback;
+        if (syncWait != null)
+        {
+            _syncExternalDropWaitActive = true;
+            _syncExternalDropCloseRequested = false;
+            _syncExternalDropCancelRequested = false;
+            effectiveCompletionCallback = () =>
             {
-                ShowStatusMessage("同一場所への移動・コピーは不要です。");
-                counters = counters.Add(new BrowserDropItemResult(BrowserDropItemClassification.NoOp, false, 0, 0));
-                continue;
-            }
-            bool sourceIsDir = Directory.Exists(sourcePath);
-            bool destExists = File.Exists(destPath) || Directory.Exists(destPath);
-            if (destExists)
-            {
-                bool destIsDir = Directory.Exists(destPath);
-                if (ClassifyBrowserDropTypeMismatch(sourceIsDir, destIsDir) == BrowserDropItemClassification.Fail)
+                try
                 {
-                    MessageBox.Show($"型が異なるため上書きできません。\n宛先: {destPath}", "上書きエラー", MessageBoxButtons.OK, MessageBoxIcon.Error);
-                    counters = counters.Add(new BrowserDropItemResult(BrowserDropItemClassification.Fail, false, 0, 0));
-                    continue;
+                    _integrationSeam?.Observer?.OnExternalDropCompletion();
                 }
-
-                if (sourceIsDir)
+                finally
                 {
-                    CopyCollisionDecision? mergeFileDecision = null;
-                    DirectoryMergeDecision? directoryDecision = null;
-                    bool canMerge = action == BrowserDropAction.Move
-                        ? TryResolveMoveDirectoryMerge(sourcePath, destPath, ref directoryDecision, out bool shouldSkip, out bool shouldCancel)
-                        : TryResolveCopyDirectoryMerge(sourcePath, destPath, ref directoryDecision, out shouldSkip, out shouldCancel);
-                    if (shouldCancel)
-                    {
-                        counters = counters.Add(new BrowserDropItemResult(BrowserDropItemClassification.Cancel, false, 0, 0));
-                        break;
-                    }
-                    if (shouldSkip)
-                    {
-                        counters = counters.Add(new BrowserDropItemResult(BrowserDropItemClassification.Skip, false, 0, 0));
-                        continue;
-                    }
-                    if (!canMerge)
-                    {
-                        counters = counters.Add(new BrowserDropItemResult(BrowserDropItemClassification.Fail, false, 0, 0));
-                        continue;
-                    }
+                    syncWait.SetSignal();
+                }
+            };
+        }
 
-                    var mergeState = new DirectoryMergeExecutionState();
-                    BrowserDropItemResult mergeResult;
-                    try
+        bool started = false;
+        try
+        {
+            started = _fileOperationApplicationCoordinator.TryStart(
+                action == BrowserDropAction.Move
+                    ? FileOperationCommandKind.Move
+                    : FileOperationCommandKind.Copy,
+                this,
+                selection,
+                destinationDirectory: _browserApplicationCoordinator.CurrentPath,
+                completionCallback: effectiveCompletionCallback,
+                recordDragCopyUndo: action == BrowserDropAction.Copy);
+            operationCompletionPending = started;
+            if (!started)
+            {
+                effectiveCompletionCallback?.Invoke();
+            }
+            else if (syncWait != null)
+            {
+                DispatchAwareWaitResult waitResult = DispatchAwareWaitService.WaitForSignal(
+                    syncWait.WaitHandle,
+                    _integrationSeam?.SyncDropWaitTimeoutMilliseconds ?? uint.MaxValue);
+                if (waitResult != DispatchAwareWaitResult.Signaled)
+                {
+                    LogService.Error($"[ExternalDropSync] wait terminated without operation completion: {waitResult}");
+                }
+            }
+        }
+        finally
+        {
+            if (syncWait != null)
+            {
+                bool closeRequested = _syncExternalDropCloseRequested;
+                _syncExternalDropWaitActive = false;
+                _syncExternalDropCloseRequested = false;
+                _syncExternalDropCancelRequested = false;
+                syncWait.Dispose();
+                if (closeRequested && !IsDisposed && !Disposing && IsHandleCreated)
+                {
+                    BeginInvoke((Action)(() =>
                     {
-                        if (action == BrowserDropAction.Move)
+                        if (!IsDisposed && !Disposing && IsHandleCreated)
                         {
-                            PasteMoveDirectoryIntoExisting(sourcePath, destPath, ref mergeFileDecision, out bool directoryShouldCancel, out _, out _, mergeState);
-                            if (directoryShouldCancel)
-                            {
-                                mergeResult = ClassifyDirectoryMergeResult(mergeState.SuccessCount, mergeState.SkipCount, mergeState.FailCount, true);
-                                counters = counters.Add(mergeResult);
-                                break;
-                            }
+                            Close();
                         }
-                        else
-                        {
-                            PasteCopyDirectoryIntoExisting(sourcePath, destPath, ref mergeFileDecision, out bool directoryShouldCancel, mergeState);
-                            if (directoryShouldCancel)
-                            {
-                                mergeResult = ClassifyDirectoryMergeResult(mergeState.SuccessCount, mergeState.SkipCount, mergeState.FailCount, true);
-                                counters = counters.Add(mergeResult);
-                                break;
-                            }
-                        }
-                        mergeResult = ClassifyDirectoryMergeResult(mergeState.SuccessCount, mergeState.SkipCount, mergeState.FailCount, false);
-                        counters = counters.Add(mergeResult);
-                    }
-                    catch (Exception ex)
-                    {
-                        MessageBox.Show($"{operationLabel}失敗: {fileName}\n{ex.Message}", "エラー", MessageBoxButtons.OK, MessageBoxIcon.Error);
-                        counters = counters.Add(new BrowserDropItemResult(BrowserDropItemClassification.Fail, mergeState.SuccessCount > 0, mergeState.SkipCount, mergeState.FailCount));
-                        break;
-                    }
-                    continue;
+                    }));
                 }
-
-                var overwriteMsg = FileOperationPresentationHelper.GetOverwriteConfirmationMessage(fileName);
-                var overwriteResult = MessageBox.Show(overwriteMsg, "確認", MessageBoxButtons.YesNoCancel, MessageBoxIcon.Warning);
-                if (overwriteResult == DialogResult.Cancel)
-                {
-                    counters = counters.Add(new BrowserDropItemResult(BrowserDropItemClassification.Cancel, false, 0, 0));
-                    break;
-                }
-
-                if (overwriteResult == DialogResult.No)
-                {
-                    counters = counters.Add(new BrowserDropItemResult(BrowserDropItemClassification.Skip, false, 0, 0));
-                    continue;
-                }
-            }
-
-            try
-            {
-                if (action == BrowserDropAction.Move)
-                {
-                    FileOperationService.Move(sourcePath, destPath, overwrite: destExists);
-                    successfulMoveUndoItems.Add((sourcePath, destPath));
-                }
-                else
-                {
-                    FileOperationService.Copy(sourcePath, destPath);
-                    successfulCreatedFilePaths.Add(destPath);
-                }
-
-                counters = counters.Add(new BrowserDropItemResult(BrowserDropItemClassification.Success, false, 0, 0));
-            }
-            catch (Exception ex)
-            {
-                MessageBox.Show($"{operationLabel}失敗: {fileName}\n{ex.Message}", "エラー", MessageBoxButtons.OK, MessageBoxIcon.Error);
-                counters = counters.Add(new BrowserDropItemResult(BrowserDropItemClassification.Fail, false, 0, 0));
-                break;
             }
         }
 
-        // Record Undo/Redo history for successful items
-        if (counters.SuccessCount > 0)
+        if (!started)
         {
-            if (action == BrowserDropAction.Move && successfulMoveUndoItems.Count > 0)
-            {
-                var moveUndoItems = FileOperationUndoRedoService.CreateMoveBatch(successfulMoveUndoItems);
-                _fileOperationUndoRedoService.RecordBatch(FileOperationUndoRedoOperation.Move, moveUndoItems);
-            }
-            else if (action == BrowserDropAction.Copy && successfulCreatedFilePaths.Count > 0)
-            {
-                var createdUndoItems = FileOperationUndoRedoService.CreateCreatedFilesBatch(successfulCreatedFilePaths);
-                _fileOperationUndoRedoService.RecordBatch(FileOperationUndoRedoOperation.CreateFromPaste, createdUndoItems);
-            }
+            ShowStatusMessage("現在、別のファイル操作を実行中です。");
         }
 
-        if (counters.SuccessCount > 0 ||
-            counters.PartialSkipCount > 0 ||
-            counters.PartialCancelCount > 0 ||
-            counters.PartialFailCount > 0)
-        {
-            RearmCurrentDirectoryWatcherAfterInternalMutation(_navigationService.CurrentPath);
-        }
-
-        LoadDirectory(_navigationService.CurrentPath);
-        ShowStatusMessage(
-            FormatBrowserDropResult(operationLabel, counters),
-            0,
-            ResolveBrowserDropStatusKind(counters));
-        RefreshBrowserStatusSummary();
         return true;
     }
+
+    private bool TryHandleSyncExternalDropCloseRequest(string source)
+    {
+        if (!_syncExternalDropWaitActive)
+        {
+            return false;
+        }
+
+        _syncExternalDropCloseRequested = true;
+        if (_syncExternalDropCancelRequested)
+        {
+            return true;
+        }
+
+        _syncExternalDropCancelRequested = true;
+        try
+        {
+            _integrationSeam?.Observer?.OnCloseCancellationRequested();
+            if (!TryRouteActiveFileOperationCancel(source))
+            {
+                LogService.Warn($"[ExternalDropSync] close request had no active cancellation route. source={source}");
+            }
+        }
+        catch (Exception ex)
+        {
+            LogService.Error($"[ExternalDropSync] close cancellation request failed. source={source}", ex);
+        }
+
+        return true;
+    }
+
+    private sealed class SyncExternalDropWait : IDisposable
+    {
+        private readonly object _sync = new();
+        private readonly ManualResetEvent _signal = new(false);
+        private bool _signaled;
+        private bool _disposeRequested;
+        private bool _disposed;
+
+        public WaitHandle WaitHandle => _signal;
+
+        public void SetSignal()
+        {
+            lock (_sync)
+            {
+                if (_disposed)
+                {
+                    return;
+                }
+
+                if (!_signaled)
+                {
+                    _signaled = true;
+                    _signal.Set();
+                }
+
+                DisposeIfRequested();
+            }
+        }
+
+        public void Dispose()
+        {
+            lock (_sync)
+            {
+                _disposeRequested = true;
+                DisposeIfRequested();
+            }
+        }
+
+        private void DisposeIfRequested()
+        {
+            if (!_disposeRequested || !_signaled || _disposed)
+            {
+                return;
+            }
+
+            _disposed = true;
+            _signal.Dispose();
+        }
+    }
+
 }

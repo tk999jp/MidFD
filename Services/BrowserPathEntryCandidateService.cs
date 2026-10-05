@@ -5,14 +5,15 @@ namespace MidFD.Services;
 internal static class BrowserPathEntryCandidateService
 {
     public static IReadOnlyList<string> BuildCandidates(
-        NavigationService navigationService,
+        NavigationService.NavigationSnapshot navigation,
         QuickAccessStore? quickAccessStore,
         IEnumerable<string>? directoryMoveHistory = null)
     {
+        ArgumentNullException.ThrowIfNull(navigation);
         var candidates = new List<string>();
         var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
-        AddCandidate(candidates, seen, navigationService.CurrentPath);
+        AddCandidate(candidates, seen, navigation.CurrentPath);
 
         foreach (string path in directoryMoveHistory ?? Enumerable.Empty<string>())
         {
@@ -30,14 +31,14 @@ internal static class BrowserPathEntryCandidateService
         }
 
         IReadOnlyList<QuickAccessEntry> historyEntries = QuickAccessService.BuildHistoryEntries(
-            navigationService.GetBackHistorySnapshot(),
-            navigationService.GetForwardHistorySnapshot());
+            navigation.BackHistory,
+            navigation.ForwardHistory);
         foreach (QuickAccessEntry entry in historyEntries)
         {
             AddCandidate(candidates, seen, entry.Path);
         }
 
-        foreach (string path in navigationService.CaptureState().LastVisitedPathByDrive.Values)
+        foreach (string path in navigation.LastVisitedPathByDrive.Values)
         {
             AddCandidate(candidates, seen, path);
         }
@@ -48,6 +49,15 @@ internal static class BrowserPathEntryCandidateService
         }
 
         return candidates;
+    }
+
+    public static IReadOnlyList<string> BuildCandidates(
+        NavigationService navigationService,
+        QuickAccessStore? quickAccessStore,
+        IEnumerable<string>? directoryMoveHistory = null)
+    {
+        ArgumentNullException.ThrowIfNull(navigationService);
+        return BuildCandidates(navigationService.CaptureState(), quickAccessStore, directoryMoveHistory);
     }
 
     private static void AddCandidate(List<string> candidates, HashSet<string> seen, string? path)

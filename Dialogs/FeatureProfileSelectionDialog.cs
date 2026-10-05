@@ -15,6 +15,7 @@ public sealed class FeatureProfileSelectionDialog : Form
     private readonly CheckBox _showPathAsBreadcrumbCheckBox;
     private readonly CheckBox _useMidFdManagedTrashCheckBox;
     private readonly CheckBox _clipboardPasteTextAsFileCheckBox;
+    private readonly CheckBox _workspaceSnapshotCheckBox;
     private readonly RadioButton _standardInputRadioButton;
     private readonly RadioButton _fdCompatibleInputRadioButton;
     private readonly RadioButton _verticalTabLayoutRadioButton;
@@ -32,6 +33,9 @@ public sealed class FeatureProfileSelectionDialog : Form
     private readonly Label _externalEditorStatusLabel;
     private bool _updatingRange;
     private bool _initializingControls;
+    private readonly bool? _initialWorkspaceSnapshotOverride;
+    private bool _workspaceSnapshotPresetSelected;
+    private bool _workspaceSnapshotManuallyChanged;
 
     public FeatureProfile SelectedProfile { get; private set; } = FeatureProfile.PracticalStable;
     public bool UseFdCompatibleFunctionKeys => _fdCompatibleInputRadioButton.Checked;
@@ -44,6 +48,12 @@ public sealed class FeatureProfileSelectionDialog : Form
     public bool ShowPathAsBreadcrumb => _showPathAsBreadcrumbCheckBox.Checked;
     public bool UseMidFdManagedTrash => _useMidFdManagedTrashCheckBox.Checked;
     public bool ClipboardPasteTextAsFileEnabled => _clipboardPasteTextAsFileCheckBox.Checked;
+    public bool WorkspaceSnapshotEnabled => _workspaceSnapshotCheckBox.Checked;
+    public bool? WorkspaceSnapshotEnabledOverride => _workspaceSnapshotManuallyChanged
+        ? _workspaceSnapshotCheckBox.Checked
+        : _workspaceSnapshotPresetSelected
+            ? null
+            : _initialWorkspaceSnapshotOverride;
     public string ColorTheme => FileListColorResolver.GetPresetKeyFromDisplayName(_colorThemeComboBox.Text);
     public BrowserTabLayoutMode LayoutMode => _verticalTabLayoutRadioButton.Checked
         ? BrowserTabLayoutMode.Vertical
@@ -65,6 +75,7 @@ public sealed class FeatureProfileSelectionDialog : Form
         Padding = new Padding(8);
 
         SelectedProfile = ResolveInitialProfile(settings);
+        _initialWorkspaceSnapshotOverride = settings?.WorkspaceSnapshotEnabledOverride;
         InputSettings? input = settings?.Input;
         FileOperationsSettings? fileOperations = settings?.FileOperations;
         PreviewSettings? preview = settings?.Preview;
@@ -107,13 +118,19 @@ public sealed class FeatureProfileSelectionDialog : Form
         basicGroup.Controls.Add(new Label { Text = "ファイル閲覧・コピー・移動・名前変更・Mark\r\n標準のキー操作・内部Viewer", AutoSize = false, Location = new Point(18, 28), Size = new Size(340, 50) });
         bodyPanel.Controls.Add(basicGroup);
 
-        var convenientGroup = new GroupBox { Text = "便利機能", Location = new Point(376, 182), Size = new Size(340, 224) };
+        var convenientGroup = new GroupBox { Text = "便利機能", Location = new Point(376, 182), Size = new Size(340, 254) };
         _restoreStartupStateCheckBox = AddCheckBox(convenientGroup, "前回の状態を復元", 18, 28, isFirstLaunch ? true : settings?.Session?.RestoreStartupState ?? true);
         _enableMouseGesturesCheckBox = AddCheckBox(convenientGroup, "マウスジェスチャー", 18, 58, isFirstLaunch ? true : input?.EnableMouseGestures ?? true);
         _showFunctionBarTooltipsCheckBox = AddCheckBox(convenientGroup, "Functionバーの説明", 18, 88, isFirstLaunch ? true : input?.ShowFunctionBarTooltips ?? true);
         _videoEnterPlaysExternalCheckBox = AddCheckBox(convenientGroup, "メディアファイルのEnter外部再生", 18, 118, isFirstLaunch ? true : preview?.VideoEnterPlaysExternal ?? false);
         _showPathAsBreadcrumbCheckBox = AddCheckBox(convenientGroup, "パスをパンくず形式で表示", 18, 148, isFirstLaunch ? true : appearance?.ShowPathAsBreadcrumb ?? false);
-        convenientGroup.Controls.Add(new Label { Text = "外部アプリは、設定済みのパスまたは\r\n自動検出したツールを使用します。", AutoSize = false, Location = new Point(18, 176), Size = new Size(300, 42) });
+        _workspaceSnapshotCheckBox = AddCheckBox(
+            convenientGroup,
+            "Workspace Snapshotを有効にする",
+            18,
+            178,
+            new FeatureGateService(SelectedProfile, _initialWorkspaceSnapshotOverride).IsEnabled(FeatureId.WorkspaceSnapshot));
+        convenientGroup.Controls.Add(new Label { Text = "外部アプリは、設定済みのパスまたは\r\n自動検出したツールを使用します。", AutoSize = false, Location = new Point(18, 204), Size = new Size(300, 42) });
         bodyPanel.Controls.Add(convenientGroup);
 
         var cautionGroup = new GroupBox { Text = "注意が必要な機能", Location = new Point(16, 294), Size = new Size(340, 220) };
@@ -124,14 +141,14 @@ public sealed class FeatureProfileSelectionDialog : Form
         cautionGroup.Controls.Add(new Label { Text = "通常削除したファイルをMidFD管理ゴミ箱へ移し、\r\nCtrl+Zで復元できるようにします。\r\nテキスト貼り付けは通常OFFを推奨します。", AutoSize = false, Location = new Point(18, 146), Size = new Size(300, 64) });
         bodyPanel.Controls.Add(cautionGroup);
 
-        var operationGroup = new GroupBox { Text = "操作方式", Location = new Point(376, 400), Size = new Size(340, 62) };
+        var operationGroup = new GroupBox { Text = "操作方式", Location = new Point(376, convenientGroup.Bottom + 8), Size = new Size(340, 62) };
         _standardInputRadioButton = AddRadio(operationGroup, "MidFD標準", 18, 24);
-        _fdCompatibleInputRadioButton = AddRadio(operationGroup, "FD／WinFD互換", 160, 24);
+        _fdCompatibleInputRadioButton = AddRadio(operationGroup, "FD/WinFD互換", 160, 24);
         _fdCompatibleInputRadioButton.Checked = string.Equals(input?.FunctionKeyProfile, InputSettings.FdCompatibleProfileValue, StringComparison.OrdinalIgnoreCase);
         _standardInputRadioButton.Checked = !_fdCompatibleInputRadioButton.Checked;
         bodyPanel.Controls.Add(operationGroup);
 
-        var displayGroup = new GroupBox { Text = "表示", Location = new Point(376, 466), Size = new Size(340, 104) };
+        var displayGroup = new GroupBox { Text = "表示", Location = new Point(376, operationGroup.Bottom + 8), Size = new Size(340, 104) };
         displayGroup.Controls.Add(new Label { Text = "タブ表示", AutoSize = true, Location = new Point(18, 20) });
         _verticalTabLayoutRadioButton = AddRadio(displayGroup, "縦型（推奨）", 18, 44);
         _horizontalTabLayoutRadioButton = AddRadio(displayGroup, "横型", 160, 44);
@@ -142,6 +159,7 @@ public sealed class FeatureProfileSelectionDialog : Form
         _horizontalTabLayoutRadioButton.Checked = !useVerticalTabs;
         displayGroup.Controls.Add(new Label { Text = "配色プリセット", AutoSize = true, Location = new Point(18, 78) });
         _colorThemeComboBox = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Location = new Point(108, 71), Size = new Size(210, 28) };
+        _colorThemeComboBox.Items.Add(FileListColorResolver.AutoColorSelectionDisplayName);
         foreach (string key in FileListColorResolver.BuiltInPresetKeys)
         {
             _colorThemeComboBox.Items.Add(FileListColorResolver.GetPresetDisplayName(key));
@@ -150,13 +168,16 @@ public sealed class FeatureProfileSelectionDialog : Form
         {
             _colorThemeComboBox.Items.Add(preset.Name);
         }
-        string currentTheme = FileListColorResolver.CanonicalizePresetKey(appearance?.ColorTheme);
+        bool autoColor = settings == null || FileListColorResolver.IsAutoColorSelection(settings);
+        string currentTheme = autoColor
+            ? FileListColorResolver.AutoColorSelectionKey
+            : FileListColorResolver.CanonicalizePresetKey(appearance?.ExplicitColorPresetKey ?? appearance?.ColorTheme);
         int themeIndex = _colorThemeComboBox.Items.IndexOf(FileListColorResolver.GetPresetDisplayName(currentTheme));
         _colorThemeComboBox.SelectedIndex = themeIndex >= 0 ? themeIndex : 0;
         displayGroup.Controls.Add(_colorThemeComboBox);
         bodyPanel.Controls.Add(displayGroup);
 
-        var externalGroup = new GroupBox { Text = "外部アプリ", Location = new Point(16, 576), Size = new Size(700, 154) };
+        var externalGroup = new GroupBox { Text = "外部アプリ", Location = new Point(16, Math.Max(cautionGroup.Bottom, displayGroup.Bottom) + 8), Size = new Size(700, 154) };
         int externalRowTop = 13;
         AddLabel(externalGroup, "7-Zip", 18, externalRowTop + 4, 120);
         _sevenZipPathBox = AddReadOnlyTextBox(externalGroup, 142, externalRowTop, 440, sevenZip?.ExePath ?? string.Empty);
@@ -214,6 +235,11 @@ public sealed class FeatureProfileSelectionDialog : Form
         rootLayout.Controls.Add(bodyPanel, 0, 0);
         rootLayout.Controls.Add(footer, 0, 1);
         Controls.Add(rootLayout);
+        int externalGroupOverflow = externalGroup.Bottom + 8 - bodyPanel.ClientSize.Height;
+        if (externalGroupOverflow > 0)
+        {
+            ClientSize = new Size(ClientSize.Width, ClientSize.Height + externalGroupOverflow);
+        }
         AcceptButton = okButton;
         CancelButton = cancelButton;
 
@@ -222,8 +248,14 @@ public sealed class FeatureProfileSelectionDialog : Form
         _convenientRangeRadioButton.CheckedChanged += (_, _) => ApplyRangeFromRadio(1);
         _allRangeRadioButton.CheckedChanged += (_, _) => ApplyRangeFromRadio(2);
         foreach (CheckBox checkBox in new[] { _restoreStartupStateCheckBox, _enableMouseGesturesCheckBox, _showFunctionBarTooltipsCheckBox, _videoEnterPlaysExternalCheckBox, _showPathAsBreadcrumbCheckBox, _useMidFdManagedTrashCheckBox, _enableDragArchiveHandoffCheckBox, _includeDragZipManifestCheckBox, _clipboardPasteTextAsFileCheckBox }) checkBox.CheckedChanged += (_, _) => RefreshRangeState();
-        _standardInputRadioButton.CheckedChanged += (_, _) => { if (_standardInputRadioButton.Checked) ApplyInputModeColor(false); };
-        _fdCompatibleInputRadioButton.CheckedChanged += (_, _) => { if (_fdCompatibleInputRadioButton.Checked) ApplyInputModeColor(true); };
+        _workspaceSnapshotCheckBox.CheckedChanged += (_, _) =>
+        {
+            if (!_updatingRange)
+            {
+                _workspaceSnapshotManuallyChanged = true;
+            }
+            RefreshRangeState();
+        };
         _enableDragArchiveHandoffCheckBox.CheckedChanged += (_, _) => _includeDragZipManifestCheckBox.Enabled = _enableDragArchiveHandoffCheckBox.Checked;
         _videoToolDirectoryBox.TextChanged += (_, _) => RefreshExternalStatuses();
         _sevenZipPathBox.TextChanged += (_, _) => RefreshExternalStatuses();
@@ -244,9 +276,9 @@ public sealed class FeatureProfileSelectionDialog : Form
 
     private int ResolveRangeIndex()
     {
-        bool basic = !_restoreStartupStateCheckBox.Checked && !_enableMouseGesturesCheckBox.Checked && _showFunctionBarTooltipsCheckBox.Checked && !_videoEnterPlaysExternalCheckBox.Checked && !_showPathAsBreadcrumbCheckBox.Checked && !_useMidFdManagedTrashCheckBox.Checked && !_enableDragArchiveHandoffCheckBox.Checked && !_includeDragZipManifestCheckBox.Checked && !_clipboardPasteTextAsFileCheckBox.Checked;
-        bool convenient = _restoreStartupStateCheckBox.Checked && _enableMouseGesturesCheckBox.Checked && _showFunctionBarTooltipsCheckBox.Checked && _videoEnterPlaysExternalCheckBox.Checked && _showPathAsBreadcrumbCheckBox.Checked && !_useMidFdManagedTrashCheckBox.Checked && !_enableDragArchiveHandoffCheckBox.Checked && !_includeDragZipManifestCheckBox.Checked && !_clipboardPasteTextAsFileCheckBox.Checked;
-        bool all = _restoreStartupStateCheckBox.Checked && _enableMouseGesturesCheckBox.Checked && _showFunctionBarTooltipsCheckBox.Checked && _videoEnterPlaysExternalCheckBox.Checked && _showPathAsBreadcrumbCheckBox.Checked && _useMidFdManagedTrashCheckBox.Checked && _enableDragArchiveHandoffCheckBox.Checked && _includeDragZipManifestCheckBox.Checked && _clipboardPasteTextAsFileCheckBox.Checked;
+        bool basic = !_restoreStartupStateCheckBox.Checked && !_enableMouseGesturesCheckBox.Checked && _showFunctionBarTooltipsCheckBox.Checked && !_videoEnterPlaysExternalCheckBox.Checked && !_showPathAsBreadcrumbCheckBox.Checked && !_useMidFdManagedTrashCheckBox.Checked && !_enableDragArchiveHandoffCheckBox.Checked && !_includeDragZipManifestCheckBox.Checked && !_clipboardPasteTextAsFileCheckBox.Checked && !_workspaceSnapshotCheckBox.Checked;
+        bool convenient = _restoreStartupStateCheckBox.Checked && _enableMouseGesturesCheckBox.Checked && _showFunctionBarTooltipsCheckBox.Checked && _videoEnterPlaysExternalCheckBox.Checked && _showPathAsBreadcrumbCheckBox.Checked && !_useMidFdManagedTrashCheckBox.Checked && !_enableDragArchiveHandoffCheckBox.Checked && !_includeDragZipManifestCheckBox.Checked && !_clipboardPasteTextAsFileCheckBox.Checked && !_workspaceSnapshotCheckBox.Checked;
+        bool all = _restoreStartupStateCheckBox.Checked && _enableMouseGesturesCheckBox.Checked && _showFunctionBarTooltipsCheckBox.Checked && _videoEnterPlaysExternalCheckBox.Checked && _showPathAsBreadcrumbCheckBox.Checked && _useMidFdManagedTrashCheckBox.Checked && _enableDragArchiveHandoffCheckBox.Checked && _includeDragZipManifestCheckBox.Checked && _clipboardPasteTextAsFileCheckBox.Checked && _workspaceSnapshotCheckBox.Checked;
         return basic ? 0 : convenient ? 1 : all ? 2 : -1;
     }
 
@@ -255,6 +287,8 @@ public sealed class FeatureProfileSelectionDialog : Form
         if (_updatingRange) return;
         if ((index == 0 && !_basicRangeRadioButton.Checked) || (index == 1 && !_convenientRangeRadioButton.Checked) || (index == 2 && !_allRangeRadioButton.Checked)) return;
         SyncSelectedProfile(index);
+        _workspaceSnapshotPresetSelected = true;
+        _workspaceSnapshotManuallyChanged = false;
         _updatingRange = true;
         _restoreStartupStateCheckBox.Checked = index > 0;
         _enableMouseGesturesCheckBox.Checked = index > 0;
@@ -265,6 +299,7 @@ public sealed class FeatureProfileSelectionDialog : Form
         _enableDragArchiveHandoffCheckBox.Checked = index == 2;
         _includeDragZipManifestCheckBox.Checked = index == 2;
         _clipboardPasteTextAsFileCheckBox.Checked = index == 2;
+        _workspaceSnapshotCheckBox.Checked = index == 2;
         _includeDragZipManifestCheckBox.Enabled = index == 2;
         _updatingRange = false;
         RefreshRangeState();
@@ -305,19 +340,6 @@ public sealed class FeatureProfileSelectionDialog : Form
         _externalEditorStatusLabel.Text = !string.IsNullOrEmpty(editorPath) && File.Exists(editorPath)
             ? $"検出済み: {Path.GetFileName(editorPath)}"
             : "未検出（未設定時はnotepad.exeを使用）";
-    }
-
-    private void ApplyInputModeColor(bool fdCompatible)
-    {
-        if (_initializingControls) return;
-        string targetKey = FileListColorResolver.CanonicalizePresetKey(fdCompatible ? "WinFdCompatible" : "MidFdStandard");
-        for (int index = 0; index < FileListColorResolver.BuiltInPresetKeys.Length; index++)
-        {
-            string builtInKey = FileListColorResolver.CanonicalizePresetKey(FileListColorResolver.BuiltInPresetKeys[index]);
-            if (!string.Equals(builtInKey, targetKey, StringComparison.OrdinalIgnoreCase)) continue;
-            if (_colorThemeComboBox.SelectedIndex != index) _colorThemeComboBox.SelectedIndex = index;
-            return;
-        }
     }
 
     private static string OnOff(bool value) => value ? "検出済み" : "未検出";

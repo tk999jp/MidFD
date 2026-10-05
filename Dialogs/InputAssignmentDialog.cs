@@ -3,6 +3,7 @@ using System.Globalization;
 using MidFD.Configuration;
 using MidFD.Helpers;
 using MidFD.Models;
+using MidFD.Presentation;
 using MidFD.Services;
 
 using System.ComponentModel;
@@ -59,7 +60,12 @@ public sealed class InputAssignmentDialog : Form
     private readonly CommandRegistry _registry;
     private readonly ComboBox _profileCombo;
     private readonly TabControl _tabs;
+    private readonly TabPage _featureTab = new("機能別");
+    private readonly TabPage _keyTab = new("キー別");
+    private readonly TabPage _functionTab = new("ファンクションキー/バー");
+    private readonly TabPage _gestureTab = new("マウスジェスチャー");
     private readonly DataGridView _featureGrid;
+    private readonly DataGridView _keyGrid;
     private readonly Label _featureDescriptionValueLabel;
     private readonly TabControl _functionLayerTabs;
     private readonly DataGridView _functionGrid;
@@ -132,10 +138,7 @@ public sealed class InputAssignmentDialog : Form
         profilePanel.Controls.Add(_profileCombo);
 
         _tabs = new TabControl { Dock = DockStyle.Fill };
-        var featureTab = new TabPage("機能別");
-        var functionTab = new TabPage("ファンクションキー/バー");
-        var gestureTab = new TabPage("マウスジェスチャー");
-        _tabs.TabPages.AddRange(new[] { featureTab, functionTab, gestureTab });
+        _tabs.TabPages.AddRange(new[] { _featureTab, _keyTab, _functionTab, _gestureTab });
         ConfigureTabControlStyle(_tabs);
 
         _featureGrid = CreateReadOnlyGrid();
@@ -153,6 +156,48 @@ public sealed class InputAssignmentDialog : Form
         _featureGrid.CellDoubleClick += FeatureGrid_CellDoubleClick;
         _featureGrid.KeyDown += FeatureGrid_KeyDown;
         _featureGrid.SelectionChanged += FeatureGrid_SelectionChanged;
+
+        _keyGrid = CreateReadOnlyGrid();
+        _keyGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "Key", HeaderText = "キー", Width = 130, ReadOnly = true });
+        _keyGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "Feature", HeaderText = "機能名", Width = 190, ReadOnly = true });
+        _keyGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "Category", HeaderText = "分類", Width = 92, ReadOnly = true });
+        _keyGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "State", HeaderText = "状態", Width = 76, ReadOnly = true });
+        _keyGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "Description", HeaderText = "説明", AutoSizeMode = DataGridViewAutoSizeColumnMode.Fill, MinimumWidth = 220, ReadOnly = true });
+        ApplyReadOnlyColumnStyle(_keyGrid.Columns["Feature"]);
+        ApplyReadOnlyColumnStyle(_keyGrid.Columns["Category"]);
+        ApplyReadOnlyColumnStyle(_keyGrid.Columns["State"]);
+        ApplyReadOnlyColumnStyle(_keyGrid.Columns["Description"]);
+        _keyGrid.CellDoubleClick += KeyGrid_CellDoubleClick;
+        _keyGrid.KeyDown += KeyGrid_KeyDown;
+        var keyFooter = new Panel { Dock = DockStyle.Bottom, Height = 70 };
+        var keyButtons = new FlowLayoutPanel
+        {
+            Dock = DockStyle.Top,
+            Height = 38,
+            Padding = new Padding(8, 4, 8, 4),
+            FlowDirection = FlowDirection.LeftToRight,
+            WrapContents = false
+        };
+        var addKey = new Button { Text = "キーを追加", Width = 108, Height = 28 };
+        addKey.Click += (_, _) => AddKeyAssignment();
+        var changeKey = new Button { Text = "選択キーの機能を変更", Width = 176, Height = 28 };
+        changeKey.Click += (_, _) => ChangeSelectedKeyAssignment();
+        keyButtons.Controls.Add(addKey);
+        keyButtons.Controls.Add(changeKey);
+        keyFooter.Controls.Add(new Label
+        {
+            Dock = DockStyle.Fill,
+            Padding = new Padding(8, 0, 8, 0),
+            TextAlign = ContentAlignment.MiddleLeft,
+            AutoEllipsis = true,
+            ForeColor = Color.DarkSlateGray,
+            Font = new Font(Font.SystemFontName, 9F),
+            Text = "他のアプリが使用するグローバルショートカットと競合する場合があります。競合した場合は、MidFDまたは他のアプリ側のキー設定を変更してください。"
+        });
+        keyFooter.Controls.Add(keyButtons);
+        _keyTab.Padding = Padding.Empty;
+        _keyTab.Controls.Add(_keyGrid);
+        _keyTab.Controls.Add(keyFooter);
 
         var featureDescriptionPanel = new Panel
         {
@@ -192,9 +237,9 @@ public sealed class InputAssignmentDialog : Form
         assignmentButtons.Controls.Add(resetSelected);
         assignmentButtons.Controls.Add(resetAll);
 
-        featureTab.Padding = Padding.Empty;
-        featureTab.Controls.Add(_featureGrid);
-        featureTab.Controls.Add(featureDescriptionPanel);
+        _featureTab.Padding = Padding.Empty;
+        _featureTab.Controls.Add(_featureGrid);
+        _featureTab.Controls.Add(featureDescriptionPanel);
 
         _functionLayerTabs = new TabControl { Dock = DockStyle.Top, Height = 52 };
         _functionLayerTabs.TabPages.Add("通常 F1〜F12");
@@ -253,8 +298,8 @@ public sealed class InputAssignmentDialog : Form
         _functionGrid.DataError += (_, e) => e.ThrowException = false;
         _functionGrid.EditingControlShowing += FunctionGrid_EditingControlShowing;
         _functionGrid.KeyDown += FunctionGrid_KeyDown;
-        functionTab.Controls.Add(_functionGrid);
-        functionTab.Controls.Add(_functionLayerTabs);
+        _functionTab.Controls.Add(_functionGrid);
+        _functionTab.Controls.Add(_functionLayerTabs);
 
         _gestureGrid = CreateReadOnlyGrid();
         _gestureGrid.ReadOnly = false;
@@ -285,8 +330,8 @@ public sealed class InputAssignmentDialog : Form
             ForeColor = Color.DimGray,
             TextAlign = ContentAlignment.MiddleLeft
         };
-        gestureTab.Controls.Add(gestureHintLabel);
-        gestureTab.Controls.Add(_gestureGrid);
+        _gestureTab.Controls.Add(gestureHintLabel);
+        _gestureTab.Controls.Add(_gestureGrid);
 
         Controls.Add(_tabs);
         Controls.Add(assignmentButtons);
@@ -294,9 +339,9 @@ public sealed class InputAssignmentDialog : Form
         RefreshAllViews();
     }
 
-    public void FocusShortcutTab() => _tabs.SelectedIndex = 0;
-    public void FocusFunctionBarTab() => _tabs.SelectedIndex = 1;
-    public void FocusMouseGestureTab() => _tabs.SelectedIndex = 2;
+    public void FocusShortcutTab() => _tabs.SelectedTab = _featureTab;
+    public void FocusFunctionBarTab() => _tabs.SelectedTab = _functionTab;
+    public void FocusMouseGestureTab() => _tabs.SelectedTab = _gestureTab;
 
     private static DataGridView CreateReadOnlyGrid()
     {
@@ -414,9 +459,48 @@ public sealed class InputAssignmentDialog : Form
     {
         _refreshing = true;
         RefreshFeatureGrid();
+        RefreshKeyGrid();
         RefreshFunctionGrid();
         RefreshGestureGrid();
         _refreshing = false;
+    }
+
+    private void RefreshKeyGrid()
+    {
+        string? selectedGesture = (_keyGrid.CurrentRow?.Tag as BrowserKeyAssignmentRow)?.Gesture;
+        _keyGrid.Rows.Clear();
+        IReadOnlyList<BrowserKeyAssignmentRow> rows = BrowserKeyAssignmentProjection.CreateRows(
+            ResolveProfileValue(),
+            _settingsDraft.BrowserKeyCommandOverrides,
+            _registry,
+            _settingsDraft.CommandLauncherShortcut);
+        foreach (BrowserKeyAssignmentRow binding in rows)
+        {
+            int rowIndex = _keyGrid.Rows.Add(
+                binding.Gesture,
+                binding.FeatureName,
+                binding.Category,
+                binding.State,
+                binding.Description);
+            DataGridViewRow row = _keyGrid.Rows[rowIndex];
+            row.Tag = binding;
+            row.Cells["State"].Style.ForeColor = binding.State == "カスタム"
+                ? SystemColors.HotTrack
+                : SystemColors.WindowText;
+        }
+
+        if (_keyGrid.Rows.Count == 0)
+        {
+            return;
+        }
+
+        int selectedIndex = selectedGesture == null
+            ? -1
+            : rows.ToList().FindIndex(row => string.Equals(row.Gesture, selectedGesture, StringComparison.OrdinalIgnoreCase));
+        int rowToSelect = selectedIndex >= 0 ? selectedIndex : 0;
+        _keyGrid.ClearSelection();
+        _keyGrid.Rows[rowToSelect].Selected = true;
+        _keyGrid.CurrentCell = _keyGrid.Rows[rowToSelect].Cells[0];
     }
 
     private void RefreshFeatureGrid()
@@ -482,6 +566,78 @@ public sealed class InputAssignmentDialog : Form
         _featureDescriptionValueLabel.Text = "(項目を選択すると説明を表示します)";
     }
 
+    private void KeyGrid_CellDoubleClick(object? sender, DataGridViewCellEventArgs e)
+    {
+        if (e.RowIndex >= 0)
+        {
+            ChangeSelectedKeyAssignment();
+        }
+    }
+
+    private void KeyGrid_KeyDown(object? sender, KeyEventArgs e)
+    {
+        if (e.KeyCode == Keys.Enter || e.KeyCode == Keys.F2)
+        {
+            ChangeSelectedKeyAssignment();
+            e.Handled = true;
+            e.SuppressKeyPress = true;
+        }
+        else if (e.KeyCode == Keys.Delete)
+        {
+            DeleteSelectedKeyAssignment();
+            e.Handled = true;
+            e.SuppressKeyPress = true;
+        }
+    }
+
+    private void AddKeyAssignment()
+    {
+        using var dialog = new KeyCaptureDialog();
+        if (dialog.ShowDialog(this) != DialogResult.OK ||
+            !TryNormalizeCapturedShortcutGesture(dialog.CapturedKeyData, out string normalizedGesture))
+        {
+            return;
+        }
+
+        CommandDefinition? command = SelectCommandForAssignment(GetKeyboardAssignableCommands());
+        if (command == null || !AssignShortcutGestureToCommand(command.Id, normalizedGesture, "キー競合"))
+        {
+            return;
+        }
+
+        RefreshAllViews();
+    }
+
+    private void ChangeSelectedKeyAssignment()
+    {
+        if (_keyGrid.CurrentRow?.Tag is not BrowserKeyAssignmentRow binding)
+        {
+            return;
+        }
+
+        CommandDefinition? command = SelectCommandForAssignment(GetKeyboardAssignableCommands());
+        if (command == null || string.Equals(command.Id, binding.CommandId, StringComparison.OrdinalIgnoreCase))
+        {
+            return;
+        }
+
+        AssignShortcutGestureToCommand(command.Id, binding.Gesture, "キー割り当ての変更");
+        RefreshAllViews();
+    }
+
+    private void DeleteSelectedKeyAssignment()
+    {
+        if (_keyGrid.CurrentRow?.Tag is not BrowserKeyAssignmentRow binding)
+        {
+            return;
+        }
+
+        if (ClearShortcutGesture(binding.Gesture, "キー割り当ての解除"))
+        {
+            RefreshAllViews();
+        }
+    }
+
     private void UpdateFeatureDescriptionLabel(DataGridViewRow row)
     {
         string text = Convert.ToString(row.Cells["Description"].Value) ?? string.Empty;
@@ -499,6 +655,7 @@ public sealed class InputAssignmentDialog : Form
             id.Equals(CommandIds.FileDelete, StringComparison.OrdinalIgnoreCase) ||
             id.Equals(CommandIds.BrowserExecute, StringComparison.OrdinalIgnoreCase) ||
             id.Equals(CommandIds.BrowserDefaultOpen, StringComparison.OrdinalIgnoreCase) ||
+            id.Equals(CommandIds.BrowserDefaultOpenMarked, StringComparison.OrdinalIgnoreCase) ||
             id.Equals(CommandIds.BrowserOpenCommandDialog, StringComparison.OrdinalIgnoreCase) ||
             id.Equals(CommandIds.BrowserChangeAttributes, StringComparison.OrdinalIgnoreCase) ||
             id.Equals(CommandIds.BrowserCreateDirectory, StringComparison.OrdinalIgnoreCase) ||
@@ -613,9 +770,14 @@ public sealed class InputAssignmentDialog : Form
             return 2;
         }
 
-        if (id.Equals(CommandIds.BrowserOpenCommandDialog, StringComparison.OrdinalIgnoreCase))
+        if (id.Equals(CommandIds.BrowserDefaultOpenMarked, StringComparison.OrdinalIgnoreCase))
         {
             return 3;
+        }
+
+        if (id.Equals(CommandIds.BrowserOpenCommandDialog, StringComparison.OrdinalIgnoreCase))
+        {
+            return 4;
         }
 
         if (id.Equals(CommandIds.FileMove, StringComparison.OrdinalIgnoreCase))
@@ -730,6 +892,15 @@ public sealed class InputAssignmentDialog : Form
     {
         return GetFeatureCommands()
             .Where(static c => (c.InputSurfaces & (CommandInputSurface.Keyboard | CommandInputSurface.FunctionBar)) != 0)
+            .ToArray();
+    }
+
+    private IReadOnlyList<CommandDefinition> GetKeyboardAssignableCommands()
+    {
+        return GetFeatureCommands()
+            .Where(command =>
+                IsEditableCommand(command.Id) &&
+                (command.InputSurfaces & CommandInputSurface.Keyboard) != 0)
             .ToArray();
     }
 
@@ -1614,20 +1785,8 @@ public sealed class InputAssignmentDialog : Form
             return;
         }
 
-        string capturedGesture = InputSettings.ToKeyGestureText(dialog.CapturedKeyData);
-        string normalizedGesture = InputSettings.NormalizeKeyGestureText(capturedGesture);
-        if (string.IsNullOrWhiteSpace(normalizedGesture))
+        if (!TryNormalizeCapturedShortcutGesture(dialog.CapturedKeyData, out string normalizedGesture))
         {
-            return;
-        }
-        if (InputSettings.IsFunctionKeyChordGesture(normalizedGesture))
-        {
-            MessageBox.Show(this, "F1〜F12（Shift/Ctrl/Alt含む）はファンクションキー/バー側で設定してください。", "入力種別", MessageBoxButtons.OK, MessageBoxIcon.Information);
-            return;
-        }
-        if (InputSettings.IsBrowserStructuralReservedGesture(normalizedGesture))
-        {
-            MessageBox.Show(this, "このキーはBrowserの表示/列操作に予約されています。", "予約キー", MessageBoxButtons.OK, MessageBoxIcon.Information);
             return;
         }
 
@@ -1645,23 +1804,54 @@ public sealed class InputAssignmentDialog : Form
         RefreshAllViews();
     }
 
-    private bool AssignShortcutGestureToCommand(string targetCommandId, string gesture, string confirmTitle, bool replaceExistingForTarget = false)
+    private bool TryNormalizeCapturedShortcutGesture(Keys keyData, out string normalizedGesture)
     {
-        if (InputSettings.IsBrowserStructuralReservedGesture(gesture))
+        normalizedGesture = InputSettings.NormalizeKeyGestureText(InputSettings.ToKeyGestureText(keyData));
+        if (string.IsNullOrWhiteSpace(normalizedGesture))
+        {
+            return false;
+        }
+        if (InputSettings.IsFunctionKeyChordGesture(normalizedGesture))
+        {
+            MessageBox.Show(this, "F1〜F12（Shift/Ctrl/Alt含む）はファンクションキー/バー側で設定してください。", "入力種別", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return false;
+        }
+        if (InputSettings.IsBrowserStructuralReservedGesture(normalizedGesture))
         {
             MessageBox.Show(this, "このキーはBrowserの表示/列操作に予約されています。", "予約キー", MessageBoxButtons.OK, MessageBoxIcon.Information);
             return false;
         }
 
+        return true;
+    }
+
+    private bool AssignShortcutGestureToCommand(string targetCommandId, string gesture, string confirmTitle, bool replaceExistingForTarget = false)
+    {
+        string normalizedGesture = InputSettings.NormalizeKeyGestureText(gesture);
+        if (string.IsNullOrWhiteSpace(normalizedGesture) || InputSettings.IsFunctionKeyChordGesture(normalizedGesture))
+        {
+            MessageBox.Show(this, "F1〜F12（Shift/Ctrl/Alt含む）はファンクションキー/バー側で設定してください。", "入力種別", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return false;
+        }
+        if (InputSettings.IsBrowserStructuralReservedGesture(normalizedGesture))
+        {
+            MessageBox.Show(this, "このキーはBrowserの表示/列操作に予約されています。", "予約キー", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return false;
+        }
+        if (!_commandById.TryGetValue(targetCommandId, out CommandDefinition? targetCommand) || !IsEditableCommand(targetCommandId))
+        {
+            MessageBox.Show(this, "この機能は安全性のため入力割り当てを変更できません。", "編集不可", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return false;
+        }
+
         var overrides = InputSettings.NormalizeBrowserKeyCommandOverrides(_settingsDraft.BrowserKeyCommandOverrides);
-        IReadOnlyDictionary<string, IReadOnlyList<string>> defaults = InputSettings.GetDefaultBrowserKeyCommandMap(ResolveProfileValue());
         var effective = BrowserCommandBindingResolver.ResolveEffectiveKeyCommandMap(
             ResolveProfileValue(),
             overrides,
             _registry,
             _settingsDraft.CommandLauncherShortcut);
 
-        if (effective.TryGetValue(gesture, out string? existingCommandId) &&
+        if (effective.TryGetValue(normalizedGesture, out string? existingCommandId) &&
             !string.IsNullOrWhiteSpace(existingCommandId) &&
             !string.Equals(existingCommandId, InputSettings.MouseGestureUnassignedCommandId, StringComparison.OrdinalIgnoreCase) &&
             !string.Equals(existingCommandId, targetCommandId, StringComparison.OrdinalIgnoreCase))
@@ -1680,63 +1870,35 @@ public sealed class InputAssignmentDialog : Form
                 : string.Empty;
             using var conflict = new AssignmentConflictDialog(
                 confirmTitle,
-                $"入力 '{gesture}' は既に他機能へ割り当て済みです。",
+                $"入力 '{normalizedGesture}' は既に別の機能へ割り当て済みです。\r\n新しい割り当て先: {targetCommand.DisplayName}",
                 existingName,
                 existingDescription);
             if (conflict.ShowDialog(this) != DialogResult.Yes)
             {
                 return false;
             }
-
-            List<string> existingEffective = overrides.TryGetValue(existingCommandId, out List<string>? existingOverride)
-                ? InputSettings.NormalizeBrowserKeyGestures(existingOverride)
-                : (defaults.TryGetValue(existingCommandId, out IReadOnlyList<string>? existingDefault)
-                    ? InputSettings.NormalizeBrowserKeyGestures(existingDefault)
-                    : new List<string>());
-            existingEffective = existingEffective
-                .Where(k => !string.Equals(k, gesture, StringComparison.OrdinalIgnoreCase))
-                .ToList();
-            List<string> existingDefaultsList = defaults.TryGetValue(existingCommandId, out IReadOnlyList<string>? defaultsForExisting)
-                ? InputSettings.NormalizeBrowserKeyGestures(defaultsForExisting)
-                : new List<string>();
-            if (existingEffective.SequenceEqual(existingDefaultsList, StringComparer.OrdinalIgnoreCase))
-            {
-                overrides.Remove(existingCommandId);
-            }
-            else
-            {
-                overrides[existingCommandId] = existingEffective;
-            }
         }
 
-        List<string> targetEffective = overrides.TryGetValue(targetCommandId, out List<string>? targetOverride)
-            ? InputSettings.NormalizeBrowserKeyGestures(targetOverride)
-            : (defaults.TryGetValue(targetCommandId, out IReadOnlyList<string>? defaultForTarget)
-                ? InputSettings.NormalizeBrowserKeyGestures(defaultForTarget)
-                : new List<string>());
         if (replaceExistingForTarget)
         {
-            targetEffective.Clear();
+            overrides[targetCommandId] = new List<string>();
         }
-        if (!targetEffective.Contains(gesture, StringComparer.OrdinalIgnoreCase))
+        try
         {
-            targetEffective.Add(gesture);
+            _settingsDraft.BrowserKeyCommandOverrides = BrowserKeyAssignmentProjection.SetGestureOwner(
+                ResolveProfileValue(),
+                overrides,
+                _registry,
+                _settingsDraft.CommandLauncherShortcut,
+                normalizedGesture,
+                targetCommandId);
+        }
+        catch (ArgumentException)
+        {
+            MessageBox.Show(this, "このキーまたは機能は通常キー割り当てに使用できません。", "入力不可", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return false;
         }
 
-        List<string> targetDefaultsList = defaults.TryGetValue(targetCommandId, out IReadOnlyList<string>? defaultsForTarget)
-            ? InputSettings.NormalizeBrowserKeyGestures(defaultsForTarget)
-            : new List<string>();
-        List<string> normalizedTarget = InputSettings.NormalizeBrowserKeyGestures(targetEffective);
-        if (normalizedTarget.SequenceEqual(targetDefaultsList, StringComparer.OrdinalIgnoreCase))
-        {
-            overrides.Remove(targetCommandId);
-        }
-        else
-        {
-            overrides[targetCommandId] = normalizedTarget;
-        }
-
-        _settingsDraft.BrowserKeyCommandOverrides = InputSettings.NormalizeBrowserKeyCommandOverrides(overrides);
         return true;
     }
 
@@ -1748,14 +1910,14 @@ public sealed class InputAssignmentDialog : Form
             return false;
         }
 
+        string normalizedGesture = InputSettings.NormalizeKeyGestureText(gesture);
         var overrides = InputSettings.NormalizeBrowserKeyCommandOverrides(_settingsDraft.BrowserKeyCommandOverrides);
-        IReadOnlyDictionary<string, IReadOnlyList<string>> defaults = InputSettings.GetDefaultBrowserKeyCommandMap(ResolveProfileValue());
         var effective = BrowserCommandBindingResolver.ResolveEffectiveKeyCommandMap(
             ResolveProfileValue(),
             overrides,
             _registry,
             _settingsDraft.CommandLauncherShortcut);
-        if (!effective.TryGetValue(gesture, out string? existingCommandId) ||
+        if (!effective.TryGetValue(normalizedGesture, out string? existingCommandId) ||
             string.IsNullOrWhiteSpace(existingCommandId) ||
             string.Equals(existingCommandId, InputSettings.MouseGestureUnassignedCommandId, StringComparison.OrdinalIgnoreCase))
         {
@@ -1775,7 +1937,7 @@ public sealed class InputAssignmentDialog : Form
             : string.Empty;
         using var conflict = new AssignmentConflictDialog(
             confirmTitle,
-            $"入力 '{gesture}' の割り当てを解除します。",
+            $"入力 '{normalizedGesture}' を「{existingName}」から解除します。",
             existingName,
             existingDescription,
             showOverwrite: false,
@@ -1785,27 +1947,22 @@ public sealed class InputAssignmentDialog : Form
             return false;
         }
 
-        List<string> existingEffective = overrides.TryGetValue(existingCommandId, out List<string>? existingOverride)
-            ? InputSettings.NormalizeBrowserKeyGestures(existingOverride)
-            : (defaults.TryGetValue(existingCommandId, out IReadOnlyList<string>? existingDefault)
-                ? InputSettings.NormalizeBrowserKeyGestures(existingDefault)
-                : new List<string>());
-        existingEffective = existingEffective
-            .Where(k => !string.Equals(k, gesture, StringComparison.OrdinalIgnoreCase))
-            .ToList();
-        List<string> existingDefaultsList = defaults.TryGetValue(existingCommandId, out IReadOnlyList<string>? defaultsForExisting)
-            ? InputSettings.NormalizeBrowserKeyGestures(defaultsForExisting)
-            : new List<string>();
-        if (existingEffective.SequenceEqual(existingDefaultsList, StringComparer.OrdinalIgnoreCase))
+        try
         {
-            overrides.Remove(existingCommandId);
+            _settingsDraft.BrowserKeyCommandOverrides = BrowserKeyAssignmentProjection.SetGestureOwner(
+                ResolveProfileValue(),
+                overrides,
+                _registry,
+                _settingsDraft.CommandLauncherShortcut,
+                normalizedGesture,
+                targetCommandId: null);
         }
-        else
+        catch (ArgumentException)
         {
-            overrides[existingCommandId] = existingEffective;
+            MessageBox.Show(this, "このキーは通常キー割り当てに使用できません。", "入力不可", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return false;
         }
 
-        _settingsDraft.BrowserKeyCommandOverrides = InputSettings.NormalizeBrowserKeyCommandOverrides(overrides);
         return true;
     }
 
@@ -1970,13 +2127,13 @@ public sealed class InputAssignmentDialog : Form
 
             if (mode == "replace")
             {
-                foreach (Dictionary<string, string?> map in new[] { normal, shift, ctrl, alt })
-                {
-                    foreach (string key in map.Where(x => string.Equals(x.Value, commandId, StringComparison.OrdinalIgnoreCase)).Select(x => x.Key).ToArray())
-                    {
-                        map.Remove(key);
-                    }
-                }
+                FunctionKeyProfileService.RemoveCommandAssignments(
+                    commandId,
+                    isFdCompatible ? FunctionKeyProfile.FDCompatible : FunctionKeyProfile.Standard,
+                    normal,
+                    shift,
+                    ctrl,
+                    alt);
             }
 
             selectedMap[slotKey] = commandId;
@@ -2663,7 +2820,7 @@ public sealed class InputAssignmentDialog : Form
         e.SuppressKeyPress = true;
     }
 
-    private CommandDefinition? SelectCommandForAssignment()
+    private CommandDefinition? SelectCommandForAssignment(IReadOnlyList<CommandDefinition>? candidateCommands = null)
     {
         using var dialog = new Form
         {
@@ -2672,39 +2829,121 @@ public sealed class InputAssignmentDialog : Form
             FormBorderStyle = FormBorderStyle.FixedDialog,
             MinimizeBox = false,
             MaximizeBox = false,
-            ClientSize = new Size(520, 460)
+            ClientSize = new Size(820, 560)
         };
-        var list = new ListBox { Dock = DockStyle.Top, Height = 380 };
-        var commands = GetAssignableCommands().OrderBy(static x => x.DisplayName, StringComparer.Ordinal).ToArray();
-        foreach (CommandDefinition command in commands)
+        var list = new ListView
         {
-            list.Items.Add(FunctionKeyProfileService.ResolveCommandDisplayText(command));
+            Dock = DockStyle.Fill,
+            View = View.Details,
+            FullRowSelect = true,
+            MultiSelect = false,
+            HideSelection = false,
+            HeaderStyle = ColumnHeaderStyle.Nonclickable
+        };
+        const int commandNameColumnWidth = 220;
+        const int minimumDescriptionColumnWidth = 240;
+        list.Columns.Add("機能名", commandNameColumnWidth, HorizontalAlignment.Left);
+        list.Columns.Add("説明", minimumDescriptionColumnWidth, HorizontalAlignment.Left);
+        void ResizeDescriptionColumn()
+        {
+            int availableWidth = list.ClientSize.Width - commandNameColumnWidth -
+                SystemInformation.VerticalScrollBarWidth - 8;
+            list.Columns[1].Width = Math.Max(minimumDescriptionColumnWidth, availableWidth);
+        }
+        list.ClientSizeChanged += (_, _) => ResizeDescriptionColumn();
+
+        CommandDefinition[] commands = (candidateCommands ?? GetAssignableCommands())
+            .DistinctBy(static command => command.Id, StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+        IGrouping<string, CommandDefinition>[] categories = commands
+            .GroupBy(GetCommandCategoryForDisplay)
+            .OrderBy(static group => GetCommandCategoryOrder(group.Key))
+            .ThenBy(static group => group.Key, StringComparer.Ordinal)
+            .ToArray();
+        foreach (IGrouping<string, CommandDefinition> category in categories)
+        {
+            var group = new ListViewGroup(category.Key, HorizontalAlignment.Left);
+            list.Groups.Add(group);
+            foreach (CommandDefinition command in category
+                         .OrderBy(GetCommandDisplayOrder)
+                         .ThenBy(static item => item.DisplayName, StringComparer.Ordinal))
+            {
+                var item = new ListViewItem(command.DisplayName)
+                {
+                    Tag = command,
+                    Group = group
+                };
+                item.SubItems.Add(command.Description ?? string.Empty);
+                list.Items.Add(item);
+            }
         }
 
-        var ok = new Button { Text = "OK", DialogResult = DialogResult.OK, Left = 340, Top = 420, Width = 80 };
-        var cancel = new Button { Text = "キャンセル", DialogResult = DialogResult.Cancel, Left = 428, Top = 420, Width = 80 };
-        dialog.Controls.Add(list);
-        dialog.Controls.Add(ok);
-        dialog.Controls.Add(cancel);
+        var buttons = new FlowLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            FlowDirection = FlowDirection.RightToLeft,
+            WrapContents = false,
+            Padding = new Padding(8, 6, 8, 6)
+        };
+        var ok = new Button { Text = "OK", DialogResult = DialogResult.OK, Enabled = false, Width = 88 };
+        var cancel = new Button { Text = "キャンセル", DialogResult = DialogResult.Cancel, Width = 88 };
+        buttons.Controls.Add(ok);
+        buttons.Controls.Add(cancel);
+
+        var layout = new TableLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            ColumnCount = 1,
+            RowCount = 2,
+            Padding = new Padding(10)
+        };
+        layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 52));
+        layout.Controls.Add(list, 0, 0);
+        layout.Controls.Add(buttons, 0, 1);
+        dialog.Controls.Add(layout);
+
+        list.SelectedIndexChanged += (_, _) => ok.Enabled = list.SelectedItems.Count == 1;
+        list.MouseDoubleClick += (_, e) =>
+        {
+            if (list.GetItemAt(e.X, e.Y)?.Tag is CommandDefinition)
+            {
+                dialog.DialogResult = DialogResult.OK;
+            }
+        };
+        dialog.Shown += (_, _) =>
+        {
+            ResizeDescriptionColumn();
+            list.Focus();
+        };
         dialog.AcceptButton = ok;
         dialog.CancelButton = cancel;
 
-        if (dialog.ShowDialog(this) != DialogResult.OK || list.SelectedIndex < 0)
+        if (dialog.ShowDialog(this) != DialogResult.OK ||
+            list.SelectedItems.Count != 1 ||
+            list.SelectedItems[0].Tag is not CommandDefinition selectedCommand)
         {
             return null;
         }
-        return commands[list.SelectedIndex];
+        return selectedCommand;
     }
 
     private void ResetSelectedAssignment()
     {
-        if (_tabs.SelectedIndex == 0)
+        if (_tabs.SelectedTab == _featureTab)
         {
             ResetSelectedFeature();
             return;
         }
 
-        if (_tabs.SelectedIndex == 1)
+        if (_tabs.SelectedTab == _keyTab)
+        {
+            ResetSelectedKeyAssignment();
+            return;
+        }
+
+        if (_tabs.SelectedTab == _functionTab)
         {
             ResetSelectedFunctionSlot();
             return;
@@ -2727,6 +2966,32 @@ public sealed class InputAssignmentDialog : Form
         _settingsDraft.BrowserKeyCommandOverrides.Remove(commandId);
         ResetFunctionAssignmentsForCommandToDefault(commandId);
         ResetGestureAssignmentForCommand(commandId);
+        RefreshAllViews();
+    }
+
+    private void ResetSelectedKeyAssignment()
+    {
+        if (_keyGrid.CurrentRow?.Tag is not BrowserKeyAssignmentRow binding)
+        {
+            return;
+        }
+
+        string? defaultOwner = BrowserKeyAssignmentProjection.FindDefaultOwner(ResolveProfileValue(), binding.Gesture);
+        try
+        {
+            _settingsDraft.BrowserKeyCommandOverrides = BrowserKeyAssignmentProjection.SetGestureOwner(
+                ResolveProfileValue(),
+                _settingsDraft.BrowserKeyCommandOverrides,
+                _registry,
+                _settingsDraft.CommandLauncherShortcut,
+                binding.Gesture,
+                defaultOwner);
+        }
+        catch (ArgumentException)
+        {
+            return;
+        }
+
         RefreshAllViews();
     }
 
@@ -2777,7 +3042,14 @@ public sealed class InputAssignmentDialog : Form
             return;
         }
 
-        if (_tabs.SelectedIndex == 1)
+        if (_tabs.SelectedTab == _keyTab)
+        {
+            _settingsDraft.BrowserKeyCommandOverrides.Clear();
+            RefreshAllViews();
+            return;
+        }
+
+        if (_tabs.SelectedTab == _functionTab)
         {
             _settingsDraft.FunctionBarCommandOverridesStandard.Clear();
             _settingsDraft.FunctionBarCommandOverridesFdCompatible.Clear();
@@ -2799,7 +3071,7 @@ public sealed class InputAssignmentDialog : Form
             return;
         }
 
-        if (_tabs.SelectedIndex == 2)
+        if (_tabs.SelectedTab == _gestureTab)
         {
             _settingsDraft.MouseGestureCommandMap = new Dictionary<string, string>(InputSettings.DefaultMouseGestureCommandMap, StringComparer.OrdinalIgnoreCase);
             RefreshAllViews();
@@ -2976,10 +3248,34 @@ public sealed class KeyCaptureDialog : Form
 {
     public Keys CapturedKeyData { get; private set; } = Keys.None;
     public bool IsDeleted { get; private set; }
+    private readonly bool _deleteOrBackspaceRemovesAssignment;
 
     public KeyCaptureDialog(string commandDisplayName, string currentKeyText)
+        : this(
+            "キー割り当ての変更",
+            $"「{commandDisplayName}」に割り当てるキーを押してください。\r\n\r\nEsc: キャンセル / Delete・Backspace: 解除",
+            string.IsNullOrEmpty(currentKeyText) ? "(未割り当て)" : currentKeyText,
+            deleteOrBackspaceRemovesAssignment: true)
     {
-        Text = "キー割り当ての変更";
+    }
+
+    public KeyCaptureDialog()
+        : this(
+            "キーを追加",
+            "追加するキーを押してください。\r\n\r\nEsc: キャンセル",
+            "入力後に機能を選択します",
+            deleteOrBackspaceRemovesAssignment: false)
+    {
+    }
+
+    private KeyCaptureDialog(
+        string title,
+        string promptText,
+        string currentKeyText,
+        bool deleteOrBackspaceRemovesAssignment)
+    {
+        _deleteOrBackspaceRemovesAssignment = deleteOrBackspaceRemovesAssignment;
+        Text = title;
         Size = new Size(580, 320);
         MinimumSize = new Size(560, 300);
         FormBorderStyle = FormBorderStyle.FixedDialog;
@@ -3003,7 +3299,7 @@ public sealed class KeyCaptureDialog : Form
 
         var promptLabel = new Label
         {
-            Text = $"「{commandDisplayName}」に割り当てるキーを押してください。\r\n\r\nEsc: キャンセル / Delete・Backspace: 解除",
+            Text = promptText,
             Dock = DockStyle.Fill,
             TextAlign = ContentAlignment.MiddleCenter,
             Font = new Font(Font.SystemFontName, 10.5F)
@@ -3012,7 +3308,7 @@ public sealed class KeyCaptureDialog : Form
 
         var currentKeyLabel = new Label
         {
-            Text = string.IsNullOrEmpty(currentKeyText) ? "(未割り当て)" : currentKeyText,
+            Text = currentKeyText,
             Dock = DockStyle.Fill,
             TextAlign = ContentAlignment.MiddleCenter,
             Font = new Font(Font.SystemFontName, 17F, FontStyle.Bold),
@@ -3049,7 +3345,7 @@ public sealed class KeyCaptureDialog : Form
                 return;
             }
 
-            if (keyCode == Keys.Delete || keyCode == Keys.Back)
+            if (_deleteOrBackspaceRemovesAssignment && (keyCode == Keys.Delete || keyCode == Keys.Back))
             {
                 IsDeleted = true;
                 DialogResult = DialogResult.OK;

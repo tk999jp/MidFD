@@ -5,6 +5,7 @@ namespace MidFD.Models;
 public class FileOperationUiState
 {
     public CancellationTokenSource? Cts { get; set; }
+    public bool CanCancel { get; set; } = true;
     public long CancelRequestedTimestamp { get; set; }
     public string? ActiveOperationName { get; set; }
     public int StatusVersion { get; set; }
@@ -17,6 +18,7 @@ public class FileOperationUiState
     {
         Cts?.Dispose();
         Cts = null;
+        CanCancel = true;
         ActiveOperationName = null;
         StatusVersion++;
         CancelRequestedTimestamp = 0;

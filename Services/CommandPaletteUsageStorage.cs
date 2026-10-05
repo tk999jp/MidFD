@@ -22,36 +22,48 @@ public static class CommandPaletteUsageStorage
         FilePath = Path.Combine(exeDir, "command_palette_usage.json");
     }
 
-    public static CommandPaletteUsageState Load()
-    {
-        if (!File.Exists(FilePath))
-        {
-            return new CommandPaletteUsageState();
-        }
+    public static CommandPaletteUsageState Load() => Load(FilePath);
 
+    internal static CommandPaletteUsageState Load(string filePath)
+    {
         try
         {
-            string json = File.ReadAllText(FilePath);
+            using FileStream stream = File.Open(filePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+            using var reader = new StreamReader(stream);
+            string json = reader.ReadToEnd();
             var state = JsonSerializer.Deserialize<CommandPaletteUsageState>(json, JsonOptions);
+            if (state == null) throw new JsonException("Command palette usage payload is empty.");
             return Sanitize(state);
         }
+        catch (FileNotFoundException) { return new CommandPaletteUsageState(); }
+        catch (DirectoryNotFoundException) { return new CommandPaletteUsageState(); }
         catch (Exception ex)
         {
             LogService.Error("Failed to load command_palette_usage.json.", ex);
-            return new CommandPaletteUsageState();
+            return new CommandPaletteUsageState { LoadFailed = true };
         }
     }
 
-    public static void Save(CommandPaletteUsageState state)
+    public static bool Save(CommandPaletteUsageState state) => Save(state, FilePath);
+
+    internal static bool Save(CommandPaletteUsageState state, string filePath)
     {
+        if (state.LoadFailed)
+        {
+            LogService.Warn("Refusing to overwrite command_palette_usage.json after a load failure.");
+            return false;
+        }
+
         try
         {
             string json = JsonSerializer.Serialize(Sanitize(state), JsonOptions);
-            File.WriteAllText(FilePath, json);
+            File.WriteAllText(filePath, json);
+            return true;
         }
         catch (Exception ex)
         {
-            LogService.Error("Failed to save command_palette_usage.json.", ex);
+            LogService.Error($"Failed to save command_palette_usage.json to '{filePath}'.", ex);
+            return false;
         }
     }
 
@@ -87,10 +99,12 @@ public static class CommandPaletteUsageStorage
     private static CommandPaletteUsageState Sanitize(CommandPaletteUsageState? source)
     {
         var sanitized = new CommandPaletteUsageState();
-        if (source == null || source.SchemaVersion != CommandPaletteUsageState.CurrentSchemaVersion)
+        if (source == null)
         {
             return sanitized;
         }
+        sanitized.LoadFailed = source.LoadFailed || source.SchemaVersion != CommandPaletteUsageState.CurrentSchemaVersion;
+        if (sanitized.LoadFailed) return sanitized;
 
         sanitized.FavoriteCommandIds = (source.FavoriteCommandIds ?? new List<string>())
             .Where(static id => !string.IsNullOrWhiteSpace(id))

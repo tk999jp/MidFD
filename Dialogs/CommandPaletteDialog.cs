@@ -49,7 +49,7 @@ public sealed class CommandPaletteDialog : Form
 
     private readonly Func<string, IReadOnlySet<string>?, CommandPalettePresentation> _presentationProvider;
     private readonly CommandPaletteUsageState _usageState;
-    private readonly Action<CommandPaletteUsageState> _usageStateChanged;
+    private readonly Func<CommandPaletteUsageState, bool> _usageStateChanged;
     private readonly TextBox _searchBox;
     private readonly ListBox _commandListBox;
     private readonly HashSet<string> _expandedSections = new(StringComparer.OrdinalIgnoreCase);
@@ -94,7 +94,7 @@ public sealed class CommandPaletteDialog : Form
     public CommandPaletteDialog(
         Func<string, IReadOnlySet<string>?, CommandPalettePresentation> presentationProvider,
         CommandPaletteUsageState usageState,
-        Action<CommandPaletteUsageState> usageStateChanged)
+        Func<CommandPaletteUsageState, bool> usageStateChanged)
     {
         _presentationProvider = presentationProvider;
         _usageState = usageState;
@@ -1046,6 +1046,7 @@ public sealed class CommandPaletteDialog : Form
             return;
         }
 
+        List<string> previousFavorites = _usageState.FavoriteCommandIds.ToList();
         if (IsFavorite(command.Id))
         {
             _usageState.FavoriteCommandIds = _usageState.FavoriteCommandIds
@@ -1061,7 +1062,16 @@ public sealed class CommandPaletteDialog : Form
                 .ToList();
         }
 
-        _usageStateChanged(_usageState);
+        if (!_usageStateChanged(_usageState))
+        {
+            _usageState.FavoriteCommandIds = previousFavorites;
+            MessageBox.Show(
+                this,
+                "お気に入りを保存できませんでした。ストレージを確認してください。",
+                "Command Palette",
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Error);
+        }
         FilterCommands();
         BeginInvoke(new Action(() => _searchBox.Focus()));
     }
@@ -1246,19 +1256,19 @@ public sealed class CommandPaletteDialog : Form
 
         if (command.SafetyLevel == CommandPaletteSafetyLevel.Unsupported)
         {
-            string reason = command.SafetyInfo.ReasonText ?? command.NonExecutableMessage ?? "未対応";
+            string reason = command.SafetyInfo.ReasonText ?? command.ResolveNonExecutableMessage() ?? "未対応";
             return $"Enter: 実行できません / {reason}";
         }
 
         if (command.SafetyLevel == CommandPaletteSafetyLevel.Deferred)
         {
-            string reason = command.SafetyInfo.ReasonText ?? command.NonExecutableMessage ?? "後続フェーズ対象";
+            string reason = command.SafetyInfo.ReasonText ?? command.ResolveNonExecutableMessage() ?? "後続フェーズ対象";
             return $"Enter: 実行できません / {reason}";
         }
 
-        if (!string.IsNullOrWhiteSpace(command.NonExecutableMessage))
+        if (!string.IsNullOrWhiteSpace(command.ResolveNonExecutableMessage()))
         {
-            return $"Enter: 実行できません / {command.NonExecutableMessage}";
+            return $"Enter: 実行できません / {command.ResolveNonExecutableMessage()}";
         }
 
         return command.ActionKind switch
@@ -1313,7 +1323,7 @@ public sealed class CommandPaletteDialog : Form
             lines.Add($"検索語: {TruncateLayerDetail(command.SearchText, 48)}");
         }
 
-        if (!string.IsNullOrWhiteSpace(command.NonExecutableMessage))
+        if (!string.IsNullOrWhiteSpace(command.ResolveNonExecutableMessage()))
         {
             lines.Add(BuildAttentionText(command));
         }
@@ -1483,9 +1493,9 @@ public sealed class CommandPaletteDialog : Form
 
     private static string BuildLayerEntryTypeLabel(CommandLauncherCommand command)
     {
-        if (!string.IsNullOrWhiteSpace(command.NonExecutableMessage))
+        if (!string.IsNullOrWhiteSpace(command.ResolveNonExecutableMessage()))
         {
-            return command.NonExecutableMessage;
+            return command.ResolveNonExecutableMessage()!;
         }
 
         if (!string.IsNullOrWhiteSpace(command.LayerKind))
@@ -1552,8 +1562,8 @@ public sealed class CommandPaletteDialog : Form
     private static string BuildLayerDescriptionText(CommandLauncherCommand command)
     {
         string inputText = BuildLayerSelectionText(command);
-        string actionLine = !string.IsNullOrWhiteSpace(command.NonExecutableMessage)
-            ? $"Enter: {command.NonExecutableMessage}"
+        string actionLine = !string.IsNullOrWhiteSpace(command.ResolveNonExecutableMessage())
+            ? $"Enter: {command.ResolveNonExecutableMessage()}"
             : command.Category switch
         {
             "QuickAccess" => string.IsNullOrWhiteSpace(inputText)
@@ -1744,7 +1754,7 @@ public sealed class CommandPaletteDialog : Form
 
     private static string BuildUniversalSectionedDetailText(PaletteListItem item, CommandLauncherCommand command)
     {
-        if (!string.IsNullOrWhiteSpace(command.NonExecutableMessage))
+        if (!string.IsNullOrWhiteSpace(command.ResolveNonExecutableMessage()))
         {
             return BuildAttentionText(command);
         }
@@ -1769,7 +1779,7 @@ public sealed class CommandPaletteDialog : Form
 
     private static string BuildLayerActionText(CommandLauncherCommand command)
     {
-        if (!string.IsNullOrWhiteSpace(command.NonExecutableMessage))
+        if (!string.IsNullOrWhiteSpace(command.ResolveNonExecutableMessage()))
         {
             return BuildAttentionText(command);
         }
@@ -1849,8 +1859,8 @@ public sealed class CommandPaletteDialog : Form
             command.Id.StartsWith("layer.archive.hash.", StringComparison.OrdinalIgnoreCase);
 
         string title = isArchiveTest ? "⚠ 現在は実行できません" : "⚠ 実行できません";
-        string reason = !string.IsNullOrWhiteSpace(command.NonExecutableMessage)
-            ? command.NonExecutableMessage
+        string reason = !string.IsNullOrWhiteSpace(command.ResolveNonExecutableMessage())
+            ? command.ResolveNonExecutableMessage()!
             : "現在は実行できません。";
         string action = isArchiveTest
             ? "対処: 今回のPhaseでは実行できません。"
@@ -1873,7 +1883,7 @@ public sealed class CommandPaletteDialog : Form
 
     private void ShowNonExecutableFeedback(CommandLauncherCommand command)
     {
-        string message = command.NonExecutableMessage ?? "現在は実行できません。";
+        string message = command.ResolveNonExecutableMessage() ?? "現在は実行できません。";
         string title = command.Category == "Archive" && string.Equals(command.Id, "layer.archive.test", StringComparison.OrdinalIgnoreCase)
             ? "現在は実行できません"
             : "実行できません";
@@ -1900,8 +1910,8 @@ public sealed class CommandPaletteDialog : Form
 
     private static string BuildAttentionText(CommandLauncherCommand command)
     {
-        string message = !string.IsNullOrWhiteSpace(command.NonExecutableMessage)
-            ? command.NonExecutableMessage
+        string message = !string.IsNullOrWhiteSpace(command.ResolveNonExecutableMessage())
+            ? command.ResolveNonExecutableMessage()!
             : "現在は実行できません。";
 
         return command.Category == "Archive" && string.Equals(command.Id, "layer.archive.test", StringComparison.OrdinalIgnoreCase)
@@ -1952,7 +1962,7 @@ public sealed class CommandPaletteDialog : Form
             return;
         }
 
-        if (!string.IsNullOrWhiteSpace(command.NonExecutableMessage))
+        if (!string.IsNullOrWhiteSpace(command.ResolveNonExecutableMessage()))
         {
             UpdateNonExecutableDetailPane(command);
             return;
@@ -2749,7 +2759,7 @@ public sealed class CommandPaletteDialog : Form
                 return;
             }
 
-            if ((cmd.CanExecute != null && !cmd.CanExecute()) || !string.IsNullOrWhiteSpace(cmd.NonExecutableMessage))
+            if ((cmd.CanExecute != null && !cmd.CanExecute()) || !string.IsNullOrWhiteSpace(cmd.ResolveNonExecutableMessage()))
             {
                 ShowNonExecutableFeedback(cmd);
                 return;

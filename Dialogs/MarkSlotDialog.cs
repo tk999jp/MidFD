@@ -96,6 +96,8 @@ public sealed class MarkSlotDialog : Form
     private readonly List<CurrentMarkRowState> _currentMarkRows = new();
     private int _initialSelectedSlotNumber = 1;
 
+    internal MarkSlotClipboardActionResult? SuccessfulImportResult { get; private set; }
+
     public MarkSlotDialog(
         Func<IReadOnlyList<MarkListViewItem>> markItemsProvider,
         Func<IReadOnlyList<MarkSlotSummaryViewItem>> slotItemsProvider,
@@ -767,10 +769,16 @@ public sealed class MarkSlotDialog : Form
         MarkSlotClipboardActionResult actionResult = _importClipboardMarkAction();
         if (actionResult.Success)
         {
+            SuccessfulImportResult = actionResult;
+            _currentMarkRows.Clear();
             RefreshCurrentMarkItems();
             _showImportResultAction(actionResult);
             DialogResult = DialogResult.OK;
             Close();
+        }
+        else if (actionResult.IsNoOp)
+        {
+            _showMessageAction(actionResult.Message, "KDSL_RESULT→現在Mark", MessageBoxIcon.Information);
         }
         else
         {
@@ -783,9 +791,12 @@ public sealed class MarkSlotDialog : Form
         .Select(item => item.Tag as string ?? string.Empty)
         .ToList();
 
+    internal string CurrentMarkSummaryTextForTest => _topSummaryLabel.Text;
+    internal int CurrentTabClearCountForTest => _currentMarkRows.Count(x => x.IsMarked);
+
     private void ExecuteClearCurrentTabMarks()
     {
-        int count = _currentMarkRows.Count(x => x.IsMarked && x.IsInCurrentDirectory);
+        int count = _currentMarkRows.Count(x => x.IsMarked);
         if (count == 0)
         {
             _showMessageAction("現在タブに解除対象のマークはありません。", "Mark解除", MessageBoxIcon.Information);

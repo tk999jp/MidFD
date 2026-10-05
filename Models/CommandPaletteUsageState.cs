@@ -7,6 +7,7 @@ public sealed class CommandPaletteUsageState
 {
     public const int CurrentSchemaVersion = 1;
 
+    internal bool LoadFailed { get; set; }
     public int SchemaVersion { get; set; } = CurrentSchemaVersion;
     public List<CommandPaletteRecentCommand> RecentCommands { get; set; } = new();
     public List<string> FavoriteCommandIds { get; set; } = new();

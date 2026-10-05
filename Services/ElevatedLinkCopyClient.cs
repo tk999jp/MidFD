@@ -5,7 +5,14 @@ using MidFD.FileOperationHelperProtocol;
 
 namespace MidFD.Services;
 
-internal sealed class ElevatedLinkCopyClient
+internal interface ILinkOperationCopyPort
+{
+    Task<ElevatedLinkCopyResponse> CopyAsync(
+        IReadOnlyList<ElevatedLinkCopyItem> items,
+        CancellationToken cancellationToken);
+}
+
+internal sealed class ElevatedLinkCopyClient : ILinkOperationCopyPort
 {
     private const int ProtocolVersion = 1;
     private static readonly TimeSpan OperationTimeout = TimeSpan.FromSeconds(20);

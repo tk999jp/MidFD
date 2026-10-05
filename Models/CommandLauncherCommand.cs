@@ -58,6 +58,14 @@ public sealed class CommandLauncherCommand
     public string? NonExecutableMessage { get; init; }
 
     /// <summary>
+    /// 実行状態に応じて実行不可メッセージを解決する。
+    /// </summary>
+    public Func<string?>? NonExecutableMessageProvider { get; init; }
+
+    public string? ResolveNonExecutableMessage() =>
+        NonExecutableMessageProvider?.Invoke() ?? NonExecutableMessage;
+
+    /// <summary>
     /// 実行ロジック。
     /// </summary>
     public required Action Execute { get; init; }

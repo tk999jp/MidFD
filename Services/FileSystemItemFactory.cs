@@ -1,6 +1,5 @@
 ﻿using System.IO;
 using System.Drawing;
-using System.Globalization;
 using System.Windows.Forms;
 using MidFD.Models;
 
@@ -13,73 +12,39 @@ public static class FileSystemItemFactory
 {
     public static ListViewItem CreateDirectoryItem(DirectoryInfo d, string? dateFormat, bool showDirectoryMarker)
     {
-        var item = new ListViewItem(d.Name);
-        item.SubItems.Add(showDirectoryMarker ? "<DIR>" : "");
-        item.SubItems.Add("");
-        item.SubItems.Add(FormatDisplayDate(d.LastWriteTime, dateFormat));
-        item.SubItems.Add(FormatAttributes(d.Attributes));
-        item.Tag = d.FullName;
-
-        item.ForeColor = ResolveAttributeColor(d.Attributes, isDirectory: true);
-
-        return item;
+        return CreateItem(BrowserItemDataFactory.CreateDirectory(d, dateFormat, showDirectoryMarker));
     }
 
     public static ListViewItem CreateFileItem(FileInfo f, string? dateFormat, string? sizeFormat)
     {
-        // WinFD風: 拡張子を分離
-        string nameOnly = Path.GetFileNameWithoutExtension(f.Name);
-        string extOnly = f.Extension.TrimStart('.');
+        return CreateItem(BrowserItemDataFactory.CreateFile(f, dateFormat, sizeFormat));
+    }
 
-        var item = new ListViewItem(nameOnly);
-        item.SubItems.Add(extOnly);
-        item.SubItems.Add(FormatDisplaySize(f.Length, sizeFormat));
-        item.SubItems.Add(FormatDisplayDate(f.LastWriteTime, dateFormat));
-        item.SubItems.Add(FormatAttributes(f.Attributes));
-        item.Tag = f.FullName;
+    public static ListViewItem CreateItem(BrowserItemData data)
+    {
+        var item = new ListViewItem(data.DisplayName);
+        item.SubItems.Add(data.TypeText);
+        item.SubItems.Add(data.SizeText);
+        item.SubItems.Add(data.DateText);
+        item.SubItems.Add(data.AttributesText);
+        item.Tag = data.FullPath;
 
-        item.ForeColor = ResolveAttributeColor(f.Attributes, isDirectory: false);
+        if (!data.IsParent)
+        {
+            item.ForeColor = ResolveAttributeColor(data.Attributes, data.IsDirectory);
+        }
 
         return item;
     }
 
     public static string FormatDisplayDate(DateTime dateTime, string? dateFormat)
     {
-        string format = dateFormat switch
-        {
-            "yyyy/MM/dd HH:mm:ss" => "yyyy/MM/dd HH:mm:ss",
-            "yyyy-MM-dd(ddd) HH:mm" => "yyyy-MM-dd(ddd) HH:mm",
-            _ => "yyyy-MM-dd HH:mm"
-        };
-
-        return dateTime.ToString(format);
+        return BrowserItemDataFactory.FormatDisplayDate(dateTime, dateFormat);
     }
 
     public static string FormatDisplaySize(long length, string? sizeFormat)
     {
-        return sizeFormat switch
-        {
-            "Bytes" => $"{length.ToString("#,0", CultureInfo.InvariantCulture)} B",
-            "KB/MB" => FormatCompactSize(length),
-            _ => FileOperationService.FormatSize(length)
-        };
-    }
-
-    private static string FormatCompactSize(long length)
-    {
-        const double kb = 1024d;
-        const double mb = kb * 1024d;
-        const double gb = mb * 1024d;
-
-        if (length >= gb) return $"{length / gb:0.0} GB";
-        if (length >= mb) return $"{length / mb:0.0} MB";
-        if (length >= kb) return $"{length / kb:0.0} KB";
-        return $"{length:#,0} B";
-    }
-
-    private static string FormatAttributes(FileAttributes attr)
-    {
-        return $"{(attr.HasFlag(FileAttributes.ReadOnly) ? "R" : "-")}{(attr.HasFlag(FileAttributes.Hidden) ? "H" : "-")}{(attr.HasFlag(FileAttributes.System) ? "S" : "-")}{(attr.HasFlag(FileAttributes.Archive) ? "A" : "-")}";
+        return BrowserItemDataFactory.FormatDisplaySize(length, sizeFormat);
     }
 
     private static Color ResolveAttributeColor(FileAttributes attr, bool isDirectory)

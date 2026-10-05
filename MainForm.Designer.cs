@@ -37,7 +37,7 @@ partial class MainForm
     private System.Windows.Forms.Label lblName;
     
     // 多列表示用パネルと裏側のListView
-    private System.Windows.Forms.Panel browserPanel;
+    private MidFD.Controls.AsyncDropPanel browserPanel;
     private System.Windows.Forms.ListView fileListView;
     private System.Windows.Forms.MenuStrip mainMenuStrip;
     private System.Windows.Forms.StatusStrip statusStrip;
@@ -50,7 +50,7 @@ partial class MainForm
 
     // Viewer Mode UI
     private System.Windows.Forms.Panel viewerPanel;
-    private System.Windows.Forms.RichTextBox viewerTextBox;
+    private System.Windows.Forms.TextBox viewerTextBox;
     private System.Windows.Forms.PictureBox viewerPictureBox;
     private System.Windows.Forms.Label viewerMessageLabel;
 
@@ -69,9 +69,9 @@ partial class MainForm
         outerHostPanel = new Panel();
         mainAreaPanel = new Panel();
         contentFramePanel = new Panel();
-        browserPanel = new Panel();
+        browserPanel = new MidFD.Controls.AsyncDropPanel();
         viewerPanel = new Panel();
-        viewerTextBox = new RichTextBox();
+        viewerTextBox = new TextBox();
         viewerPictureBox = new PictureBox();
         viewerMessageLabel = new Label();
         mainMenuStrip = new MenuStrip();
@@ -221,6 +221,8 @@ partial class MainForm
         viewerTextBox.Location = new Point(0, 0);
         viewerTextBox.Name = "viewerTextBox";
         viewerTextBox.ReadOnly = true;
+        viewerTextBox.Multiline = true;
+        viewerTextBox.ScrollBars = ScrollBars.Both;
         viewerTextBox.Size = new Size(782, 453);
         viewerTextBox.TabIndex = 0;
         viewerTextBox.Text = "";

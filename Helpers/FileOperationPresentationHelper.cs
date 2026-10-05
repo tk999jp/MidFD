@@ -29,6 +29,7 @@ namespace MidFD.Helpers
                 "Paste" => "貼り付け",
                 "Delete" => "削除",
                 "Rename" => "リネーム",
+                "Restore" => "復元",
                 _ => operationNameOrLabel
             };
         }
@@ -42,6 +43,7 @@ namespace MidFD.Helpers
                 "Paste" => "貼り付け",
                 "Delete" => "削除",
                 "Rename" => "リネーム",
+                "Restore" or "復元" => "復元",
                 _ => "処理"
             };
         }
@@ -60,6 +62,7 @@ namespace MidFD.Helpers
                 "Copy" or "コピー" or "貼り付け(コピー)" => FileOperationItemProgressKind.Copy,
                 "Move" or "移動" or "貼り付け(移動)" => FileOperationItemProgressKind.Move,
                 "Delete" or "削除" or "完全削除" => FileOperationItemProgressKind.Delete,
+                "Restore" or "復元" => FileOperationItemProgressKind.Restore,
                 _ => FileOperationItemProgressKind.Other
             };
         }

@@ -15,7 +15,8 @@ internal sealed class MainMenuConstructionCoordinator
         bool requiresEditorTarget = false,
         bool requiresExactlyTwoSelection = false,
         bool requiresTwoFiles = false,
-        string? shortcutHint = null);
+        string? shortcutHint = null,
+        string? commandId = null);
 
     internal sealed class BuildContext
     {
@@ -24,6 +25,7 @@ internal sealed class MainMenuConstructionCoordinator
         public required Func<bool> IsWorkspaceSnapshotEnabled { get; init; }
 
         public required Action ExecuteBrowserOpen { get; init; }
+        public required Action ExecuteBrowserDefaultOpenMarked { get; init; }
         public required Action ExecuteAttribute { get; init; }
         public required Action ExecuteCopy { get; init; }
         public required Action ExecuteMove { get; init; }
@@ -35,13 +37,14 @@ internal sealed class MainMenuConstructionCoordinator
         public required Action CloseMainForm { get; init; }
         public required Action ExecuteSort { get; init; }
         public required Action ExecuteFilter { get; init; }
+        public required Action ExecuteSearch { get; init; }
+        public required Action ClearFilter { get; init; }
         public required Action SetFileDisplayModeNameOnly { get; init; }
         public required Action SetFileDisplayModeNameSize { get; init; }
         public required Action SetFileDisplayModeNameSizeDate { get; init; }
+        public required Action SetFileDisplayModeNameExtensionAligned { get; init; }
         public required Action UpdateFileDisplayModeMenuChecks { get; init; }
         public required Action ReloadCurrentDirectory { get; init; }
-        public required Action OpenActiveTabFilterLockDialog { get; init; }
-        public required Action ClearActiveTabFilterLock { get; init; }
         public required Action ExecutePreviewLaunch { get; init; }
         public required Action ExecuteLogdisk { get; init; }
         public required Action OpenFileListColorSettings { get; init; }
@@ -54,6 +57,9 @@ internal sealed class MainMenuConstructionCoordinator
         public required Action ExecuteQuickAccess { get; init; }
         public required Action NavigateBack { get; init; }
         public required Action NavigateForward { get; init; }
+        public required Action NavigateTabHistoryBack { get; init; }
+        public required Action NavigateTabHistoryForward { get; init; }
+        public required Action OpenTabHistoryDialog { get; init; }
         public required Action CreateNewBrowserTab { get; init; }
         public required Action ToggleActiveBrowserTabLock { get; init; }
         public required Action ToggleActiveBrowserTabReadOnly { get; init; }
@@ -87,8 +93,8 @@ internal sealed class MainMenuConstructionCoordinator
         public required ToolStripMenuItem FileDisplayModeNameOnlyMenuItem { get; init; }
         public required ToolStripMenuItem FileDisplayModeNameSizeMenuItem { get; init; }
         public required ToolStripMenuItem FileDisplayModeNameSizeDateMenuItem { get; init; }
+        public required ToolStripMenuItem FileDisplayModeNameExtensionAlignedMenuItem { get; init; }
         public required ToolStripMenuItem ReloadCurrentDirectoryMenuItem { get; init; }
-        public required ToolStripMenuItem ClearTabFilterLockMenuItem { get; init; }
         public required ToolStripMenuItem ToggleBrowserTabLockMenuItem { get; init; }
         public required ToolStripMenuItem ToggleBrowserTabReadOnlyMenuItem { get; init; }
     }
@@ -96,7 +102,8 @@ internal sealed class MainMenuConstructionCoordinator
     public BuildResult Build(BuildContext context)
     {
         ToolStripMenuItem fileMenu = new("ファイル(&F)");
-        fileMenu.DropDownItems.Add(context.CreateMenuItem("開く(&O)", (s, e) => context.ExecuteBrowserOpen(), browserOnly: true, requiresIdle: true, requiresSelection: true, requiresFile: false, requiresEditorTarget: false, requiresExactlyTwoSelection: false, requiresTwoFiles: false, shortcutHint: context.GetBrowserCommandShortcutHint(CommandIds.BrowserExecute)));
+        fileMenu.DropDownItems.Add(context.CreateMenuItem("開く(&O)", (s, e) => context.ExecuteBrowserOpen(), browserOnly: true, requiresIdle: true, requiresSelection: true, requiresFile: false, requiresEditorTarget: false, requiresExactlyTwoSelection: false, requiresTwoFiles: false, shortcutHint: context.GetBrowserCommandShortcutHint(CommandIds.BrowserExecute), commandId: CommandIds.BrowserExecute));
+        fileMenu.DropDownItems.Add(context.CreateMenuItem("マークしたファイルを既定アプリで開く(&B)", (s, e) => context.ExecuteBrowserDefaultOpenMarked(), browserOnly: true, requiresIdle: true, requiresSelection: true, requiresFile: false, requiresEditorTarget: false, requiresExactlyTwoSelection: false, requiresTwoFiles: false, shortcutHint: null, commandId: CommandIds.BrowserDefaultOpenMarked));
         fileMenu.DropDownItems.Add(context.CreateMenuItem("属性変更(&A)", (s, e) => context.ExecuteAttribute(), browserOnly: true, requiresIdle: true, requiresSelection: true, requiresFile: false, requiresEditorTarget: false, requiresExactlyTwoSelection: false, requiresTwoFiles: false, shortcutHint: context.GetBrowserCommandShortcutHint(CommandIds.BrowserChangeAttributes)));
         fileMenu.DropDownItems.Add(context.CreateMenuItem("コピー(&C)", (s, e) => context.ExecuteCopy(), browserOnly: true, requiresIdle: true, requiresSelection: true, requiresFile: false, requiresEditorTarget: false, requiresExactlyTwoSelection: false, requiresTwoFiles: false, shortcutHint: context.GetBrowserCommandShortcutHint(CommandIds.FileCopy)));
         fileMenu.DropDownItems.Add(context.CreateMenuItem("移動(&M)", (s, e) => context.ExecuteMove(), browserOnly: true, requiresIdle: true, requiresSelection: true, requiresFile: false, requiresEditorTarget: false, requiresExactlyTwoSelection: false, requiresTwoFiles: false, shortcutHint: context.GetBrowserCommandShortcutHint(CommandIds.FileMove)));
@@ -112,23 +119,25 @@ internal sealed class MainMenuConstructionCoordinator
 
         ToolStripMenuItem viewMenu = new("表示(&V)");
         viewMenu.DropDownItems.Add(context.CreateMenuItem("ソート(&S)", (s, e) => context.ExecuteSort(), browserOnly: true, requiresIdle: true, requiresSelection: false, requiresFile: false, requiresEditorTarget: false, requiresExactlyTwoSelection: false, requiresTwoFiles: false, shortcutHint: context.GetBrowserCommandShortcutHint(CommandIds.BrowserSort)));
-        viewMenu.DropDownItems.Add(context.CreateMenuItem("フィルタ(&F)", (s, e) => context.ExecuteFilter(), browserOnly: true, requiresIdle: true, requiresSelection: false, requiresFile: false, requiresEditorTarget: false, requiresExactlyTwoSelection: false, requiresTwoFiles: false, shortcutHint: context.GetBrowserCommandShortcutHint(CommandIds.BrowserFilter)));
+        viewMenu.DropDownItems.Add(context.CreateMenuItem("フィルタ...(&F)", (s, e) => context.ExecuteFilter(), browserOnly: true, requiresIdle: true, requiresSelection: false, requiresFile: false, requiresEditorTarget: false, requiresExactlyTwoSelection: false, requiresTwoFiles: false, shortcutHint: context.GetBrowserCommandShortcutHint(CommandIds.BrowserFilter), commandId: CommandIds.BrowserFilter));
+        viewMenu.DropDownItems.Add(context.CreateMenuItem("検索...(&S)", (s, e) => context.ExecuteSearch(), browserOnly: true, requiresIdle: true, requiresSelection: false, requiresFile: false, requiresEditorTarget: false, requiresExactlyTwoSelection: false, requiresTwoFiles: false, shortcutHint: context.GetBrowserCommandShortcutHint(CommandIds.BrowserSearch), commandId: CommandIds.BrowserSearch));
+        ToolStripMenuItem clearFilterMenuItem = context.CreateMenuItem("現在のフィルタを解除", (s, e) => context.ClearFilter(), browserOnly: true, requiresIdle: true, requiresSelection: false, requiresFile: false, requiresEditorTarget: false, requiresExactlyTwoSelection: false, requiresTwoFiles: false, shortcutHint: "Esc", commandId: CommandIds.BrowserFilterClear);
+        viewMenu.DropDownItems.Add(clearFilterMenuItem);
         ToolStripMenuItem fileDisplayModeSubMenu = new MidFD.Controls.TightCascadeToolStripMenuItem("一覧表示");
         ToolStripMenuItem fileDisplayModeNameOnlyMenuItem = context.CreateMenuItem("ファイル名のみ", (s, e) => context.SetFileDisplayModeNameOnly(), browserOnly: true, requiresIdle: true, requiresSelection: false, requiresFile: false, requiresEditorTarget: false, requiresExactlyTwoSelection: false, requiresTwoFiles: false, shortcutHint: "Ctrl+1");
         ToolStripMenuItem fileDisplayModeNameSizeMenuItem = context.CreateMenuItem("サイズ", (s, e) => context.SetFileDisplayModeNameSize(), browserOnly: true, requiresIdle: true, requiresSelection: false, requiresFile: false, requiresEditorTarget: false, requiresExactlyTwoSelection: false, requiresTwoFiles: false, shortcutHint: "Ctrl+2");
         ToolStripMenuItem fileDisplayModeNameSizeDateMenuItem = context.CreateMenuItem("サイズ・更新日時", (s, e) => context.SetFileDisplayModeNameSizeDate(), browserOnly: true, requiresIdle: true, requiresSelection: false, requiresFile: false, requiresEditorTarget: false, requiresExactlyTwoSelection: false, requiresTwoFiles: false, shortcutHint: "Ctrl+3");
+        ToolStripMenuItem fileDisplayModeNameExtensionAlignedMenuItem = context.CreateMenuItem("拡張子整列", (s, e) => context.SetFileDisplayModeNameExtensionAligned(), browserOnly: true, requiresIdle: true, requiresSelection: false, requiresFile: false, requiresEditorTarget: false, requiresExactlyTwoSelection: false, requiresTwoFiles: false, shortcutHint: "Ctrl+4");
         fileDisplayModeSubMenu.DropDownItems.Add(fileDisplayModeNameOnlyMenuItem);
         fileDisplayModeSubMenu.DropDownItems.Add(fileDisplayModeNameSizeMenuItem);
         fileDisplayModeSubMenu.DropDownItems.Add(fileDisplayModeNameSizeDateMenuItem);
+        fileDisplayModeSubMenu.DropDownItems.Add(fileDisplayModeNameExtensionAlignedMenuItem);
         viewMenu.DropDownItems.Add(fileDisplayModeSubMenu);
         viewMenu.DropDownOpening += (s, e) => context.UpdateFileDisplayModeMenuChecks();
         fileDisplayModeSubMenu.DropDownOpening += (s, e) => context.UpdateFileDisplayModeMenuChecks();
 
         ToolStripMenuItem reloadCurrentDirectoryMenuItem = context.CreateMenuItem("現在ディレクトリを再読込(&R)", (s, e) => context.ReloadCurrentDirectory(), browserOnly: true, requiresIdle: false, requiresSelection: false, requiresFile: false, requiresEditorTarget: false, requiresExactlyTwoSelection: false, requiresTwoFiles: false, shortcutHint: context.GetBrowserCommandShortcutHint(CommandIds.BrowserReload));
         viewMenu.DropDownItems.Add(reloadCurrentDirectoryMenuItem);
-        viewMenu.DropDownItems.Add(context.CreateMenuItem("現在タブのフィルタロック...(&L)", (s, e) => context.OpenActiveTabFilterLockDialog(), browserOnly: true, requiresIdle: true, requiresSelection: false, requiresFile: false, requiresEditorTarget: false, requiresExactlyTwoSelection: false, requiresTwoFiles: false, shortcutHint: context.GetBrowserCommandShortcutHint(CommandIds.BrowserTabFilterLock)));
-        ToolStripMenuItem clearTabFilterLockMenuItem = context.CreateMenuItem("現在タブのフィルタロックを解除(&U)", (s, e) => context.ClearActiveTabFilterLock(), browserOnly: true, requiresIdle: true, requiresSelection: false, requiresFile: false, requiresEditorTarget: false, requiresExactlyTwoSelection: false, requiresTwoFiles: false, shortcutHint: null);
-        viewMenu.DropDownItems.Add(clearTabFilterLockMenuItem);
         viewMenu.DropDownItems.Add(context.CreateMenuItem("内蔵Viewer / 内容プレビュー(&P)", (s, e) => context.ExecutePreviewLaunch(), browserOnly: true, requiresIdle: true, requiresSelection: true, requiresFile: true, requiresEditorTarget: false, requiresExactlyTwoSelection: false, requiresTwoFiles: false, shortcutHint: context.GetBrowserCommandShortcutHint(CommandIds.BrowserPreview)));
         viewMenu.DropDownItems.Add(context.CreateMenuItem("Logdisk(&L)", (s, e) => context.ExecuteLogdisk(), browserOnly: true, requiresIdle: true, requiresSelection: false, requiresFile: false, requiresEditorTarget: false, requiresExactlyTwoSelection: false, requiresTwoFiles: false, shortcutHint: context.GetBrowserCommandShortcutHint(CommandIds.BrowserLogdisk)));
         viewMenu.DropDownItems.Add(new ToolStripSeparator());
@@ -142,8 +151,11 @@ internal sealed class MainMenuConstructionCoordinator
         moveMenu.DropDownItems.Add(context.CreateMenuItem("Bottom(&B)", (s, e) => context.ExecuteBottom(), browserOnly: true, requiresIdle: true, requiresSelection: false, requiresFile: false, requiresEditorTarget: false, requiresExactlyTwoSelection: false, requiresTwoFiles: false, shortcutHint: context.GetBrowserCommandShortcutHint(CommandIds.BrowserCursorBottom)));
         moveMenu.DropDownItems.Add(context.CreateMenuItem("Tree(&E)", (s, e) => context.ExecuteTreeDialog(), browserOnly: true, requiresIdle: true, requiresSelection: false, requiresFile: false, requiresEditorTarget: false, requiresExactlyTwoSelection: false, requiresTwoFiles: false, shortcutHint: context.GetBrowserCommandShortcutHint(CommandIds.BrowserTree)));
         moveMenu.DropDownItems.Add(context.CreateMenuItem("QuickAccess(&Q)", (s, e) => context.ExecuteQuickAccess(), browserOnly: true, requiresIdle: true, requiresSelection: false, requiresFile: false, requiresEditorTarget: false, requiresExactlyTwoSelection: false, requiresTwoFiles: false, shortcutHint: context.GetBrowserCommandShortcutHint(CommandIds.BrowserQuickAccess)));
-        moveMenu.DropDownItems.Add(context.CreateMenuItem("戻る(&A)", (s, e) => context.NavigateBack(), browserOnly: true, requiresIdle: true, requiresSelection: false, requiresFile: false, requiresEditorTarget: false, requiresExactlyTwoSelection: false, requiresTwoFiles: false, shortcutHint: context.GetBrowserCommandShortcutHint(CommandIds.BrowserNavigateBack)));
-        moveMenu.DropDownItems.Add(context.CreateMenuItem("進む(&D)", (s, e) => context.NavigateForward(), browserOnly: true, requiresIdle: true, requiresSelection: false, requiresFile: false, requiresEditorTarget: false, requiresExactlyTwoSelection: false, requiresTwoFiles: false, shortcutHint: context.GetBrowserCommandShortcutHint(CommandIds.BrowserNavigateForward)));
+        moveMenu.DropDownItems.Add(context.CreateMenuItem("ディレクトリ履歴: 戻る(&A)", (s, e) => context.NavigateBack(), browserOnly: true, requiresIdle: true, requiresSelection: false, requiresFile: false, requiresEditorTarget: false, requiresExactlyTwoSelection: false, requiresTwoFiles: false, shortcutHint: context.GetBrowserCommandShortcutHint(CommandIds.BrowserNavigateBack)));
+        moveMenu.DropDownItems.Add(context.CreateMenuItem("ディレクトリ履歴: 進む(&D)", (s, e) => context.NavigateForward(), browserOnly: true, requiresIdle: true, requiresSelection: false, requiresFile: false, requiresEditorTarget: false, requiresExactlyTwoSelection: false, requiresTwoFiles: false, shortcutHint: context.GetBrowserCommandShortcutHint(CommandIds.BrowserNavigateForward)));
+        moveMenu.DropDownItems.Add(context.CreateMenuItem("タブ履歴: 戻る(&H)", (s, e) => context.NavigateTabHistoryBack(), browserOnly: true, requiresIdle: true, requiresSelection: false, requiresFile: false, requiresEditorTarget: false, requiresExactlyTwoSelection: false, requiresTwoFiles: false, shortcutHint: context.GetBrowserCommandShortcutHint(CommandIds.BrowserTabHistoryBack)));
+        moveMenu.DropDownItems.Add(context.CreateMenuItem("タブ履歴: 進む(&J)", (s, e) => context.NavigateTabHistoryForward(), browserOnly: true, requiresIdle: true, requiresSelection: false, requiresFile: false, requiresEditorTarget: false, requiresExactlyTwoSelection: false, requiresTwoFiles: false, shortcutHint: context.GetBrowserCommandShortcutHint(CommandIds.BrowserTabHistoryForward)));
+        moveMenu.DropDownItems.Add(context.CreateMenuItem("タブ移動履歴...", (s, e) => context.OpenTabHistoryDialog(), browserOnly: true, requiresIdle: true, requiresSelection: false, requiresFile: false, requiresEditorTarget: false, requiresExactlyTwoSelection: false, requiresTwoFiles: false, shortcutHint: context.GetBrowserCommandShortcutHint(CommandIds.BrowserTabHistoryShow)));
         moveMenu.DropDownItems.Add(new ToolStripSeparator());
         moveMenu.DropDownItems.Add(context.CreateMenuItem("新しいタブを作る(&N)", (s, e) => context.CreateNewBrowserTab(), browserOnly: true, requiresIdle: true, requiresSelection: false, requiresFile: false, requiresEditorTarget: false, requiresExactlyTwoSelection: false, requiresTwoFiles: false, shortcutHint: context.GetBrowserCommandShortcutHint(CommandIds.BrowserTabNew)));
         ToolStripMenuItem toggleBrowserTabLockMenuItem = context.CreateMenuItem("現在のタブを固定(&K)", (s, e) => context.ToggleActiveBrowserTabLock(), browserOnly: true, requiresIdle: true, requiresSelection: false, requiresFile: false, requiresEditorTarget: false, requiresExactlyTwoSelection: false, requiresTwoFiles: false, shortcutHint: context.GetBrowserCommandShortcutHint(CommandIds.BrowserTabLock));
@@ -188,8 +200,8 @@ internal sealed class MainMenuConstructionCoordinator
             FileDisplayModeNameOnlyMenuItem = fileDisplayModeNameOnlyMenuItem,
             FileDisplayModeNameSizeMenuItem = fileDisplayModeNameSizeMenuItem,
             FileDisplayModeNameSizeDateMenuItem = fileDisplayModeNameSizeDateMenuItem,
+            FileDisplayModeNameExtensionAlignedMenuItem = fileDisplayModeNameExtensionAlignedMenuItem,
             ReloadCurrentDirectoryMenuItem = reloadCurrentDirectoryMenuItem,
-            ClearTabFilterLockMenuItem = clearTabFilterLockMenuItem,
             ToggleBrowserTabLockMenuItem = toggleBrowserTabLockMenuItem,
             ToggleBrowserTabReadOnlyMenuItem = toggleBrowserTabReadOnlyMenuItem
         };

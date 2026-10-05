@@ -48,9 +48,9 @@ public static class QuickAccessService
         return store;
     }
 
-    public static void Save(QuickAccessStore store)
+    public static bool Save(QuickAccessStore store)
     {
-        QuickAccessStorage.Save(SanitizeStore(store));
+        return QuickAccessStorage.Save(SanitizeStore(store));
     }
 
     public static bool TryAddBookmark(QuickAccessStore store, string path, string? currentPath, out string message)
@@ -889,6 +889,8 @@ public static class QuickAccessService
         {
             return result;
         }
+
+        result.LoadFailed = store.LoadFailed;
 
         foreach (QuickAccessEntry entry in store.Bookmarks)
         {

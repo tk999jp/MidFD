@@ -5,6 +5,8 @@ namespace MidFD.Configuration;
 public class AppSettings
 {
     public string Profile { get; set; } = string.Empty;
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public bool? WorkspaceSnapshotEnabledOverride { get; set; }
     public InputSettings Input { get; set; } = new InputSettings();
     public SevenZipSettings SevenZip { get; set; } = new SevenZipSettings();
     public ExternalToolsSettings ExternalTools { get; set; } = new ExternalToolsSettings();
@@ -24,6 +26,7 @@ public class AppSettings
         return new AppSettings
         {
             Profile = Profile ?? string.Empty,
+            WorkspaceSnapshotEnabledOverride = WorkspaceSnapshotEnabledOverride,
             Input = (Input ?? new InputSettings()).Clone(),
             SevenZip = (SevenZip ?? new SevenZipSettings()).Clone(),
             ExternalTools = (ExternalTools ?? new ExternalToolsSettings()).Clone(),
@@ -68,14 +71,21 @@ public class AppSettings
         }
         ExternalTools ??= new ExternalToolsSettings();
         FileOperations ??= new FileOperationsSettings();
+        FileOperations.NewFileExtensions ??= FileOperationsSettings.CreateDefaultNewFileExtensions();
         Appearance ??= new AppearanceSettings();
         Appearance.CustomFileListColors ??= new CustomFileListColorSettings();
         Appearance.CustomFileListColorPresets ??= new List<CustomFileListColorPreset>();
+        Appearance.NormalizeAutoProfileColors();
+        Appearance.NormalizeColorSelection(Input.FunctionKeyProfile);
+        Appearance.MigrateLegacyProfileColors(Input.FunctionKeyProfile);
         Logging ??= new LoggingSettings();
         Preview ??= new PreviewSettings();
         Rename ??= new RenameSettings();
         QuickAccess ??= new List<string>();
         BrowserTabs ??= new BrowserTabSettings();
+        BrowserTabs.MultiDirectoryOpenConfirmationThreshold = Math.Max(
+            BrowserTabSettings.MinimumMultiDirectoryOpenConfirmationThreshold,
+            BrowserTabs.MultiDirectoryOpenConfirmationThreshold);
         BrowserTabs.Categories ??= new List<BrowserTabCategoryDefinition>();
         Fonts ??= new FontSettings();
         Window ??= new WindowSettings();
@@ -88,6 +98,7 @@ public class AppSettings
         if (Session.BrowserTabRestoreSnapshot != null)
         {
             Session.BrowserTabRestoreSnapshot.Categories ??= new List<BrowserTabRestoreCategoryState>();
+            Session.BrowserTabRestoreSnapshot.UserTabGroups ??= new List<BrowserTabGroupRestoreState>();
             foreach (BrowserTabRestoreCategoryState category in Session.BrowserTabRestoreSnapshot.Categories.Where(static category => category != null))
             {
                 category.OpenTabs ??= new List<BrowserTabSessionState>();
@@ -98,7 +109,12 @@ public class AppSettings
 
 public class AppearanceSettings
 {
+    public const string AutoColorSelectionMode = "AutoFromInputProfile";
+    public const string ExplicitColorSelectionMode = "ExplicitPreset";
+
     public string ColorTheme { get; set; } = "ClassicCyan";
+    public string? ColorSelectionMode { get; set; }
+    public string? ExplicitColorPresetKey { get; set; }
     public bool ShowBrowserTabCategoryRow { get; set; } = true;
     public bool ShowExtensions { get; set; } = true;
     public bool ShowDirectoryMarker { get; set; } = true;
@@ -119,6 +135,9 @@ public class AppearanceSettings
     public bool EnableSemanticColorAssist { get; set; } = true;
     public CustomFileListColorSettings CustomFileListColors { get; set; } = new();
     public List<CustomFileListColorPreset> CustomFileListColorPresets { get; set; } = new();
+    public AutoProfileColorSettings? MidFdStandardProfileColors { get; set; }
+    public AutoProfileColorSettings? WinFdCompatibleProfileColors { get; set; }
+    public bool LegacyProfileColorsMigrated { get; set; }
 
     public bool CustomUiThemeColorsEnabled { get; set; } = false;
     public string? CustomFilerBackColor { get; set; }
@@ -134,7 +153,122 @@ public class AppearanceSettings
         var clone = (AppearanceSettings)MemberwiseClone();
         clone.CustomFileListColors = (CustomFileListColors ?? new CustomFileListColorSettings()).Clone();
         clone.CustomFileListColorPresets = (CustomFileListColorPresets ?? []).Where(static preset => preset != null).Select(static preset => preset.Clone()).ToList();
+        clone.MidFdStandardProfileColors = MidFdStandardProfileColors?.Clone();
+        clone.WinFdCompatibleProfileColors = WinFdCompatibleProfileColors?.Clone();
         return clone;
+    }
+
+    public AutoProfileColorSettings? GetAutoProfileColors(string? inputProfile)
+    {
+        return IsFdCompatibleInputProfile(inputProfile)
+            ? WinFdCompatibleProfileColors
+            : IsStandardInputProfile(inputProfile)
+                ? MidFdStandardProfileColors
+                : null;
+    }
+
+    public AutoProfileColorSettings GetOrCreateAutoProfileColors(string inputProfile)
+    {
+        if (IsFdCompatibleInputProfile(inputProfile))
+        {
+            return WinFdCompatibleProfileColors ??= new AutoProfileColorSettings();
+        }
+
+        if (IsStandardInputProfile(inputProfile))
+        {
+            return MidFdStandardProfileColors ??= new AutoProfileColorSettings();
+        }
+
+        throw new ArgumentException($"Unsupported input profile: {inputProfile}", nameof(inputProfile));
+    }
+
+    internal void NormalizeAutoProfileColors()
+    {
+        MidFdStandardProfileColors?.Normalize();
+        WinFdCompatibleProfileColors?.Normalize();
+    }
+
+    internal void NormalizeColorSelection(string? inputProfile)
+    {
+        if (string.Equals(ColorSelectionMode, ExplicitColorSelectionMode, StringComparison.OrdinalIgnoreCase))
+        {
+            ExplicitColorPresetKey ??= ColorTheme;
+            return;
+        }
+
+        if (string.Equals(ColorSelectionMode, AutoColorSelectionMode, StringComparison.OrdinalIgnoreCase))
+        {
+            ExplicitColorPresetKey = null;
+            ColorTheme = string.Equals(inputProfile, InputSettings.FdCompatibleProfileValue, StringComparison.OrdinalIgnoreCase)
+                ? "WinFdCompatible"
+                : "MidFdStandard";
+            return;
+        }
+
+        string theme = ColorTheme ?? string.Empty;
+        bool hasInterimAutoColors = MidFdStandardProfileColors != null || WinFdCompatibleProfileColors != null;
+        bool isLegacyAutoTheme = string.IsNullOrWhiteSpace(theme) ||
+            string.Equals(theme, "ClassicCyan", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(theme, "AutoFromInputProfile", StringComparison.OrdinalIgnoreCase) ||
+            hasInterimAutoColors;
+
+        if (isLegacyAutoTheme)
+        {
+            ColorSelectionMode = AutoColorSelectionMode;
+            ExplicitColorPresetKey = null;
+            ColorTheme = string.Equals(inputProfile, InputSettings.FdCompatibleProfileValue, StringComparison.OrdinalIgnoreCase)
+                ? "WinFdCompatible"
+                : "MidFdStandard";
+        }
+        else
+        {
+            ColorSelectionMode = ExplicitColorSelectionMode;
+            ExplicitColorPresetKey = theme;
+        }
+    }
+
+    internal void MigrateLegacyProfileColors(string? inputProfileKey)
+    {
+        if (LegacyProfileColorsMigrated)
+        {
+            return;
+        }
+
+        if (string.Equals(ColorSelectionMode, ExplicitColorSelectionMode, StringComparison.OrdinalIgnoreCase))
+        {
+            LegacyProfileColorsMigrated = true;
+            return;
+        }
+
+        if (GetAutoProfileColors(inputProfileKey) != null || !HasLegacyCustomColors())
+        {
+            LegacyProfileColorsMigrated = true;
+            return;
+        }
+
+        AutoProfileColorSettings linked = GetOrCreateAutoProfileColors(inputProfileKey ?? InputSettings.StandardProfileValue);
+        linked.UseCustomFileListColors = UseCustomFileListColors;
+        linked.FileListColors = (CustomFileListColors ?? new CustomFileListColorSettings()).Clone();
+        linked.CustomFunctionBarBackColor = CustomFunctionBarBackColor;
+        linked.CustomFunctionBarForeColor = CustomFunctionBarForeColor;
+        LegacyProfileColorsMigrated = true;
+    }
+
+    private bool HasLegacyCustomColors()
+    {
+        return UseCustomFileListColors ||
+            !string.IsNullOrWhiteSpace(CustomFunctionBarBackColor) ||
+            !string.IsNullOrWhiteSpace(CustomFunctionBarForeColor);
+    }
+
+    private static bool IsFdCompatibleInputProfile(string? inputProfile)
+    {
+        return string.Equals(inputProfile, InputSettings.FdCompatibleProfileValue, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool IsStandardInputProfile(string? inputProfile)
+    {
+        return string.Equals(inputProfile, InputSettings.StandardProfileValue, StringComparison.OrdinalIgnoreCase);
     }
 
     public BrowserFileDisplayMode ResolveFileDisplayMode()
@@ -148,11 +282,36 @@ public class AppearanceSettings
     }
 }
 
+public class AutoProfileColorSettings
+{
+    public bool UseCustomFileListColors { get; set; }
+    public CustomFileListColorSettings FileListColors { get; set; } = new();
+    public string? CustomFunctionBarBackColor { get; set; }
+    public string? CustomFunctionBarForeColor { get; set; }
+
+    public AutoProfileColorSettings Clone()
+    {
+        return new AutoProfileColorSettings
+        {
+            UseCustomFileListColors = UseCustomFileListColors,
+            FileListColors = (FileListColors ?? new CustomFileListColorSettings()).Clone(),
+            CustomFunctionBarBackColor = CustomFunctionBarBackColor,
+            CustomFunctionBarForeColor = CustomFunctionBarForeColor
+        };
+    }
+
+    internal void Normalize()
+    {
+        FileListColors ??= new CustomFileListColorSettings();
+    }
+}
+
 public enum BrowserFileDisplayMode
 {
     NameOnly = 0,
     NameSize = 1,
-    NameSizeDate = 2
+    NameSizeDate = 2,
+    NameExtensionAligned = 3
 }
 
 public class LoggingSettings
@@ -173,6 +332,11 @@ public class WindowSettings
     public int Width { get; set; } = 800;
     public int Height { get; set; } = 600;
     public FormWindowState State { get; set; } = FormWindowState.Normal;
+
+    public void SetState(int value)
+    {
+        State = (FormWindowState)value;
+    }
 
     public WindowSettings Clone() => (WindowSettings)MemberwiseClone();
 }
@@ -233,13 +397,16 @@ public class BrowserTabRestoreSnapshot
 {
     public string ActiveCategoryId { get; set; } = BrowserTabSettings.DefaultCategoryId;
     public List<BrowserTabRestoreCategoryState> Categories { get; set; } = new();
+    [System.Text.Json.Serialization.JsonConverter(typeof(BrowserTabGroupRestoreStateListConverter))]
+    public List<BrowserTabGroupRestoreState> UserTabGroups { get; set; } = new();
 
     public BrowserTabRestoreSnapshot Clone()
     {
         return new BrowserTabRestoreSnapshot
         {
             ActiveCategoryId = ActiveCategoryId,
-            Categories = (Categories ?? []).Where(static category => category != null).Select(static category => category.Clone()).ToList()
+            Categories = (Categories ?? []).Where(static category => category != null).Select(static category => category.Clone()).ToList(),
+            UserTabGroups = (UserTabGroups ?? []).Where(static group => group != null).Select(static group => group.Clone()).ToList()
         };
     }
 }
@@ -271,8 +438,11 @@ public class BrowserTabSettings
     public const float DefaultTabFontSize = 9.0f;
     public const int DefaultTabWidth = 140;
     public const int DefaultNavigationWidth = 220;
+    public const int DefaultMultiDirectoryOpenConfirmationThreshold = 2;
+    public const int MinimumMultiDirectoryOpenConfirmationThreshold = 2;
 
     public int MaxTabsPerCategory { get; set; } = DefaultMaxTabsPerCategory;
+    public int MultiDirectoryOpenConfirmationThreshold { get; set; } = DefaultMultiDirectoryOpenConfirmationThreshold;
     private float _tabFontSize = DefaultTabFontSize;
     public float TabFontSize
     {
@@ -296,6 +466,7 @@ public class BrowserTabSettings
         return new BrowserTabSettings
         {
             MaxTabsPerCategory = MaxTabsPerCategory,
+            MultiDirectoryOpenConfirmationThreshold = MultiDirectoryOpenConfirmationThreshold,
             TabFontSize = TabFontSize,
             TabWidth = TabWidth,
             LayoutMode = LayoutMode,
@@ -346,6 +517,10 @@ public class BrowserTabSessionState
     public string StartupPath { get; set; } = string.Empty;
     public bool IsReadOnly { get; set; }
     public TabFilterLockState FilterLock { get; set; } = new();
+    [System.Text.Json.Serialization.JsonIgnore]
+    public string FilterPattern { get; set; } = string.Empty;
+    [System.Text.Json.Serialization.JsonIgnore]
+    public bool FilterUseRegex { get; set; }
     public List<string> MarkedPaths { get; set; } = new();
     public List<string> BackHistory { get; set; } = new();
     public List<string> ForwardHistory { get; set; } = new();
@@ -366,6 +541,8 @@ public class BrowserTabSessionState
             StartupPath = StartupPath,
             IsReadOnly = IsReadOnly,
             FilterLock = FilterLock?.Clone() ?? new TabFilterLockState(),
+            FilterPattern = FilterPattern,
+            FilterUseRegex = FilterUseRegex,
             MarkedPaths = new List<string>(MarkedPaths ?? new List<string>()),
             BackHistory = new List<string>(BackHistory ?? new List<string>()),
             ForwardHistory = new List<string>(ForwardHistory ?? new List<string>()),
@@ -479,6 +656,9 @@ public enum ManagedTrashStoreMode
 
 public class FileOperationsSettings
 {
+    public static IReadOnlyList<string> DefaultNewFileExtensions { get; } =
+        Array.AsReadOnly(new[] { ".txt", ".md", ".json" });
+
     public bool ConfirmDelete { get; set; } = true;
     public bool ConfirmPermanentDelete { get; set; } = true;
     public bool UseRecycleBinByDefault { get; set; } = true;
@@ -491,8 +671,17 @@ public class FileOperationsSettings
     public bool ClipboardPasteTextAsFileEnabled { get; set; } = false;
     public bool EnableDragArchiveHandoff { get; set; } = false;
     public bool IncludeDragZipManifest { get; set; } = false;
+    public List<string> NewFileExtensions { get; set; } = CreateDefaultNewFileExtensions();
 
-    public FileOperationsSettings Clone() => (FileOperationsSettings)MemberwiseClone();
+    public static List<string> CreateDefaultNewFileExtensions()
+        => new(DefaultNewFileExtensions);
+
+    public FileOperationsSettings Clone()
+    {
+        var clone = (FileOperationsSettings)MemberwiseClone();
+        clone.NewFileExtensions = new List<string>(NewFileExtensions ?? DefaultNewFileExtensions);
+        return clone;
+    }
 }
 
 public class CustomFileListColorSettings

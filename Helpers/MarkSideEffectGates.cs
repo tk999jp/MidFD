@@ -1,6 +1,7 @@
 using System.Threading;
 using System.Threading.Tasks;
 using System.IO;
+using MidFD.Models;
 using MidFD.Services;
 
 namespace MidFD.Helpers;
@@ -84,11 +85,238 @@ public sealed class MarkSummaryBulkEffectCoordinator
     }
 }
 
+public readonly record struct MarkPathValidationMetrics(
+    int ParentBatchGroups,
+    int ParentBatchPaths,
+    int ParentBatchHits,
+    int ParentBatchMisses,
+    int ParentBatchFailures,
+    int IndividualFallbackValidations,
+    int IndividualFileProbes,
+    int IndividualDirectoryProbes)
+{
+    public static MarkPathValidationMetrics Empty => default;
+}
+
+internal readonly record struct MarkParentEnumerationResult(
+    bool Succeeded,
+    IReadOnlyDictionary<string, bool>? PathKinds)
+{
+    public static MarkParentEnumerationResult Failure => new(false, null);
+}
+
+internal interface IMarkParentEnumerationProvider
+{
+    MarkParentEnumerationResult Enumerate(string parentDirectory);
+}
+
+internal readonly record struct MarkPathValidationResult(
+    IReadOnlyList<MarkPathKind> ExistingPaths,
+    int SkippedCount,
+    MarkPathValidationMetrics Metrics);
+
+/// <summary>Validates marked paths with fresh parent enumeration and safe individual fallback.</summary>
+internal static class MarkPathValidationService
+{
+    public static MarkPathValidationResult Validate(
+        IEnumerable<string>? paths,
+        IMarkParentEnumerationProvider? parentEnumeration = null)
+    {
+        int skippedCount = 0;
+        int parentBatchGroups = 0;
+        int parentBatchPaths = 0;
+        int parentBatchHits = 0;
+        int parentBatchMisses = 0;
+        int parentBatchFailures = 0;
+        int individualFallbackValidations = 0;
+        int individualFileProbes = 0;
+        int individualDirectoryProbes = 0;
+        var orderedUniquePaths = new List<string>();
+        var validatedByPath = new Dictionary<string, MarkPathKind>(StringComparer.OrdinalIgnoreCase);
+        var queued = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var pendingByParent = new Dictionary<
+            string,
+            List<(string OriginalPath, string FullPath)>>(StringComparer.OrdinalIgnoreCase);
+
+        void AddValidatedPath(string path, bool isDirectory, bool exists)
+        {
+            if (!exists)
+            {
+                skippedCount++;
+                return;
+            }
+
+            if (!validatedByPath.ContainsKey(path))
+            {
+                validatedByPath.Add(path, new MarkPathKind(path, isDirectory));
+            }
+        }
+
+        void ValidateIndividually(string path)
+        {
+            individualFallbackValidations++;
+            individualFileProbes++;
+            if (File.Exists(path))
+            {
+                AddValidatedPath(path, isDirectory: false, exists: true);
+                return;
+            }
+
+            individualDirectoryProbes++;
+            AddValidatedPath(path, isDirectory: true, exists: Directory.Exists(path));
+        }
+
+        foreach (string? path in paths ?? Enumerable.Empty<string>())
+        {
+            if (string.IsNullOrWhiteSpace(path))
+            {
+                skippedCount++;
+                continue;
+            }
+
+            if (!queued.Add(path))
+            {
+                continue;
+            }
+
+            orderedUniquePaths.Add(path);
+
+            if (TryGetParentDirectory(path, out string parentDirectory, out string fullPath))
+            {
+                if (!pendingByParent.TryGetValue(parentDirectory, out List<(string OriginalPath, string FullPath)>? pending))
+                {
+                    pending = new List<(string OriginalPath, string FullPath)>();
+                    pendingByParent.Add(parentDirectory, pending);
+                }
+
+                pending.Add((path, fullPath));
+                continue;
+            }
+
+            ValidateIndividually(path);
+        }
+
+        foreach ((string parentDirectory, List<(string OriginalPath, string FullPath)> pending) in pendingByParent)
+        {
+            if (pending.Count < 2)
+            {
+                ValidateIndividually(pending[0].OriginalPath);
+                continue;
+            }
+
+            parentBatchGroups++;
+            parentBatchPaths += pending.Count;
+            MarkParentEnumerationResult enumeration;
+            try
+            {
+                enumeration = parentEnumeration?.Enumerate(parentDirectory)
+                    ?? EnumerateParentPathKinds(parentDirectory);
+            }
+            catch (Exception)
+            {
+                enumeration = MarkParentEnumerationResult.Failure;
+            }
+
+            if (!enumeration.Succeeded || enumeration.PathKinds == null)
+            {
+                parentBatchFailures++;
+                foreach ((string originalPath, _) in pending)
+                {
+                    ValidateIndividually(originalPath);
+                }
+
+                continue;
+            }
+
+            foreach ((string originalPath, string fullPath) in pending)
+            {
+                if (enumeration.PathKinds.TryGetValue(fullPath, out bool isDirectory))
+                {
+                    parentBatchHits++;
+                    AddValidatedPath(originalPath, isDirectory, exists: true);
+                }
+                else
+                {
+                    parentBatchMisses++;
+                    AddValidatedPath(originalPath, isDirectory: false, exists: false);
+                }
+            }
+        }
+
+        IReadOnlyList<MarkPathKind> result = orderedUniquePaths
+            .Where(validatedByPath.ContainsKey)
+            .Select(path => validatedByPath[path])
+            .ToList();
+        return new MarkPathValidationResult(
+            result,
+            skippedCount,
+            new MarkPathValidationMetrics(
+                parentBatchGroups,
+                parentBatchPaths,
+                parentBatchHits,
+                parentBatchMisses,
+                parentBatchFailures,
+                individualFallbackValidations,
+                individualFileProbes,
+                individualDirectoryProbes));
+    }
+
+    private static bool TryGetParentDirectory(
+        string path,
+        out string parentDirectory,
+        out string fullPath)
+    {
+        try
+        {
+            fullPath = Path.GetFullPath(path);
+            parentDirectory = Path.GetDirectoryName(fullPath) ?? string.Empty;
+            if (string.IsNullOrWhiteSpace(parentDirectory) ||
+                string.Equals(parentDirectory, fullPath, StringComparison.OrdinalIgnoreCase))
+            {
+                parentDirectory = string.Empty;
+                fullPath = string.Empty;
+                return false;
+            }
+
+            return true;
+        }
+        catch (Exception)
+        {
+            parentDirectory = string.Empty;
+            fullPath = string.Empty;
+            return false;
+        }
+    }
+
+    private static MarkParentEnumerationResult EnumerateParentPathKinds(string parentDirectory)
+    {
+        var pathKinds = new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase);
+        try
+        {
+            foreach (FileSystemInfo child in new DirectoryInfo(parentDirectory).EnumerateFileSystemInfos())
+            {
+                pathKinds[child.FullName] = child is DirectoryInfo;
+            }
+
+            return new MarkParentEnumerationResult(true, pathKinds);
+        }
+        catch (Exception ex) when (
+            ex is IOException ||
+            ex is UnauthorizedAccessException ||
+            ex is ArgumentException ||
+            ex is NotSupportedException)
+        {
+            return MarkParentEnumerationResult.Failure;
+        }
+    }
+}
+
 public readonly record struct MarkPersistencePreparation(
     IReadOnlyList<string> MarkedPaths,
     bool UsedPendingEscSnapshot,
     int SourceCount,
-    int ValidationCount);
+    int ValidationCount,
+    MarkPathValidationMetrics ValidationMetrics);
 
 /// <summary>保存境界でmark sourceを先に確定し、順序を維持したまま一度だけ検証する。</summary>
 public sealed class MarkPersistenceBoundaryCoordinator
@@ -97,7 +325,7 @@ public sealed class MarkPersistenceBoundaryCoordinator
         bool marksDirty,
         IReadOnlyList<string> runtimeMarks,
         IReadOnlyList<string>? pendingEscMarks,
-        Func<string, bool> pathExists)
+        Func<string, bool>? pathExists = null)
     {
         bool usePending = pendingEscMarks is { Count: > 0 };
         IReadOnlyList<string> source = usePending ? pendingEscMarks! : runtimeMarks;
@@ -113,11 +341,32 @@ public sealed class MarkPersistenceBoundaryCoordinator
 
         if (!marksDirty && !usePending)
         {
-            return new MarkPersistencePreparation(ordered, false, ordered.Count, 0);
+            return new MarkPersistencePreparation(
+                ordered,
+                false,
+                ordered.Count,
+                0,
+                MarkPathValidationMetrics.Empty);
         }
 
-        List<string> persisted = ordered.Where(pathExists).ToList();
-        return new MarkPersistencePreparation(persisted, usePending, ordered.Count, 1);
+        if (pathExists != null)
+        {
+            List<string> persisted = ordered.Where(pathExists).ToList();
+            return new MarkPersistencePreparation(
+                persisted,
+                usePending,
+                ordered.Count,
+                1,
+                MarkPathValidationMetrics.Empty);
+        }
+
+        MarkPathValidationResult validation = MarkPathValidationService.Validate(ordered);
+        return new MarkPersistencePreparation(
+            validation.ExistingPaths.Select(static entry => entry.Path).ToList(),
+            usePending,
+            ordered.Count,
+            1,
+            validation.Metrics);
     }
 
     public bool ShouldRemainDirty(bool wasDirty, int validationCount, bool saveSucceeded)

@@ -15,6 +15,35 @@ namespace MidFD.Services
         Cancel
     }
 
+    public readonly record struct OutlookAttachmentDropResult(
+        int AttachmentCount,
+        int ProcessedCount,
+        int SuccessCount,
+        int FailureCount,
+        int SkippedCount,
+        bool WasCanceled,
+        IReadOnlyList<string>? SavedFileNames = null)
+    {
+        public bool AnySucceeded => SuccessCount > 0;
+
+        public IReadOnlyList<string> SuccessfulFileNames => SavedFileNames ?? Array.Empty<string>();
+
+        public bool HadFailure => FailureCount > 0;
+
+        public bool AllSucceeded => AttachmentCount > 0 && SuccessCount == AttachmentCount;
+
+        public string Classification =>
+            HadFailure
+                ? AnySucceeded ? "partial-failure" : "failed"
+                : AttachmentCount == 0
+                    ? "no-op"
+                    : AllSucceeded
+                    ? "all-succeeded"
+                    : WasCanceled
+                        ? AnySucceeded ? "partial-canceled" : "canceled"
+                        : AnySucceeded ? "partial-skipped" : "skipped";
+    }
+
     public static class OutlookAttachmentDropService
     {
         [DllImport("user32.dll", CharSet = CharSet.Auto)]
@@ -69,7 +98,7 @@ namespace MidFD.Services
         {
             if (data == null) return false;
 
-            // 通常のFileDropがある場合は、仮想ファイルとして扱わない
+            // Filesystem FileDrop takes precedence even if virtual attachment formats coexist.
             if (data.GetDataPresent(DataFormats.FileDrop)) return false;
 
             bool hasDescriptor = data.GetDataPresent("FileGroupDescriptorW") || data.GetDataPresent("FileGroupDescriptor");
@@ -160,28 +189,64 @@ namespace MidFD.Services
         /// <summary>
         /// 仮想ファイルをターゲットディレクトリへ保存します。
         /// </summary>
-        public static bool ProcessDrop(
+        public static OutlookAttachmentDropResult ProcessDrop(
             System.Windows.Forms.IDataObject data,
             string targetDir,
-            Func<string, OverwriteConfirmResult> confirmOverwrite)
+            Func<string, OverwriteConfirmResult> confirmOverwrite,
+            Action<string>? showTypeMismatch = null,
+            Action<string, Exception?>? showCopyFailure = null)
         {
+            showTypeMismatch ??= destinationPath => MessageBox.Show(
+                $"型が異なるため上書きできません。\n宛先: {destinationPath}",
+                "上書きエラー",
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Error);
+            showCopyFailure ??= (fileName, exception) => MessageBox.Show(
+                $"コピー失敗: {fileName}\n{exception?.Message ?? "添付データを保存できませんでした。"}",
+                "エラー",
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Error);
+
             var comDataObject = data as System.Runtime.InteropServices.ComTypes.IDataObject;
             if (comDataObject == null)
             {
                 LogService.Warn("[OutlookDrop] DataObject cannot be cast to ComTypes.IDataObject.");
-                return false;
+                return LogResult(new OutlookAttachmentDropResult(0, 0, 0, 1, 0, false));
             }
 
             var fileNames = GetAttachmentNames(data);
             if (fileNames.Count == 0)
             {
                 LogService.Warn("[OutlookDrop] No attachment names resolved.");
-                return false;
+                return LogResult(new OutlookAttachmentDropResult(0, 0, 0, 0, 0, false));
             }
 
+            return ProcessAttachmentFiles(
+                fileNames,
+                targetDir,
+                confirmOverwrite,
+                (index, destPath) => SaveAttachmentFile(comDataObject, index, destPath),
+                showTypeMismatch,
+                showCopyFailure);
+        }
+
+        internal static OutlookAttachmentDropResult ProcessAttachmentFiles(
+            IReadOnlyList<string> fileNames,
+            string targetDir,
+            Func<string, OverwriteConfirmResult> confirmOverwrite,
+            Func<int, string, bool> saveAttachmentFile,
+            Action<string> showTypeMismatch,
+            Action<string, Exception?> showCopyFailure)
+        {
+            int processedCount = 0;
             int successCount = 0;
+            int failureCount = 0;
+            int skippedCount = 0;
+            bool wasCanceled = false;
+            var savedFileNames = new List<string>();
             for (int i = 0; i < fileNames.Count; i++)
             {
+                processedCount++;
                 string fileName = fileNames[i];
                 string destPath = Path.Combine(targetDir, fileName);
 
@@ -190,18 +255,21 @@ namespace MidFD.Services
                 {
                     if (Directory.Exists(destPath))
                     {
-                        MessageBox.Show($"型が異なるため上書きできません。\n宛先: {destPath}", "上書きエラー", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                        failureCount++;
+                        showTypeMismatch(destPath);
                         continue;
                     }
 
                     var confirm = confirmOverwrite(fileName);
                     if (confirm == OverwriteConfirmResult.Cancel)
                     {
+                        wasCanceled = true;
                         LogService.Info("[OutlookDrop] Copy canceled by user.");
                         break;
                     }
                     if (confirm == OverwriteConfirmResult.No)
                     {
+                        skippedCount++;
                         LogService.Info($"[OutlookDrop] Skipped file: {fileName}");
                         continue;
                     }
@@ -209,20 +277,46 @@ namespace MidFD.Services
 
                 try
                 {
-                    if (SaveAttachmentFile(comDataObject, i, destPath))
+                    if (saveAttachmentFile(i, destPath))
                     {
                         successCount++;
+                        savedFileNames.Add(fileName);
+                    }
+                    else
+                    {
+                        failureCount++;
+                        LogService.Error($"[OutlookDrop] Failed to save virtual file index {i}: {fileName}; SaveAttachmentFile returned false.");
+                        showCopyFailure(fileName, null);
                     }
                 }
                 catch (Exception ex)
                 {
+                    failureCount++;
                     LogService.Error($"[OutlookDrop] Failed to save virtual file index {i}: {fileName}", ex);
-                    MessageBox.Show($"コピー失敗: {fileName}\n{ex.Message}", "エラー", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    showCopyFailure(fileName, ex);
                     break;
                 }
             }
 
-            return successCount > 0;
+            return LogResult(new OutlookAttachmentDropResult(
+                fileNames.Count,
+                processedCount,
+                successCount,
+                failureCount,
+                skippedCount,
+                wasCanceled,
+                savedFileNames));
+        }
+
+        private static OutlookAttachmentDropResult LogResult(OutlookAttachmentDropResult result)
+        {
+            LogService.Info(
+                $"[OutlookDrop] result=processed, attachmentCount={result.AttachmentCount}, " +
+                $"processedCount={result.ProcessedCount}, successCount={result.SuccessCount}, " +
+                $"failureCount={result.FailureCount}, skippedCount={result.SkippedCount}, " +
+                $"canceled={result.WasCanceled}, anySucceeded={result.AnySucceeded}, " +
+                $"allSucceeded={result.AllSucceeded}, classification={result.Classification}");
+            return result;
         }
 
         private static bool SaveAttachmentFile(System.Runtime.InteropServices.ComTypes.IDataObject comDataObject, int index, string destPath)

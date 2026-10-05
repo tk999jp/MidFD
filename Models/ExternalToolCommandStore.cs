@@ -7,6 +7,7 @@ namespace MidFD.Models;
 /// </summary>
 public sealed class ExternalToolCommandStore
 {
+    internal bool LoadFailed { get; set; }
     public int SchemaVersion { get; set; } = 1;
     public List<ExternalToolCommandDefinition> Tools { get; set; } = new();
 }

@@ -9,7 +9,8 @@ public sealed record MarkSlotClipboardActionResult(
     int DirectoryPathCount,
     int DuplicatePathCount,
     int IgnoredEarlierResultCount,
-    IReadOnlyList<string>? UnresolvedPaths = null)
+    IReadOnlyList<string>? UnresolvedPaths = null,
+    bool IsNoOp = false)
 {
     public int RegisteredCount => Paths.Count;
 }

@@ -125,6 +125,7 @@ public static class FileOperationService
 
     public static void Copy(string sourcePath, string destPath, ISet<string>? excludedReparsePaths = null)
     {
+        EnsureDestinationIsNotSourceOrDescendant(sourcePath, destPath, ReparsePointHelper.IsDirectory(sourcePath));
         bool destinationExisted = ReparsePointHelper.Exists(destPath);
         try
         {
@@ -161,6 +162,7 @@ public static class FileOperationService
         if (!suppressLogging) LogService.Info($"[FileOp] Move start: {sourcePath} -> {destPath} (overwrite={overwrite})");
         bool isDirectory = ReparsePointHelper.IsDirectory(sourcePath);
         if (!ReparsePointHelper.Exists(sourcePath)) throw new FileNotFoundException("移動元が見つかりません。", sourcePath);
+        EnsureDestinationIsNotSourceOrDescendant(sourcePath, destPath, isDirectory);
         if (!overwrite && PathExists(destPath))
         {
             throw new IOException($"移動先に同名項目が残っています: {destPath}");
@@ -198,6 +200,19 @@ public static class FileOperationService
     private static bool PathExists(string path)
     {
         return ReparsePointHelper.Exists(path);
+    }
+
+    private static void EnsureDestinationIsNotSourceOrDescendant(
+        string sourcePath,
+        string destinationPath,
+        bool sourceIsDirectory)
+    {
+        bool sourceAndDestinationAreSame = IsSameOrDescendantPath(sourcePath, destinationPath)
+            && IsSameOrDescendantPath(destinationPath, sourcePath);
+        if (sourceAndDestinationAreSame || (sourceIsDirectory && IsSameOrDescendantPath(sourcePath, destinationPath)))
+        {
+            throw new IOException($"sourceとdestinationの関係が無効です: {sourcePath} -> {destinationPath}");
+        }
     }
 
     internal static bool IsDirectoryPath(string path) => ReparsePointHelper.IsDirectory(path);
@@ -292,7 +307,7 @@ public static class FileOperationService
         }
     }
 
-    private static bool IsSameOrDescendantPath(string rootPath, string candidatePath)
+    internal static bool IsSameOrDescendantPath(string rootPath, string candidatePath)
     {
         string root = Path.GetFullPath(rootPath).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
         string candidate = Path.GetFullPath(candidatePath).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
@@ -457,6 +472,7 @@ public static class FileOperationService
         cancellationToken.ThrowIfCancellationRequested();
         bool isDirectory = ReparsePointHelper.IsDirectory(sourcePath);
         if (!ReparsePointHelper.Exists(sourcePath)) throw new FileNotFoundException("移動元が見つかりません。", sourcePath);
+        EnsureDestinationIsNotSourceOrDescendant(sourcePath, destPath, isDirectory);
         Func<string, bool> isReparsePoint = reparsePointProbe ?? ReparsePointHelper.IsReparsePoint;
         if (!overwrite && PathExists(destPath)) throw new IOException($"移動先に同名項目が残っています: {destPath}");
 

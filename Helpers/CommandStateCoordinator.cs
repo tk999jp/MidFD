@@ -1,6 +1,4 @@
 using System.Collections.Generic;
-using System.Linq;
-using System.Windows.Forms;
 using MidFD.Commands;
 using MidFD.Models;
 using MidFD.Services;
@@ -23,7 +21,8 @@ internal sealed class CommandStateCoordinator
         bool RequiresFile = false,
         bool RequiresEditorTarget = false,
         bool RequiresExactlyTwoSelection = false,
-        bool RequiresTwoFiles = false);
+        bool RequiresTwoFiles = false,
+        string? CommandId = null);
 
     internal readonly record struct CommandUiSnapshot(
         bool IsBrowserMode,
@@ -34,7 +33,12 @@ internal sealed class CommandStateCoordinator
         bool HasFileSelection,
         bool HasEditorTarget,
         bool HasTwoFileSelection,
-        BrowserSelectionKind SelectionKind = BrowserSelectionKind.None);
+        BrowserSelectionKind SelectionKind = BrowserSelectionKind.None,
+        BrowserOpenSelectionKind OpenSelectionKind = BrowserOpenSelectionKind.None,
+        string FilterPattern = "",
+        bool FilterDetailActive = false,
+        bool CanUndo = false,
+        bool CanRedo = false);
 
     internal readonly record struct CommandHintState(
         bool CanShowOverlay,
@@ -47,7 +51,12 @@ internal sealed class CommandStateCoordinator
         bool hasTwoFileSelection,
         string? currentItemText,
         string? currentPath,
-        BrowserSelectionKind selectionKind)
+        BrowserSelectionKind selectionKind,
+        BrowserOpenSelectionKind openSelectionKind = BrowserOpenSelectionKind.None,
+        string filterPattern = "",
+        bool filterDetailActive = false,
+        bool canUndo = false,
+        bool canRedo = false)
     {
         bool hasSelection = selectionCount > 0;
         bool hasExactlyTwoSelection = selectionCount == 2;
@@ -64,68 +73,14 @@ internal sealed class CommandStateCoordinator
             HasFileSelection: hasFileSelection,
             HasEditorTarget: hasEditorTarget,
             HasTwoFileSelection: hasExactlyTwoSelection && hasTwoFileSelection,
-            SelectionKind: selectionKind);
-    }
-
-    internal Dictionary<ToolStripItem, bool> BuildMenuItemStates(
-        CommandUiSnapshot snapshot,
-        IReadOnlyList<ToolStripItem> browserOnlyItems,
-        IReadOnlyList<ToolStripItem> busyAwareItems,
-        IReadOnlyDictionary<ToolStripItem, MenuItemStateRule> menuItemRules)
-    {
-        var browserOnlySet = new HashSet<ToolStripItem>(browserOnlyItems);
-        var busyAwareSet = new HashSet<ToolStripItem>(busyAwareItems);
-        var allItems = new HashSet<ToolStripItem>(browserOnlyItems);
-        allItems.UnionWith(busyAwareItems);
-        allItems.UnionWith(menuItemRules.Keys);
-
-        var states = new Dictionary<ToolStripItem, bool>(allItems.Count);
-        foreach (ToolStripItem item in allItems)
-        {
-            bool enabled = true;
-
-            if (browserOnlySet.Contains(item))
-            {
-                enabled &= snapshot.IsBrowserMode;
-            }
-
-            if (busyAwareSet.Contains(item))
-            {
-                enabled &= snapshot.IsBrowserMode && snapshot.IsIdle;
-            }
-
-            if (enabled && menuItemRules.TryGetValue(item, out MenuItemStateRule rule))
-            {
-                if (rule.RequiresSelection)
-                {
-                    enabled &= snapshot.HasSelection;
-                }
-
-                if (enabled && rule.RequiresFile)
-                {
-                    enabled &= snapshot.HasFileSelection;
-                }
-
-                if (enabled && rule.RequiresEditorTarget)
-                {
-                    enabled &= snapshot.HasEditorTarget;
-                }
-
-                if (enabled && rule.RequiresExactlyTwoSelection)
-                {
-                    enabled &= snapshot.HasExactlyTwoSelection;
-                }
-
-                if (enabled && rule.RequiresTwoFiles)
-                {
-                    enabled &= snapshot.HasTwoFileSelection;
-                }
-            }
-
-            states[item] = enabled;
-        }
-
-        return states;
+            SelectionKind: selectionKind,
+            OpenSelectionKind: openSelectionKind == BrowserOpenSelectionKind.None
+                ? InferOpenSelectionKind(selectionCount, selectionKind, hasTwoFileSelection)
+                : openSelectionKind,
+            FilterPattern: filterPattern ?? string.Empty,
+            FilterDetailActive: filterDetailActive,
+            CanUndo: canUndo,
+            CanRedo: canRedo);
     }
 
     internal bool UsesBrowserFunctionBar(CommandUiSnapshot snapshot)
@@ -136,28 +91,17 @@ internal sealed class CommandStateCoordinator
     internal bool IsCommandEnabled(string commandId, CommandUiSnapshot snapshot)
     {
         if (!snapshot.IsBrowserMode) return false;
-        if (!snapshot.IsIdle)
-        {
-            if (commandId != CommandIds.AppOpenSystemInformation &&
-                commandId != CommandIds.AppOpenSettings &&
-                commandId != CommandIds.AppOpenCommandLauncher)
-            {
-                return false;
-            }
-        }
+        if (!CommandBusyPolicy.CanExecute(CommandBusyPolicy.GetBehavior(commandId), !snapshot.IsIdle)) return false;
 
         switch (commandId)
         {
             case CommandIds.BrowserExecute:
-                return snapshot.SelectionKind == BrowserSelectionKind.ParentDirectory ||
-                       snapshot.SelectionKind == BrowserSelectionKind.Directory ||
-                       snapshot.SelectionKind == BrowserSelectionKind.File ||
-                       snapshot.SelectionKind == BrowserSelectionKind.ArchiveCandidate;
-
             case CommandIds.BrowserDefaultOpen:
-                return snapshot.SelectionKind == BrowserSelectionKind.Directory ||
-                       snapshot.SelectionKind == BrowserSelectionKind.File ||
-                       snapshot.SelectionKind == BrowserSelectionKind.ArchiveCandidate;
+            case CommandIds.BrowserDefaultOpenMarked:
+            case CommandIds.BrowserOpenInNewTab:
+                return BrowserOpenSelectionResolver.IsCommandEnabled(
+                    commandId,
+                    new BrowserOpenSelection(snapshot.OpenSelectionKind, System.Array.Empty<string>()));
 
             case CommandIds.BrowserChangeAttributes:
                 return snapshot.SelectionKind == BrowserSelectionKind.Directory ||
@@ -192,9 +136,45 @@ internal sealed class CommandStateCoordinator
             case CommandIds.ArchiveUnpack:
                 return snapshot.SelectionKind == BrowserSelectionKind.ArchiveCandidate;
 
+            case CommandIds.BrowserFilterClear:
+                return !string.IsNullOrEmpty(snapshot.FilterPattern) || snapshot.FilterDetailActive;
+
+            case CommandIds.EditUndo:
+                return snapshot.CanUndo;
+
+            case CommandIds.EditRedo:
+                return snapshot.CanRedo;
+
             default:
                 return true;
         }
+    }
+
+    private static BrowserOpenSelectionKind InferOpenSelectionKind(
+        int selectionCount,
+        BrowserSelectionKind selectionKind,
+        bool hasTwoFileSelection)
+    {
+        if (selectionCount <= 0)
+        {
+            return BrowserOpenSelectionKind.None;
+        }
+
+        if (selectionCount > 1)
+        {
+            return hasTwoFileSelection
+                ? BrowserOpenSelectionKind.MultipleFiles
+                : BrowserOpenSelectionKind.Mixed;
+        }
+
+        return selectionKind switch
+        {
+            BrowserSelectionKind.ParentDirectory => BrowserOpenSelectionKind.ParentDirectory,
+            BrowserSelectionKind.Directory => BrowserOpenSelectionKind.SingleDirectory,
+            BrowserSelectionKind.ArchiveCandidate => BrowserOpenSelectionKind.SingleArchive,
+            BrowserSelectionKind.File => BrowserOpenSelectionKind.SingleFile,
+            _ => BrowserOpenSelectionKind.None
+        };
     }
 
     internal CommandHintState CreateCommandHintState(

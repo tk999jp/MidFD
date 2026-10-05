@@ -20,6 +20,12 @@ public class DirectoryProvider
         TabFilterLockState? filterLock = null,
         Action<string>? onFilterError = null)
     {
+        var filterErrorMessages = new List<string>();
+        void RecordFilterError(string message)
+        {
+            filterErrorMessages.Add(message);
+            onFilterError?.Invoke(message);
+        }
         var dirInfo = new DirectoryInfo(targetPath);
         var allDirs = dirInfo.GetDirectories()
             .Where(d => showHiddenFiles || !d.Attributes.HasFlag(FileAttributes.Hidden))
@@ -30,11 +36,11 @@ public class DirectoryProvider
 
         var dirsArray = string.IsNullOrEmpty(filterPattern)
             ? allDirs
-            : allDirs.Where(d => IsMatch(d.Name, filterPattern, useRegex, onFilterError)).ToArray();
+            : allDirs.Where(d => IsMatch(d.Name, filterPattern, useRegex, RecordFilterError)).ToArray();
 
         var filesArray = string.IsNullOrEmpty(filterPattern)
             ? allFiles
-            : allFiles.Where(f => IsMatch(f.Name, filterPattern, useRegex, onFilterError)).ToArray();
+            : allFiles.Where(f => IsMatch(f.Name, filterPattern, useRegex, RecordFilterError)).ToArray();
 
         IEnumerable<DirectoryInfo> dirsReq = dirsArray;
         IEnumerable<FileInfo> filesReq = filesArray;
@@ -45,7 +51,7 @@ public class DirectoryProvider
                 dirsReq,
                 filesReq,
                 filterLock,
-                onFilterError);
+                RecordFilterError);
             dirsReq = filtered.SelectedDirs;
             filesReq = filtered.SelectedFiles;
         }
@@ -113,7 +119,8 @@ public class DirectoryProvider
         {
             SelectedDirs = dirsReq.ToList(),
             SelectedFiles = filesReq.ToList(),
-            RawDirectoryEntryCount = allDirs.Length + allFiles.Length
+            RawDirectoryEntryCount = allDirs.Length + allFiles.Length,
+            FilterErrorMessages = filterErrorMessages
         };
     }
 
@@ -123,22 +130,7 @@ public class DirectoryProvider
 
         try
         {
-            if (useRegex)
-            {
-                return Regex.IsMatch(name, pattern, RegexOptions.IgnoreCase);
-            }
-            else
-            {
-                if (pattern.Contains("*") || pattern.Contains("?"))
-                {
-                    string regexPattern = "^" + Regex.Escape(pattern).Replace("\\*", ".*").Replace("\\?", ".") + "$";
-                    return Regex.IsMatch(name, regexPattern, RegexOptions.IgnoreCase);
-                }
-                else
-                {
-                    return name.Contains(pattern, StringComparison.OrdinalIgnoreCase);
-                }
-            }
+            return NamePatternMatcher.IsMatch(name, pattern, useRegex);
         }
         catch (Exception ex)
         {

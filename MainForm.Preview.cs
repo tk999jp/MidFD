@@ -8,6 +8,7 @@ using MidFD.Configuration;
 using MidFD.Dialogs;
 using MidFD.Helpers;
 using MidFD.Models;
+using MidFD.Runtime;
 using MidFD.Services;
 
 namespace MidFD;
@@ -32,7 +33,7 @@ public partial class MainForm
         {
             return PreviewKind.None;
         }
-        return GetEffectivePreviewKind(fullPath);
+        return _viewerWorkflowApplicationCoordinator.ResolveSelectionPreviewKind(fullPath);
     }
     private WebBrowser CreateMarkdownBrowser()
     {
@@ -143,9 +144,9 @@ public partial class MainForm
         try
         {
             string? ranges = browser.Document?.InvokeScript("midfdGetSelectionSourceBlocks") as string;
-            return _markdownViewerSource == null
+            return _viewerApplicationCoordinator.MarkdownSource == null
                 ? null
-                : MarkdownSelectionSourceResolver.ResolveContainingBlocks(_markdownViewerSource, ranges);
+                : MarkdownSelectionSourceResolver.ResolveContainingBlocks(_viewerApplicationCoordinator.MarkdownSource, ranges);
         }
         catch
         {
@@ -170,14 +171,14 @@ public partial class MainForm
 
     private string? GetMarkdownSourceRange(HtmlElement element)
     {
-        if (_markdownViewerSource == null
+        if (_viewerApplicationCoordinator.MarkdownSource == null
             || !int.TryParse(AttributeOrNull(element, "data-md-start"), out int start)
             || !int.TryParse(AttributeOrNull(element, "data-md-length"), out int length)
-            || start < 0 || length < 0 || start > _markdownViewerSource.Length - length)
+            || start < 0 || length < 0 || start > _viewerApplicationCoordinator.MarkdownSource.Length - length)
         {
             return null;
         }
-        return _markdownViewerSource.Substring(start, length);
+        return _viewerApplicationCoordinator.MarkdownSource.Substring(start, length);
     }
 
     private static string? AttributeOrNull(HtmlElement element, string name)
@@ -276,7 +277,7 @@ public partial class MainForm
 
     private void ApplyDelimitedGridTheme(DataGridView grid)
     {
-        UiThemeColors theme = UiThemeResolver.Resolve(_settings.Appearance);
+        UiThemeColors theme = UiThemeResolver.Resolve(_settingsCoordinator.Value.Appearance);
         Color selectionBack = MidFDColors.ListSelectedBack;
         Color selectionFore = MidFDColors.ListSelectedFore;
         var cellStyle = new DataGridViewCellStyle
@@ -303,30 +304,20 @@ public partial class MainForm
         grid.ColumnHeadersDefaultCellStyle = headerStyle;
         grid.RowHeadersDefaultCellStyle = headerStyle;
     }
-    private PreviewKind GetEffectivePreviewKind(string path, PreviewKind rawKind)
-    {
-        var result = PreviewRoutingService.Route(path, rawKind, _settings.Preview?.VideoToolDirectory);
-        return result.EffectiveKind;
-    }
-    private PreviewKind GetEffectivePreviewKind(string path)
-    {
-        var result = PreviewRoutingService.Route(path, _settings.Preview?.VideoToolDirectory);
-        return result.EffectiveKind;
-    }
     private void ApplyViewerChromeState()
     {
-        if (_markdownBrowser != null) _markdownBrowser.Visible = _currentViewerKind == PreviewKind.Markdown && !IsMarkdownViewerRawMode;
-        if (_delimitedGrid != null) _delimitedGrid.Visible = _currentViewerKind == PreviewKind.CsvTsv;
-        bool compactViewer = _uiMode == UIMode.Viewer
-            && (_currentViewerKind == PreviewKind.Text
-                || _currentViewerKind == PreviewKind.Markdown
-                || _currentViewerKind == PreviewKind.CsvTsv
-                || _currentViewerKind == PreviewKind.Sqlite
-                || _currentViewerKind == PreviewKind.Binary
-                || _currentViewerKind == PreviewKind.LargeText);
+        if (_markdownBrowser != null) _markdownBrowser.Visible = _viewerApplicationCoordinator.CurrentKind == PreviewKind.Markdown && !IsMarkdownViewerRawMode;
+        if (_delimitedGrid != null) _delimitedGrid.Visible = _viewerApplicationCoordinator.CurrentKind == PreviewKind.CsvTsv;
+        bool compactViewer = _viewerApplicationCoordinator.Mode == ViewerApplicationMode.Viewer
+            && (_viewerApplicationCoordinator.CurrentKind == PreviewKind.Text
+                || _viewerApplicationCoordinator.CurrentKind == PreviewKind.Markdown
+                || _viewerApplicationCoordinator.CurrentKind == PreviewKind.CsvTsv
+                || _viewerApplicationCoordinator.CurrentKind == PreviewKind.Sqlite
+                || _viewerApplicationCoordinator.CurrentKind == PreviewKind.Binary
+                || _viewerApplicationCoordinator.CurrentKind == PreviewKind.LargeText);
         Presentation.PreviewUiPresenter.ApplyViewerChromeState(
             compactViewer,
-            _uiMode == UIMode.Viewer && _currentViewerKind == PreviewKind.LargeText,
+            _viewerApplicationCoordinator.Mode == ViewerApplicationMode.Viewer && _viewerApplicationCoordinator.CurrentKind == PreviewKind.LargeText,
             titleHeaderPanel,
             headerPanel,
             sepBeforeTopPanel,
@@ -335,41 +326,19 @@ public partial class MainForm
         ApplyFunctionBarVisibilityForCurrentContext();
         UpdateMarkdownViewerModeStatus();
     }
-    private bool IsMarkdownViewerRawMode => (_settings.Preview?.MarkdownViewerMode ?? MarkdownViewerMode.Rendered) == MarkdownViewerMode.Raw;
+    private bool IsMarkdownViewerRawMode => _viewerWorkflowApplicationCoordinator.IsMarkdownViewerRawMode;
 
     private void SetMarkdownViewerMode(MarkdownViewerMode mode, bool save = true)
     {
-        _settings.Preview ??= new PreviewSettings();
-        bool changed = _settings.Preview.MarkdownViewerMode != mode;
-        _settings.Preview.MarkdownViewerMode = mode;
-        if (save && changed)
-        {
-            SettingsManager.Save(_settings);
-        }
+        _viewerWorkflowApplicationCoordinator.SetMarkdownViewerMode(mode, save);
 
-        if (_uiMode != UIMode.Viewer || _currentViewerKind != PreviewKind.Markdown || _markdownViewerSource == null)
+        if (_viewerApplicationCoordinator.Mode != ViewerApplicationMode.Viewer || _viewerApplicationCoordinator.CurrentKind != PreviewKind.Markdown || _viewerApplicationCoordinator.MarkdownSource == null)
         {
             UpdateMarkdownViewerModeStatus();
             return;
         }
 
-        bool rawMode = mode == MarkdownViewerMode.Raw;
-        ApplyViewerChromeState();
-        if (rawMode)
-        {
-            viewerTextBox.ReadOnly = true;
-            viewerTextBox.Text = _markdownViewerSource;
-            viewerTextBox.Visible = true;
-            viewerTextBox.BringToFront();
-            viewerTextBox.Focus();
-            ApplyViewerStatusLine("Markdown raw preview applied");
-            return;
-        }
-
-        viewerTextBox.Visible = false;
-        _markdownBrowser?.BringToFront();
-        _markdownBrowser?.Focus();
-        ApplyViewerStatusLine("Markdown rendered preview applied");
+        ApplyMarkdownViewerMode(mode);
     }
 
     private void UpdateMarkdownViewerModeStatus()
@@ -379,7 +348,7 @@ public partial class MainForm
             return;
         }
 
-        bool visible = _uiMode == UIMode.Viewer && _currentViewerKind == PreviewKind.Markdown && _markdownViewerSource != null;
+        bool visible = _viewerApplicationCoordinator.Mode == ViewerApplicationMode.Viewer && _viewerApplicationCoordinator.CurrentKind == PreviewKind.Markdown && _viewerApplicationCoordinator.MarkdownSource != null;
         _markdownModeSpacer.Visible = visible;
         _markdownRenderedModeStatusLabel.Visible = visible;
         _markdownRawModeStatusLabel.Visible = visible;
@@ -413,15 +382,15 @@ public partial class MainForm
     }
     private void ExecuteViewerFind()
     {
-        if (_currentViewerKind == PreviewKind.LargeText && _largeFileState != null)
+        if (_viewerApplicationCoordinator.CurrentKind == PreviewKind.LargeText && _viewerApplicationCoordinator.LargeFileState != null)
         {
             ExecuteLargeFileFind();
             return;
         }
         if (!viewerTextBox.Visible) return;
-        string? query = SimpleInputDialog.ShowNullable("検索:", "Viewer 検索 (Ctrl+F)", _viewerSearchKeyword);
+        string? query = SimpleInputDialog.ShowNullable("検索:", "Viewer 検索 (Ctrl+F)", _viewerApplicationCoordinator.SearchKeyword);
         if (query == null) return; // キャンセル時は現状維持
-        _viewerSearchKeyword = query;
+        _viewerWorkflowApplicationCoordinator.SetSearchKeyword(query ?? string.Empty);
         ApplyViewerStatusLine(); // ステータスに反映
         if (string.IsNullOrWhiteSpace(query))
         {
@@ -434,13 +403,13 @@ public partial class MainForm
     }
     private void ExecuteViewerFindNext(bool backward)
     {
-        if (_currentViewerKind == PreviewKind.LargeText && _largeFileState != null)
+        if (_viewerApplicationCoordinator.CurrentKind == PreviewKind.LargeText && _viewerApplicationCoordinator.LargeFileState != null)
         {
             ExecuteLargeFileFindNext(backward);
             return;
         }
         if (!viewerTextBox.Visible) return;
-        if (string.IsNullOrWhiteSpace(_viewerSearchKeyword))
+        if (string.IsNullOrWhiteSpace(_viewerApplicationCoordinator.SearchKeyword))
         {
             ShowStatusMessage("検索キーワードが未設定です。新規検索ダイアログを開きます...");
             ExecuteViewerFind();
@@ -457,32 +426,28 @@ public partial class MainForm
             // 次方向: 現在の選択終了位置から探す
             start = viewerTextBox.SelectionStart + viewerTextBox.SelectionLength;
         }
-        _ = InnerExecuteViewerSearch(_viewerSearchKeyword, start, backward);
+        _ = InnerExecuteViewerSearch(_viewerApplicationCoordinator.SearchKeyword, start, backward);
     }
     private async Task InnerExecuteViewerSearch(string query, int start, bool backward, bool isWrapAround = false, int chunkCrossoverCount = 0)
     {
-        if (_currentViewerKind == PreviewKind.LargeText && _largeFileState != null)
+        if (_viewerApplicationCoordinator.CurrentKind == PreviewKind.LargeText && _viewerApplicationCoordinator.LargeFileState != null)
         {
             await ExecuteLargeFileSearchAsync(query, backward, isWrapAround);
             return;
         }
-        RichTextBoxFinds options = backward ? RichTextBoxFinds.Reverse : RichTextBoxFinds.None;
-        int result = viewerTextBox.Find(query, start, options);
-        if (result < 0 && !isWrapAround)
+        ViewerTextSearchResult search = _viewerWorkflowApplicationCoordinator.FindText(
+            viewerTextBox.Text,
+            query,
+            start,
+            backward,
+            allowWrap: !isWrapAround);
+        if (search.Found)
         {
-            if (backward)
+            if (search.Wrapped)
             {
-                result = viewerTextBox.Find(query, viewerTextBox.TextLength, options);
-                if (result >= 0) ShowStatusMessage("末尾から再検索しました");
+                ShowStatusMessage(backward ? "末尾から再検索しました" : "先頭から再検索しました");
             }
-            else
-            {
-                result = viewerTextBox.Find(query, 0, options);
-                if (result >= 0) ShowStatusMessage("先頭から再検索しました");
-            }
-        }
-        if (result >= 0)
-        {
+            viewerTextBox.Select(search.Index, query.Length);
             viewerTextBox.Focus();
         }
         else
@@ -492,47 +457,45 @@ public partial class MainForm
     }
     private async Task ExecuteLargeFileSearchAsync(string query, bool backward, bool isWrapAround)
     {
-        if (_largeFileState == null) return;
-        var state = _largeFileState;
+        if (_viewerApplicationCoordinator.LargeFileState == null) return;
+        var state = _viewerApplicationCoordinator.LargeFileState;
         string normalizedQuery = query?.Trim() ?? string.Empty;
         if (string.IsNullOrWhiteSpace(normalizedQuery))
         {
-            ClearLargeFileSearchHit(state);
+            _viewerWorkflowApplicationCoordinator.InvalidateLargeFileSearchRequest(state);
+            _viewerWorkflowApplicationCoordinator.ClearLargeFileSearchState(state);
             ShowStatusMessage("検索キーワードが未設定です。");
             return;
         }
-        int requestId = ++state.SearchRequestId;
-        state.LastSearchText = normalizedQuery;
-        state.LastSearchBackward = backward;
-        _viewerSearchKeyword = normalizedQuery;
+        _viewerWorkflowApplicationCoordinator.PrepareLargeFileSearch(state, normalizedQuery, backward);
         ApplyViewerStatusLine();
         ShowStatusMessage($"検索中: {normalizedQuery}");
-        var token = _previewRequestCoordinator.Token;
-        var encoding = GetCurrentViewerEncoding();
-        var (startLine, startColumn) = GetLargeFileSearchStartPosition(state, normalizedQuery, backward, isWrapAround);
+        var token = _viewerApplicationCoordinator.Token;
+        var encoding = _viewerWorkflowApplicationCoordinator.ResolveCurrentViewerEncoding();
         try
         {
-            var hit = await Services.LargeFileLineReaderService.SearchTextAsync(
+            LargeFileSearchResult search = await _viewerWorkflowApplicationCoordinator.SearchLargeFileAsync(
                 state,
                 normalizedQuery,
-                startLine,
-                startColumn,
                 backward,
+                isWrapAround,
                 encoding,
                 token);
-            if (!IsLargeFileSearchRequestActive(state, requestId))
+            if (!_viewerWorkflowApplicationCoordinator.IsLargeFileSearchRequestActive(state, search.RequestId))
             {
                 return;
             }
-            if (hit.HasValue)
+            if (search.Found)
             {
-                await ApplyLargeFileSearchHitAsync(state, requestId, normalizedQuery, hit.Value.Line, hit.Value.Column, hit.Value.Length, backward, isWrapAround);
-                return;
-            }
-            if (!isWrapAround)
-            {
-                ShowStatusMessage(backward ? "先頭まで検索しました。末尾から再検索します..." : "末尾まで検索しました。先頭から再検索します...");
-                await ExecuteLargeFileSearchAsync(normalizedQuery, backward, true);
+                await ApplyLargeFileSearchHitAsync(
+                    state,
+                    search.RequestId,
+                    normalizedQuery,
+                    search.Line,
+                    search.Column,
+                    search.Length,
+                    backward,
+                    search.Wrapped);
                 return;
             }
             ClearLargeFileSearchHit(state);
@@ -548,13 +511,13 @@ public partial class MainForm
     }
     private void ExecuteLargeFileFind()
     {
-        if (_largeFileState == null)
+        if (_viewerApplicationCoordinator.LargeFileState == null)
         {
             return;
         }
-        string initialQuery = string.IsNullOrWhiteSpace(_largeFileState.LastSearchText)
-            ? _viewerSearchKeyword
-            : _largeFileState.LastSearchText;
+        string initialQuery = string.IsNullOrWhiteSpace(_viewerApplicationCoordinator.LargeFileState.LastSearchText)
+            ? _viewerApplicationCoordinator.SearchKeyword
+            : _viewerApplicationCoordinator.LargeFileState.LastSearchText;
         string? query = SimpleInputDialog.ShowNullable("検索:", "LargeText 検索 (Ctrl+F)", initialQuery);
         if (query == null)
         {
@@ -562,63 +525,41 @@ public partial class MainForm
         }
         string normalizedQuery = query.Trim();
         bool continueFromActiveHit = !string.IsNullOrWhiteSpace(normalizedQuery)
-            && string.Equals(_largeFileState.LastSearchText, normalizedQuery, StringComparison.OrdinalIgnoreCase)
-            && _largeFileState.ActiveSearchHitLine.HasValue;
-        _viewerSearchKeyword = normalizedQuery;
-        _largeFileState.LastSearchText = normalizedQuery;
+            && string.Equals(_viewerApplicationCoordinator.LargeFileState.LastSearchText, normalizedQuery, StringComparison.OrdinalIgnoreCase)
+            && _viewerApplicationCoordinator.LargeFileState.ActiveSearchHitLine.HasValue;
+        _viewerWorkflowApplicationCoordinator.PrepareLargeFileSearch(
+            _viewerApplicationCoordinator.LargeFileState,
+            normalizedQuery,
+            _viewerApplicationCoordinator.LargeFileState.LastSearchBackward);
         ApplyViewerStatusLine();
         if (string.IsNullOrWhiteSpace(normalizedQuery))
         {
-            ClearLargeFileSearchHit(_largeFileState);
+            LargeFilePreviewState state = _viewerApplicationCoordinator.LargeFileState;
+            _viewerWorkflowApplicationCoordinator.InvalidateLargeFileSearchRequest(state);
+            _viewerWorkflowApplicationCoordinator.ClearLargeFileSearchState(state);
             ShowStatusMessage("検索キーワードをクリアしました。");
             return;
         }
         if (!continueFromActiveHit)
         {
-            _largeFileState.ActiveSearchHitLine = null;
-            _largeFileState.ActiveSearchHitColumn = 0;
-            _largeFileState.ActiveSearchHitLength = 0;
+            _viewerWorkflowApplicationCoordinator.ClearLargeFileSearchState(
+                _viewerApplicationCoordinator.LargeFileState);
         }
         _ = ExecuteLargeFileSearchAsync(normalizedQuery, backward: false, isWrapAround: false);
     }
     private void ExecuteLargeFileFindNext(bool backward)
     {
-        if (_largeFileState == null)
+        if (_viewerApplicationCoordinator.LargeFileState == null)
         {
             return;
         }
-        if (string.IsNullOrWhiteSpace(_largeFileState.LastSearchText))
+        if (string.IsNullOrWhiteSpace(_viewerApplicationCoordinator.LargeFileState.LastSearchText))
         {
             ShowStatusMessage("検索キーワードが未設定です。新規検索ダイアログを開きます...");
             ExecuteLargeFileFind();
             return;
         }
-        _ = ExecuteLargeFileSearchAsync(_largeFileState.LastSearchText, backward, false);
-    }
-    private (int StartLine, int StartColumn) GetLargeFileSearchStartPosition(LargeFilePreviewState state, string query, bool backward, bool isWrapAround)
-    {
-        if (isWrapAround)
-        {
-            return backward
-                ? (Math.Max(0, state.TotalLines - 1), int.MaxValue)
-                : (0, 0);
-        }
-        if (state.ActiveSearchHitLine.HasValue
-            && string.Equals(state.LastSearchText, query, StringComparison.OrdinalIgnoreCase))
-        {
-            if (backward)
-            {
-                return (
-                    state.ActiveSearchHitLine.Value,
-                    Math.Max(-1, state.ActiveSearchHitColumn - 1));
-            }
-            return (
-                state.ActiveSearchHitLine.Value,
-                state.ActiveSearchHitColumn + Math.Max(1, state.ActiveSearchHitLength));
-        }
-        return backward
-            ? (Math.Max(0, state.FirstVisibleLine), int.MaxValue)
-            : (Math.Max(0, state.FirstVisibleLine), 0);
+        _ = ExecuteLargeFileSearchAsync(_viewerApplicationCoordinator.LargeFileState.LastSearchText, backward, false);
     }
     private async Task ApplyLargeFileSearchHitAsync(
         LargeFilePreviewState state,
@@ -630,17 +571,15 @@ public partial class MainForm
         bool backward,
         bool isWrapAround)
     {
-        if (!IsLargeFileSearchRequestActive(state, requestId))
+        if (!_viewerWorkflowApplicationCoordinator.IsLargeFileSearchRequestActive(state, requestId))
         {
             return;
         }
-        state.ActiveSearchHitLine = hitLine;
-        state.ActiveSearchHitColumn = hitColumn;
-        state.ActiveSearchHitLength = hitLength;
+        _viewerWorkflowApplicationCoordinator.SetLargeFileSearchHit(state, hitLine, hitColumn, hitLength);
         _largeFileControl.SetActiveSearchHit(hitLine, hitColumn, hitLength);
         int targetFirstLine = Math.Max(0, hitLine - Math.Max(1, _largeFileControl.VisibleLineCount / 2));
         await NavigateLargeFilePreviewAsync(targetFirstLine, "SearchHit");
-        if (!IsLargeFileSearchRequestActive(state, requestId))
+        if (!_viewerWorkflowApplicationCoordinator.IsLargeFileSearchRequestActive(state, requestId))
         {
             return;
         }
@@ -651,20 +590,234 @@ public partial class MainForm
             : string.Empty;
         ShowStatusMessage($"{wrapPrefix}{query}: {hitLine + 1:N0} 行目");
     }
-    private bool IsLargeFileSearchRequestActive(LargeFilePreviewState state, int requestId)
-    {
-        return ReferenceEquals(_largeFileState, state)
-            && state.SearchRequestId == requestId
-            && _uiMode == UIMode.Viewer
-            && _currentViewerKind == PreviewKind.LargeText
-            && string.Equals(_currentPreviewTarget, state.FilePath, StringComparison.OrdinalIgnoreCase);
-    }
     private void ClearLargeFileSearchHit(LargeFilePreviewState state)
     {
-        state.ActiveSearchHitLine = null;
-        state.ActiveSearchHitColumn = 0;
-        state.ActiveSearchHitLength = 0;
+        _viewerWorkflowApplicationCoordinator.ClearLargeFileSearchHit(state);
         _largeFileControl.ClearActiveSearchHit();
         ApplyViewerStatusLine();
+    }
+
+    bool IViewerPreviewUiPort.IsViewerMode => _viewerApplicationCoordinator.Mode == ViewerApplicationMode.Viewer;
+
+    int IViewerPreviewUiPort.VisibleLineCount => _largeFileControl.VisibleLineCount;
+
+    bool IViewerPreviewUiPort.IsLatestRequest(int requestId, string path, CancellationToken token)
+        => !IsDisposed && !Disposing && IsLatestPreviewRequest(requestId, path, token);
+
+    TextPreviewEncodingOverride IViewerPreviewUiPort.GetTextPreviewEncodingOverride()
+        => _viewerApplicationCoordinator.EncodingPreference switch
+        {
+            ViewerEncodingPreference.Utf8 => TextPreviewEncodingOverride.Utf8,
+            ViewerEncodingPreference.ShiftJis => TextPreviewEncodingOverride.ShiftJis,
+            _ => TextPreviewEncodingOverride.Auto
+        };
+
+    void IViewerPreviewUiPort.ClearPreview(string message, int requestId)
+        => ClearPreview(message, requestId);
+
+    void IViewerPreviewUiPort.ApplyViewerChromeState()
+        => ApplyViewerChromeState();
+
+    void IViewerPreviewUiPort.ApplyViewerStatus(string reason)
+        => ApplyViewerStatusLine(reason);
+
+    void IViewerPreviewUiPort.ShowStatusMessage(string message)
+        => ShowStatusMessage(message);
+
+    void IViewerPreviewUiPort.ReturnToBrowserForVideo()
+    {
+        HideViewerContentBeforeExit();
+        ShowBrowserSurfaceForMode();
+        EnsureStatusBarVisible();
+        ApplyViewerChromeState();
+        UpdateFunctionBar();
+        UpdateMenuStripState();
+        RefreshBrowserStatusForMode();
+    }
+
+    void IViewerPreviewUiPort.ApplyImagePreview(string path)
+    {
+        ApplyViewerChromeState();
+        viewerMessageLabel.Text = "画像は専用画像ビューアで表示します。\nV / Enter で開きます。";
+        viewerMessageLabel.Visible = true;
+        viewerTextBox.Visible = false;
+        viewerPictureBox.Image?.Dispose();
+        viewerPictureBox.Image = null;
+        viewerPictureBox.Visible = false;
+        var openViewer = GetReusableImageViewer();
+        if (openViewer != null && !string.Equals(openViewer.CurrentPath, path, StringComparison.OrdinalIgnoreCase))
+        {
+            openViewer.LoadMedia(path, PreviewKind.Image, showErrorMessage: false);
+        }
+    }
+
+    void IViewerPreviewUiPort.ApplyVideoPreview(string path, VideoPreviewOptions options)
+    {
+        ClearPreview("Enter/V: 画像プレビューで静止画表示\nCtrl+Enter: 外部再生", -1);
+        ShowStatusMessage("Enter/V: 画像プレビューで静止画表示 / Ctrl+Enter: 外部再生");
+        var openViewer = GetReusableImageViewer();
+        openViewer?.LoadVideoStill(
+            path,
+            options.ToolDirectory,
+            options.InitialSeconds,
+            options.VolumePercent);
+    }
+
+    void IViewerPreviewUiPort.ApplyTextPreview(TextPreviewContent content)
+    {
+        ApplyViewerChromeState();
+        Presentation.PreviewUiPresenter.ApplyPlainTextContent(
+            viewerTextBox,
+            viewerMessageLabel,
+            viewerPictureBox,
+            content.Text);
+        if (IsSearchHitPreviewPending(_viewerApplicationCoordinator.CurrentPreviewTarget ?? string.Empty))
+        {
+            ApplySearchHitToTextPreview(content.Text);
+        }
+        ApplyViewerStatusLine("Text preview applied");
+    }
+
+    void IViewerPreviewUiPort.ApplyMarkdownPreview(string text, string path, MarkdownViewerMode mode)
+    {
+        ApplyViewerChromeState();
+        viewerMessageLabel.Visible = false;
+        viewerPictureBox.Visible = false;
+        viewerTextBox.Visible = false;
+        _markdownBrowser ??= CreateMarkdownBrowser();
+        _markdownBrowserInitialNavigation = true;
+        _markdownBrowserDocumentUri = null;
+        _markdownBrowser.DocumentText = MarkdownHtmlRenderer.Render(text, path);
+        bool navigateToSearchHit = IsSearchHitPreviewPending(path);
+        ApplyMarkdownViewerMode(navigateToSearchHit ? MarkdownViewerMode.Raw : mode);
+        if (navigateToSearchHit)
+        {
+            ApplySearchHitToTextPreview(viewerTextBox.Text);
+        }
+        ApplyViewerStatusLine("Markdown preview applied");
+    }
+
+    private void ApplyMarkdownViewerMode(MarkdownViewerMode mode)
+    {
+        bool rawMode = mode == MarkdownViewerMode.Raw;
+        ApplyViewerChromeState();
+        if (rawMode)
+        {
+            viewerTextBox.ReadOnly = true;
+            viewerTextBox.Text = _viewerApplicationCoordinator.MarkdownSource ?? string.Empty;
+            viewerTextBox.Select(0, 0);
+            viewerTextBox.Visible = true;
+            viewerTextBox.BringToFront();
+            viewerTextBox.Focus();
+            ApplyViewerStatusLine("Markdown raw preview applied");
+            return;
+        }
+
+        viewerTextBox.Visible = false;
+        _markdownBrowser?.BringToFront();
+        _markdownBrowser?.Focus();
+        ApplyViewerStatusLine("Markdown rendered preview applied");
+    }
+
+    void IViewerPreviewUiPort.ApplyDelimitedPreview(DelimitedTextTable table)
+    {
+        ApplyViewerChromeState();
+        viewerMessageLabel.Visible = false;
+        viewerPictureBox.Visible = false;
+        viewerTextBox.Visible = false;
+        _delimitedGrid ??= CreateDelimitedGrid();
+        _delimitedGrid.Columns.Clear();
+        for (int i = 0; i < table.Headers.Count; i++)
+        {
+            _delimitedGrid.Columns.Add($"c{i}", table.Headers[i]);
+        }
+        foreach (IReadOnlyList<string> row in table.Rows)
+        {
+            _delimitedGrid.Rows.Add(row.Take(table.Headers.Count).Cast<object>().ToArray());
+        }
+        _delimitedGrid.Visible = true;
+        _delimitedGrid.BringToFront();
+        if (_delimitedGrid.Rows.Count > 0 && _delimitedGrid.Columns.Count > 0)
+        {
+            _delimitedGrid.CurrentCell = _delimitedGrid[0, 0];
+            _delimitedGrid.Focus();
+        }
+        ApplyViewerStatusLine("CSV/TSV grid preview applied");
+    }
+
+    void IViewerPreviewUiPort.ApplySqlitePreview(string text)
+    {
+        ApplyViewerChromeState();
+        Presentation.PreviewUiPresenter.ApplyPlainTextContent(
+            viewerTextBox,
+            viewerMessageLabel,
+            viewerPictureBox,
+            text);
+        ApplyViewerStatusLine("SQLite preview applied");
+    }
+
+    void IViewerPreviewUiPort.ApplyBinaryPreview(string text)
+    {
+        ApplyViewerChromeState();
+        Presentation.PreviewUiPresenter.ApplyPlainTextContent(
+            viewerTextBox,
+            viewerMessageLabel,
+            viewerPictureBox,
+            text);
+        if (_viewerApplicationCoordinator.Mode == ViewerApplicationMode.Viewer)
+        {
+            NormalizeStatusLabelLayout();
+            ApplyViewerStatusLine();
+        }
+    }
+
+    void IViewerPreviewUiPort.BeginLargeTextPreview(LargeFilePreviewState state)
+    {
+        ApplyViewerChromeState();
+        viewerPictureBox.Visible = false;
+        viewerTextBox.Visible = false;
+        viewerMessageLabel.Text = "LargeText 読み込み中...";
+        viewerMessageLabel.Visible = true;
+        _largeFileControl.ResetFirstContentPaintMarker();
+        _largeTextEntryStopwatch.Restart();
+        ApplyViewerStatusLine("LargeText loading ui shown");
+    }
+
+    async Task IViewerPreviewUiPort.ApplyLargeTextInitialDisplayAsync(
+        LargeFilePreviewState state,
+        int requestId,
+        CancellationToken token)
+    {
+        if (!IsLatestPreviewRequest(requestId, state.FilePath, token) || _viewerApplicationCoordinator.Mode != ViewerApplicationMode.Viewer)
+        {
+            return;
+        }
+
+        _largeFileControl.SetState(state, state.DetectedEncoding);
+        ApplyViewerStatusLine("LargeText SetState applied");
+        LogViewerLayoutBounds("LargeText after SetState");
+        int navigationRequestId = ++state.NavigationRequestId;
+        await UpdateLargeFileVirtualDisplayAsync(requestId, navigationRequestId, token);
+        if (IsCurrentLargeFileNavigationRequest(state, navigationRequestId))
+        {
+            ApplyViewerStatusLine("LargeText initial first paint ready");
+            statusStrip.Invalidate();
+            statusStrip.Update();
+            _largeFileControl.Invalidate();
+            _largeFileControl.Update();
+        }
+        BeginInvoke(new Action(async () =>
+        {
+            if (!IsLargeTextStatusApplyTarget(state)) return;
+            await Task.Delay(150);
+            if (!IsLargeTextStatusApplyTarget(state)) return;
+            StartLargeTextFullIndexAsync(
+                state,
+                requestId,
+                Stopwatch.StartNew(),
+                state.FilePath,
+                PreviewKind.LargeText,
+                token);
+        }));
     }
 }

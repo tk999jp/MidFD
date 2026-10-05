@@ -67,6 +67,9 @@ public sealed class LargeFilePreviewState
     /// </summary>
     public int SearchRequestId { get; set; }
 
+    /// <summary>表示位置の非同期読込を順序付ける世代。</summary>
+    public int NavigationRequestId { get; set; }
+
     /// <summary>
     /// LargeText 用に確定した文字コード。
     /// </summary>
@@ -127,6 +130,7 @@ public sealed class LargeFilePreviewState
         ActiveSearchHitColumn = 0;
         ActiveSearchHitLength = 0;
         SearchRequestId = 0;
+        NavigationRequestId++;
         DetectedEncoding = Encoding.UTF8;
         DetectedEncodingLabel = "UTF-8";
         HasBom = false;

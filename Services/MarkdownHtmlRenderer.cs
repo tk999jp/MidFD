@@ -16,41 +16,47 @@ public static class MarkdownHtmlRenderer
         bool inList = false;
         bool inTable = false;
         bool tableHeaderWritten = false;
-        string[] lines = markdown.Replace("\r\n", "\n").Split('\n');
+        string[] sourceLines = markdown.Split('\n');
+        string[] lines = sourceLines
+            .Select(static segment => segment.EndsWith('\r') ? segment[..^1] : segment)
+            .ToArray();
+        int[] sourceLineLengths = sourceLines
+            .Select((segment, index) => segment.Length + (index < sourceLines.Length - 1 ? 1 : 0))
+            .ToArray();
         int sourceOffset = 0;
         for (int lineIndex = 0; lineIndex < lines.Length; lineIndex++)
         {
             string rawLine = lines[lineIndex];
             string line = WebUtility.HtmlEncode(rawLine);
             string sourceAttributes = SourceAttributes(sourceOffset, rawLine.Length);
-            if (line.StartsWith("```")) { if (inList) { html.Append("</ul>"); inList = false; } inCode = !inCode; html.Append(inCode ? $"<pre{sourceAttributes}>" : "</pre>"); sourceOffset += rawLine.Length + 1; continue; }
-            if (inCode) { html.Append(line).Append("\n"); sourceOffset += rawLine.Length + 1; continue; }
+            if (line.StartsWith("```")) { if (inList) { html.Append("</ul>"); inList = false; } inCode = !inCode; html.Append(inCode ? $"<pre{sourceAttributes}>" : "</pre>"); sourceOffset += sourceLineLengths[lineIndex]; continue; }
+            if (inCode) { html.Append(line).Append("\n"); sourceOffset += sourceLineLengths[lineIndex]; continue; }
             if (!inTable && line.Contains('|') && lineIndex + 1 < lines.Length && IsTableSeparator(WebUtility.HtmlEncode(lines[lineIndex + 1])))
             {
                 inTable = true; tableHeaderWritten = true;
                 html.Append("<div class=\"md-table-scroll\"><table><thead><tr").Append(sourceAttributes).Append(">"); AppendTableCells(html, TokenizeTableCells(rawLine), "th", sourceOffset, markdownPath); html.Append("</tr></thead><tbody>");
-                sourceOffset += rawLine.Length + 1;
+                sourceOffset += sourceLineLengths[lineIndex];
                 lineIndex++;
-                sourceOffset += lines[lineIndex].Length + 1;
+                sourceOffset += sourceLineLengths[lineIndex];
                 continue;
             }
-            if (IsTableSeparator(line)) { inTable = true; tableHeaderWritten = false; continue; }
+            if (IsTableSeparator(line)) { inTable = true; tableHeaderWritten = false; sourceOffset += sourceLineLengths[lineIndex]; continue; }
             if (inTable && line.Contains('|'))
             {
                 IReadOnlyList<TableCell> cells = TokenizeTableCells(rawLine);
                 if (!tableHeaderWritten) { html.Append("<div class=\"md-table-scroll\"><table><thead><tr").Append(sourceAttributes).Append(">"); AppendTableCells(html, cells, "th", sourceOffset, markdownPath); html.Append("</tr></thead><tbody>"); tableHeaderWritten = true; }
                 else { html.Append("<tr").Append(sourceAttributes).Append(">"); AppendTableCells(html, cells, "td", sourceOffset, markdownPath); html.Append("</tr>"); }
-                sourceOffset += rawLine.Length + 1;
+                sourceOffset += sourceLineLengths[lineIndex];
                 continue;
             }
             if (inTable) { html.Append("</tbody></table></div>"); inTable = false; }
             Match heading = Regex.Match(line, "^(#{1,6})\\s+(.+)$");
-            if (heading.Success) { CloseList(html, ref inList); int level = heading.Groups[1].Value.Length; html.Append("<h").Append(level).Append(sourceAttributes).Append('>').Append(Inline(rawLine[(level + 1)..], sourceOffset + level + 1, markdownPath)).Append("</h").Append(level).Append('>'); sourceOffset += rawLine.Length + 1; continue; }
-            if (line.StartsWith("> ")) { html.Append("<blockquote").Append(sourceAttributes).Append(">").Append(Inline(rawLine[2..], sourceOffset + 2, markdownPath)).Append("</blockquote>"); sourceOffset += rawLine.Length + 1; continue; }
-            if (line.StartsWith("- ") || line.StartsWith("* ")) { if (!inList) { html.Append("<ul>"); inList = true; } html.Append("<li").Append(sourceAttributes).Append(">").Append(Inline(rawLine[2..], sourceOffset + 2, markdownPath)).Append("</li>"); sourceOffset += rawLine.Length + 1; continue; }
+            if (heading.Success) { CloseList(html, ref inList); int level = heading.Groups[1].Value.Length; html.Append("<h").Append(level).Append(sourceAttributes).Append('>').Append(Inline(rawLine[(level + 1)..], sourceOffset + level + 1, markdownPath)).Append("</h").Append(level).Append('>'); sourceOffset += sourceLineLengths[lineIndex]; continue; }
+            if (line.StartsWith("> ")) { html.Append("<blockquote").Append(sourceAttributes).Append(">").Append(Inline(rawLine[2..], sourceOffset + 2, markdownPath)).Append("</blockquote>"); sourceOffset += sourceLineLengths[lineIndex]; continue; }
+            if (line.StartsWith("- ") || line.StartsWith("* ")) { if (!inList) { html.Append("<ul>"); inList = true; } html.Append("<li").Append(sourceAttributes).Append(">").Append(Inline(rawLine[2..], sourceOffset + 2, markdownPath)).Append("</li>"); sourceOffset += sourceLineLengths[lineIndex]; continue; }
             CloseList(html, ref inList);
             html.Append(string.IsNullOrWhiteSpace(line) ? $"<br{sourceAttributes}>" : $"<p{sourceAttributes}>{Inline(rawLine, sourceOffset, markdownPath)}</p>");
-            sourceOffset += rawLine.Length + 1;
+            sourceOffset += sourceLineLengths[lineIndex];
         }
         if (inTable) html.Append("</tbody></table></div>");
         CloseList(html, ref inList);

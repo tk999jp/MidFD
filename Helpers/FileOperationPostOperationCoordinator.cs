@@ -19,6 +19,15 @@ public sealed class FileOperationPostOperationCoordinator
         string? NextFocusTarget,
         string StatusMessage);
 
+    public static PostOperationPlan CreateReloadPlan(string statusMessage = "") => new(
+        ShouldFinalizeBusy: false,
+        ShouldClearPreview: false,
+        ShouldReloadCurrentDirectory: true,
+        ShouldRefreshMarks: false,
+        ShouldClearMarks: false,
+        NextFocusTarget: null,
+        StatusMessage: statusMessage);
+
     public FileOperationResult CreateCopyResult(
         FileOpExitStatus exitStatus,
         int successCount,

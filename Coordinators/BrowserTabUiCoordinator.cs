@@ -57,7 +57,8 @@ public class BrowserTabUiCoordinator
                     presentation.CanonicalPath,
                     presentation.PrefixText,
                     presentation.BaseTitle,
-                    presentation.RelativeSuffix);
+                    presentation.RelativeSuffix,
+                    BrowserTabId: state.Id);
             })
             .ToList();
 
@@ -90,22 +91,31 @@ public class BrowserTabUiCoordinator
         bool select,
         Func<BrowserTabState, BrowserTabPresentationSnapshot>? presentationResolver = null)
     {
-        if (_browserTabStrip == null || tabIndex < 0 || tabIndex >= _browserTabStrip.TabCount)
+        if (_browserTabStrip == null)
         {
             return;
         }
 
+        int projectionIndex = _browserTabStrip.FindBrowserTabProjectionIndex(state.Id);
+        if (projectionIndex < 0 && tabIndex >= 0 && tabIndex < _browserTabStrip.TabCount
+            && _browserTabStrip.GetTabItem(tabIndex)?.Kind == BrowserTabStripItemKind.Browser)
+        {
+            projectionIndex = tabIndex;
+        }
+        if (projectionIndex < 0) return;
+
         BrowserTabPresentationSnapshot presentation = presentationResolver?.Invoke(state)
             ?? new BrowserTabPresentationSnapshot(state.CurrentPath, null, state.CurrentPath, null, string.Empty, state.CurrentPath, state.CurrentPath, BrowserTabPresentationHelper.BuildHeaderText(state, tabIndex), BrowserTabPresentationHelper.BuildToolTip(state), state.CurrentPath);
         _browserTabStrip.UpdateTabAndSelection(
-            tabIndex,
+            projectionIndex,
             new BrowserTabStripItem(
                 presentation.HeaderText,
                 presentation.ToolTipText,
                 presentation.CanonicalPath,
                 presentation.PrefixText,
                 presentation.BaseTitle,
-                presentation.RelativeSuffix),
+                presentation.RelativeSuffix,
+                BrowserTabId: state.Id),
             select);
     }
 }

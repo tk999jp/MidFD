@@ -15,7 +15,9 @@ using System.Diagnostics.CodeAnalysis;
 using System.Runtime.InteropServices;
 using System.Media;
 using MidFD.Models;
+using MidFD.Runtime;
 using MidFD.Helpers;
+using MidFD.Presentation;
 using MidFD.Commands;
 using MidFD.Services.TrashManifestStore;
 using MidFD.Services.Workspace;
@@ -118,6 +120,37 @@ public partial class MainForm : Form
         return (false, false, false);
     }
 
+    private IReadOnlyList<FunctionBarSlotViewModel> BuildFunctionBarProjection(bool activeLayer = true)
+    {
+        if (_unifiedSearchSession is { IsActive: true } search)
+        {
+            string[] labels = ["Open", "Expo", "Close"];
+            string[] keys = ["Enter", "E", "Esc"];
+            return Enumerable.Range(1, 12).Select(slot =>
+            {
+                int index = slot - 1;
+                bool enabled = index < labels.Length && (index == 2 || (index == 1 ? search.View.CanExport : search.View.HasResults));
+                string label = index < labels.Length ? labels[index] : string.Empty;
+                string key = index < keys.Length ? keys[index] : string.Empty;
+                return new FunctionBarSlotViewModel(slot, false, index < labels.Length ? $"search.{index}" : null,
+                    label, key, null, label, enabled, key, label, true);
+            }).ToArray();
+        }
+        var (isShift, isCtrl, isAlt) = activeLayer
+            ? GetActiveFunctionBarLayer()
+            : (false, false, false);
+        FunctionKeyProfile profile = FunctionKeyProfileService.ResolveProfile(CurrentFunctionKeyProfileValue);
+        return FunctionBarProjection.Build(
+            profile,
+            _viewerApplicationCoordinator.Mode == ViewerApplicationMode.Browser,
+            isShift,
+            isCtrl,
+            isAlt,
+            _settingsCoordinator.Value.Input,
+            _commandRegistry,
+            BuildCommandUiSnapshot());
+    }
+
     private void WireHeaderAndFunctionBarEvents()
     {
         EnableDoubleBuffering(this.functionBarPanel);
@@ -162,25 +195,26 @@ public partial class MainForm : Form
 
     private bool ShouldShowBrowserFunctionBarForCurrentProfile()
     {
-        return _settings.Appearance?.ShowFunctionBar ?? true;
+        return _settingsCoordinator.Value.Appearance?.ShowFunctionBar ?? true;
     }
 
     private bool ShouldShowFunctionBarForCurrentContext()
     {
-        if (!(_settings.Appearance?.ShowFunctionBar ?? true))
+        if (!(_settingsCoordinator.Value.Appearance?.ShowFunctionBar ?? true))
         {
             return false;
         }
-        if (_uiMode == UIMode.Browser)
+        if (_unifiedSearchSession is { IsActive: true }) return true;
+        if (_viewerApplicationCoordinator.Mode == ViewerApplicationMode.Browser)
         {
             return ShouldShowBrowserFunctionBarForCurrentProfile();
         }
-        bool compactViewer = _uiMode == UIMode.Viewer
-            && (_currentViewerKind == PreviewKind.Text
-                || _currentViewerKind == PreviewKind.Markdown
-                || _currentViewerKind == PreviewKind.Sqlite
-                || _currentViewerKind == PreviewKind.Binary
-                || _currentViewerKind == PreviewKind.LargeText);
+        bool compactViewer = _viewerApplicationCoordinator.Mode == ViewerApplicationMode.Viewer
+            && (_viewerApplicationCoordinator.CurrentKind == PreviewKind.Text
+                || _viewerApplicationCoordinator.CurrentKind == PreviewKind.Markdown
+                || _viewerApplicationCoordinator.CurrentKind == PreviewKind.Sqlite
+                || _viewerApplicationCoordinator.CurrentKind == PreviewKind.Binary
+                || _viewerApplicationCoordinator.CurrentKind == PreviewKind.LargeText);
         return !compactViewer;
     }
 
@@ -201,285 +235,33 @@ public partial class MainForm : Form
         viewerPanel.PerformLayout();
     }
 
-
-    private IReadOnlyList<FunctionBarSlotViewModel> BuildFunctionBarSlotModels(FunctionKeyProfile profile, bool isShiftLayer, bool isCtrlLayer = false, bool isAltLayer = false)
-    {
-        var snapshot = BuildCommandUiSnapshot();
-        var models = new List<FunctionBarSlotViewModel>(12);
-        var profileValue = profile == FunctionKeyProfile.FDCompatible
-            ? InputSettings.FdCompatibleProfileValue
-            : InputSettings.StandardProfileValue;
-        for (int slot = 1; slot <= 12; slot++)
-        {
-            string? customCmdId = FunctionKeyProfileService.ResolveFunctionBarCommandId(
-                profile,
-                slot,
-                _settings.Input.FunctionBarCommandOverridesStandard,
-                _settings.Input.FunctionBarCommandOverridesFdCompatible,
-                _settings.Input.FunctionBarCommandOverridesShiftStandard,
-                _settings.Input.FunctionBarCommandOverridesShiftFdCompatible,
-                isShiftLayer,
-                _settings.Input.FunctionBarCommandOverridesCtrlStandard,
-                _settings.Input.FunctionBarCommandOverridesCtrlFdCompatible,
-                _settings.Input.FunctionBarCommandOverridesAltStandard,
-                _settings.Input.FunctionBarCommandOverridesAltFdCompatible,
-                isCtrlLayer,
-                isAltLayer);
-
-            bool isUnassignedModifier = string.IsNullOrEmpty(customCmdId) ||
-                                        FunctionKeyProfileService.IsExplicitUnassigned(customCmdId);
-
-            // Determine ShortLabel
-            string shortLabel;
-            if (isUnassignedModifier)
-            {
-                shortLabel = "";
-            }
-            else
-            {
-                shortLabel = FunctionKeyProfileService.ResolveFunctionBarDisplayLabelFromCommandId(profile, customCmdId);
-            }
-
-            // Apply Custom ShortLabel Override if exists and active CommandId matches
-            if (!isUnassignedModifier && !string.IsNullOrEmpty(customCmdId) && !FunctionKeyProfileService.IsExplicitUnassigned(customCmdId))
-            {
-                var labelOverrides = GetActiveFunctionBarLabelOverrides(isShiftLayer, isCtrlLayer, isAltLayer, profile == FunctionKeyProfile.FDCompatible);
-                if (labelOverrides != null && labelOverrides.TryGetValue($"F{slot}", out var labelOverride) && labelOverride != null)
-                {
-                    if (string.Equals(labelOverride.CommandId, customCmdId, StringComparison.OrdinalIgnoreCase) && !string.IsNullOrWhiteSpace(labelOverride.Label))
-                    {
-                        shortLabel = InputSettings.NormalizeFunctionBarLabelText(labelOverride.Label);
-                    }
-                }
-            }
-
-            // Determine KeyHint (browser shortcut表示用。hotkey強調は未修飾の英字ショートカットだけに限定)
-            string? keyHint = null;
-            string? hotKeyChar = null;
-            if (!isUnassignedModifier && !string.IsNullOrEmpty(customCmdId))
-            {
-                keyHint = FunctionKeyProfileService.ResolveFunctionBarKeyHint(
-                    customCmdId,
-                    _settings.Input.BrowserKeyCommandOverrides,
-                    profileValue);
-                if (string.IsNullOrWhiteSpace(keyHint))
-                {
-                    keyHint = null;
-                }
-                hotKeyChar = FunctionKeyProfileService.ResolveFunctionBarBrowserHotKeyCharacter(
-                    customCmdId,
-                    _settings.Input.BrowserKeyCommandOverrides,
-                    profileValue);
-                if (string.IsNullOrWhiteSpace(hotKeyChar))
-                {
-                    hotKeyChar = null;
-                }
-            }
-
-            // Determine DisplayLabel
-            string displayLabel;
-            if (isUnassignedModifier)
-            {
-                displayLabel = "";
-            }
-            else
-            {
-                var labelOverrides = GetActiveFunctionBarLabelOverrides(isShiftLayer, isCtrlLayer, isAltLayer, profile == FunctionKeyProfile.FDCompatible);
-                displayLabel = FunctionKeyProfileService.ResolveFunctionBarDisplayLabel(
-                    profile,
-                    slot,
-                    isShiftLayer,
-                    isCtrlLayer,
-                    isAltLayer,
-                    customCmdId,
-                    labelOverrides);
-            }
-
-            // Determine IsEnabled
-            bool isEnabled = true;
-            if (_uiMode == UIMode.Browser)
-            {
-                if (isUnassignedModifier)
-                {
-                    isEnabled = false;
-                }
-                else if (!string.IsNullOrEmpty(customCmdId))
-                {
-                    isEnabled = _commandStateCoordinator.IsCommandEnabled(customCmdId, snapshot);
-                }
-                else
-                {
-                    isEnabled = false;
-                }
-            }
-            else if (isUnassignedModifier)
-            {
-                isEnabled = false;
-            }
-
-            // Determine ToolTipText
-            string toolTipText;
-            string slotPrefix;
-            if (isCtrlLayer)
-            {
-                slotPrefix = $"Ctrl+F{slot}";
-            }
-            else if (isAltLayer)
-            {
-                slotPrefix = $"Alt+F{slot}";
-            }
-            else if (isShiftLayer)
-            {
-                slotPrefix = $"Shift+F{slot}";
-            }
-            else
-            {
-                slotPrefix = $"F{slot}";
-            }
-
-            if (isUnassignedModifier)
-            {
-                toolTipText = $"{slotPrefix}: 未割り当て";
-            }
-            else if (!string.IsNullOrEmpty(customCmdId))
-            {
-                var cmdDef = _commandRegistry.Find(customCmdId);
-                string commandName = cmdDef?.DisplayName ?? "不明なコマンド";
-                string description = cmdDef?.Description ?? $"未登録のコマンドID: {customCmdId}";
-                var toolTipLines = new List<string>
-                {
-                    shortLabel,
-                    $"Command: {customCmdId}",
-                    $"Function: {slotPrefix}"
-                };
-                if (!string.IsNullOrEmpty(keyHint))
-                {
-                    toolTipLines.Add($"通常キー: {keyHint}");
-                }
-                toolTipLines.Add(description);
-                toolTipText = string.Join("\r\n", toolTipLines);
-            }
-            else
-            {
-                toolTipText = $"{shortLabel}\r\nFunction: {slotPrefix}\r\nカスタムコマンドを割り当てることができます。";
-            }
-
-            // Determine LayoutLabel (width base label from standard layer)
-            string layoutLabel;
-            if (!isShiftLayer && !isCtrlLayer && !isAltLayer)
-            {
-                layoutLabel = displayLabel;
-            }
-            else
-            {
-                string? normalCmdId = FunctionKeyProfileService.ResolveFunctionBarCommandId(
-                    profile,
-                    slot,
-                    _settings.Input.FunctionBarCommandOverridesStandard,
-                    _settings.Input.FunctionBarCommandOverridesFdCompatible,
-                    _settings.Input.FunctionBarCommandOverridesShiftStandard,
-                    _settings.Input.FunctionBarCommandOverridesShiftFdCompatible,
-                    false,
-                    _settings.Input.FunctionBarCommandOverridesCtrlStandard,
-                    _settings.Input.FunctionBarCommandOverridesCtrlFdCompatible,
-                    _settings.Input.FunctionBarCommandOverridesAltStandard,
-                    _settings.Input.FunctionBarCommandOverridesAltFdCompatible,
-                    false,
-                    false);
-
-                bool normalUnassigned = string.IsNullOrEmpty(normalCmdId) ||
-                                        FunctionKeyProfileService.IsExplicitUnassigned(normalCmdId);
-
-                if (normalUnassigned)
-                {
-                    layoutLabel = "";
-                }
-                else
-                {
-                    var normalOverrides = GetActiveFunctionBarLabelOverrides(false, false, false, profile == FunctionKeyProfile.FDCompatible);
-                    layoutLabel = FunctionKeyProfileService.ResolveFunctionBarDisplayLabel(
-                        profile,
-                        slot,
-                        false,
-                        false,
-                        false,
-                        normalCmdId,
-                        normalOverrides);
-                }
-            }
-
-            models.Add(new FunctionBarSlotViewModel(
-                slot,
-                isShiftLayer,
-                customCmdId,
-                shortLabel,
-                keyHint,
-                hotKeyChar,
-                displayLabel,
-                isEnabled,
-                toolTipText,
-                layoutLabel,
-                true // IsSlotVisible
-            ));
-        }
-
-        return models;
-    }
-
-    private Dictionary<string, FunctionBarLabelOverride> GetActiveFunctionBarLabelOverrides(bool isShift, bool isCtrl, bool isAlt, bool isFdCompatible)
-    {
-        if (isCtrl)
-        {
-            return isFdCompatible
-                ? _settings.Input.FunctionBarLabelOverridesCtrlFdCompatible
-                : _settings.Input.FunctionBarLabelOverridesCtrlStandard;
-        }
-
-        if (isAlt)
-        {
-            return isFdCompatible
-                ? _settings.Input.FunctionBarLabelOverridesAltFdCompatible
-                : _settings.Input.FunctionBarLabelOverridesAltStandard;
-        }
-
-        if (isShift)
-        {
-            return isFdCompatible
-                ? _settings.Input.FunctionBarLabelOverridesShiftFdCompatible
-                : _settings.Input.FunctionBarLabelOverridesShiftStandard;
-        }
-
-        return isFdCompatible
-            ? _settings.Input.FunctionBarLabelOverridesFdCompatible
-            : _settings.Input.FunctionBarLabelOverridesStandard;
-    }
-
     private void UpdateFunctionBar()
     {
         ApplyFunctionBarVisibilityForCurrentContext();
-        var snapshot = BuildCommandUiSnapshot();
-        if (_commandStateCoordinator.UsesBrowserFunctionBar(snapshot))
+        IReadOnlyList<FunctionBarSlotViewModel> models;
+        if (_unifiedSearchSession is { IsActive: true })
         {
-            var (isShift, isCtrl, isAlt) = GetActiveFunctionBarLayer();
-            var profile = FunctionKeyProfileService.ResolveProfile(CurrentFunctionKeyProfileValue);
-            var models = BuildFunctionBarSlotModels(profile, isShift, isCtrl, isAlt);
-            for (int i = 1; i <= 12; i++)
-            {
-                var model = models[i - 1];
-                bool showEnabled = profile == FunctionKeyProfile.FDCompatible ? model.IsEnabled : true;
-                SetFuncKeyText(i, model.DisplayLabel, showEnabled);
-            }
+            models = BuildFunctionBarProjection();
         }
         else
         {
-            // Viewer モード
-            for (int i = 1; i <= 12; i++) SetFuncKeyText(i, "", false);
-            SetFuncKeyText(1, "L:Enc ", true); // L キーによる文字コード切替
-            SetFuncKeyText(2, "W:Wrap", true); // W キーによる折り返し切替
-            SetFuncKeyText(3, "^F:Find", true); // Ctrl+F による検索入力
-            SetFuncKeyText(4, "F3:Next", true); // F3 による前方検索
-            SetFuncKeyText(5, "S+F3:Prv", true); // Shift+F3 による後方検索
-            SetFuncKeyText(10, "Qt(En/Es)", true); // Enter / Esc による終了
+            var snapshot = BuildCommandUiSnapshot();
+            var (isShift, isCtrl, isAlt) = GetActiveFunctionBarLayer();
+            var profile = FunctionKeyProfileService.ResolveProfile(CurrentFunctionKeyProfileValue);
+            models = FunctionBarProjection.Build(
+                profile,
+                _commandStateCoordinator.UsesBrowserFunctionBar(snapshot),
+                isShift,
+                isCtrl,
+                isAlt,
+                _settingsCoordinator.Value.Input,
+                _commandRegistry,
+                snapshot);
+        }
+        for (int i = 1; i <= 12; i++)
+        {
+            FunctionBarSlotViewModel model = models[i - 1];
+            SetFuncKeyText(i, model.DisplayLabel, model.IsEnabled);
         }
     }
 
@@ -519,7 +301,7 @@ public partial class MainForm : Form
 
     private void FunctionBarPanel_MouseMove(object? sender, MouseEventArgs e)
     {
-        if (_uiMode != UIMode.Browser || !ShouldShowBrowserFunctionBarForCurrentProfile()) return;
+        if (_viewerApplicationCoordinator.Mode != ViewerApplicationMode.Browser || !ShouldShowBrowserFunctionBarForCurrentProfile()) return;
         using var layoutFont = _headerPaintFont != null
             ? new Font(_headerPaintFont.FontFamily, _headerPaintFont.Size, _headerPaintFont.Style)
             : new Font("Consolas", 10F);
@@ -540,7 +322,7 @@ public partial class MainForm : Form
 
     private void FunctionBarPanel_MouseDown(object? sender, MouseEventArgs e)
     {
-        if (_uiMode != UIMode.Browser || !ShouldShowBrowserFunctionBarForCurrentProfile()) return;
+        if (_viewerApplicationCoordinator.Mode != ViewerApplicationMode.Browser || !ShouldShowBrowserFunctionBarForCurrentProfile()) return;
         if (e.Button != MouseButtons.Left) return;
 
         using var layoutFont = _headerPaintFont != null
@@ -553,7 +335,7 @@ public partial class MainForm : Form
         {
             var profile = FunctionKeyProfileService.ResolveProfile(CurrentFunctionKeyProfileValue);
             var (isShift, isCtrl, isAlt) = GetActiveFunctionBarLayer();
-            var models = BuildFunctionBarSlotModels(profile, isShift, isCtrl, isAlt);
+            var models = BuildFunctionBarProjection();
             bool isEnabled = models[index].IsEnabled;
 
             if (isEnabled)
@@ -602,7 +384,7 @@ public partial class MainForm : Form
 
     private void FunctionBarPanel_MouseClick(object? sender, MouseEventArgs e)
     {
-        if (_uiMode != UIMode.Browser || !ShouldShowBrowserFunctionBarForCurrentProfile()) return;
+        if (_viewerApplicationCoordinator.Mode != ViewerApplicationMode.Browser || !ShouldShowBrowserFunctionBarForCurrentProfile()) return;
         if (e.Button != MouseButtons.Left) return;
 
         using var layoutFont = _headerPaintFont != null
@@ -615,7 +397,7 @@ public partial class MainForm : Form
 
         var profile = FunctionKeyProfileService.ResolveProfile(CurrentFunctionKeyProfileValue);
         var (isShift, isCtrl, isAlt) = GetActiveFunctionBarLayer();
-        var models = BuildFunctionBarSlotModels(profile, isShift, isCtrl, isAlt);
+        var models = BuildFunctionBarProjection();
         bool isEnabled = models[index].IsEnabled;
 
         if (!isEnabled)
@@ -630,7 +412,7 @@ public partial class MainForm : Form
     {
         var panel = sender as Panel;
         if (panel == null) return;
-        if (_uiMode == UIMode.Browser && !ShouldShowBrowserFunctionBarForCurrentProfile()) return;
+        if (_viewerApplicationCoordinator.Mode == ViewerApplicationMode.Browser && !ShouldShowBrowserFunctionBarForCurrentProfile()) return;
         int totalW = panel.ClientSize.Width;
         int totalH = panel.ClientSize.Height;
         if (totalW <= 0 || totalH <= 0) return;
@@ -651,8 +433,8 @@ public partial class MainForm : Form
         Rectangle[]? activeRects = null;
 
         var profile = FunctionKeyProfileService.ResolveProfile(CurrentFunctionKeyProfileValue);
-        var models = BuildFunctionBarSlotModels(profile, isShift, isCtrl, isAlt);
-        var layoutModels = BuildFunctionBarSlotModels(profile, false, false, false);
+        var models = BuildFunctionBarProjection();
+        var layoutModels = BuildFunctionBarProjection(activeLayer: false);
         var labels = layoutModels.Select(model => model.LayoutLabel).ToArray();
         activeRects = CalculateFunctionBarLabelRects(panel.ClientRectangle, functionBarFont, labels);
         for (int i = 0; i < 12; i++)
@@ -686,7 +468,7 @@ public partial class MainForm : Form
     }
     private void UpdateFunctionBarToolTip(int index, Point location)
     {
-        if (index < 0 || !_settings.Input.ShowFunctionBarTooltips)
+        if (index < 0 || !_settingsCoordinator.Value.Input.ShowFunctionBarTooltips)
         {
             HideFunctionBarToolTip();
             return;
@@ -696,7 +478,7 @@ public partial class MainForm : Form
 
         var profile = FunctionKeyProfileService.ResolveProfile(CurrentFunctionKeyProfileValue);
         var (isShift, isCtrl, isAlt) = GetActiveFunctionBarLayer();
-        var models = BuildFunctionBarSlotModels(profile, isShift, isCtrl, isAlt);
+        var models = BuildFunctionBarProjection();
         string toolTipText = models[index].ToolTipText;
 
         HideFunctionBarToolTip();
@@ -817,24 +599,28 @@ public partial class MainForm : Form
 
     private FunctionBarColorPalette GetFunctionBarColors(bool isWinFdCompatible)
     {
-        string theme = _settings!.Appearance!.ColorTheme ?? string.Empty;
-        if (string.Equals(theme, "WinFdCompatible", StringComparison.OrdinalIgnoreCase))
-        {
-            isWinFdCompatible = true;
-        }
-        else if (string.Equals(theme, "MidFdStandard", StringComparison.OrdinalIgnoreCase))
-        {
-            isWinFdCompatible = false;
-        }
-
-        var resolved = _resolvedColors ?? FileListColorResolver.ResolveColors(_settings!);
-        string themeNormalized = FileListColorResolver.NormalizeCoreTheme(_settings!.Appearance!.ColorTheme, _settings!);
+        var resolved = _resolvedColors ?? FileListColorResolver.ResolveColors(_settingsCoordinator.Value!);
+        string canonicalTheme = FileListColorResolver.ResolveEffectiveColorPresetKey(_settingsCoordinator.Value!);
+        isWinFdCompatible = string.Equals(canonicalTheme, "WinFdCompatible", StringComparison.OrdinalIgnoreCase);
+        string themeNormalized = FileListColorResolver.NormalizeCoreTheme(canonicalTheme, _settingsCoordinator.Value!);
         bool isLightTheme = themeNormalized == "Light";
+        Color lightSeparatorColor = UiThemeResolver.Resolve(_settingsCoordinator.Value.Appearance).SeparatorColor;
 
         // 現在のテーマを象徴する Directory (フォルダ色: ClassicCyan=シアン, Green=緑, Amber=黄/黄金など) を主調色として使用
         Color accentColor = resolved.Directory;
-        Color? customBackColor = UiThemeResolver.TryParseColor(_settings.Appearance?.CustomFunctionBarBackColor);
-        Color? customForeColor = UiThemeResolver.TryParseColor(_settings.Appearance?.CustomFunctionBarForeColor);
+        Color? customBackColor;
+        Color? customForeColor;
+        if (FileListColorResolver.IsAutoColorSelection(_settingsCoordinator.Value))
+        {
+            AutoProfileColorSettings? autoColors = _settingsCoordinator.Value.Appearance!.GetAutoProfileColors(_settingsCoordinator.Value.Input.FunctionKeyProfile);
+            customBackColor = UiThemeResolver.TryParseColor(autoColors?.CustomFunctionBarBackColor);
+            customForeColor = UiThemeResolver.TryParseColor(autoColors?.CustomFunctionBarForeColor);
+        }
+        else
+        {
+            customBackColor = UiThemeResolver.TryParseColor(_settingsCoordinator.Value.Appearance?.CustomFunctionBarBackColor);
+            customForeColor = UiThemeResolver.TryParseColor(_settingsCoordinator.Value.Appearance?.CustomFunctionBarForeColor);
+        }
         bool hasCustomFunctionBarColors = customBackColor.HasValue || customForeColor.HasValue;
 
         if (hasCustomFunctionBarColors)
@@ -853,17 +639,24 @@ public partial class MainForm : Form
             return new FunctionBarColorPalette
             {
                 BackColor = barBack,
-                BorderColor = isLightTheme ? Color.FromArgb(200, 200, 200) : Color.FromArgb(70, 100, 120),
+                BorderColor = isLightTheme ? lightSeparatorColor : Color.FromArgb(70, 100, 120),
                 EnabledBackColor = enabledBack,
                 EnabledTextColor = barFore,
                 DisabledBackColor = disabledBack,
                 DisabledTextColor = disabledFore,
-                DisabledBorderColor = ColorContrastHelper.Blend(barBack, enabledBack, isLightTheme ? 0.06 : 0.03),
+                DisabledBorderColor = isLightTheme
+                    ? ColorContrastHelper.Blend(barBack, lightSeparatorColor, 0.5)
+                    : ColorContrastHelper.Blend(barBack, enabledBack, 0.03),
                 HotKeyBackColor = ColorContrastHelper.Blend(enabledBack, Color.Yellow, isLightTheme ? 0.30 : 0.18),
                 HotKeyTextColor = barFore,
                 HoverBackColor = ColorContrastHelper.Blend(enabledBack, Color.White, isLightTheme ? 0.28 : 0.18),
                 PressedBackColor = ColorContrastHelper.Blend(enabledBack, Color.Black, isLightTheme ? 0.10 : 0.20)
             };
+        }
+
+        if (isWinFdCompatible && !isLightTheme)
+        {
+            return FunctionBarColorResolver.ResolveFdCompatibleDarkDefault(resolved.Background, resolved.Directory);
         }
 
         if (isWinFdCompatible)
@@ -890,17 +683,15 @@ public partial class MainForm : Form
                     disabledFore = disabledForeBase;
                 }
 
-                Color disabledBorder = ColorContrastHelper.Blend(barBack, enabledBack, 0.04); // 主張しすぎない極薄境界線
-
                 return new FunctionBarColorPalette
                 {
                     BackColor = barBack,
-                    BorderColor = Color.FromArgb(200, 200, 200),
+                    BorderColor = lightSeparatorColor,
                     EnabledBackColor = enabledBack,
                     EnabledTextColor = Color.Black,
                     DisabledBackColor = disabledBack,
                     DisabledTextColor = disabledFore,
-                    DisabledBorderColor = disabledBorder,
+                    DisabledBorderColor = ColorContrastHelper.Blend(barBack, lightSeparatorColor, 0.5),
                     HotKeyBackColor = Color.Yellow,
                     HotKeyTextColor = Color.Black,
                     HoverBackColor = ColorContrastHelper.Blend(enabledBack, Color.White, 0.45),
@@ -969,12 +760,12 @@ public partial class MainForm : Form
                 return new FunctionBarColorPalette
                 {
                     BackColor = barBack,
-                    BorderColor = Color.FromArgb(198, 198, 198),
+                    BorderColor = lightSeparatorColor,
                     EnabledBackColor = lightEnabledBack,
                     EnabledTextColor = Color.FromArgb(32, 32, 32),
                     DisabledBackColor = lightDisabledBack,
                     DisabledTextColor = lightDisabledText,
-                    DisabledBorderColor = Color.FromArgb(210, 210, 210),
+                    DisabledBorderColor = ColorContrastHelper.Blend(barBack, lightSeparatorColor, 0.5),
                     HotKeyBackColor = Color.FromArgb(246, 242, 220),
                     HotKeyTextColor = Color.FromArgb(32, 32, 32),
                     HoverBackColor = Color.FromArgb(220, 220, 220),
@@ -988,7 +779,7 @@ public partial class MainForm : Form
             Color hotKeyBack = Color.FromArgb(70, 140, 110);
             Color hoverBack = Color.FromArgb(70, 132, 192);
             Color pressedBack = Color.FromArgb(46, 92, 140);
-            (enabledBack, enabledFore, borderColor, hotKeyBack, hoverBack, pressedBack) = ResolveDarkStandardFunctionThemeColors(_settings.Appearance?.ColorTheme ?? "ClassicCyan", resolved);
+            (enabledBack, enabledFore, borderColor, hotKeyBack, hoverBack, pressedBack) = ResolveDarkStandardFunctionThemeColors(canonicalTheme, resolved);
             Color disabledBack = ColorContrastHelper.Blend(barBack, enabledBack, 0.5);
             Color disabledTextBase = ColorContrastHelper.PickReadableTextColor(disabledBack, Color.Black, Color.White);
             Color disabledText = ColorContrastHelper.Blend(disabledTextBase, disabledBack, 0.35);
@@ -1274,9 +1065,12 @@ public partial class MainForm : Form
             graphics.FillRectangle(bgBrush, cellRect);
         }
 
-        Color borderCol = isEnabled
-            ? ColorContrastHelper.Blend(cellBg, palette.BackColor, 0.22)
-            : ColorContrastHelper.Blend(cellBg, palette.BackColor, 0.14);
+        bool isLightTheme = FileListColorResolver.NormalizeCoreTheme(_settingsCoordinator.Value!.Appearance!.ColorTheme, _settingsCoordinator.Value!) == "Light";
+        Color borderCol = isLightTheme
+            ? (isEnabled ? palette.BorderColor : palette.DisabledBorderColor)
+            : isEnabled
+                ? ColorContrastHelper.Blend(cellBg, palette.BackColor, 0.22)
+                : ColorContrastHelper.Blend(cellBg, palette.BackColor, 0.14);
         if (emphasizeBorder && isEnabled)
         {
             borderCol = ColorContrastHelper.Blend(borderCol, palette.BackColor, 0.28);
@@ -1434,7 +1228,7 @@ public partial class MainForm : Form
             labelInfo = new WinFdCompatibleLabelInfo { DisplayText = shortLabel, HotKeyCharIndex = -1 };
             hotKeyCharacter = FunctionBarLabelFormatter.ResolveHotKeyCharacter(FunctionKeyProfileService.ResolveFunctionBarPrimaryKeyHint(
                 customCmdId,
-                _settings.Input.BrowserKeyCommandOverrides,
+                _settingsCoordinator.Value.Input.BrowserKeyCommandOverrides,
                 InputSettings.StandardProfileValue));
         }
         else
@@ -1558,7 +1352,7 @@ public partial class MainForm : Form
     private int HitTestFunctionKeyIndex(Point loc, Rectangle clientBounds, Font font)
     {
         var profile = FunctionKeyProfileService.ResolveProfile(CurrentFunctionKeyProfileValue);
-        var layoutModels = BuildFunctionBarSlotModels(profile, false, false, false);
+        var layoutModels = BuildFunctionBarProjection(activeLayer: false);
         var labels = layoutModels.Select(model => model.LayoutLabel).ToArray();
         var rects = CalculateFunctionBarLabelRects(clientBounds, font, labels);
         for (int i = 0; i < rects.Length; i++)
@@ -1581,7 +1375,7 @@ public partial class MainForm : Form
         using var functionBarFont = CreateFunctionBarRenderFont(layoutFont);
 
         var profile = FunctionKeyProfileService.ResolveProfile(CurrentFunctionKeyProfileValue);
-        var layoutModels = BuildFunctionBarSlotModels(profile, false, false, false);
+        var layoutModels = BuildFunctionBarProjection(activeLayer: false);
         var labels = layoutModels.Select(model => model.LayoutLabel).ToArray();
         var rects = CalculateFunctionBarLabelRects(functionBarPanel.ClientRectangle, functionBarFont, labels);
         if (index < rects.Length)

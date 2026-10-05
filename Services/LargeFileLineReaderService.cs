@@ -251,20 +251,17 @@ public static class LargeFileLineReaderService
 
                 long offset = state.LineOffsets[current];
                 long nextOffset = (current + 1 < state.LineOffsets.Count) ? state.LineOffsets[current + 1] : state.TotalBytes;
-                int len = (int)(nextOffset - offset);
+                long len = nextOffset - offset;
 
                 if (len > 0)
                 {
-                    byte[] buf = new byte[len];
                     fs.Seek(offset, SeekOrigin.Begin);
-                    int bytesRead = ReadFully(fs, buf, len);
-                    if (bytesRead < buf.Length)
-                    {
-                        Array.Resize(ref buf, bytesRead);
-                    }
-                    
-                    string lineText = encoding.GetString(buf).TrimEnd('\r', '\n');
-                    int hitColumn = FindInLine(lineText, query, current == startLine ? startColumn : (backward ? int.MaxValue : 0), backward);
+                    int searchStartColumn = current == startLine
+                        ? startColumn
+                        : (backward ? int.MaxValue : 0);
+                    int hitColumn = backward
+                        ? FindLastInLine(fs, len, query, searchStartColumn, encoding)
+                        : FindFirstInLine(fs, len, query, searchStartColumn, encoding);
                     if (hitColumn >= 0)
                     {
                         return (current, hitColumn, query.Length);
@@ -279,26 +276,164 @@ public static class LargeFileLineReaderService
         }, token);
     }
 
-    private static int FindInLine(string lineText, string query, int startColumn, bool backward)
+    private static int FindFirstInLine(
+        Stream source,
+        long byteLength,
+        string query,
+        int startColumn,
+        Encoding encoding)
     {
-        if (string.IsNullOrEmpty(lineText) || string.IsNullOrEmpty(query))
-        {
-            return -1;
-        }
+        using var bounded = new BoundedReadStream(source, byteLength);
+        using var reader = new StreamReader(
+            bounded,
+            encoding,
+            detectEncodingFromByteOrderMarks: false,
+            bufferSize: 64 * 1024,
+            leaveOpen: true);
+        char[] buffer = new char[8 * 1024];
+        string tail = string.Empty;
+        int totalCharsRead = 0;
 
-        if (backward)
+        int charsRead;
+        while ((charsRead = reader.Read(buffer, 0, buffer.Length)) > 0)
         {
-            int startIndex = Math.Min(startColumn, lineText.Length - 1);
-            if (startIndex < 0)
+            string chunk = tail + new string(buffer, 0, charsRead);
+            int chunkStart = totalCharsRead - tail.Length;
+            int localStart = Math.Max(0, startColumn - chunkStart);
+            if (localStart <= chunk.Length)
             {
-                return -1;
+                int hit = chunk.IndexOf(query, localStart, StringComparison.OrdinalIgnoreCase);
+                if (hit >= 0)
+                {
+                    int globalHit = chunkStart + hit;
+                    if (globalHit >= startColumn)
+                    {
+                        return globalHit;
+                    }
+                }
             }
 
-            return lineText.LastIndexOf(query, startIndex, startIndex + 1, StringComparison.OrdinalIgnoreCase);
+            tail = GetSearchTail(chunk, query.Length);
+            totalCharsRead += charsRead;
         }
 
-        int normalizedStart = Math.Clamp(startColumn, 0, lineText.Length);
-        return lineText.IndexOf(query, normalizedStart, StringComparison.OrdinalIgnoreCase);
+        return -1;
+    }
+
+    private static int FindLastInLine(
+        Stream source,
+        long byteLength,
+        string query,
+        int startColumn,
+        Encoding encoding)
+    {
+        using var bounded = new BoundedReadStream(source, byteLength);
+        using var reader = new StreamReader(
+            bounded,
+            encoding,
+            detectEncodingFromByteOrderMarks: false,
+            bufferSize: 64 * 1024,
+            leaveOpen: true);
+        char[] buffer = new char[8 * 1024];
+        string tail = string.Empty;
+        int totalCharsRead = 0;
+        int lastHit = -1;
+
+        int charsRead;
+        while ((charsRead = reader.Read(buffer, 0, buffer.Length)) > 0)
+        {
+            string chunk = tail + new string(buffer, 0, charsRead);
+            int chunkStart = totalCharsRead - tail.Length;
+            int maxLocalHitStart = chunk.Length - query.Length;
+            if (startColumn != int.MaxValue)
+            {
+                maxLocalHitStart = Math.Min(maxLocalHitStart, startColumn - chunkStart);
+            }
+
+            if (maxLocalHitStart >= 0)
+            {
+                int searchStartIndex = Math.Min(
+                    chunk.Length - 1,
+                    maxLocalHitStart + query.Length - 1);
+                int hit = chunk.LastIndexOf(
+                    query,
+                    searchStartIndex,
+                    searchStartIndex + 1,
+                    StringComparison.OrdinalIgnoreCase);
+                if (hit >= 0)
+                {
+                    int globalHit = chunkStart + hit;
+                    if (globalHit <= startColumn || startColumn == int.MaxValue)
+                    {
+                        lastHit = globalHit;
+                    }
+                }
+            }
+
+            tail = GetSearchTail(chunk, query.Length);
+            totalCharsRead += charsRead;
+        }
+
+        return lastHit;
+    }
+
+    private static string GetSearchTail(string text, int queryLength)
+    {
+        int tailLength = Math.Min(Math.Max(0, queryLength - 1), text.Length);
+        return tailLength == 0 ? string.Empty : text[^tailLength..];
+    }
+
+    private sealed class BoundedReadStream : Stream
+    {
+        private readonly Stream _inner;
+        private long _remaining;
+
+        public BoundedReadStream(Stream inner, long length)
+        {
+            _inner = inner;
+            _remaining = Math.Max(0, length);
+        }
+
+        public override bool CanRead => true;
+        public override bool CanSeek => false;
+        public override bool CanWrite => false;
+        public override long Length => _remaining;
+        public override long Position
+        {
+            get => 0;
+            set => throw new NotSupportedException();
+        }
+
+        public override int Read(byte[] buffer, int offset, int count)
+        {
+            if (_remaining <= 0 || count <= 0) return 0;
+            int requested = (int)Math.Min(count, _remaining);
+            int read = _inner.Read(buffer, offset, requested);
+            _remaining -= read;
+            return read;
+        }
+
+        public override int Read(Span<byte> buffer)
+        {
+            if (_remaining <= 0 || buffer.Length == 0) return 0;
+            int requested = (int)Math.Min(buffer.Length, _remaining);
+            int read = _inner.Read(buffer[..requested]);
+            _remaining -= read;
+            return read;
+        }
+
+        public override int ReadByte()
+        {
+            if (_remaining <= 0) return -1;
+            int value = _inner.ReadByte();
+            if (value >= 0) _remaining--;
+            return value;
+        }
+
+        public override void Flush() => throw new NotSupportedException();
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+        public override void SetLength(long value) => throw new NotSupportedException();
+        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
     }
 
     private static int AddSingleByteLineOffsets(

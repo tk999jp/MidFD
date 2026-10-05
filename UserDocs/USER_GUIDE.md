@@ -16,15 +16,17 @@ MidFDは、FDライクな操作感を参考にしつつ、現在のWindows環境
 |---|---|
 | 基本機能のみ | 閲覧、コピー、移動、名前変更、Mark、標準キー操作、内蔵Viewer |
 | 便利機能まで使う（推奨） | 基本機能＋前回状態復元、mouse gesture、Functionバー説明、メディアEnter外部再生、パンくず表示 |
-| すべての機能を使う | 便利機能＋MidFD管理ゴミ箱、Drag ZIP、manifest、clipboard text貼り付け |
+| すべての機能を使う | 便利機能＋Workspace Snapshot（Fullで既定有効、個別override可）、MarkSlot集合演算／Backup Transfer、Image Quantization、SVG Clipboard、Command PaletteのFavorite／Recent利用情報保存、MidFD管理ゴミ箱、Drag ZIP／manifest、clipboard text貼り付け |
 
 各項目は個別に変更できます。既知の組み合わせと一致しない場合は「個別設定」と表示されます。
+
+Command Paletteの基本検索・実行はどの機能範囲でも利用できます。機能範囲で切り替わるのはFavorite／Recent利用情報の保存です。
 
 ### 操作方式・配色
 
 操作方式は「MidFD標準」または「FD／WinFD互換」から選びます。
 
-操作方式を実際に変更した場合だけ、対応する標準配色へ連動します。画面を開いただけでは保存済み配色を変更しません。連動後も別のbuilt-in／user presetへ変更できます。
+配色が「既定色」の場合は、操作方式に応じた既定配色を使用します。「MidFD標準」「FD／WinFD互換」「Green」などの配色プリセットを明示選択した場合は、操作方式を変更しても選択した配色を維持します。
 
 ### 外部アプリ
 
@@ -57,7 +59,8 @@ Browser画面では、ファイルやフォルダを選択し、Mark、コピー
 | コマンド実行Dialog | X |
 | コマンド実行Dialog（FD／WinFD互換） | F2 |
 | 親directory | Backspace / Alt+↑ |
-| 履歴を戻る／進む | Alt+← / Alt+→ |
+| ディレクトリ履歴を戻る／進む | Alt+← / Alt+→ |
+| タブ履歴を戻る／進む | Alt+Shift+Left / Alt+Shift+Right |
 | QuickAccess | Q |
 | Logdsk | L |
 | パス入力 | Ctrl+L |
@@ -65,7 +68,13 @@ Browser画面では、ファイルやフォルダを選択し、Mark、コピー
 | 設定 | O |
 | Command Palette | Ctrl+Shift+P |
 
-Enterは`..`で親directoryへ移動し、directoryはMidFD内で開き、fileは対象別openを行います。Vは明示Preview、Xはコマンド実行Dialogです。ZはfileをOSの関連付けで、directoryをExplorerで開きます。ファイル一覧のdouble-clickはfileをOS既定openしますが、directoryはMidFD内で開くため、Zとはdirectoryの結果が異なります。
+Enterは`..`で親directoryへ移動し、directoryはMidFD内で開き、fileは対象別openを行います。Vは明示Preview、XはCommand・Arguments・Working Directoryを指定するコマンド実行Dialogです。Working Directoryを空欄にすると現在のBrowser directoryを使います。ZはfileをOSの関連付けで、directoryをExplorerで開きます。ファイル一覧のdouble-clickはfileをOS既定openしますが、directoryはMidFD内で開くため、Zとはdirectoryの結果が異なります。
+
+単一fileのContextMenuから「プログラムから開く...」を選ぶと、Windowsのアプリ選択画面で起動先を選べます。
+
+ContextMenuの空白部分にある「新規作成」には、設定の「ファイル操作」→「新規作成の拡張子...」で追加・並べ替えた拡張子が表示されます。項目を選ぶと空のfileを作成します。file内容のtemplateを設定する機能ではありません。
+
+「移動 -> タブ移動履歴...」では、タブ履歴のBack／現在／Forwardを一覧で確認できます。BackまたはForwardの項目をEnter／DoubleClickで選ぶと、その履歴位置へ直接移動します。これはAlt+Shift+Left／Rightと同じruntime-onlyの履歴を使い、カテゴリをまたいで移動できます。表示されるpathは過去訪問時のsnapshotではなく、対象Tabが現在保持しているstateです。
 
 ## パス表示と移動
 
@@ -93,6 +102,8 @@ UNC pathではUsed／Free情報を同期取得せず、操作が落ち着いて�
 ## 表示
 
 設定の「表示」では、一覧表示mode、date形式、size形式、fontなどを変更できます。
+
+一覧表示modeは「ファイル名のみ」「サイズ」「サイズ・更新日時」「拡張子整列」から選べます。「拡張子整列」は同じ表示列のfileで拡張子の開始位置を揃える表示専用modeです。file名、sort、selection、Mark、file operationの対象は変わりません。Ctrl+4またはCtrl+NumPad4でも切り替えられます。「拡張子を表示」をOFFにすると拡張子は表示されません。
 
 ### size形式
 
@@ -131,15 +142,94 @@ MarkSlotは、現在Markを名前付きslotへ保存し、後から復元・管�
 
 `Ctrl+M`で開きます。
 
-- slotを選ぶ
-- 現在Markを保存
-- slotから復元
+- slotを選び、現在タブのMarkを保存できます。
+- 選択slotから現在のMarkへ復元できます。
+- 「管理...」の「保存範囲」から、現在カテゴリ全タブまたはWorkspace全体のMarkを選択slotへ保存できます。これらのscope保存は通常機能です。
 
 保存または復元後は、keyboard中心でBrowserへ戻れるよう画面遷移を整理しています。
 
 ### 管理画面
 
-通常画面から管理画面を開くと、slot一覧と内容を編集できます。選択中slotと現在Markは別領域で確認できます。
+管理画面ではslot一覧と内容を確認し、slotのrename／deleteや保存済みmark項目の管理ができます。現在カテゴリ／Workspaceのscope保存も利用できます。
+
+### Full限定機能
+
+機能範囲が「すべての機能を使う (Full)」の場合、以下を利用できます。
+- **集合演算 (Set Operations)**: OR（和集合）、AND（積集合）、A-B、B-A、XORを選択し、プレビュー後に結果を現在タブへ適用するか指定スロットへ保存
+- **Backup Transfer**: 選択slotまたは全slotをJSONへimport／export
+
+## フィルタ / 検索
+
+Fは現在の一覧を絞り込むFilter、Ctrl+FまたはF7は現在のBrowser tabをrootとして配下を再帰検索するSearchを開きます。FilterとSearchは別pageで、条件のdraftを共有しません。Ctrl+Gは既定未割当です。
+
+### 使い分け
+
+| やりたいこと | 開き方 | 対象 | Search content |
+|---|---|---|---|
+| 今見えている一覧を絞る | `F` | 現在の一覧 | - |
+| 配下からfile／folder名を探す | `Ctrl+F` / `F7` | 現在tab配下を再帰 | 空 |
+| 配下fileの中身を探す | `Ctrl+F` / `F7` | 現在tab配下のfileを再帰 | 検索文字列を入力 |
+
+Filterはfilesystemを再帰検索しません。Searchの検索rootは現在のBrowser tabです。内容検索では、必要に応じてfilename条件も併用できます。
+
+### 基本的な検索手順
+
+1. `Ctrl+F`または`F7`でSearchを開きます。
+2. 名前検索ではfilename条件を指定し、content欄を空にします。
+3. 内容検索ではcontent欄へ検索文字列を入力します。必要ならfilename条件も指定します。
+4. 必要に応じて拡張子、更新日時、Git条件などを指定します。
+5. `Enter`で検索を開始します。
+6. 結果から対象を確認またはPreviewします。内容検索ではfile、ヒット数、行、列、内容を一覧で確認できます。
+
+内容検索用ripgrep 15.2.0は配布packageに同梱されているため、通常は別途導入する必要はありません。実際に使用したengineとversionは検索結果画面に表示されます。
+
+Search pageはfilenameに初期focusし、`Tab`でcontentへ移動します。`Alt+F`はFilter filename、`Alt+S`はSearch filename、`Alt+C`はSearch content、`Alt+N`はactive pageのfilename、`Alt+E`はactive pageの対象拡張子欄へfocusします。`Enter`でactive pageを実行し、`Esc`でdialogを閉じます。
+
+設定の「入力割り当て」には「機能別」「キー別」「ファンクションキー/バー」「マウスジェスチャー」の各viewがあります。キー別で「キーを追加」を選ぶと、先に追加する通常キーを押し、続けて割り当てる機能を選択します。機能選択は機能別viewと同じカテゴリ・表示順でグループ化されます。追加中のDelete／Backspaceはキー入力として扱い、Escでキャンセルします。選択keyの機能変更・解除・既定復元もでき、変更は機能別viewへすぐ反映されます。他のアプリが使うグローバルショートカットと競合する場合があり、競合時はMidFDまたは他アプリ側のキー設定を変更してください。
+
+### モードと条件
+- **フィルタ**: 現在タブの一覧を名前・詳細条件で絞り込みます。名前の正規表現にも対応します。通常Browser状態のEscで名前・詳細条件を解除します。
+- **検索**: 名前欄と詳細条件で配下のfile／folderを再帰検索します。既定は大文字小文字を区別せず、必要に応じて区別できます。部分一致、wildcard、正規表現に対応します。
+- Search pageのcontent欄が空なら名前検索、文字列があれば配下fileの内容検索になります。Search Regex checkboxは1つで、入力済みfilename/contentの両方へ適用します。filenameとcontentの大文字小文字指定は独立しています。
+- 内容検索の文字コードはAuto／UTF-8／Shift_JIS／UTF-16 LE／UTF-16 BEから選びます。AutoはUTF-8とBOM付きUTF-16を扱い、Shift_JISの自動推定はしません。再検索時も選択を引き継ぎます。正規表現はPCRE2を使用せず、先読み・後読み・後方参照には対応しません。
+- 同梱ripgrep、PATH上のripgrep、内蔵検索の順に使用します。
+- 拡張子、更新日時、Git条件はフィルタと検索pageごとに入力できます。対象拡張子は`cs, md, txt`のカンマ区切りを推奨します。既存のカンマ、セミコロン、空白、tab、改行区切りも受け付けます。
+
+### 検索結果の確認
+- 検索開始直後にMainForm内へ一時検索surfaceを開き、走査件数、結果／ファイル数、ヒット数、スキップ数、現在のpathを更新します。全体件数の事前走査は行いません。内容検索は検索中から結果を順次表示し、名前検索は完了後に結果一覧を表示します。結果の到着順は保証しません。
+- 進捗はcompact ringとcountを表示し、current pathは別行でellipsisします。割合・ETAは表示しません。検索が停止／完了／失敗した場合と結果surfaceが非表示の場合はring animationを停止します。
+- 一時検索surfaceはfilesystem Browser tabではなく、workspace／session restore／closed-tab historyへ保存しません。縦型では検索元Browser tabのchild、横型では検索元tabの直後へ表示します。検索sessionは同時に1つで、新しい検索は既存sessionを置き換えます。
+- 名前検索は1項目1行、内容検索は1ファイル1行です。結果数／ファイル数・ヒット数とスキップ数を表示します。
+- ↑/↓で結果を選び、PageUp/PageDown、Home/Endで移動します。0件でも検索結果surfaceに該当なしの文と0件数を表示し、Browserへ戻らず、Enter/Ctrl+Enterは何も開きません。Ctrl+FまたはF7ですぐ再検索でき、criteriaと検索元rootを引き継ぎます。検索結果childを選ぶと選択行・内容hit・一覧位置を保ったまま結果へ戻ります。結果一覧のEscで検索sessionを閉じ、検索元Browser tabへ戻ります。
+- 名前検索結果のEnter「ブラウザ表示」はsession内の確認用Browser tabを1個だけ再利用し、対象fileの親folderを表示して選択します。Ctrl+Enterは結果ごとに新しい通常Browser tabを追加します。folder結果は親folderを表示してfolder自体を選択します。確認後にEscを押すと同じ検索結果childへ戻り、選択行・filterを保ちます。検索元Browser tabと他tabのpath・selection・mark・navigation historyは変わりません。
+- 内容検索のEnter「プレビュー」は再利用する確認tab、Ctrl+Enterは新しい通常tabをbacking BrowserとしてPreviewを開き、該当行へ移動します。LargeTextはfull line indexとscroll rangeを反映してからexact hit行へ移動します。ViewerのEnter／Escで検索結果childへ戻り、選択file・hit・filterを維持します。通常TextとLargeTextは検索位置を示し、MarkdownはRaw source表示へ切り替えて行を示します。binary／行Preview非対応形式は既存のPreview表示を維持します。検索sessionを閉じても確認tabと追加tabは通常Browser tabとして残ります。
+- 通常BrowserからVでPreviewした場合、ViewerのEnter／Escは従来どおりBrowserへ戻ります。対象消失や起動失敗は検索結果surfaceのstatusへ表示します。
+- 内容検索は←/→で同じfile内のhitを移動します。行・列・内容とhit位置を確認でき、別fileへ移動すると先頭hitに戻ります。
+- 非0件の完了後はCtrl+Fで結果filterへfocusします。0件ならCtrl+FでSearch dialogを再表示します。F7はいつでもSearch dialogをcriteria引継ぎで再表示します。名前検索はrelative path/name、内容検索はrelative path/nameまたはhit行の文字列をcase-insensitive部分一致で絞ります。path一致fileはそのfileの全hitを表示し、hit行一致では一致hitだけを表示します。filterは完了snapshot内だけで処理し、filesystemを再検索しません。clearすると選択位置を可能な範囲で復元し、filter中も表示件数と選択位置を示します。filter欄のEnterは一覧へ戻り、Escはfilterをclearして一覧へ戻ります。結果一覧のEscは検索tabを閉じます。
+- MainForm Function Barの**Expo**または**E 一覧出力**を実行した時だけfilter前の全結果をUTF-8 BOMなしの一時fileへ出力し、設定済み外部Editorで開きます。未設定時は既存方針でnotepadを使用します。名前検索はfull path、内容検索は `fullPath:line:column:lineText` 形式です。
+- 内容検索中も到着済みhitをEnter／Ctrl+EnterでPreviewでき、検索は継続します。ViewerのEnter／Escで選択fileとhitを保った結果一覧へ戻ります。結果FilterとExpo／Eによる一覧出力は検索完了後だけ利用できます。
+- 大量結果はvirtual一覧で表示します。結果件数の打切りやpaginationはありません。
+
+## 一括リネーム (Batch Rename)
+
+複数項目を選択またはMarkした状態で R（名前変更）を押すと、一括リネームダイアログが起動します（単一項目の場合は通常リネーム）。
+
+### リネーム方式
+- **1件ずつ確認**: 項目ごとに新しい名前を入力しながら順次変更
+- **テンプレート一括リネーム**:
+  - $F: 元のファイル名（拡張子なし）
+  - $E: 拡張子
+  - $D: 親フォルダ名
+  - `$N`: 連番（ダイアログで設定した桁数を使用）
+  - `$<digits>N`: 桁数を指定した連番（例: `$3N` は3桁でゼロ埋め）
+- **正規表現置換**:
+  - 検索パターンと置換パターンを指定
+  - 大文字小文字の区別 (IgnoreCase)、複数行 (Multiline)、全置換 (Global) を制御可能
+
+### プレビューとUndo
+- 変更前後のファイル名一覧がリアルタイムにプレビュー表示されます。
+- プレビューを確認し、［OK］で確定すると一括で名前が変更されます。
+- 一括リネームが正常に完了したバッチは、直後であれば Ctrl+Z（元に戻す）で一括復元できます。
 
 ## コピー・移動・削除
 
@@ -171,7 +261,8 @@ symlinkやjunctionをコピー／移動する場合、リンク先の実体へ�
 
 ## MidFD管理ゴミ箱
 
-MidFD管理ゴミ箱を有効にすると、通常削除した項目を削除元と同じvolume／shareの `.midfd-trash` へ移します。
+通常削除の既定はWindows標準ごみ箱です。UseMidFdManagedTrash=trueに設定し、MidFD管理ゴミ箱が利用可能な場合だけ、削除した項目を削除元と同じvolume／shareの `.midfd-trash` へ退避します。Windows標準ごみ箱とは別に管理されます。
+MidFD管理ゴミ箱を使った削除はMidFDの削除Undo/Redo対象です。Windows標準ごみ箱を使う通常削除では、MidFD独自の削除Undo/Redoを保証しません。
 
 ### 管理画面
 
@@ -279,7 +370,30 @@ ONの場合:
 - `Ctrl+Alt+Right` / `Ctrl+Alt+Left`: categoryを移動
 - `Ctrl+Shift+N`: category追加
 
-ContextMenuのdirectory項目では「新しいtabで開く」を選べます。新しいtabの追加位置は設定から、現在tabの隣またはtab列末尾を選択できます。
+縦型navigationでは通常Browser tabを右クリックし、「グループを作成...」「グループへ移動」「グループから外す」を選べます。「グループへ移動」から現在とは別のGroupを選択できます。新しいGroupには入力した名前が付き、tabの表示だけをまとめます。tab行をGroupの見出しへdropすると末尾へ移動し、Group member行の上半分／下半分へdropするとその前／後へ挿入します。Category行へdropするとGroupから外れてcategory直下へ戻ります。Group nodeのEnter／Spaceまたは開閉アイコンで折りたたみ／展開できます。Group名はGroup nodeのContext Menuから変更します。tabの右クリックContext Menuは `Shift+F10` またはContext Menuキーでも開けます。Command Paletteと設定の「入力割り当て」にもGroup操作があり、既定のshortcutはありません。
+
+Group配下のtabは通常Browser tabのままなので、path、選択、Mark、history、Preview、closeは従来どおりです。タブグループは同一category内に限られ、tabは一度に1つのGroupへ所属します。別Groupへ追加すると所属先が移り、最後のmemberを外すとGroupも消えます。Group自体を閉じる操作や入れ子Groupはありません。横型tab stripではmember tabsを通常tab順に連続表示し、Group名をprefixに付けます。
+
+Tab GroupはMidFDの正常終了後も復元されます。Group ID、名前、所属tab、開閉状態を、通常のBrowser tab順を保って復元します。Search結果の一時階層とSearch lineageは復元しません。Searchから開いたnormal Browser tabは通常tabとして復元され、明示的に作成したGroupへの所属があればその所属も復元します。active Search session中のresult tabはGroupへ追加できません。Searchを閉じると明示的に追加でき、追加後はSource tabとのSearch-derived階層から外れます。Source tabをGroupへ入れても、その配下にあるSearch childとresult tabsは維持されます。
+
+ContextMenuのdirectory項目では「新しいtabで開く」を選べます。複数directoryを選択またはMarkしている場合は、それぞれを新しいtabで一括して開けます。新しいtabの追加位置は設定から、現在tabの隣またはtab列末尾を選択できます。
+
+成功した一括tab openはUndo／Redoの1操作として記録され、対応するfile操作と共通の時系列履歴から `Ctrl+Z`／`Ctrl+Y` で戻す・やり直すことができます。
+
+Browser一覧focus時に`@`を押してから1文字入力すると、その文字で始まる最初の項目へ移動します。入力は1文字で完了し、複数文字で名前を探す場合は`Ctrl+F` / `F7`のSearchを使います。これはFilterではなく、表示中のFilter・並び順・Markを変えません。文字入力前のEnterはジャンプ待機だけを終了し、Escではジャンプだけを終了します。
+
+### Workspace Snapshot
+
+設定の「表示」または「基本セットアップ」でWorkspace Snapshotを有効にすると（Fullプロファイルの既定、または個別Override）、Workspace全体の状態を名前付きスナップショットとして保存・復元できます。
+
+- **管理ダイアログ**: メニュー「ツール」→「Workspace スナップショット...(&W)」から開きます。
+  - スナップショット一覧の確認
+  - 選択スナップショットの復元（全カテゴリ・タブ状態のトランザクション復元）
+  - スナップショットの名前変更、削除
+  - JSON形式でのエクスポート／インポート
+  - 現在のWorkspaceの新規保存
+- **タブ右クリックからの保存**: タブの右クリックメニューに「現在のWorkspaceをスナップショット保存...」が表示されます。
+  - 選ぶと、右クリックしたタブへアクティブを切り替えることなく、現在のWorkspace全体（全カテゴリ・全タブ）をそのまま保存します。右クリックしたタブ単体を保存する機能ではありません。
 
 前回状態復元を有効にすると、category、tab、path、cursor位置等を起動時に復元します。詳細は設定の「起動・ログ」で変更できます。
 

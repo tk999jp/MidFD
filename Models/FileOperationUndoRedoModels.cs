@@ -22,6 +22,7 @@ public sealed class FileOperationUndoRedoItem
 
 public sealed class FileOperationUndoRedoBatch
 {
+    public Guid OperationId { get; init; } = Guid.NewGuid();
     public FileOperationUndoRedoOperation Operation { get; init; } = FileOperationUndoRedoOperation.Rename;
     public IReadOnlyList<FileOperationUndoRedoItem> Items { get; set; } = Array.Empty<FileOperationUndoRedoItem>();
     public bool IsPartialCancellation { get; set; }

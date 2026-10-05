@@ -15,21 +15,23 @@ internal sealed class JsonTrashManifestStore : ITrashManifestStore
 
     public TrashManifest Load()
     {
+        string json;
         try
         {
-            if (!File.Exists(_manifestPath))
-            {
-                return new TrashManifest();
-            }
-
-            string json = File.ReadAllText(_manifestPath);
-            return JsonSerializer.Deserialize<TrashManifest>(json, _jsonOptions) ?? new TrashManifest();
+            using FileStream stream = File.Open(_manifestPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+            using var reader = new StreamReader(stream);
+            json = reader.ReadToEnd();
         }
-        catch (Exception ex)
+        catch (FileNotFoundException)
         {
-            LogService.Warn($"[MidFdTrash] Failed to load manifest; using empty manifest. error={ex.Message}");
             return new TrashManifest();
         }
+        catch (DirectoryNotFoundException)
+        {
+            return new TrashManifest();
+        }
+        return JsonSerializer.Deserialize<TrashManifest>(json, _jsonOptions)
+            ?? throw new JsonException("Trash manifest payload is empty.");
     }
 
     public void Save(TrashManifest manifest)

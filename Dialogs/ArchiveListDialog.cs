@@ -239,55 +239,7 @@ public sealed class ArchiveListDialog : Form
             _listView.Items.Add(upItem);
         }
 
-        var visibleMap = new Dictionary<string, ArchiveEntry>(StringComparer.OrdinalIgnoreCase);
-
-        foreach (ArchiveEntry entry in _allEntries)
-        {
-            string path = entry.EntryPath;
-            if (!string.IsNullOrEmpty(_currentPath))
-            {
-                if (!path.StartsWith(_currentPath, StringComparison.OrdinalIgnoreCase)) continue;
-                if (path.Length <= _currentPath.Length) continue;
-            }
-
-            string relativePath = string.IsNullOrEmpty(_currentPath) ? path : path[_currentPath.Length..];
-            int firstSlash = relativePath.IndexOf('/');
-
-            if (firstSlash < 0)
-            {
-                // Direct child (file or explicit directory entry)
-                string key = entry.IsDirectory && !entry.EntryPath.EndsWith('/')
-                    ? entry.EntryPath + "/"
-                    : entry.EntryPath;
-                visibleMap[key] = entry;
-            }
-            else
-            {
-                // Nested entry -> Synthesize the intermediate directory
-                string subDirRelative = relativePath[..(firstSlash + 1)];
-                string subDirAbsolute = _currentPath + subDirRelative;
-
-                // Explicit directory entry should overwrite any synthetic directory
-                if (visibleMap.TryGetValue(subDirAbsolute, out var existing) && !existing.IsSyntheticDirectory)
-                {
-                    continue;
-                }
-
-                var synthEntry = new ArchiveEntry
-                {
-                    EntryPath = subDirAbsolute,
-                    RawEntryPath = subDirAbsolute,
-                    Name = subDirRelative.TrimEnd('/'),
-                    IsDirectory = true,
-                    Size = null,
-                    ModifiedAt = null,
-                    IsSyntheticDirectory = true
-                };
-                visibleMap[subDirAbsolute] = synthEntry;
-            }
-        }
-
-        foreach (ArchiveEntry entry in visibleMap.Values)
+        foreach (ArchiveEntry entry in BuildVisibleEntries(_allEntries, _currentPath))
         {
             var item = CreateItem(entry);
             _listView.Items.Add(item);
@@ -297,6 +249,52 @@ public sealed class ArchiveListDialog : Form
         _listView.Sort();
         _listView.EndUpdate();
         UpdateDialogState();
+    }
+
+    internal static IReadOnlyList<ArchiveEntry> BuildVisibleEntries(
+        IReadOnlyList<ArchiveEntry> allEntries,
+        string currentPath)
+    {
+        var visibleMap = new Dictionary<string, ArchiveEntry>(StringComparer.OrdinalIgnoreCase);
+        foreach (ArchiveEntry entry in allEntries)
+        {
+            string path = entry.EntryPath;
+            if (!string.IsNullOrEmpty(currentPath))
+            {
+                if (!path.StartsWith(currentPath, StringComparison.OrdinalIgnoreCase)) continue;
+                if (path.Length <= currentPath.Length) continue;
+            }
+
+            string relativePath = string.IsNullOrEmpty(currentPath) ? path : path[currentPath.Length..];
+            if (entry.IsDirectory) relativePath = relativePath.TrimEnd('/');
+            int firstSlash = relativePath.IndexOf('/');
+            if (firstSlash < 0)
+            {
+                string key = entry.IsDirectory && !entry.EntryPath.EndsWith('/')
+                    ? entry.EntryPath + "/"
+                    : entry.EntryPath;
+                visibleMap[key] = entry;
+                continue;
+            }
+
+            string subDirRelative = relativePath[..(firstSlash + 1)];
+            string subDirAbsolute = currentPath + subDirRelative;
+            if (visibleMap.TryGetValue(subDirAbsolute, out ArchiveEntry? existing) && !existing.IsSyntheticDirectory)
+            {
+                continue;
+            }
+
+            visibleMap[subDirAbsolute] = new ArchiveEntry
+            {
+                EntryPath = subDirAbsolute,
+                RawEntryPath = subDirAbsolute,
+                Name = subDirRelative.TrimEnd('/'),
+                IsDirectory = true,
+                IsSyntheticDirectory = true
+            };
+        }
+
+        return visibleMap.Values.ToArray();
     }
 
     private ListViewItem CreateItem(ArchiveEntry entry)
@@ -678,18 +676,16 @@ public sealed class ArchiveListDialog : Form
         return ArchiveExtractDestinationDialog.Show(this, _initialExtractDirectory, archiveDisplayName);
     }
 
-    private IReadOnlyList<string> GetMarkedEntryPaths()
+    private IReadOnlyList<ArchiveEntry> GetMarkedEntries()
     {
         if (_markedEntryPaths.Count == 0)
         {
-            return Array.Empty<string>();
+            return Array.Empty<ArchiveEntry>();
         }
 
         return _allEntries
             .Where(entry => !entry.IsSyntheticDirectory)
             .Where(entry => _markedEntryPaths.Contains(entry.EntryPath))
-            .Select(entry => string.IsNullOrEmpty(entry.RawEntryPath) ? entry.EntryPath : entry.RawEntryPath)
-            .Distinct(StringComparer.OrdinalIgnoreCase)
             .ToArray();
     }
 
@@ -743,7 +739,7 @@ public sealed class ArchiveListDialog : Form
             return;
         }
 
-        if (entry.IsSyntheticDirectory)
+        if (!IsEntryMarkable(entry))
         {
             return;
         }
@@ -856,39 +852,79 @@ public sealed class ArchiveListDialog : Form
         return entry;
     }
 
+    internal static bool IsEntryMarkable(ArchiveEntry entry)
+        => !entry.IsSyntheticDirectory;
+
+    internal static IReadOnlyList<string> ResolveRealExtractionEntryPaths(
+        IReadOnlyList<ArchiveEntry> archiveEntries,
+        IEnumerable<ArchiveEntry> selectedOrMarkedEntries)
+    {
+        var targets = new Dictionary<string, (string SortKey, string BackendPath)>(StringComparer.OrdinalIgnoreCase);
+
+        static string GetBackendPath(ArchiveEntry entry)
+        {
+            return string.IsNullOrWhiteSpace(entry.RawEntryPath) ? entry.EntryPath : entry.RawEntryPath;
+        }
+
+        static string NormalizeEntryIdentity(string path)
+            => path.Replace('\\', '/');
+
+        void AddRealEntry(ArchiveEntry entry)
+        {
+            if (entry.IsSyntheticDirectory) return;
+            string backendPath = GetBackendPath(entry);
+            if (string.IsNullOrWhiteSpace(backendPath)) return;
+            string sortKey = NormalizeEntryIdentity(backendPath);
+            targets.TryAdd(sortKey, (sortKey, backendPath));
+        }
+
+        foreach (ArchiveEntry selected in selectedOrMarkedEntries
+                     .OrderBy(entry => NormalizeEntryIdentity(entry.EntryPath), StringComparer.OrdinalIgnoreCase)
+                     .ThenBy(entry => NormalizeEntryIdentity(entry.EntryPath), StringComparer.Ordinal))
+        {
+            string selectedPath = string.IsNullOrWhiteSpace(selected.EntryPath)
+                ? GetBackendPath(selected)
+                : selected.EntryPath;
+            string normalizedSelectedPath = NormalizeEntryIdentity(selectedPath);
+            if (!selected.IsSyntheticDirectory) AddRealEntry(selected);
+
+            if (!selected.IsDirectory && !selected.IsSyntheticDirectory) continue;
+
+            string descendantPrefix = normalizedSelectedPath.TrimEnd('/') + "/";
+            foreach (ArchiveEntry candidate in archiveEntries
+                         .Where(entry => !entry.IsSyntheticDirectory)
+                         .OrderBy(entry => NormalizeEntryIdentity(entry.EntryPath), StringComparer.OrdinalIgnoreCase)
+                         .ThenBy(entry => NormalizeEntryIdentity(entry.EntryPath), StringComparer.Ordinal))
+            {
+                string candidatePath = string.IsNullOrWhiteSpace(candidate.EntryPath)
+                    ? GetBackendPath(candidate)
+                    : candidate.EntryPath;
+                if (NormalizeEntryIdentity(candidatePath).StartsWith(descendantPrefix, StringComparison.OrdinalIgnoreCase))
+                {
+                    AddRealEntry(candidate);
+                }
+            }
+        }
+
+        return targets.Values
+            .OrderBy(target => target.SortKey, StringComparer.OrdinalIgnoreCase)
+            .ThenBy(target => target.SortKey, StringComparer.Ordinal)
+            .Select(target => target.BackendPath)
+            .ToArray();
+    }
+
     private IReadOnlyList<string> GetExtractionEntryPathsForU()
     {
-        IReadOnlyList<string> marked = GetMarkedEntryPaths();
-        if (marked.Count > 0)
+        IReadOnlyList<ArchiveEntry> marked = GetMarkedEntries();
+        if (_markedEntryPaths.Count > 0)
         {
-            return marked;
+            return ResolveRealExtractionEntryPaths(_allEntries, marked);
         }
 
         ArchiveEntry? selected = GetSelectedArchiveEntry();
-        if (selected == null || selected.IsSyntheticDirectory)
-        {
-            return Array.Empty<string>();
-        }
-
-        if (selected.IsDirectory)
-        {
-            string dirPath = !string.IsNullOrWhiteSpace(selected.RawEntryPath) ? selected.RawEntryPath : selected.EntryPath;
-            string prefix = dirPath.Replace('\\', '/').TrimEnd('/') + "/";
-            return _allEntries
-                .Where(e => !e.IsDirectory && !e.IsSyntheticDirectory)
-                .Where(e => {
-                    string ePath = (!string.IsNullOrWhiteSpace(e.RawEntryPath) ? e.RawEntryPath : e.EntryPath).Replace('\\', '/');
-                    return ePath.StartsWith(prefix, StringComparison.OrdinalIgnoreCase);
-                })
-                .Select(e => !string.IsNullOrWhiteSpace(e.RawEntryPath) ? e.RawEntryPath : e.EntryPath)
-                .ToList();
-        }
-
-        string path = !string.IsNullOrWhiteSpace(selected.RawEntryPath)
-            ? selected.RawEntryPath
-            : selected.EntryPath;
-
-        return new[] { path };
+        return selected == null
+            ? Array.Empty<string>()
+            : ResolveRealExtractionEntryPaths(_allEntries, new[] { selected });
     }
 
     private void UpdateDialogState()

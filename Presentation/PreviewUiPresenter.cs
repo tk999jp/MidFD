@@ -6,6 +6,20 @@ namespace MidFD.Presentation;
 
 public static class PreviewUiPresenter
 {
+    public static void ApplyPlainTextContent(
+        TextBox textBox,
+        Label messageLabel,
+        PictureBox pictureBox,
+        string text)
+    {
+        messageLabel.Visible = false;
+        pictureBox.Visible = false;
+        textBox.Text = text;
+        textBox.Select(0, 0);
+        textBox.Visible = true;
+        textBox.Focus();
+    }
+
     public static void ApplyViewerChromeState(
         bool compactViewer,
         bool showLargeTextControl,

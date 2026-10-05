@@ -42,6 +42,7 @@ public partial class ImageViewerForm : Form
     private readonly Stack<ImageHistoryEntry> _undoStack = new();
     private readonly Stack<ImageHistoryEntry> _redoStack = new();
     private int _loadRequestId;
+    private int _imageGeneration;
     private readonly Label _loadingLabel;
 
     // VideoStill Fields
@@ -211,6 +212,7 @@ public partial class ImageViewerForm : Form
         _currentPath = path;
         Text = $"{Path.GetFileName(path)} - MidFD Image Viewer";
         int reqId = ++_loadRequestId;
+        _imageGeneration++;
         ClearSelection();
 
         bool isSvg = string.Equals(Path.GetExtension(path), ".svg", StringComparison.OrdinalIgnoreCase);
@@ -318,15 +320,28 @@ public partial class ImageViewerForm : Form
 
         SetQuantizeMenuEnabled(false);
         string label = dialog.ResultLabel;
+        int imageGeneration = _imageGeneration;
         statusLabel.Text = $"減色中: {label}";
+        Bitmap? sourceImage = null;
+        Bitmap? result = null;
         try
         {
+            Bitmap quantizeSource = new(_displayImage ?? _originalImage);
+            sourceImage = quantizeSource;
+            result = await Task.Run(() => ImageQuantizationService.Quantize(quantizeSource, dialog.ResultRequest));
+            sourceImage.Dispose();
+            sourceImage = null;
+            if (!ShouldApplyQuantizeResult(imageGeneration, _imageGeneration, IsDisposed))
+            {
+                result.Dispose();
+                result = null;
+                return;
+            }
             PushUndoState("減色前");
-            Bitmap src = new Bitmap(_displayImage ?? _originalImage);
-            Bitmap result = await Task.Run(() => ImageQuantizationService.Quantize(src, dialog.ResultRequest));
-            src.Dispose();
-            SetDisplayImage(result);
-            ApplyInitialZoom(result);
+            Bitmap appliedResult = result;
+            SetDisplayImage(appliedResult);
+            result = null;
+            ApplyInitialZoom(appliedResult);
             statusLabel.Text = $"減色適用: {label}";
             ClearRedoStack();
         }
@@ -336,7 +351,9 @@ public partial class ImageViewerForm : Form
         }
         finally
         {
-            SetQuantizeMenuEnabled(true);
+            sourceImage?.Dispose();
+            result?.Dispose();
+            if (ShouldApplyQuantizeResult(imageGeneration, _imageGeneration, IsDisposed)) SetQuantizeMenuEnabled(true);
         }
     }
 
@@ -376,6 +393,7 @@ public partial class ImageViewerForm : Form
 
     private void ReplaceCurrentImages(Bitmap source, bool clearHistory)
     {
+        _imageGeneration++;
         ClearSelection();
         ResetDisplayTransformState();
         DisposeImage(_originalImage);
@@ -392,6 +410,7 @@ public partial class ImageViewerForm : Form
 
     private void SetDisplayImage(Bitmap bitmap)
     {
+        _imageGeneration++;
         ClearSelection();
         DisposeImage(_displayImage);
         _displayImage = bitmap;
@@ -470,6 +489,9 @@ public partial class ImageViewerForm : Form
         _menuCopySvg.Enabled = _featureGate.IsEnabled(FeatureId.SvgClipboard) && enabled && _displayImage != null;
         _menuImageInfo.Enabled = enabled && (_displayImage != null || _originalImage != null);
     }
+
+    internal static bool ShouldApplyQuantizeResult(int requestGeneration, int currentGeneration, bool isDisposed)
+        => requestGeneration == currentGeneration && !isDisposed;
 
     private void PushUndoState(string label)
     {
@@ -777,6 +799,7 @@ public partial class ImageViewerForm : Form
             {
                 return;
             }
+            _loadRequestId++;
             PushUndoState("貼り付け前");
             ResetDisplayTransformState();
             SetDisplayImage(new Bitmap(img));

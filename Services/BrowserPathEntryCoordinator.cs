@@ -6,11 +6,29 @@ internal static class BrowserPathEntryCoordinator
 {
     public static BrowserPathEntryApplyResult Apply(
         string? inputPath,
+        Func<string, string> normalizeDestinationDirectory,
+        Action<string> navigateDirectory,
+        Func<string, string?> openFile)
+    {
+        BrowserPathEntryNavigationResult result = BrowserPathEntryNavigationService.Resolve(inputPath, normalizeDestinationDirectory);
+        return ApplyResolved(result, navigateDirectory, openFile);
+    }
+
+    public static BrowserPathEntryApplyResult Apply(
+        string? inputPath,
         NavigationService navigationService,
         Action<string> navigateDirectory,
         Func<string, string?> openFile)
     {
         BrowserPathEntryNavigationResult result = BrowserPathEntryNavigationService.Resolve(inputPath, navigationService);
+        return ApplyResolved(result, navigateDirectory, openFile);
+    }
+
+    private static BrowserPathEntryApplyResult ApplyResolved(
+        BrowserPathEntryNavigationResult result,
+        Action<string> navigateDirectory,
+        Func<string, string?> openFile)
+    {
         if (result.TargetKind == BrowserPathEntryTargetKind.None)
         {
             return new BrowserPathEntryApplyResult

@@ -12,6 +12,10 @@ public sealed class FileOperationUndoRedoService
     private readonly Stack<FileOperationUndoRedoBatch> _undoStack = new();
     private readonly Stack<FileOperationUndoRedoBatch> _redoStack = new();
 
+    public event Action<FileOperationUndoRedoBatch>? BatchRecorded;
+    public event Action<FileOperationUndoRedoBatch, bool>? UndoRedoCommitted;
+    public event Action? HistoryChanged;
+
     public bool CanUndo => _undoStack.Count > 0;
     public bool CanRedo => _redoStack.Count > 0;
 
@@ -23,14 +27,16 @@ public sealed class FileOperationUndoRedoService
             return;
         }
 
-        _undoStack.Push(new FileOperationUndoRedoBatch
+        var batch = new FileOperationUndoRedoBatch
         {
             Operation = operation,
             Items = normalizedItems,
             IsPartialCancellation = isPartialCancellation
-        });
+        };
+        _undoStack.Push(batch);
         TrimStackToMax(_undoStack, MaxBatchCount);
         _redoStack.Clear();
+        BatchRecorded?.Invoke(batch);
     }
 
     public bool TryPeekUndo(out FileOperationUndoRedoBatch batch)
@@ -68,11 +74,13 @@ public sealed class FileOperationUndoRedoService
         if (popped.Operation == FileOperationUndoRedoOperation.CreateFromPaste)
         {
             // 作成Undoは安全性優先でRedo対象にしない。
+            UndoRedoCommitted?.Invoke(popped, true);
             return;
         }
 
         _redoStack.Push(popped);
         TrimStackToMax(_redoStack, MaxBatchCount);
+        UndoRedoCommitted?.Invoke(popped, true);
     }
 
     public void CommitRedo()
@@ -82,20 +90,28 @@ public sealed class FileOperationUndoRedoService
             return;
         }
 
-        _undoStack.Push(_redoStack.Pop());
+        FileOperationUndoRedoBatch popped = _redoStack.Pop();
+        _undoStack.Push(popped);
         TrimStackToMax(_undoStack, MaxBatchCount);
+        UndoRedoCommitted?.Invoke(popped, false);
     }
 
     public void Reset()
     {
         _undoStack.Clear();
         _redoStack.Clear();
+        HistoryChanged?.Invoke();
     }
+
+    internal bool ContainsOperation(Guid operationId) =>
+        _undoStack.Any(batch => batch.OperationId == operationId) ||
+        _redoStack.Any(batch => batch.OperationId == operationId);
 
     public void ClearTrashDeleteBatches()
     {
         RemoveMatching(_undoStack, static batch => IsTrashDeleteOperation(batch.Operation));
         RemoveMatching(_redoStack, static batch => IsTrashDeleteOperation(batch.Operation));
+        HistoryChanged?.Invoke();
     }
 
     public void PruneTrashDeleteItemsByRecycleBinPaths(IEnumerable<string> recycleBinPaths)
@@ -110,6 +126,7 @@ public sealed class FileOperationUndoRedoService
 
         PruneTrashDeleteItems(_undoStack, pathSet);
         PruneTrashDeleteItems(_redoStack, pathSet);
+        HistoryChanged?.Invoke();
     }
 
     public static IReadOnlyList<FileOperationUndoRedoItem> CreateRenameBatch(IEnumerable<RenamePreviewItem> items)
@@ -265,6 +282,7 @@ public sealed class FileOperationUndoRedoService
 
             preserved.Add(new FileOperationUndoRedoBatch
             {
+                OperationId = batch.OperationId,
                 Operation = batch.Operation,
                 Items = filteredItems,
                 IsPartialCancellation = batch.IsPartialCancellation

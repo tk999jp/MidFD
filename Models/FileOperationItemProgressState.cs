@@ -5,6 +5,7 @@ public enum FileOperationItemProgressKind
     Copy,
     Move,
     Delete,
+    Restore,
     Other
 }
 

@@ -11,7 +11,8 @@ public enum MarkSlotClipboardImportFailureReason
     KdslResultNotFound,
     MultipleKdslResults,
     KdslResultFenceUnclosed,
-    ChangeSectionNotFound,
+    NoChangesDeclared,
+    MalformedChangeSection,
     NoExplicitFiles,
     NoValidExistingFiles,
     InvalidEntriesDetected
@@ -58,7 +59,10 @@ public static class MarkSlotClipboardImportService
         int changeIndex = Array.FindIndex(lines, 1, line => string.Equals(line.Trim(), "変更:", StringComparison.Ordinal));
         if (changeIndex < 0)
         {
-            return Failure(MarkSlotClipboardImportFailureReason.ChangeSectionNotFound, 0, canonical.IgnoredEarlierResultCount);
+            MarkSlotClipboardImportFailureReason reason = lines.Skip(1).Any(IsMalformedChangeHeader)
+                ? MarkSlotClipboardImportFailureReason.MalformedChangeSection
+                : MarkSlotClipboardImportFailureReason.NoChangesDeclared;
+            return Failure(reason, 0, canonical.IgnoredEarlierResultCount);
         }
 
         if (string.IsNullOrWhiteSpace(repositoryRoot))
@@ -69,7 +73,7 @@ public static class MarkSlotClipboardImportService
         string root;
         try
         {
-            root = Path.GetFullPath(repositoryRoot.Trim()).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+            root = NormalizeRepositoryRoot(repositoryRoot);
         }
         catch (Exception ex) when (ex is ArgumentException or NotSupportedException or IOException)
         {
@@ -164,7 +168,9 @@ public static class MarkSlotClipboardImportService
                 try
                 {
                     candidateFullPath = Path.GetFullPath(Path.Combine(root, val));
-                    string prefix = root + Path.DirectorySeparatorChar;
+                    string prefix = root.EndsWith(Path.DirectorySeparatorChar) || root.EndsWith(Path.AltDirectorySeparatorChar)
+                        ? root
+                        : root + Path.DirectorySeparatorChar;
                     if (!candidateFullPath.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
                     {
                         outsideRepo = true;
@@ -247,6 +253,19 @@ public static class MarkSlotClipboardImportService
         int syntaxInvalidEntryCount = 0,
         int ignoredEarlierResultCount = 0)
         => new(Array.Empty<string>(), syntaxInvalidEntryCount, 0, 0, 0, 0, false, reason, ignoredEarlierResultCount);
+
+    private static string NormalizeRepositoryRoot(string repositoryRoot)
+    {
+        string fullPath = Path.GetFullPath(repositoryRoot.Trim());
+        string? filesystemRoot = Path.GetPathRoot(fullPath);
+        if (!string.IsNullOrEmpty(filesystemRoot) &&
+            string.Equals(fullPath, filesystemRoot, StringComparison.OrdinalIgnoreCase))
+        {
+            return filesystemRoot;
+        }
+
+        return fullPath.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+    }
 
     private static CanonicalBlockResult ExtractCanonicalBlock(string? text)
     {
@@ -413,4 +432,17 @@ public static class MarkSlotClipboardImportService
 
     private static bool IsCodeFence(string line)
         => line.StartsWith("```", StringComparison.Ordinal);
+
+    private static bool IsMalformedChangeHeader(string line)
+    {
+        string trimmed = line.Trim();
+        if (trimmed.Equals("変更:", StringComparison.Ordinal)
+            || !trimmed.StartsWith("変更", StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        string remainder = trimmed["変更".Length..].TrimStart();
+        return remainder.StartsWith(':') || remainder.StartsWith('：');
+    }
 }

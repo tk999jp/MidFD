@@ -1,5 +1,4 @@
 using System;
-using System.Windows.Forms;
 using MidFD.Models;
 
 namespace MidFD.Coordinators;
@@ -39,7 +38,7 @@ public class NavigationRefreshCoordinator
         return true;
     }
 
-    public void QueueRefresh(
+    public bool QueueRefresh(
         string watchedDirectoryPath,
         string reason,
         string normalizedWatchedPath,
@@ -47,15 +46,14 @@ public class NavigationRefreshCoordinator
         string normalizedWatcherPath,
         long watcherGeneration,
         long activeWatcherGeneration,
-        Exception? exception,
-        System.Windows.Forms.Timer debounceTimer)
+        Exception? exception)
     {
         if (string.IsNullOrWhiteSpace(normalizedWatchedPath) ||
             !string.Equals(normalizedWatchedPath, normalizedCurrentPath, StringComparison.OrdinalIgnoreCase) ||
             !string.Equals(normalizedWatchedPath, normalizedWatcherPath, StringComparison.OrdinalIgnoreCase) ||
             watcherGeneration != activeWatcherGeneration)
         {
-            return;
+            return false;
         }
 
         _state.IsPending = true;
@@ -70,17 +68,14 @@ public class NavigationRefreshCoordinator
             _state.ExceptionMessage = exception.Message;
         }
 
-        if (!_state.IsPassiveRefresh && _state.EventCount < 64)
+        if (!_state.IsPassiveRefresh)
         {
+            // Bulk volume classifies the batch; it must not bypass the quiet window.
             _state.ScheduleRefreshDelay();
-            debounceTimer.Stop();
-            debounceTimer.Start();
+            return true;
         }
-        else if (!_state.IsPassiveRefresh)
-        {
-            _state.CompleteRefreshDelay();
-            debounceTimer.Stop();
-        }
+
+        return false;
     }
 
     public void ClearPendingRefresh()

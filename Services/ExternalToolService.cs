@@ -74,7 +74,7 @@ public static class ExternalToolService
     /// <summary>
     /// OSの既定関連付けでファイルまたはフォルダを開く。
     /// </summary>
-    public static string? OpenWithShellAssociation(string path)
+    public static string? OpenWithShellAssociation(string path, string? workingDirectory = null)
     {
         if (string.IsNullOrWhiteSpace(path))
         {
@@ -89,11 +89,7 @@ public static class ExternalToolService
                 return $"対象が見つかりません: {normalized}";
             }
 
-            Process.Start(new ProcessStartInfo
-            {
-                FileName = normalized,
-                UseShellExecute = true
-            });
+            Process.Start(CreateShellAssociationStartInfo(normalized, workingDirectory));
             return null;
         }
         catch (Exception ex)
@@ -101,6 +97,24 @@ public static class ExternalToolService
             LogService.Error($"OpenWithShellAssociation failed. Path: {path}", ex);
             return $"起動に失敗しました: {ex.Message}";
         }
+    }
+
+    internal static ProcessStartInfo CreateShellAssociationStartInfo(
+        string normalizedPath,
+        string? workingDirectory = null)
+    {
+        var startInfo = new ProcessStartInfo
+        {
+            FileName = normalizedPath,
+            UseShellExecute = true
+        };
+
+        if (TryNormalizeExistingDirectory(workingDirectory, out string normalizedWorkingDirectory, out _))
+        {
+            startInfo.WorkingDirectory = normalizedWorkingDirectory;
+        }
+
+        return startInfo;
     }
 
     private static string? LaunchProcess(string exePath, params string[] arguments)
@@ -235,6 +249,159 @@ public static class ExternalToolService
             LogService.Error($"ExecuteShell failed. Cmd: {command}", ex);
             return $"起動に失敗しました: {ex.Message}";
         }
+    }
+
+    /// <summary>
+    /// eXec dialog の Command / Arguments / Working Directory を使ってshell起動する。
+    /// 既存の ExecuteShell と異なり、空のCommandは起動せず、空のWorking Directoryだけを
+    /// 呼び出し元の現在directoryへ解決する。
+    /// </summary>
+    public static string? ExecuteShellCommand(
+        string command,
+        string? arguments,
+        string? workingDirectory,
+        string currentWorkingDirectory)
+    {
+        if (!TryCreateShellCommandStartInfo(
+                command,
+                arguments,
+                workingDirectory,
+                currentWorkingDirectory,
+                out ProcessStartInfo? startInfo,
+                out string error))
+        {
+            return error;
+        }
+
+        try
+        {
+            Process.Start(startInfo!);
+            return null;
+        }
+        catch (Exception ex)
+        {
+            LogService.Error($"ExecuteShellCommand failed. Cmd: {command}", ex);
+            return $"起動に失敗しました: {ex.Message}";
+        }
+    }
+
+    internal static bool TryCreateShellCommandStartInfo(
+        string? command,
+        string? arguments,
+        string? workingDirectory,
+        string currentWorkingDirectory,
+        out ProcessStartInfo? startInfo,
+        out string error)
+    {
+        startInfo = null;
+        error = string.Empty;
+
+        if (string.IsNullOrWhiteSpace(command))
+        {
+            error = "実行するコマンドが指定されていません。";
+            return false;
+        }
+
+        if (!TryResolveShellWorkingDirectory(
+                workingDirectory,
+                currentWorkingDirectory,
+                out string normalizedWorkingDirectory,
+                out error))
+        {
+            return false;
+        }
+
+        (string fileName, string resolvedArguments) = ResolveShellCommandLine(command, arguments);
+        if (string.IsNullOrWhiteSpace(fileName))
+        {
+            error = "実行するコマンドが指定されていません。";
+            return false;
+        }
+
+        startInfo = new ProcessStartInfo
+        {
+            FileName = fileName,
+            Arguments = resolvedArguments,
+            WorkingDirectory = normalizedWorkingDirectory,
+            UseShellExecute = true
+        };
+        return true;
+    }
+
+    private static (string FileName, string Arguments) ResolveShellCommandLine(
+        string command,
+        string? arguments)
+    {
+        string trimmedCommand = command.Trim();
+        if (!string.IsNullOrWhiteSpace(arguments))
+        {
+            return (TrimOuterQuotes(trimmedCommand), arguments.Trim());
+        }
+
+        // A path entered as one field must not be split merely because it contains spaces.
+        if (File.Exists(TrimOuterQuotes(trimmedCommand)) || Directory.Exists(TrimOuterQuotes(trimmedCommand)))
+        {
+            return (TrimOuterQuotes(trimmedCommand), string.Empty);
+        }
+
+        // Keep the existing one-line eXec behavior when the Arguments field is empty.
+        if (trimmedCommand.StartsWith("\"", StringComparison.Ordinal))
+        {
+            int endQuote = trimmedCommand.IndexOf('"', 1);
+            if (endQuote > 0)
+            {
+                return (
+                    trimmedCommand.Substring(1, endQuote - 1),
+                    trimmedCommand[(endQuote + 1)..].Trim());
+            }
+
+            return (trimmedCommand[1..], string.Empty);
+        }
+
+        int spaceIndex = trimmedCommand.IndexOf(' ');
+        if (spaceIndex > 0)
+        {
+            return (
+                trimmedCommand[..spaceIndex],
+                trimmedCommand[(spaceIndex + 1)..].Trim());
+        }
+
+        return (TrimOuterQuotes(trimmedCommand), string.Empty);
+    }
+
+    private static bool TryResolveShellWorkingDirectory(
+        string? workingDirectory,
+        string currentWorkingDirectory,
+        out string normalizedPath,
+        out string error)
+    {
+        normalizedPath = string.Empty;
+        error = string.Empty;
+
+        if (!TryNormalizeExistingDirectory(currentWorkingDirectory, out normalizedPath, out error))
+        {
+            return false;
+        }
+
+        if (string.IsNullOrWhiteSpace(workingDirectory))
+        {
+            return true;
+        }
+
+        string requestedPath = TrimOuterQuotes(workingDirectory.Trim());
+        if (!Path.IsPathRooted(requestedPath))
+        {
+            requestedPath = Path.Combine(normalizedPath, requestedPath);
+        }
+
+        return TryNormalizeExistingDirectory(requestedPath, out normalizedPath, out error);
+    }
+
+    private static string TrimOuterQuotes(string value)
+    {
+        return value.Length >= 2 && value[0] == '"' && value[^1] == '"'
+            ? value[1..^1]
+            : value;
     }
 
     /// <summary>

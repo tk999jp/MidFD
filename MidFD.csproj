@@ -21,6 +21,8 @@
   </ItemGroup>
 
   <ItemGroup>
+    <Content Include="third_party\ripgrep\win-x64\rg.exe" TargetPath="rg.exe" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <Content Include="third_party\ripgrep\LICENSE-MIT;third_party\ripgrep\UNLICENSE;third_party\ripgrep\COPYING;third_party\ripgrep\manifest.json" TargetPath="licenses\ripgrep\%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
     <Content Include="Assets\appicon\MidFD.ico">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>

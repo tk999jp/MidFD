@@ -1,4 +1,5 @@
 using MidFD.Models;
+using MidFD.Runtime;
 using MidFD.Presentation;
 using MidFD.Services;
 
@@ -8,44 +9,38 @@ public partial class MainForm
 {
     private void RefreshBrowserStatusSummary(string? dragStatusText = null)
     {
-        if (_notificationService == null || _uiMode != UIMode.Browser)
+        if (_notificationService == null || _viewerApplicationCoordinator.Mode != ViewerApplicationMode.Browser)
         {
             return;
         }
 
+        ShellClipboardService.TryGetStatus(out var clipboardStatus, out _);
+
         bool canPaste = !IsActiveBrowserTabReadOnly()
             && !IsCurrentDirectoryBusy()
-            && !_isClipboardBusy
-            && !string.IsNullOrWhiteSpace(_navigationService.CurrentPath)
-            && (ShellClipboardService.HasFileDrop()
-                || ShellClipboardService.HasImage()
-                || ((_settings.FileOperations?.ClipboardPasteTextAsFileEnabled ?? false) && ShellClipboardService.HasText()));
+            && !_fileOperationApplicationCoordinator.IsClipboardBusy
+            && !string.IsNullOrWhiteSpace(_browserApplicationCoordinator.CurrentPath)
+            && (clipboardStatus.HasFileDrop
+                || clipboardStatus.HasImage
+                || ((_settingsCoordinator.Value.FileOperations?.ClipboardPasteTextAsFileEnabled ?? false) && clipboardStatus.HasText));
 
         BrowserClipboardStatusMode clipboardMode = BrowserClipboardStatusMode.None;
         int clipboardCount = 0;
-        if (ShellClipboardService.TryGetSnapshot(out var snapshot, out _)
-            && snapshot != null)
+        if (clipboardStatus.HasFileDrop && clipboardStatus.FileDropCount > 0)
         {
-            clipboardMode = snapshot.IsCut ? BrowserClipboardStatusMode.Cut : BrowserClipboardStatusMode.Copy;
-            clipboardCount = snapshot.Paths.Count;
+            clipboardMode = clipboardStatus.IsCut ? BrowserClipboardStatusMode.Cut : BrowserClipboardStatusMode.Copy;
+            clipboardCount = clipboardStatus.FileDropCount;
             canPaste = true;
         }
 
         SelectionResult selection = ResolveSelection();
-        string targetText = selection.Count == 0
-            ? "Target: none"
-            : selection.HasMarkedSelection ? "Target: mark" : "Target: select";
-
-        var state = new BrowserStatusSummaryState
-        {
-            MarkCount = _markedFiles.Count,
-            SelectionCount = selection.Count,
-            TargetText = targetText,
-            ClipboardMode = clipboardMode,
-            ClipboardCount = clipboardCount,
-            CanPaste = canPaste,
-            DragStatusText = dragStatusText
-        };
+        BrowserStatusSummaryState state = BrowserStatusSummaryProjection.Build(
+            _browserApplicationCoordinator.Selection.Count,
+            selection,
+            clipboardMode,
+            clipboardCount,
+            canPaste,
+            dragStatusText);
 
         _notificationService.SetDefaultMessage(
             BrowserStatusSummaryFormatter.Format(state),

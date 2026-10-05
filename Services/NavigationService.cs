@@ -24,7 +24,6 @@ public class NavigationService
     private readonly Stack<string> _backHistory = new();
     private readonly Stack<string> _forwardHistory = new();
     private readonly Dictionary<char, string> _lastVisitedPathByDrive = new();
-    private bool _isNavigatingHistory = false;
 
     public string CurrentPath => _currentPath;
 
@@ -41,7 +40,7 @@ public class NavigationService
         if (string.IsNullOrEmpty(path)) return;
 
         // 履歴移動中でなく、かつパスが実際に変わる場合のみ履歴に積む
-        if (!isHistoryNavigation && !_isNavigatingHistory && !string.IsNullOrEmpty(_currentPath) &&
+        if (!isHistoryNavigation && !string.IsNullOrEmpty(_currentPath) &&
             !string.Equals(_currentPath, path, StringComparison.OrdinalIgnoreCase))
         {
             PushBack(_currentPath);
@@ -108,16 +107,6 @@ public class NavigationService
         _forwardHistory.Pop();
         PushBack(previousPath);
     }
-
-    /// <summary>
-    /// 履歴移動モードに入る（旧 MainForm 互換用。現在は SetCurrentPath の引数利用を推奨）。
-    /// </summary>
-    public void EnterHistoryNavigation() => _isNavigatingHistory = true;
-
-    /// <summary>
-    /// 履歴移動モードを抜ける。
-    /// </summary>
-    public void ExitHistoryNavigation() => _isNavigatingHistory = false;
 
     public NavigationSnapshot CaptureState()
     {
@@ -238,8 +227,13 @@ public class NavigationService
 
         try
         {
-            // 相対パスは _currentPath をベースに解決、絶対パスはそのまま正規化
-            string combined = Path.IsPathRooted(resolved) ? resolved : Path.Combine(_currentPath, resolved);
+            // Windows の root-relative path は現在地の drive/share root を基準に解決する。
+            // UNC absolute path と drive-qualified absolute path は従来の rooted path 分岐へ残す。
+            string combined = TryResolveRootRelativePath(resolved, out string rootRelativePath)
+                ? rootRelativePath
+                : Path.IsPathRooted(resolved)
+                    ? resolved
+                    : Path.Combine(_currentPath, resolved);
             string fullPath = Path.GetFullPath(combined);
 
             // ドライブルートの場合は末尾の \ を削らない
@@ -256,6 +250,39 @@ public class NavigationService
             return resolved; // 異常時は解決済みの値を返す
         }
     }
+
+    private bool TryResolveRootRelativePath(string path, out string resolvedPath)
+    {
+        resolvedPath = path;
+        if (!IsSingleLeadingSeparatorPath(path))
+        {
+            return false;
+        }
+
+        string? currentRoot = Path.GetPathRoot(_currentPath);
+        if (string.IsNullOrWhiteSpace(currentRoot))
+        {
+            return false;
+        }
+
+        resolvedPath = Path.Combine(
+            currentRoot,
+            path.TrimStart(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
+        return true;
+    }
+
+    private static bool IsSingleLeadingSeparatorPath(string path)
+    {
+        if (path.Length == 0 || !IsDirectorySeparator(path[0]))
+        {
+            return false;
+        }
+
+        return path.Length == 1 || !IsDirectorySeparator(path[1]);
+    }
+
+    private static bool IsDirectorySeparator(char value) =>
+        value == Path.DirectorySeparatorChar || value == Path.AltDirectorySeparatorChar;
 
     private static bool IsAsciiLetter(char c)
     {

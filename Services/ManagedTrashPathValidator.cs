@@ -30,7 +30,7 @@ internal sealed class ManagedTrashPathValidator
 
         string fullPath = Normalize(path);
         EnsureContained(fullPath, itemsRoot);
-        EnsureNoReparsePoint(GetValidationRoot(itemsRoot), fullPath);
+        EnsureNoReparseAncestors(GetValidationRoot(itemsRoot), fullPath);
         return fullPath;
     }
 
@@ -103,7 +103,8 @@ internal sealed class ManagedTrashPathValidator
                 return false;
             }
 
-            EnsureNoReparsePoint(GetValidationRoot(normalized), normalized);
+            EnsureNoReparseAncestors(GetValidationRoot(normalized), normalized);
+            if (_isReparsePoint(normalized)) throw new IOException("管理ゴミ箱items rootがreparse pointです。");
             return true;
         }
         catch
@@ -159,21 +160,22 @@ internal sealed class ManagedTrashPathValidator
         return fullPath.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
     }
 
-    private void EnsureNoReparsePoint(string root, string target)
+    private void EnsureNoReparseAncestors(string root, string target)
     {
         if (_isReparsePoint(root)) throw new IOException("管理ゴミ箱rootがreparse pointです。");
 
-        string relative = Path.GetRelativePath(root, target);
+        string ancestorTarget = Path.GetDirectoryName(target) ?? root;
+        string relative = Path.GetRelativePath(root, ancestorTarget);
         string current = root;
         foreach (string segment in relative.Split(
             new[] { Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar },
             StringSplitOptions.RemoveEmptyEntries))
         {
             current = Path.Combine(current, segment);
-            if (_isReparsePoint(current)) throw new IOException($"管理ゴミ箱pathにreparse pointが含まれます: {current}");
+            if (_isReparsePoint(current)) throw new IOException($"管理ゴミ箱pathのancestorにreparse pointが含まれます: {current}");
         }
     }
 
     private static bool IsExistingReparsePoint(string path) =>
-        (File.Exists(path) || Directory.Exists(path)) && ReparsePointHelper.IsReparsePoint(path);
+        ReparsePointHelper.Exists(path) && ReparsePointHelper.IsReparsePoint(path);
 }

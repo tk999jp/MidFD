@@ -9,91 +9,55 @@ using MidFD.Models;
 
 namespace MidFD.Services;
 
+internal interface ICommandPaletteHost : ICommandPaletteLayerHost
+{
+    CommandRegistry GetCommandRegistry();
+    void OpenSettingsForm(SettingsForm.InitialTab initialTab);
+    string GetCurrentFunctionKeyProfileValue();
+    Dictionary<string, List<string>>? GetBrowserKeyCommandOverrides();
+    string ResolveKeyBindingText(string commandId);
+}
+
 public sealed class CommandPaletteSearchContext
 {
-    private readonly Func<CommandRegistry> _registryProvider;
-    private readonly Action<string, CommandScope, string, SelectionResult?> _executor;
-    private readonly Action _openSettingsForm;
-    private readonly Action<SettingsForm.InitialTab> _openSettingsFormWithTab;
-    private readonly Action _showCommandList;
-    private readonly Action _showSystemInformationDialog;
-    private readonly Action _openControlPanel;
-    private readonly Func<SelectionResult> _selectionProvider;
-    private readonly Func<string> _currentBrowserPathProvider;
-    private readonly Action<string> _showArchiveContents;
-    private readonly Action<SevenZipHashAlgorithm> _executeArchiveHash;
-    private readonly Func<string, string> _keyBindingResolver;
+    private readonly ICommandPaletteHost _host;
+    private readonly SelectionResult? _selectionOverride;
 
-    public CommandPaletteSearchContext(
-        Func<CommandRegistry> registryProvider,
-        Action<string, CommandScope, string, SelectionResult?> executor,
-        Action openSettingsForm,
-        Action<SettingsForm.InitialTab> openSettingsFormWithTab,
-        Action showCommandList,
-        Action showSystemInformationDialog,
-        Action openControlPanel,
-        Func<SelectionResult> selectionProvider,
-        Func<string> currentBrowserPathProvider,
-        Action<string> showArchiveContents,
-        Action<SevenZipHashAlgorithm> executeArchiveHash,
-        Func<string, string>? keyBindingResolver = null)
+    internal CommandPaletteSearchContext(ICommandPaletteHost host, SelectionResult? selectionOverride = null)
     {
-        _registryProvider = registryProvider;
-        _executor = executor;
-        _openSettingsForm = openSettingsForm;
-        _openSettingsFormWithTab = openSettingsFormWithTab;
-        _showCommandList = showCommandList;
-        _showSystemInformationDialog = showSystemInformationDialog;
-        _openControlPanel = openControlPanel;
-        _selectionProvider = selectionProvider;
-        _currentBrowserPathProvider = currentBrowserPathProvider;
-        _showArchiveContents = showArchiveContents;
-        _executeArchiveHash = executeArchiveHash;
-        _keyBindingResolver = keyBindingResolver ?? (_ => "未割り当て");
+        _host = host;
+        _selectionOverride = selectionOverride;
     }
 
-    public static implicit operator CommandPaletteSearchContext(MainForm mainForm)
+    public CommandRegistry GetCommandRegistry() => _host.GetCommandRegistry();
+    public bool IsFileOperationBusy => _host.IsFileOperationBusy;
+
+    public void ExecuteCommandFromUi(
+        string commandId,
+        CommandScope scope,
+        string source,
+        SelectionResult? selectionSnapshot = null,
+        SevenZipHashAlgorithm? hashAlgorithm = null)
     {
-        return new CommandPaletteSearchContext(
-            () => mainForm.InvokeGetCommandRegistry(),
-            (id, scope, source, selectionSnapshot) => mainForm.InvokeExecuteCommandFromUi(id, scope, source, selectionSnapshot),
-            () => mainForm.InvokeOpenSettingsForm(),
-            initialTab => mainForm.InvokeOpenSettingsForm(initialTab),
-            () => mainForm.InvokeShowCommandList(),
-            () => mainForm.InvokeShowSystemInformationDialog(),
-            () => mainForm.InvokeOpenControlPanel(),
-            () => mainForm.InvokeResolveSelection(),
-            () => mainForm.InvokeGetCurrentBrowserPath(),
-            path => mainForm.InvokeShowArchiveContents(path),
-            algorithm => _ = mainForm.InvokeExecuteArchiveHashAsync(algorithm),
-            commandId => ResolveKeyBindingText(mainForm, commandId)
-        );
+        _host.ExecuteCommandFromUi(commandId, scope, source, selectionSnapshot, hashAlgorithm);
     }
 
-    public CommandRegistry GetCommandRegistry() => _registryProvider();
-
-    public void ExecuteCommandFromUi(string commandId, CommandScope scope, string source, SelectionResult? selectionSnapshot = null)
+    public void OpenSettingsForm(SettingsForm.InitialTab initialTab) => _host.OpenSettingsForm(initialTab);
+    public SelectionResult ResolveSelection() => _selectionOverride ?? _host.ResolveSelection();
+    public string GetCurrentBrowserPath() => _host.GetCurrentBrowserPath();
+    public IReadOnlyDictionary<string, bool> GetPassiveSelectionPathKinds() => _host.GetPassiveSelectionPathKinds();
+    public void ShowArchiveContents(string archivePath)
     {
-        _executor(commandId, scope, source, selectionSnapshot);
+        _host.ShowArchiveContents(archivePath);
     }
+    public string ResolveKeyBindingText(string commandId) => _host.ResolveKeyBindingText(commandId);
 
-    public void OpenSettingsForm() => _openSettingsForm();
-    public void OpenSettingsForm(SettingsForm.InitialTab initialTab) => _openSettingsFormWithTab(initialTab);
-    public void ShowCommandList() => _showCommandList();
-    public void ShowSystemInformationDialog() => _showSystemInformationDialog();
-    public void OpenControlPanel() => _openControlPanel();
-    public SelectionResult ResolveSelection() => _selectionProvider();
-    public string GetCurrentBrowserPath() => _currentBrowserPathProvider();
-    public void ShowArchiveContents(string archivePath) => _showArchiveContents(archivePath);
-    public void ExecuteArchiveHash(SevenZipHashAlgorithm algorithm) => _executeArchiveHash(algorithm);
-    public string ResolveKeyBindingText(string commandId) => _keyBindingResolver(commandId);
-
-    internal static string ResolveKeyBindingText(MainForm mainForm, string commandId)
+    internal static string ResolveKeyBindingText(ICommandPaletteHost host, string commandId)
     {
         Dictionary<string, string> bindings = BrowserCommandBindingResolver.ResolveEffectiveKeyCommandMap(
-            mainForm.InvokeGetCurrentFunctionKeyProfileValue(),
-            mainForm.InvokeGetBrowserKeyCommandOverrides(),
-            mainForm.InvokeGetCommandRegistry());
+            host.GetCurrentFunctionKeyProfileValue(),
+            host.GetBrowserKeyCommandOverrides(),
+            host.GetCommandRegistry());
 
         string[] gestures = bindings
             .Where(x => string.Equals(x.Value, commandId, StringComparison.OrdinalIgnoreCase))

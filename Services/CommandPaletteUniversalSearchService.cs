@@ -106,7 +106,16 @@ public static class CommandPaletteUniversalSearchService
         ICollection<CommandLauncherCommand> commands)
     {
         TryAddCommand(definitions, CommandIds.BrowserExecute, definition => commands.Add(CreateFunctionCommand(
-            definition, context, "開く", "選択項目をMidFDの対象別動作で開きます。", "open 開く 入る 対象別open")));
+            definition, context, "開く", "カーソル項目をMidFDの対象別動作で開きます。", "open 開く 入る 対象別open",
+            useSelectionSnapshot: false)));
+        TryAddCommand(definitions, CommandIds.BrowserDefaultOpen, definition => commands.Add(CreateFunctionCommand(
+            definition, context, "既定アプリで開く", "カーソル項目を既定アプリで開きます。", "default open 既定アプリ 関連付け 開く",
+            useSelectionSnapshot: false)));
+        TryAddCommand(definitions, CommandIds.BrowserDefaultOpenMarked, definition => commands.Add(CreateFunctionCommand(
+            definition, context, "マークしたファイルを既定アプリで開く", "マークした複数ファイルをWindowsの関連付けでまとめて開きます。", "default open marked 既定アプリ マーク 関連付け 開く",
+            useSelectionSnapshot: true,
+            canExecuteOverride: CanExecuteMarkedDefaultOpen(context),
+            nonExecutableMessage: "2件以上のファイルをマークしてください。")));
         TryAddCommand(definitions, CommandIds.BrowserReload, definition => commands.Add(CreateFunctionCommand(
             definition, context, "再読込", "現在ディレクトリを再読込します。", "reload refresh update 更新 再読込")));
         TryAddCommand(definitions, CommandIds.BrowserOpenExplorer, definition => commands.Add(CreateFunctionCommand(
@@ -122,7 +131,17 @@ public static class CommandPaletteUniversalSearchService
         TryAddCommand(definitions, CommandIds.BrowserSort, definition => commands.Add(CreateFunctionCommand(
             definition, context, "ソート", "ソート設定を開きます。", "sort ソート 順序", CommandPaletteActionKind.OpenDialog)));
         TryAddCommand(definitions, CommandIds.BrowserFilter, definition => commands.Add(CreateFunctionCommand(
-            definition, context, "フィルタ", "フィルタ設定を開きます。", "filter フィルタ 絞り込み", CommandPaletteActionKind.OpenDialog)));
+            definition, context, "フィルタ", "現在の一覧を絞り込みます。", "filter フィルタ 絞り込み", CommandPaletteActionKind.OpenDialog)));
+        TryAddCommand(definitions, CommandIds.BrowserSearch, definition => commands.Add(CreateFunctionCommand(
+            definition, context, "検索", "現在のBrowserタブから再帰的に名前・内容を検索します。", "search find grep 検索 名前 内容", CommandPaletteActionKind.OpenDialog)));
+        TryAddCommand(definitions, CommandIds.BrowserTabGroupCreate, definition => commands.Add(CreateFunctionCommand(
+            definition, context, "タブグループを作成", "Browserタブを新しいグループへ移動します。", "tab group browser group タブグループ グループ 作成", CommandPaletteActionKind.OpenDialog)));
+        TryAddCommand(definitions, CommandIds.BrowserTabGroupAdd, definition => commands.Add(CreateFunctionCommand(
+            definition, context, "タブをグループへ移動", "Browserタブを同じカテゴリのタブグループへ移動します。", "tab group browser group タブ グループ 追加 移動", CommandPaletteActionKind.OpenDialog)));
+        TryAddCommand(definitions, CommandIds.BrowserTabGroupRemove, definition => commands.Add(CreateFunctionCommand(
+            definition, context, "タブをグループから外す", "Browserタブをタブグループから外します。", "tab group browser group タブ グループ 解除 外す")));
+        TryAddCommand(definitions, CommandIds.BrowserTabGroupRename, definition => commands.Add(CreateFunctionCommand(
+            definition, context, "タブグループ名を変更", "タブグループの表示名を変更します。", "tab group browser group タブグループ グループ 名前 変更", CommandPaletteActionKind.OpenDialog)));
         TryAddCommand(definitions, CommandIds.BrowserTree, definition => commands.Add(CreateFunctionCommand(
             definition, context, "ツリー", "ツリーダイアログを開きます。", "tree ツリー", CommandPaletteActionKind.OpenDialog)));
         TryAddCommand(definitions, CommandIds.BrowserLogdisk, definition => commands.Add(CreateFunctionCommand(
@@ -204,11 +223,12 @@ public static class CommandPaletteUniversalSearchService
     private static void AddArchiveCandidates(CommandPaletteSearchContext context, ICollection<CommandLauncherCommand> commands)
     {
         SelectionResult selection = context.ResolveSelection();
-        bool hasArchiveSelection = selection.Count > 0 &&
-            selection.FullPaths.All(path => File.Exists(path) && ArchiveFileTypeHelper.IsArchive(path));
-        bool hasHashableSelection = selection.Count > 0 &&
-            selection.FullPaths.All(File.Exists) &&
-            !selection.FullPaths.Any(Directory.Exists);
+        BrowserPassiveSelectionFacts facts = BrowserPassiveSelectionFacts.Resolve(
+            selection,
+            context.GetPassiveSelectionPathKinds(),
+            allowFileSystemFallback: false);
+        bool hasArchiveSelection = facts.HasArchiveSelection;
+        bool hasHashableSelection = facts.HasHashableSelection;
 
         if (hasArchiveSelection)
         {
@@ -219,7 +239,9 @@ public static class CommandPaletteUniversalSearchService
                 "選択中アーカイブの内容を表示します。",
                 $"7zip 7-zip zip archive アーカイブ list 一覧 情報 表示 {archiveTarget}",
                 CommandPaletteActionKind.OpenDialog,
-                () => context.ShowArchiveContents(selection.FirstPath!)));
+                () => context.ShowArchiveContents(selection.FirstPath!),
+                canExecute: () => CommandBusyPolicy.CanExecute(CommandBusyBehavior.Block, context.IsFileOperationBusy),
+                nonExecutableMessage: "ファイル操作中は実行できません。"));
         }
 
         if (!hasHashableSelection)
@@ -234,28 +256,36 @@ public static class CommandPaletteUniversalSearchService
             "選択ファイルの SHA256 を計算します。",
             $"7zip 7-zip zip archive アーカイブ hash sha sha256 checksum チェックサム 検査 {hashTarget}",
             CommandPaletteActionKind.Execute,
-            () => context.ExecuteArchiveHash(SevenZipHashAlgorithm.Sha256)));
+            () => context.ExecuteCommandFromUi(CommandIds.ArchiveHash, CommandScope.Browser, "CommandPalette.UniversalSearch.ArchiveHash", selection, SevenZipHashAlgorithm.Sha256),
+            canExecute: () => CommandBusyPolicy.CanStartFileOperation(context.IsFileOperationBusy),
+            nonExecutableMessageProvider: () => context.IsFileOperationBusy ? "ファイル操作中は実行できません。" : null));
         commands.Add(CreateSyntheticFunctionCommand(
             "function.archive.hash.crc32",
             "CRC32を計算",
             "選択ファイルの CRC32 を計算します。",
             $"7zip 7-zip zip archive アーカイブ hash crc crc32 checksum チェックサム 検査 {hashTarget}",
             CommandPaletteActionKind.Execute,
-            () => context.ExecuteArchiveHash(SevenZipHashAlgorithm.Crc32)));
+            () => context.ExecuteCommandFromUi(CommandIds.ArchiveHash, CommandScope.Browser, "CommandPalette.UniversalSearch.ArchiveHash", selection, SevenZipHashAlgorithm.Crc32),
+            canExecute: () => CommandBusyPolicy.CanStartFileOperation(context.IsFileOperationBusy),
+            nonExecutableMessageProvider: () => context.IsFileOperationBusy ? "ファイル操作中は実行できません。" : null));
         commands.Add(CreateSyntheticFunctionCommand(
             "function.archive.hash.sha1",
             "SHA1を計算",
             "選択ファイルの SHA1 を計算します。",
             $"7zip 7-zip zip archive アーカイブ hash sha sha1 checksum チェックサム 検査 {hashTarget}",
             CommandPaletteActionKind.Execute,
-            () => context.ExecuteArchiveHash(SevenZipHashAlgorithm.Sha1)));
+            () => context.ExecuteCommandFromUi(CommandIds.ArchiveHash, CommandScope.Browser, "CommandPalette.UniversalSearch.ArchiveHash", selection, SevenZipHashAlgorithm.Sha1),
+            canExecute: () => CommandBusyPolicy.CanStartFileOperation(context.IsFileOperationBusy),
+            nonExecutableMessageProvider: () => context.IsFileOperationBusy ? "ファイル操作中は実行できません。" : null));
         commands.Add(CreateSyntheticFunctionCommand(
             "function.archive.hash.all",
             "ハッシュをまとめて計算",
             "選択ファイルの主要ハッシュをまとめて計算します。",
             $"7zip 7-zip zip archive アーカイブ hash sha sha256 sha1 crc all checksum チェックサム 検査 {hashTarget}",
             CommandPaletteActionKind.Execute,
-            () => context.ExecuteArchiveHash(SevenZipHashAlgorithm.All)));
+            () => context.ExecuteCommandFromUi(CommandIds.ArchiveHash, CommandScope.Browser, "CommandPalette.UniversalSearch.ArchiveHash", selection, SevenZipHashAlgorithm.All),
+            canExecute: () => CommandBusyPolicy.CanStartFileOperation(context.IsFileOperationBusy),
+            nonExecutableMessageProvider: () => context.IsFileOperationBusy ? "ファイル操作中は実行できません。" : null));
     }
 
     private static void AddFileOperationCandidates(
@@ -415,10 +445,13 @@ public static class CommandPaletteUniversalSearchService
                 IsDestructive = true
             });
 
-        bool archiveSelection = selection.Count > 0 &&
-            selection.FullPaths.All(path => File.Exists(path) && ArchiveFileTypeHelper.IsArchive(path));
-        bool archiveOperands = selection.Count > 0 &&
-            selection.FullPaths.All(path => File.Exists(path) || Directory.Exists(path));
+        BrowserPassiveSelectionFacts passiveFacts = BrowserPassiveSelectionFacts.Resolve(
+            selection,
+            context.GetPassiveSelectionPathKinds(),
+            allowFileSystemFallback: false);
+        bool archiveSelection = passiveFacts.HasArchiveSelection;
+        bool archiveOperands = passiveFacts.HasSelection &&
+            passiveFacts.OpenSelectionKind is not BrowserOpenSelectionKind.Invalid and not BrowserOpenSelectionKind.None;
 
         AddConfirmedCommand(
             registry,
@@ -473,8 +506,20 @@ public static class CommandPaletteUniversalSearchService
         string title,
         string subtitle,
         string keywords,
-        CommandPaletteActionKind actionKind = CommandPaletteActionKind.Execute)
+        CommandPaletteActionKind actionKind = CommandPaletteActionKind.Execute,
+        bool useSelectionSnapshot = true,
+        bool canExecuteOverride = true,
+        string? nonExecutableMessage = null)
     {
+        bool available = canExecuteOverride && CommandBusyPolicy.CanExecute(
+            CommandBusyPolicy.GetBehavior(definition.Id),
+            context.IsFileOperationBusy);
+        string? unavailableMessage = available
+            ? null
+            : context.IsFileOperationBusy && canExecuteOverride
+                ? "ファイル操作中は実行できません。"
+                : nonExecutableMessage;
+
         return CreateCommand(
             definition,
             "機能",
@@ -483,8 +528,27 @@ public static class CommandPaletteUniversalSearchService
             subtitle,
             keywords,
             actionKind,
-            () => context.ExecuteCommandFromUi(definition.Id, definition.Scope, "CommandPaletteFunctionalSearch"),
-            context.ResolveKeyBindingText(definition.Id));
+            () => context.ExecuteCommandFromUi(
+                definition.Id,
+                definition.Scope,
+                "CommandPaletteFunctionalSearch",
+                useSelectionSnapshot ? context.ResolveSelection() : null),
+            context.ResolveKeyBindingText(definition.Id),
+            safetyLevel: canExecuteOverride ? CommandPaletteSafetyLevel.Safe : CommandPaletteSafetyLevel.Unsupported,
+            canExecute: () => available,
+            nonExecutableMessage: unavailableMessage);
+    }
+
+    private static bool CanExecuteMarkedDefaultOpen(CommandPaletteSearchContext context)
+    {
+        SelectionResult selection = context.ResolveSelection();
+        BrowserPassiveSelectionFacts facts = BrowserPassiveSelectionFacts.Resolve(
+            selection,
+            context.GetPassiveSelectionPathKinds(),
+            allowFileSystemFallback: false);
+        return selection.HasMarkedSelection
+            && selection.Count >= 2
+            && facts.OpenSelectionKind == BrowserOpenSelectionKind.MultipleFiles;
     }
 
     private static CommandLauncherCommand CreateSettingsCommand(
@@ -496,14 +560,13 @@ public static class CommandPaletteUniversalSearchService
         string keywords,
         CommandPaletteActionKind actionKind)
     {
-        Action execute = definition.Id switch
-        {
-            CommandIds.AppOpenSettings => context.OpenSettingsForm,
-            CommandIds.AppOpenCommandList => context.ShowCommandList,
-            CommandIds.AppOpenSystemInformation => context.ShowSystemInformationDialog,
-            CommandIds.AppOpenControlPanel => context.OpenControlPanel,
-            _ => () => context.ExecuteCommandFromUi(definition.Id, definition.Scope, "CommandPaletteFunctionalSearch")
-        };
+        Action execute = () => context.ExecuteCommandFromUi(
+            definition.Id,
+            definition.Scope,
+            "CommandPaletteFunctionalSearch");
+        bool available = CommandBusyPolicy.CanExecute(
+            CommandBusyPolicy.GetBehavior(definition.Id),
+            context.IsFileOperationBusy);
 
         return CreateCommand(
             definition,
@@ -514,7 +577,9 @@ public static class CommandPaletteUniversalSearchService
             keywords,
             actionKind,
             execute,
-            context.ResolveKeyBindingText(definition.Id));
+            context.ResolveKeyBindingText(definition.Id),
+            canExecute: () => available,
+            nonExecutableMessage: available ? null : "ファイル操作中は実行できません。");
     }
 
     private static CommandLauncherCommand CreateSyntheticSettingsCommand(
@@ -546,7 +611,10 @@ public static class CommandPaletteUniversalSearchService
         CommandPaletteActionKind actionKind,
         Action execute,
         CommandPaletteSafetyLevel safetyLevel = CommandPaletteSafetyLevel.Safe,
-        CommandPaletteSafetyInfo? safetyInfo = null)
+        CommandPaletteSafetyInfo? safetyInfo = null,
+        Func<bool>? canExecute = null,
+        string? nonExecutableMessage = null,
+        Func<string?>? nonExecutableMessageProvider = null)
     {
         return new CommandLauncherCommand
         {
@@ -563,7 +631,9 @@ public static class CommandPaletteUniversalSearchService
             ActionKind = actionKind,
             SafetyLevel = safetyLevel,
             SafetyInfo = safetyInfo ?? new CommandPaletteSafetyInfo(),
-            CanExecute = () => true,
+            CanExecute = canExecute ?? (() => true),
+            NonExecutableMessage = nonExecutableMessage,
+            NonExecutableMessageProvider = nonExecutableMessageProvider,
             Execute = execute,
             Category = "Archive",
             LayerKind = "機能",
@@ -641,6 +711,15 @@ public static class CommandPaletteUniversalSearchService
     {
         TryAddCommand(registry, definitions, commandId, definition =>
         {
+            bool available = canExecute && CommandBusyPolicy.CanExecute(
+                CommandBusyPolicy.GetBehavior(definition.Id),
+                context.IsFileOperationBusy);
+            string? unavailableMessage = available
+                ? null
+                : context.IsFileOperationBusy && canExecute
+                    ? "ファイル操作中は実行できません。"
+                    : nonExecutableMessage;
+
             commands.Add(CreateCommand(
                 definition,
                 "機能",
@@ -653,8 +732,8 @@ public static class CommandPaletteUniversalSearchService
                 context.ResolveKeyBindingText(definition.Id),
                 canExecute ? CommandPaletteSafetyLevel.Confirm : CommandPaletteSafetyLevel.Unsupported,
                 safetyInfo,
-                canExecute ? () => true : () => false,
-                nonExecutableMessage));
+                () => available,
+                unavailableMessage));
         });
     }
 

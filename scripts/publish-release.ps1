@@ -142,6 +142,8 @@ function Test-ForbiddenPackagePath([string]$relativePath) {
 }
 
 function Assert-PackageContents([string]$packageRoot) {
+    . (Join-Path $PSScriptRoot 'ripgrep-bundle.ps1')
+    Assert-RipgrepBundle -PackageRoot $packageRoot
     $requiredRootFiles = @(
         "MidFD.exe",
         "MidFD.FileOperationHelper.exe",

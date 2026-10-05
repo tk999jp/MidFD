@@ -6,6 +6,7 @@ using System.Linq;
 using System.Windows.Forms;
 using MidFD.Configuration;
 using MidFD.Models;
+using MidFD.Runtime;
 using MidFD.Services;
 using MidFD.Services.TrashManifestStore;
 
@@ -14,17 +15,17 @@ namespace MidFD.Dialogs;
 public sealed class ManagedTrashDialog : Form
 {
     private readonly AppSettings _settings;
-    private readonly FileOperationUndoRedoService? _undoRedoService;
+    private readonly FileOperationApplicationCoordinator _fileOperations;
     private readonly DataGridView _grid;
     private readonly Label _summaryLabel;
     private readonly List<Button> _mutationButtons = new();
     private readonly Button _restoreButton;
     private readonly Button _deleteButton;
 
-    public ManagedTrashDialog(AppSettings settings, FileOperationUndoRedoService? undoRedoService)
+    internal ManagedTrashDialog(AppSettings settings, FileOperationApplicationCoordinator fileOperations)
     {
         _settings = settings ?? throw new ArgumentNullException(nameof(settings));
-        _undoRedoService = undoRedoService;
+        _fileOperations = fileOperations ?? throw new ArgumentNullException(nameof(fileOperations));
 
         Text = "MidFD管理ゴミ箱の確認・管理";
         Size = new Size(1000, 600);
@@ -292,42 +293,21 @@ public sealed class ManagedTrashDialog : Form
             return;
         }
 
-        int successCount = 0;
-        var errors = new List<string>();
-
-        foreach (DataGridViewRow row in selectedRows)
-        {
-            if (row.Tag is not ManagedTrashRecordView view || !view.CanRestore)
-            {
-                errors.Add("復元できないrecordが選択されています。状態を確認してください。");
-                continue;
-            }
-            TrashManifestRecord record = view.Record;
-
-            try
-            {
-                var item = new FileOperationUndoRedoItem
-                {
-                    BeforePath = record.OriginalPath,
-                    BeforeName = record.OriginalName,
-                    RecycleBinPath = record.TrashPath,
-                    RecycleBinDeletedAtUtc = record.DeletedAtUtc
-                };
-
-                MidFdManagedTrashService.RestoreFromTrash(item, skipStatusUpdate: false);
-                successCount++;
-            }
-            catch (Exception ex)
-            {
-                errors.Add($"復元失敗: {record.OriginalName}\r\n原因: {ex.Message}");
-            }
-        }
+        var selected = selectedRows
+            .Select(static row => row.Tag)
+            .OfType<ManagedTrashRecordView>()
+            .ToList();
+        ManagedTrashOperationResult operation = _fileOperations.RestoreManagedTrash(selected);
+        int successCount = operation.SuccessCount;
+        List<ManagedTrashOperationFailure> errors = operation.Failures.ToList();
 
         LoadTrashRecords();
 
         if (errors.Count > 0)
         {
-            string errSummary = string.Join("\r\n\r\n", errors.Take(5));
+            string errSummary = string.Join(
+                "\r\n\r\n",
+                errors.Take(5).Select(static error => $"復元失敗: {error.ItemName}\r\n原因: {error.Detail}"));
             if (errors.Count > 5)
             {
                 errSummary += $"\r\n\r\n他 {errors.Count - 5} 件のエラーがあります。";
@@ -358,22 +338,12 @@ public sealed class ManagedTrashDialog : Form
 
         if (result != DialogResult.Yes) return;
 
-        int successCount = 0;
-        foreach (DataGridViewRow row in selectedRows)
-        {
-            if (row.Tag is not ManagedTrashRecordView view || !view.CanDeletePhysicalItem) continue;
-            TrashManifestRecord record = view.Record;
-
-            try
-            {
-                MidFdManagedTrashService.DeleteFromTrashForever(record.TrashPath, _undoRedoService);
-                successCount++;
-            }
-            catch (Exception ex)
-            {
-                LogService.Warn($"[ManagedTrashDialog] Failed to delete item forever. path={record.TrashPath}, error={ex.Message}");
-            }
-        }
+        var selected = selectedRows
+            .Select(static row => row.Tag)
+            .OfType<ManagedTrashRecordView>()
+            .ToList();
+        ManagedTrashOperationResult operation = _fileOperations.DeleteManagedTrashForever(selected);
+        int successCount = operation.SuccessCount;
 
         LoadTrashRecords();
         MessageBox.Show($"{successCount} 件の項目を完全に削除しました。", "完了", MessageBoxButtons.OK, MessageBoxIcon.Information);
@@ -390,30 +360,28 @@ public sealed class ManagedTrashDialog : Form
 
         if (result != DialogResult.Yes) return;
 
-        try
+        ManagedTrashOperationResult operation = _fileOperations.EmptyManagedTrash();
+        if (operation.ExitStatus == FileOpExitStatus.Error)
         {
-            MidFdManagedTrashService.EmptyTrash();
-            LoadTrashRecords();
-            MessageBox.Show("ゴミ箱を空にしました。", "完了", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            MessageBox.Show($"ゴミ箱のクリアに失敗しました。Error={operation.ErrorMessage ?? "不明なエラー"}", "エラー", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            return;
         }
-        catch (Exception ex)
-        {
-            MessageBox.Show($"ゴミ箱のクリアに失敗しました。Error={ex.Message}", "エラー", MessageBoxButtons.OK, MessageBoxIcon.Error);
-        }
+
+        LoadTrashRecords();
+        MessageBox.Show("ゴミ箱を空にしました。", "完了", MessageBoxButtons.OK, MessageBoxIcon.Information);
     }
 
     private void ExecuteCleanMissing()
     {
-        try
+        ManagedTrashOperationResult operation = _fileOperations.CleanMissingManagedTrash();
+        if (operation.ExitStatus == FileOpExitStatus.Error)
         {
-            int missingCount = MidFdManagedTrashService.CleanMissingTrashRecords(_undoRedoService);
-            LoadTrashRecords();
-            MessageBox.Show($"{missingCount} 件の欠損レコードを掃除しました。", "完了", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            MessageBox.Show($"欠損レコードの掃除に失敗しました。Error={operation.ErrorMessage ?? "不明なエラー"}", "エラー", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            return;
         }
-        catch (Exception ex)
-        {
-            MessageBox.Show($"欠損レコードの掃除に失敗しました。Error={ex.Message}", "エラー", MessageBoxButtons.OK, MessageBoxIcon.Error);
-        }
+
+        LoadTrashRecords();
+        MessageBox.Show($"{operation.SuccessCount} 件の欠損レコードを掃除しました。", "完了", MessageBoxButtons.OK, MessageBoxIcon.Information);
     }
 
     private static string FormatSize(long bytes)

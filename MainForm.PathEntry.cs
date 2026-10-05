@@ -2,6 +2,7 @@ using System.Drawing;
 using System.Windows.Forms;
 using MidFD.Helpers;
 using MidFD.Models;
+using MidFD.Runtime;
 using MidFD.Services;
 
 namespace MidFD;
@@ -23,7 +24,8 @@ public partial class MainForm
 
     private void OpenBrowserPathEntry()
     {
-        if (_uiMode != UIMode.Browser || IsCurrentDirectoryBusy())
+        ClearBrowserNamePrefixJump();
+        if (_viewerApplicationCoordinator.Mode != ViewerApplicationMode.Browser || IsCurrentDirectoryBusy())
         {
             return;
         }
@@ -34,7 +36,7 @@ public partial class MainForm
             return;
         }
 
-        _browserPathEntryTextBox.Text = _navigationService.CurrentPath;
+        _browserPathEntryTextBox.Text = _browserApplicationCoordinator.CurrentPath;
         ShowBrowserPathEntryEditor();
         _browserPathEntryCompletionController?.ShowHistoryCandidates();
     }
@@ -80,9 +82,9 @@ public partial class MainForm
                     return Task.Run(() =>
                     {
                         var all = Services.BrowserPathEntryCandidateService.BuildCandidates(
-                            _navigationService,
-                            _quickAccessStore,
-                            GetSharedDirectoryMoveHistory());
+                            _browserApplicationCoordinator.NavigationSnapshot,
+                            _browserApplicationCoordinator.Workspace.QuickAccessSnapshot,
+                            _settingsCoordinator.GetDirectoryMoveHistory());
                         if (string.IsNullOrWhiteSpace(text))
                         {
                             return all.ToList();
@@ -291,7 +293,7 @@ public partial class MainForm
 
         BrowserPathEntryApplyResult result = BrowserPathEntryCoordinator.Apply(
             _browserPathEntryTextBox.Text,
-            _navigationService,
+            _browserApplicationCoordinator.NormalizeDestinationDirectory,
             navigateDirectory: path =>
             {
                 NavigateToLocationDirectory(path);
@@ -314,7 +316,9 @@ public partial class MainForm
 
     private string? TryOpenBrowserPathEntryFile(string fullPath)
     {
-        return ExternalToolService.OpenWithShellAssociation(fullPath);
+        return ExternalToolService.OpenWithShellAssociation(
+            fullPath,
+            _browserApplicationCoordinator.CurrentPath);
     }
 
     private void CancelBrowserPathEntry()
@@ -351,9 +355,8 @@ public partial class MainForm
 
     private bool NavigateToLocationDirectory(string resolvedPath)
     {
-        return ExecuteDirectoryNavigationRequest(
-            _browserNavigationCoordinator.CreateDirectoryNavigationRequest(resolvedPath),
-            onNavigationSucceeded: () => AddDirectoryMoveHistory(resolvedPath),
-            onDirectoryMissing: missingPath => ShowStatusMessage(BrowserPathEntryNavigationService.BuildMissingPathMessage(missingPath), 2000));
+        return ExecuteConfirmedUserDirectoryNavigation(
+            resolvedPath,
+            recordDirectoryMoveHistory: true);
     }
 }

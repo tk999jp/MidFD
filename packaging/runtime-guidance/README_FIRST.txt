@@ -53,6 +53,9 @@ Command PromptまたはPowerShellで次を実行します。
 外部tool
 ----------------------------------------------------------------------
 
+内容検索用ripgrep 15.2.0 (rg.exe) は同梱済みで、別途導入は不要です。
+rg.exeとlicenses/ripgrep folderをMidFD.exeと同じ配布folderに保持してください。
+
 MidFDには次の外部toolを同梱していません。
 
 - 7-Zip
@@ -75,6 +78,11 @@ MidFDには次の外部toolを同梱していません。
 
 - MidFD.exe
 - MidFD.FileOperationHelper.exe
+- rg.exe
+- licenses/ripgrep/LICENSE-MIT
+- licenses/ripgrep/UNLICENSE
+- licenses/ripgrep/COPYING
+- licenses/ripgrep/manifest.json
 - README_FIRST.txt
 - README.md
 - CHANGELOG.md

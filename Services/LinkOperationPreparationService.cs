@@ -109,6 +109,11 @@ internal static class LinkOperationPreparationService
                 false);
         }
 
+        if (cancellationToken.IsCancellationRequested)
+        {
+            return new LinkOperationPreparationResult(plan, excluded, successfulSources, successfulTopLevel, partialTopLevel, 0, 0, true);
+        }
+
         LinkOperationDecision decision = chooseDecision(plan);
         if (decision == LinkOperationDecision.Cancel)
         {
@@ -129,9 +134,15 @@ internal static class LinkOperationPreparationService
                 false);
         }
 
+        if (cancellationToken.IsCancellationRequested)
+        {
+            return new LinkOperationPreparationResult(plan, excluded, successfulSources, successfulTopLevel, partialTopLevel, 0, 0, true);
+        }
+
         List<string> createdParents = ensureDestinationParents(plan);
         try
         {
+            cancellationToken.ThrowIfCancellationRequested();
             var helperItems = plan.Items.Select((item, index) => new ElevatedLinkCopyItem
             {
                 ItemId = $"{itemIdPrefix}-{index}",
@@ -156,6 +167,11 @@ internal static class LinkOperationPreparationService
             return new LinkOperationPreparationResult(plan, excluded, successfulSources, successfulTopLevel, partialTopLevel, 0, partialTopLevel.Count, false);
         }
         catch (ElevatedLinkCopyCanceledException)
+        {
+            cleanupCreatedParents(createdParents);
+            return new LinkOperationPreparationResult(plan, excluded, successfulSources, successfulTopLevel, partialTopLevel, 0, 0, true);
+        }
+        catch (OperationCanceledException)
         {
             cleanupCreatedParents(createdParents);
             return new LinkOperationPreparationResult(plan, excluded, successfulSources, successfulTopLevel, partialTopLevel, 0, 0, true);

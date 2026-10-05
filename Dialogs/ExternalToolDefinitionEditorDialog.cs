@@ -247,8 +247,16 @@ public class ExternalToolDefinitionEditorDialog : Form
 
         try
         {
+            List<ExternalToolCommandDefinition> previousTools = _store.Tools;
             _store.Tools = _workingTools;
-            ExternalToolCommandStorage.Save(_store);
+            if (!ExternalToolCommandStorage.Save(_store))
+            {
+                _store.Tools = previousTools;
+                MessageBox.Show(this, "外部ツール定義を保存できませんでした。", "保存エラー", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                DialogResult = DialogResult.None;
+                return;
+            }
+
             DialogResult = DialogResult.OK;
             Close();
         }

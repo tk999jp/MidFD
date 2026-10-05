@@ -68,13 +68,42 @@ public static class PathTextIntakeService
             bool resolved = false;
             foreach (string extracted in ExtractCandidates(candidate))
             {
-                candidate = ExpandAndTrim(extracted);
-                if (candidate.Length == 0) continue;
-                resolved |= TryAddCandidate(candidate, currentDirectory, repositoryRoot, applicationDirectory, includeDirectories, result, seen);
+                foreach (string pathCandidate in EnumeratePathCandidates(extracted))
+                {
+                    if (pathCandidate.Length == 0) continue;
+                    if (TryAddCandidate(pathCandidate, currentDirectory, repositoryRoot, applicationDirectory, includeDirectories, result, seen))
+                    {
+                        resolved = true;
+                        break;
+                    }
+                }
             }
             if (!resolved) invalidPathCount++;
         }
         return new PathTextIntakeResult(result, invalidPathCount);
+    }
+
+    internal static IEnumerable<string> EnumeratePathCandidates(string? value)
+    {
+        string literal = TrimWrappers(value);
+        if (literal.Length == 0) yield break;
+        yield return literal;
+
+        string expanded = Environment.ExpandEnvironmentVariables(literal);
+        if (!string.Equals(expanded, literal, StringComparison.OrdinalIgnoreCase))
+        {
+            yield return expanded;
+        }
+    }
+
+    private static string TrimWrappers(string? value)
+    {
+        string text = (value ?? string.Empty).Trim();
+        if (text.Length >= 2 && ((text[0] == '"' && text[^1] == '"') || (text[0] == '`' && text[^1] == '`')))
+        {
+            text = text[1..^1].Trim();
+        }
+        return text;
     }
 
     private static bool TryAddCandidate(string candidate, string? currentDirectory, string? repositoryRoot, string? applicationDirectory, bool includeDirectories, List<string> result, HashSet<string> seen)
@@ -112,7 +141,7 @@ public static class PathTextIntakeService
         {
             value = value[(value.IndexOf(':') + 1)..].Trim();
         }
-        return ExpandAndTrim(value);
+        return value.Trim();
     }
 
     private static IEnumerable<string> ExtractCandidates(string value)

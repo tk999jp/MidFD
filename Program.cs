@@ -218,6 +218,7 @@ static class Program
             }
 
             Services.FeatureProfileService.ApplyRuntimeProfile(settings, dialog.SelectedProfile, settingsLoadMetadata.IsMouseGesturesExplicit);
+            settings.WorkspaceSnapshotEnabledOverride = dialog.WorkspaceSnapshotEnabledOverride;
             settings.Input ??= new Configuration.InputSettings();
             settings.FileOperations ??= new Configuration.FileOperationsSettings();
             settings.Preview ??= new Configuration.PreviewSettings();

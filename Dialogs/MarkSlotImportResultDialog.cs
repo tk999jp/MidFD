@@ -99,7 +99,11 @@ public sealed class MarkSlotImportResultDialog : Form
             ? $"\n末尾RESULT採用（過去{result.IgnoredEarlierResultCount}件を無視）"
             : string.Empty;
         int unresolvedCount = result.UnresolvedPaths?.Count ?? 0;
-        return $"現在Markへ登録: {result.RegisteredCount}件\n未解決: {unresolvedCount}件（削除・不存在: {result.MissingFileCount}件 / directory: {result.DirectoryPathCount}件） / 重複: {result.DuplicatePathCount}件{ignored}";
+        int reportedCount = result.RegisteredCount
+            + result.MissingFileCount
+            + result.DirectoryPathCount
+            + result.DuplicatePathCount;
+        return $"現在Markに反映: {result.RegisteredCount}件（RESULT報告{reportedCount}件中の有効file）\n未解決: {unresolvedCount}件（削除・不存在: {result.MissingFileCount}件 / directory: {result.DirectoryPathCount}件） / 重複: {result.DuplicatePathCount}件{ignored}";
     }
 
     private static string GetRelativePath(string? repositoryRoot, string fullPath)

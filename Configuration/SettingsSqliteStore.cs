@@ -51,7 +51,9 @@ public sealed class SettingsSqliteStore
                 }
                 catch (Exception primaryException)
                 {
-                    result = CreateRecoveryFailedResult(ClassifyLoadFailure(primaryException));
+                    result = CreateRecoveryFailedResult(
+                        ClassifyLoadFailure(primaryException),
+                        protectPrimaryPayload: primaryException is SettingsVersionException);
                 }
                 if (result.CanWritePrimary)
                 {
@@ -179,7 +181,7 @@ public sealed class SettingsSqliteStore
             {
                 FormatVersion = 1,
                 PayloadVersion = CurrentPayloadVersion,
-                Settings = settings
+                Settings = JsonSerializer.SerializeToElement(settings, JsonOptions)
             }, JsonOptions);
             File.WriteAllText(Path.GetFullPath(targetPath), json);
             return new SettingsTransferResult(true, string.Empty, null, settings);
@@ -197,7 +199,7 @@ public sealed class SettingsSqliteStore
             string json = File.ReadAllText(Path.GetFullPath(sourcePath));
             SettingsTransferDocument document = JsonSerializer.Deserialize<SettingsTransferDocument>(json, JsonOptions)
                 ?? throw new JsonException("Settings transfer document is empty.");
-            if (document.FormatVersion != 1 || document.Settings == null)
+            if (document.FormatVersion != 1 || document.Settings.ValueKind is JsonValueKind.Null or JsonValueKind.Undefined)
             {
                 throw new JsonException("Unsupported settings transfer document.");
             }
@@ -216,8 +218,10 @@ public sealed class SettingsSqliteStore
                     payloadDecision.Status);
             }
 
-            document.Settings.NormalizeChildren();
-            return new SettingsTransferResult(true, string.Empty, null, document.Settings);
+            AppSettings settings = document.Settings.Deserialize<AppSettings>(JsonOptions)
+                ?? throw new JsonException("Settings transfer payload is empty.");
+            settings.NormalizeChildren();
+            return new SettingsTransferResult(true, string.Empty, null, settings);
         }
         catch (Exception ex)
         {
@@ -260,9 +264,6 @@ public sealed class SettingsSqliteStore
         }
 
         int payloadVersion = reader.GetInt32(1);
-        string payloadJson = reader.GetString(2);
-        AppSettings settings = JsonSerializer.Deserialize<AppSettings>(payloadJson, JsonOptions) ?? new AppSettings();
-        settings.NormalizeChildren();
         var metadata = new SettingsManager.SettingsLoadMetadata
         {
             IsProfileExplicit = reader.GetInt32(3) != 0,
@@ -285,6 +286,9 @@ public sealed class SettingsSqliteStore
                 ProtectedPrimaryPayloadStatus: payloadDecision.Status);
         }
 
+        string payloadJson = reader.GetString(2);
+        AppSettings settings = JsonSerializer.Deserialize<AppSettings>(payloadJson, JsonOptions) ?? new AppSettings();
+        settings.NormalizeChildren();
         return new SettingsLoadResult(
             settings,
             metadata,
@@ -470,13 +474,14 @@ public sealed class SettingsSqliteStore
             : null;
     }
 
-    private static SettingsLoadResult CreateRecoveryFailedResult(SettingsLoadStatus status)
+    private static SettingsLoadResult CreateRecoveryFailedResult(SettingsLoadStatus status, bool protectPrimaryPayload = false)
     {
         return new SettingsLoadResult(
             new AppSettings(),
             new SettingsManager.SettingsLoadMetadata { LoadKind = SettingsManager.SettingsLoadKind.RecoveryFailed },
             status,
-            CanWritePrimary: false);
+            CanWritePrimary: false,
+            PrimaryPayloadProtected: protectPrimaryPayload);
     }
 
     private BackupGenerationStatus CreateAndRotateBackup(string sourcePath, string snapshotPath)
@@ -636,7 +641,7 @@ public sealed class SettingsSqliteStore
     {
         public int FormatVersion { get; set; }
         public int PayloadVersion { get; set; }
-        public AppSettings? Settings { get; set; }
+        public JsonElement Settings { get; set; }
     }
 
     private static PayloadVersionDecision EvaluatePayloadVersion(int payloadVersion)

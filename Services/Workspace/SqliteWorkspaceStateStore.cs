@@ -24,7 +24,10 @@ public sealed class SqliteWorkspaceStateStore : IWorkspaceStateStore
     public WorkspaceState? Load()
     {
         if (!File.Exists(_dbPath)) return null;
-        using SqliteConnection connection = OpenReadOnlyConnection();
+        using var read = WorkspaceReadConnection.Open(_dbPath);
+        SqliteConnection connection = read.Connection;
+        // All tables/meta belong to one committed WAL snapshot, including concurrent saves.
+        using SqliteTransaction transaction = connection.BeginTransaction(deferred: true);
 
         string? activeCategoryId = ReadMeta(connection, "active_category_id");
         string? savedAtValue = ReadMeta(connection, "saved_at_utc");
@@ -126,14 +129,6 @@ public sealed class SqliteWorkspaceStateStore : IWorkspaceStateStore
         ExecuteNonQuery(connection, null, "PRAGMA journal_mode=WAL;");
         ExecuteNonQuery(connection, null, "PRAGMA synchronous=NORMAL;");
         InitializeSchema(connection);
-        return connection;
-    }
-
-    private SqliteConnection OpenReadOnlyConnection()
-    {
-        string immutableUri = $"file:{Path.GetFullPath(_dbPath).Replace('\\', '/')}?immutable=1";
-        var connection = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = immutableUri, Mode = SqliteOpenMode.ReadOnly, Pooling = false }.ToString());
-        connection.Open();
         return connection;
     }
 

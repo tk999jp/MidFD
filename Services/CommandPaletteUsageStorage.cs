@@ -28,9 +28,7 @@ public static class CommandPaletteUsageStorage
     {
         try
         {
-            using FileStream stream = File.Open(filePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
-            using var reader = new StreamReader(stream);
-            string json = reader.ReadToEnd();
+            string json = JsonResourceSafety.ReadValidatedJsonFile(filePath, FileShare.ReadWrite | FileShare.Delete);
             var state = JsonSerializer.Deserialize<CommandPaletteUsageState>(json, JsonOptions);
             if (state == null) throw new JsonException("Command palette usage payload is empty.");
             return Sanitize(state);
@@ -56,8 +54,7 @@ public static class CommandPaletteUsageStorage
 
         try
         {
-            string json = JsonSerializer.Serialize(Sanitize(state), JsonOptions);
-            File.WriteAllText(filePath, json);
+            JsonResourceSafety.WriteJsonAtomically(filePath, stream => JsonSerializer.Serialize(stream, Sanitize(state), JsonOptions));
             return true;
         }
         catch (Exception ex)
@@ -94,6 +91,43 @@ public static class CommandPaletteUsageStorage
             .OrderByDescending(static item => item.LastUsedUtc)
             .Take(MaxRecentCommands)
             .ToList();
+    }
+
+    internal static bool ToggleFavorite(
+        CommandPaletteUsageState state,
+        string commandId,
+        bool persist,
+        Func<CommandPaletteUsageState, bool>? save = null)
+    {
+        if (state.LoadFailed || string.IsNullOrWhiteSpace(commandId))
+        {
+            return false;
+        }
+
+        List<string> previousFavorites = state.FavoriteCommandIds.ToList();
+        string normalizedId = commandId.Trim();
+        if (previousFavorites.Any(id => string.Equals(id, normalizedId, StringComparison.OrdinalIgnoreCase)))
+        {
+            state.FavoriteCommandIds = previousFavorites
+                .Where(id => !string.Equals(id, normalizedId, StringComparison.OrdinalIgnoreCase))
+                .ToList();
+        }
+        else
+        {
+            state.FavoriteCommandIds = previousFavorites
+                .Append(normalizedId)
+                .Where(static id => !string.IsNullOrWhiteSpace(id))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToList();
+        }
+
+        if (!persist || (save ?? Save)(state))
+        {
+            return true;
+        }
+
+        state.FavoriteCommandIds = previousFavorites;
+        return false;
     }
 
     private static CommandPaletteUsageState Sanitize(CommandPaletteUsageState? source)

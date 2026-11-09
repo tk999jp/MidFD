@@ -39,6 +39,40 @@ public sealed class BrowserLoadCoordinator
         bool SortAscending,
         string FilterLockSignature);
 
+    internal sealed class SnapshotScope : IDisposable
+    {
+        private BrowserLoadCoordinator? _owner;
+        private readonly DirectorySnapshot? _previousSnapshot;
+        private bool _committed;
+
+        internal SnapshotScope(BrowserLoadCoordinator owner)
+        {
+            _owner = owner;
+            _previousSnapshot = owner._snapshot;
+        }
+
+        internal void Commit()
+        {
+            ObjectDisposedException.ThrowIf(_owner == null, this);
+            _committed = true;
+        }
+
+        public void Dispose()
+        {
+            BrowserLoadCoordinator? owner = _owner;
+            if (owner == null)
+            {
+                return;
+            }
+
+            _owner = null;
+            if (!_committed)
+            {
+                owner._snapshot = _previousSnapshot;
+            }
+        }
+    }
+
     public sealed record DirectoryLoadRequest(
         string TargetPath,
         string? FocusTargetName,
@@ -57,7 +91,10 @@ public sealed class BrowserLoadCoordinator
         string? SizeFormat,
         bool ShowDirectoryMarker,
         int ItemsPerPage,
-        SnapshotPolicy SnapshotPolicy);
+        SnapshotPolicy SnapshotPolicy)
+    {
+        public bool RequireFocusTarget { get; init; }
+    }
 
     public sealed record DirectoryLoadResult(
         string NewPath,
@@ -81,9 +118,12 @@ public sealed class BrowserLoadCoordinator
             new ReadOnlyDictionary<string, bool>(new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase));
 
         public bool SnapshotPathKindsAreFresh { get; init; }
+        public bool FocusTargetFound { get; init; }
     }
 
     public void InvalidateSnapshot() => _snapshot = null;
+
+    internal SnapshotScope BeginSnapshotScope() => new(this);
 
     public bool TryGetCurrentSnapshotTargetPaths(
         string expectedPath,
@@ -255,7 +295,8 @@ public sealed class BrowserLoadCoordinator
             statusMessages)
         {
             SnapshotPathKinds = _snapshot!.PathKinds,
-            SnapshotPathKindsAreFresh = !reusedSnapshot
+            SnapshotPathKindsAreFresh = !reusedSnapshot,
+            FocusTargetFound = resolvedFocusIndex >= 0
         };
     }
 

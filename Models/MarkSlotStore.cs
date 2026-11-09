@@ -6,12 +6,17 @@ namespace MidFD.Models;
 
 public sealed class MarkSlotStore
 {
+    [System.Text.Json.Serialization.JsonIgnore]
+    public bool LoadFailed { get; set; }
+
+    [System.Text.Json.Serialization.JsonRequired]
     public List<MarkSlotEntry> Slots { get; set; } = new();
 
     public MarkSlotStore Clone()
     {
         return new MarkSlotStore
         {
+            LoadFailed = LoadFailed,
             Slots = Slots.Select(static slot => slot.Clone()).ToList()
         };
     }

@@ -49,10 +49,6 @@ public static class PreviewService
     {
         ".db", ".sqlite", ".sqlite3"
     };
-    private static readonly HashSet<string> VideoFileExtensions = new(StringComparer.OrdinalIgnoreCase)
-    {
-        ".mp4", ".m4v", ".mov", ".avi", ".wmv", ".mpg", ".mpeg", ".webm", ".mkv"
-    };
     private static readonly HashSet<string> CsvTsvExtensions = new(StringComparer.OrdinalIgnoreCase)
     {
         ".csv", ".tsv"
@@ -87,6 +83,11 @@ public static class PreviewService
         }
 
         if (IsSupportedMediaExtension(path))
+        {
+            return PreviewKind.Video;
+        }
+
+        if (VideoMediaCatalog.IsMpegTransportStreamFile(path))
         {
             return PreviewKind.Video;
         }
@@ -175,6 +176,14 @@ public static class PreviewService
             return PreviewKind.Video;
         }
 
+        // .ts is also a common TypeScript source extension. Only classify it as video
+        // when a bounded read confirms MPEG-TS packet sync bytes.
+        if (string.Equals(Path.GetExtension(path), ".ts", StringComparison.OrdinalIgnoreCase)
+            && VideoMediaCatalog.IsMpegTransportStreamFile(path))
+        {
+            return PreviewKind.Video;
+        }
+
         if (IsMarkdownExtension(path))
         {
             return PreviewKind.Markdown;
@@ -205,8 +214,7 @@ public static class PreviewService
 
     public static bool IsSupportedVideoExtension(string path)
     {
-        string ext = Path.GetExtension(path);
-        return VideoFileExtensions.Contains(ext);
+        return VideoMediaCatalog.IsSupportedExtension(path);
     }
 
     public static bool IsSupportedMediaExtension(string path)
@@ -237,6 +245,7 @@ public static class PreviewService
         string ext = Path.GetExtension(path);
         return BinaryFastPathExtensions.Contains(ext);
     }
+
 
     /// <summary>
     /// LargeText 向けの文字コード判定。

@@ -8,6 +8,24 @@ namespace MidFD.Services;
 internal static class MarkdownInlineImageResolver
 {
     internal const int MaxMarkdownInlinePreviewWidth = 800;
+    internal const int MaxInlineImageBytes = 8 * 1024 * 1024;
+
+    internal sealed class PreviewBudget(int maxImages = 512, int maxDataUriChars = 16 * 1024 * 1024)
+    {
+        private int _images = maxImages, _chars = maxDataUriChars;
+        private readonly System.Diagnostics.Stopwatch _elapsed = System.Diagnostics.Stopwatch.StartNew();
+        internal bool WasLimited { get; private set; }
+        internal bool TryStartImage()
+        {
+            if (_images-- <= 0 || _elapsed.Elapsed > TimeSpan.FromSeconds(2)) { WasLimited = true; return false; }
+            return true;
+        }
+        internal bool TryReserve(int chars)
+        {
+            if (chars > _chars) { WasLimited = true; return false; }
+            _chars -= chars; return true;
+        }
+    }
 
     private static readonly IReadOnlyDictionary<string, string> SupportedMimeTypes =
         new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
@@ -28,11 +46,13 @@ internal static class MarkdownInlineImageResolver
         string? resourceReference,
         out string? dataUri,
         out int displayWidth,
-        out int displayHeight)
+        out int displayHeight,
+        PreviewBudget? budget = null)
     {
         dataUri = null;
         displayWidth = 0;
         displayHeight = 0;
+        if (budget != null && !budget.TryStartImage()) return false;
         if (string.IsNullOrWhiteSpace(markdownPath)
             || string.IsNullOrWhiteSpace(resourceReference)
             || Path.IsPathRooted(resourceReference)
@@ -70,7 +90,18 @@ internal static class MarkdownInlineImageResolver
 
         try
         {
-            byte[] previewBytes = CreatePreviewBytes(File.ReadAllBytes(candidate), mimeType, out displayWidth, out displayHeight);
+            using var input = new FileStream(candidate, FileMode.Open, FileAccess.Read, FileShare.Read);
+            ImagePreviewService.ValidateRasterStream(input, MaxInlineImageBytes, 16L * 1024 * 1024);
+            byte[] bytes = new byte[checked((int)input.Length)];
+            input.ReadExactly(bytes);
+            byte[] previewBytes = CreatePreviewBytes(bytes, mimeType, out displayWidth, out displayHeight);
+            if (previewBytes.Length > MaxInlineImageBytes)
+            {
+                displayWidth = displayHeight = 0;
+                return false;
+            }
+            int uriChars = 4 * ((previewBytes.Length + 2) / 3) + mimeType.Length + 13;
+            if (budget != null && !budget.TryReserve(uriChars)) { displayWidth = displayHeight = 0; return false; }
             dataUri = $"data:{mimeType};base64,{Convert.ToBase64String(previewBytes)}";
             return true;
         }
@@ -137,9 +168,9 @@ internal static class MarkdownInlineImageResolver
 
             return output.ToArray();
         }
-        catch (Exception)
+        catch (Exception ex)
         {
-            return sourceBytes;
+            throw new InvalidDataException("画像プレビューを生成できません。", ex);
         }
     }
 

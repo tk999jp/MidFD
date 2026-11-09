@@ -1,12 +1,12 @@
 using System;
-using System.Windows.Forms;
+using MidFD.Models;
 
 namespace MidFD.Services;
 
 internal sealed class BrowserOutgoingDragDecision
 {
-    public DragDropEffects AllowedEffects { get; init; }
-    public DragDropEffects PreferredEffect { get; init; }
+    public BrowserDragEffect AllowedEffects { get; init; }
+    public BrowserDragEffect PreferredEffect { get; init; }
     public bool HasPreferredEffect { get; init; }
     public string StatusText { get; init; } = string.Empty;
 }
@@ -15,15 +15,15 @@ internal static class BrowserOutgoingDragResolver
 {
     public static BrowserOutgoingDragDecision Resolve(
         bool isRightButton,
-        Keys modifierKeys,
+        BrowserDragModifiers modifiers,
         bool isDragArchive = false)
     {
         if (isDragArchive)
         {
             return new BrowserOutgoingDragDecision
             {
-                AllowedEffects = DragDropEffects.Copy,
-                PreferredEffect = DragDropEffects.Copy,
+                AllowedEffects = BrowserDragEffect.Copy,
+                PreferredEffect = BrowserDragEffect.Copy,
                 HasPreferredEffect = true,
                 StatusText = "Drag: Copy"
             };
@@ -33,30 +33,30 @@ internal static class BrowserOutgoingDragResolver
         {
             return new BrowserOutgoingDragDecision
             {
-                AllowedEffects = DragDropEffects.Copy | DragDropEffects.Move | DragDropEffects.Link,
-                PreferredEffect = DragDropEffects.None,
+                AllowedEffects = BrowserDragEffect.Copy | BrowserDragEffect.Move | BrowserDragEffect.Link,
+                PreferredEffect = BrowserDragEffect.None,
                 HasPreferredEffect = false,
                 StatusText = "Drag: 操作を選択"
             };
         }
 
-        if ((modifierKeys & Keys.Shift) != 0)
+        if ((modifiers & BrowserDragModifiers.Shift) != 0)
         {
             return new BrowserOutgoingDragDecision
             {
-                AllowedEffects = DragDropEffects.Move,
-                PreferredEffect = DragDropEffects.Move,
+                AllowedEffects = BrowserDragEffect.Move,
+                PreferredEffect = BrowserDragEffect.Move,
                 HasPreferredEffect = true,
                 StatusText = "Drag: Move"
             };
         }
 
-        if ((modifierKeys & Keys.Control) != 0)
+        if ((modifiers & BrowserDragModifiers.Control) != 0)
         {
             return new BrowserOutgoingDragDecision
             {
-                AllowedEffects = DragDropEffects.Copy,
-                PreferredEffect = DragDropEffects.Copy,
+                AllowedEffects = BrowserDragEffect.Copy,
+                PreferredEffect = BrowserDragEffect.Copy,
                 HasPreferredEffect = true,
                 StatusText = "Drag: Copy"
             };
@@ -64,8 +64,8 @@ internal static class BrowserOutgoingDragResolver
 
         return new BrowserOutgoingDragDecision
         {
-            AllowedEffects = DragDropEffects.Copy | DragDropEffects.Move,
-            PreferredEffect = DragDropEffects.None,
+            AllowedEffects = BrowserDragEffect.Copy | BrowserDragEffect.Move,
+            PreferredEffect = BrowserDragEffect.None,
             HasPreferredEffect = false,
             StatusText = "Drag: Copy" // default left drag is copy/move but shown as default
         };

@@ -67,10 +67,10 @@ PowerShell から直接起動する場合は、次のように実行できます
 
 この画面では以下の項目をまとめて設定できます。
 
-- **機能範囲**: 初回は「便利機能まで使う（推奨）」presetが選択され、前回状態復元、mouse gesture、Functionバー説明、動画のEnter外部再生、breadcrumb表示がONになります。
+- **機能範囲**: 初回は「便利機能まで使う（推奨）」presetが選択され、前回状態復元、mouse gesture、Functionバー説明、breadcrumb表示がONになります。Browserの動画Enterはpresetにかかわらず内蔵MidPlayerで再生します。
 - **注意が必要な機能**: MidFD管理ゴミ箱、Drag ZIP、内容一覧manifest、clipboard text貼り付けは上記presetではOFFです。Full presetではONになり、各項目は個別に変更できます。
 - **Workspace Snapshot**: 独立したcheckboxで切り替えます。PracticalStable presetでは既定OFF、Full presetでは既定ONです。
-- **操作方式／外部アプリ**: MidFD標準またはFD互換を選択できます。外部アプリ欄は7-Zip実行file、動画tool folder、外部editor実行fileを設定し、自動検出状態も確認できます。
+- **操作方式／外部アプリ**: MidFD標準またはFD互換を選択できます。外部アプリ欄は7-Zip実行file、音声外部再生用ffplay folder、外部editor実行fileを設定し、自動検出状態も確認できます。
 
 初回セットアップの推奨状態は画面の「便利機能まで使う（推奨）」presetに一致します。設定は後から個別に変更できます。
 
@@ -106,6 +106,14 @@ publish出力は通常次の場所に作成されます。
 bin\Release\net10.0-windows\publish\
 ```
 
+MidFDの画像・動画Viewerは `MidPlayer.Lite.dll` を同一process内で使用し、Viewer表示に `MidPlayer.exe` やNamed Pipeを使いません。動画再生はWindows Media Foundationのみです。現行配布ZIPにはMidPlayer.Lite.dllを含み、MidFDとは別に起動するMidPlayer.exeは含みません。LibVLC backendを採用せず、LibVLC／SkiaSharp依存は含みません。Susie Hostはx86／x64別processとして別projectからbuildします。機能ProfileのFullと操作ProfileのStandardは別の設定を表し、配布版区分ではありません。
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\package-local.ps1 -Mode Portable -OutputDirectory artifacts\local-package-standard
+```
+
+既存の出力directoryを再利用せず、新しい`-OutputDirectory`を指定します。
+
 単一ファイル化などの詳細な配布設定は、今後の公開方針に合わせて変更される可能性があります。
 
 ## Release ZIP 作成 (scripts/publish-release.ps1)
@@ -122,7 +130,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\publish-release.ps1 -ReleaseT
 
 - `-ReleaseTag` (必須): `vYYYY.MM.DD` 形式でリリースバージョンを指定します。
 - `-AllowDirty` (オプション): ワーキングツリーに未コミットの変更がある状態での実行を許可します（開発検証専用）。この出力はformal Candidateとして扱いません。
-- packageは.NET 10 Windows Desktop Runtimeのインストールを前提とする `framework-dependent`（ランタイム非同梱）です。`-SelfContained`はscriptで拒否されるため、self-contained package生成経路ではありません。
+- packageは.NET 10 Windows Desktop Runtimeのインストールを前提とする `framework-dependent`（ランタイム非同梱）です。MidFD／MidPlayer用にx64、32-bit Susie SPI pluginを使う場合はSusieHost32用にx86 Desktop Runtimeも必要です。`-SelfContained`はscriptで拒否されるため、self-contained package生成経路ではありません。
 
 ### スクリプトの動作概要
 

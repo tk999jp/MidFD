@@ -11,10 +11,13 @@ namespace MidFD.Services;
 public static class MarkSlotStorage
 {
     private static readonly string MarkSlotFilePath;
+    internal const int MaxImportBytes = 16 * 1024 * 1024;
+    internal const int MaxStoreBytes = 64 * 1024 * 1024;
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
         WriteIndented = true,
-        PropertyNameCaseInsensitive = true
+        PropertyNameCaseInsensitive = true,
+        MaxDepth = 32
     };
 
     static MarkSlotStorage()
@@ -23,23 +26,27 @@ public static class MarkSlotStorage
         MarkSlotFilePath = Path.Combine(exeDir, "markslots.json");
     }
 
-    public static MarkSlotStore Load(int slotCount)
+    public static MarkSlotStore Load(int slotCount) => Load(slotCount, MarkSlotFilePath);
+
+    internal static MarkSlotStore Load(int slotCount, string filePath)
     {
-        if (!File.Exists(MarkSlotFilePath))
+        if (!File.Exists(filePath))
         {
             return MarkSlotStore.CreateDefault(slotCount);
         }
 
         try
         {
-            string json = File.ReadAllText(MarkSlotFilePath);
-            var store = JsonSerializer.Deserialize<MarkSlotStore>(json, JsonOptions);
+            var store = ReadDocument<MarkSlotStore>(filePath, MaxStoreBytes);
+            if (store?.Slots == null) throw new JsonException("MarkSlot store payload is empty or invalid.");
             return Sanitize(store, slotCount);
         }
         catch (Exception ex)
         {
             LogService.Error("Failed to load markslots.json.", ex);
-            return MarkSlotStore.CreateDefault(slotCount);
+            var failed = MarkSlotStore.CreateDefault(slotCount);
+            failed.LoadFailed = true;
+            return failed;
         }
     }
 
@@ -49,8 +56,8 @@ public static class MarkSlotStorage
     {
         try
         {
-            string json = JsonSerializer.Serialize(Sanitize(store, slotCount), JsonOptions);
-            File.WriteAllText(filePath, json);
+            if (store.LoadFailed) throw new InvalidDataException("読込に失敗したMarkSlot状態の自動上書きを拒否しました。");
+            WriteDocument(filePath, Sanitize(store, slotCount), MaxStoreBytes);
             return true;
         }
         catch (Exception ex)
@@ -86,8 +93,7 @@ public static class MarkSlotStorage
                 }
             };
 
-            string json = JsonSerializer.Serialize(document, JsonOptions);
-            File.WriteAllText(filePath, json, new UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
+            WriteDocument(filePath, document, MaxImportBytes);
             return true;
         }
         catch (Exception ex)
@@ -106,8 +112,7 @@ public static class MarkSlotStorage
 
         try
         {
-            string json = File.ReadAllText(filePath, Encoding.UTF8);
-            var document = JsonSerializer.Deserialize<MarkSlotExportDocument>(json, JsonOptions);
+            var document = ReadDocument<MarkSlotExportDocument>(filePath, MaxImportBytes);
             if (document == null)
             {
                 errorMessage = "Mark Slot export JSON を読み取れませんでした。";
@@ -205,8 +210,7 @@ public static class MarkSlotStorage
                     .ToList()
             };
 
-            string json = JsonSerializer.Serialize(document, JsonOptions);
-            File.WriteAllText(filePath, json, new UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
+            WriteDocument(filePath, document, MaxStoreBytes);
             return true;
         }
         catch (Exception ex)
@@ -224,8 +228,7 @@ public static class MarkSlotStorage
         warningMessage = null;
         try
         {
-            string json = File.ReadAllText(filePath, Encoding.UTF8);
-            var document = JsonSerializer.Deserialize<MarkSlotBackupSetDocument>(json, JsonOptions);
+            var document = ReadDocument<MarkSlotBackupSetDocument>(filePath, MaxStoreBytes);
             if (document == null)
             {
                 errorMessage = "Mark Slot backup JSON を読み取れませんでした。";
@@ -329,6 +332,109 @@ public static class MarkSlotStorage
             errorMessage = "全マークスロットのインポートに失敗しました。";
             return false;
         }
+    }
+
+    private static T? ReadDocument<T>(string path, int maxBytes)
+    {
+        // Deny concurrent growth/replacement during the bounded read.
+        using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read);
+        if (stream.Length > maxBytes) throw new InvalidDataException($"JSONが容量上限 ({maxBytes} bytes) を超えています。");
+        byte[] json = new byte[checked((int)stream.Length)];
+        stream.ReadExactly(json);
+        return DeserializeDocument<T>(json);
+    }
+
+    private static T? DeserializeDocument<T>(ReadOnlySpan<byte> json)
+    {
+        if (json.StartsWith(new byte[] { 0xEF, 0xBB, 0xBF })) json = json[3..];
+        ValidateJson(json);
+        return JsonSerializer.Deserialize<T>(json, JsonOptions);
+    }
+
+    private static void ValidateJson(ReadOnlySpan<byte> json)
+    {
+        var reader = new Utf8JsonReader(json, new JsonReaderOptions { MaxDepth = 32 });
+        int tokens = 0;
+        var arrays = new Stack<(int Depth, int Count)>();
+        while (reader.Read()) ValidateToken(ref reader, ref tokens, arrays);
+    }
+
+    private static void ValidateToken(ref Utf8JsonReader reader, ref int tokens, Stack<(int Depth, int Count)> arrays)
+    {
+        if (++tokens > 1_000_000 ||
+            (reader.TokenType is JsonTokenType.String or JsonTokenType.PropertyName && reader.ValueSpan.Length > 128 * 1024))
+            throw new InvalidDataException("JSONの項目数・文字列長が上限を超えています。");
+        if (arrays.Count > 0 && reader.CurrentDepth == arrays.Peek().Depth + 1 &&
+            reader.TokenType is not (JsonTokenType.PropertyName or JsonTokenType.EndArray or JsonTokenType.EndObject))
+        {
+            var current = arrays.Pop();
+            if (++current.Count > 100_000) throw new InvalidDataException("JSON配列の項目数が上限を超えています。");
+            arrays.Push(current);
+        }
+        if (reader.TokenType == JsonTokenType.StartArray) arrays.Push((reader.CurrentDepth, 0));
+        else if (reader.TokenType == JsonTokenType.EndArray) arrays.Pop();
+    }
+
+    internal static void WriteDocument<T>(string path, T document, int maxBytes)
+    {
+        AtomicFileWriter.Write(path, stream =>
+        {
+            using (var bounded = new BoundedWriteStream(stream, maxBytes))
+                JsonSerializer.Serialize(bounded, document, JsonOptions);
+            stream.Position = 0;
+            ValidateJsonStream(stream);
+        });
+    }
+
+    // Keep only an incomplete token instead of rereading the full serialized file.
+    private static void ValidateJsonStream(Stream stream)
+    {
+        byte[] buffer = new byte[16 * 1024];
+        int buffered = 0, tokens = 0;
+        var state = new JsonReaderState(new JsonReaderOptions { MaxDepth = 32 });
+        var arrays = new Stack<(int Depth, int Count)>();
+        while (true)
+        {
+            int read = stream.Read(buffer, buffered, buffer.Length - buffered);
+            bool final = read == 0;
+            buffered += read;
+            var reader = new Utf8JsonReader(buffer.AsSpan(0, buffered), final, state);
+            while (reader.Read()) ValidateToken(ref reader, ref tokens, arrays);
+            int consumed = checked((int)reader.BytesConsumed);
+            state = reader.CurrentState;
+            buffered -= consumed;
+            buffer.AsSpan(consumed, buffered).CopyTo(buffer);
+            if (final) break;
+            if (buffered == buffer.Length)
+            {
+                if (buffer.Length >= 256 * 1024)
+                    throw new InvalidDataException("JSON文字列長が上限を超えています。");
+                Array.Resize(ref buffer, buffer.Length * 2);
+            }
+        }
+    }
+
+    private sealed class BoundedWriteStream(Stream inner, long maxBytes) : Stream
+    {
+        private long written;
+        public override bool CanRead => false;
+        public override bool CanSeek => false;
+        public override bool CanWrite => true;
+        public override long Length => written;
+        public override long Position { get => written; set => throw new NotSupportedException(); }
+        public override void Write(byte[] buffer, int offset, int count) => Write(buffer.AsSpan(offset, count));
+        public override void Write(ReadOnlySpan<byte> buffer)
+        {
+            if (buffer.Length > maxBytes - written)
+                throw new InvalidDataException("JSONの保存容量上限を超えています。");
+            inner.Write(buffer);
+            written += buffer.Length;
+        }
+        public override void Flush() => inner.Flush();
+        public override int Read(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+        public override void SetLength(long value) => throw new NotSupportedException();
+        // AtomicFileWriter retains ownership of the underlying stream.
     }
 
     private static MarkSlotStore Sanitize(MarkSlotStore? source, int slotCount)

@@ -8,16 +8,22 @@ public static class StorageProfileActivationResolver
     public const string BootstrapFileName = "storage-profile.json";
 
     public static StorageProfileActivation ResolveDefault(string[] args)
+        => ResolveDefault(StartupArgumentParser.Parse(args));
+
+    public static StorageProfileActivation ResolveDefault(StartupOptions options)
     {
         return Resolve(
-            args,
+            options,
             Environment.GetEnvironmentVariable(EnvironmentVariableName),
             Path.Combine(AppContext.BaseDirectory, BootstrapFileName));
     }
 
     internal static StorageProfileActivation Resolve(string[] args, string? environmentValue, string bootstrapFilePath)
+        => Resolve(StartupArgumentParser.Parse(args), environmentValue, bootstrapFilePath);
+
+    internal static StorageProfileActivation Resolve(StartupOptions options, string? environmentValue, string bootstrapFilePath)
     {
-        string? commandLineValue = TryGetCommandLineValue(args);
+        string? commandLineValue = options.StorageProfileValue;
         if (commandLineValue != null)
         {
             return FromValue(commandLineValue, StorageProfileActivationSource.CommandLine, null);
@@ -30,27 +36,6 @@ public static class StorageProfileActivationResolver
 
         StorageProfileActivation? bootstrapActivation = TryResolveBootstrapFile(bootstrapFilePath);
         return bootstrapActivation ?? DefaultActivation();
-    }
-
-    private static string? TryGetCommandLineValue(string[] args)
-    {
-        const string prefix = "--storage-profile=";
-
-        for (int i = 0; i < args.Length; i++)
-        {
-            string arg = args[i];
-            if (arg.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
-            {
-                return arg[prefix.Length..];
-            }
-
-            if (string.Equals(arg, "--storage-profile", StringComparison.OrdinalIgnoreCase))
-            {
-                return i + 1 < args.Length ? args[i + 1] : string.Empty;
-            }
-        }
-
-        return null;
     }
 
     private static StorageProfileActivation? TryResolveBootstrapFile(string bootstrapFilePath)

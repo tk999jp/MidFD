@@ -359,7 +359,8 @@ internal sealed class BrowserRefreshWorkflowApplicationCoordinator
             IsApplying);
     }
 
-    public void ReleaseCanceledCountAudit() => _browser.Refresh.CompleteCountAudit();
+    public void ReleaseCanceledCountAudit(BrowserCountAuditRequest request) =>
+        _browser.Refresh.CompleteCountAudit(request.OperationId);
 
     public BrowserCountAuditApplyResult CompleteCountAuditAndApply(
         BrowserCountAuditRequest request,
@@ -367,8 +368,12 @@ internal sealed class BrowserRefreshWorkflowApplicationCoordinator
         bool isExitPending,
         bool isDisposed)
     {
-        _browser.Refresh.CompleteCountAudit();
-        return ApplyCountAudit(request, rawDirectoryEntryCount, isExitPending, isDisposed);
+        return _browser.Refresh.CompleteCountAudit(
+            request,
+            rawDirectoryEntryCount,
+            _browser.CurrentPath,
+            isExitPending,
+            isDisposed);
     }
 
     public Task<DirectoryCountAuditResult> ExecuteCountAuditAsync(BrowserCountAuditRequest request) =>
@@ -397,6 +402,7 @@ internal sealed class BrowserRefreshWorkflowApplicationCoordinator
         try
         {
             DirectoryCountAuditResult result = await ExecuteCountAuditAsync(request.Value).ConfigureAwait(false);
+            request.Value.Token.ThrowIfCancellationRequested();
             BrowserCountAuditApplyResult applied = CompleteCountAuditAndApply(
                 request.Value,
                 result.VisibleEntryCount,
@@ -421,7 +427,7 @@ internal sealed class BrowserRefreshWorkflowApplicationCoordinator
         {
             if (!completed)
             {
-                ReleaseCanceledCountAudit();
+                ReleaseCanceledCountAudit(request.Value);
             }
         }
     }

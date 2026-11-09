@@ -1,0 +1,13 @@
+<Project>
+  <PropertyGroup>
+    <DefaultItemExcludesInProjectFolder>$(DefaultItemExcludesInProjectFolder);obj\**</DefaultItemExcludesInProjectFolder>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(MSBuildProjectName)' == 'SusieHost32'">
+    <BaseIntermediateOutputPath>obj\SusieHost32\</BaseIntermediateOutputPath>
+    <MSBuildProjectExtensionsPath>obj\SusieHost32\</MSBuildProjectExtensionsPath>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(MSBuildProjectName)' == 'SusieHost64'">
+    <BaseIntermediateOutputPath>obj\SusieHost64\</BaseIntermediateOutputPath>
+    <MSBuildProjectExtensionsPath>obj\SusieHost64\</MSBuildProjectExtensionsPath>
+  </PropertyGroup>
+</Project>

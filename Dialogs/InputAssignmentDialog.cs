@@ -1,5 +1,6 @@
 using MidFD.Commands;
 using System.Globalization;
+using System.IO;
 using MidFD.Configuration;
 using MidFD.Helpers;
 using MidFD.Models;
@@ -649,10 +650,16 @@ public sealed class InputAssignmentDialog : Form
     private static string GetCommandCategoryForDisplay(CommandDefinition command)
     {
         string id = command.Id;
+        if (CommandIds.TryGetBrowserDriveNumber(id, out _))
+        {
+            return "Drive移動";
+        }
+
         if (id.Equals(CommandIds.FileCopy, StringComparison.OrdinalIgnoreCase) ||
             id.Equals(CommandIds.FileMove, StringComparison.OrdinalIgnoreCase) ||
             id.Equals(CommandIds.FileRename, StringComparison.OrdinalIgnoreCase) ||
             id.Equals(CommandIds.FileDelete, StringComparison.OrdinalIgnoreCase) ||
+            id.Equals(CommandIds.FileDeletePermanent, StringComparison.OrdinalIgnoreCase) ||
             id.Equals(CommandIds.BrowserExecute, StringComparison.OrdinalIgnoreCase) ||
             id.Equals(CommandIds.BrowserDefaultOpen, StringComparison.OrdinalIgnoreCase) ||
             id.Equals(CommandIds.BrowserDefaultOpenMarked, StringComparison.OrdinalIgnoreCase) ||
@@ -791,6 +798,11 @@ public sealed class InputAssignmentDialog : Form
         }
 
         if (id.Equals(CommandIds.FileDelete, StringComparison.OrdinalIgnoreCase))
+        {
+            return 7;
+        }
+
+        if (id.Equals(CommandIds.FileDeletePermanent, StringComparison.OrdinalIgnoreCase))
         {
             return 7;
         }

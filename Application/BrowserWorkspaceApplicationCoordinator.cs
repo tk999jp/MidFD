@@ -19,6 +19,11 @@ namespace MidFD.Runtime;
 /// </summary>
 internal sealed class BrowserWorkspaceApplicationCoordinator
 {
+    private static readonly JsonSerializerOptions SnapshotExportJsonOptions = new(JsonSerializerDefaults.Web)
+    {
+        WriteIndented = true
+    };
+
     private readonly BrowserSessionState _session;
 
     public BrowserWorkspaceApplicationCoordinator(BrowserSessionState session)
@@ -42,6 +47,19 @@ internal sealed class BrowserWorkspaceApplicationCoordinator
     public IReadOnlyList<BrowserTabState> TabStates => Tabs.Tabs.Select(static tab => tab.Clone()).ToList();
     public BrowserTabState? ActiveTabSnapshot => Tabs.ActiveTab?.Clone();
     public BrowserTabState? GetTabSnapshot(int index) => Tabs.IsValidIndex(index) ? Tabs.Tabs[index].Clone() : null;
+
+    public bool UpdateActiveTabCursorFocus(Guid tabId, int cursorIndex, string? focusTargetName)
+    {
+        BrowserTabState? activeTab = Tabs.ActiveTab;
+        if (tabId == Guid.Empty || activeTab == null || activeTab.Id != tabId || cursorIndex < 0)
+        {
+            return false;
+        }
+
+        activeTab.CursorIndex = cursorIndex;
+        activeTab.FocusTargetName = focusTargetName;
+        return true;
+    }
 
     public int RemoveMarksFromTab(
         SessionSettings session,
@@ -256,20 +274,25 @@ internal sealed class BrowserWorkspaceApplicationCoordinator
     public bool TryExportSnapshot(string snapshotId, WorkspaceSnapshotMetadata metadata, string destinationPath, out string errorMessage)
     {
         errorMessage = string.Empty;
-        if (!TryGetSnapshotPayload(snapshotId, out string? payloadJson, out errorMessage) || payloadJson == null)
-        {
-            return false;
-        }
-
         try
         {
-            var exportFile = new WorkspaceSnapshotExportFile
+            if (!TryGetSnapshotPayload(snapshotId, out string? payloadJson, out errorMessage) || payloadJson == null)
             {
-                Metadata = metadata,
-                Payload = JsonSerializer.Deserialize<WorkspaceState>(payloadJson, new JsonSerializerOptions(JsonSerializerDefaults.Web))
-            };
-            string json = JsonSerializer.Serialize(exportFile, new JsonSerializerOptions(JsonSerializerDefaults.Web) { WriteIndented = true });
-            File.WriteAllText(destinationPath, json);
+                return false;
+            }
+            if (!WorkspaceSnapshotImportSafety.TryDeserializeWorkspacePayload(payloadJson, out WorkspaceState? state, out errorMessage) || state == null)
+            {
+                return false;
+            }
+            if (!WorkspaceSnapshotImportSafety.IsStringWithinBudget(metadata.Name) ||
+                !WorkspaceSnapshotImportSafety.IsStringWithinBudget(metadata.Summary))
+            {
+                errorMessage = "エクスポートmetadataのNameまたはSummaryが上限（128 KiB）を超えています。";
+                return false;
+            }
+
+            var exportFile = new WorkspaceSnapshotExportFile { Metadata = metadata, Payload = state };
+            AtomicFileWriter.Write(destinationPath, stream => WriteSingleSnapshotExport(stream, exportFile));
             return true;
         }
         catch (Exception ex)
@@ -283,7 +306,8 @@ internal sealed class BrowserWorkspaceApplicationCoordinator
     {
         importedName = string.Empty;
         errorMessage = string.Empty;
-        if (_session.Workspace.SnapshotStorage == null)
+        WorkspaceSnapshotStorage? storage = _session.Workspace.SnapshotStorage;
+        if (storage == null)
         {
             errorMessage = "Workspace スナップショットの保存先を初期化できません。";
             return false;
@@ -291,19 +315,20 @@ internal sealed class BrowserWorkspaceApplicationCoordinator
 
         try
         {
-            string json = File.ReadAllText(sourcePath);
-            var importFile = JsonSerializer.Deserialize<WorkspaceSnapshotExportFile>(json, new JsonSerializerOptions(JsonSerializerDefaults.Web));
-            if (importFile?.Kind != "MidFD.WorkspaceSnapshot" || importFile.Payload == null)
+            if (!WorkspaceSnapshotImportSafety.TryReadSingle(sourcePath, out WorkspaceSnapshotExportFile? importFile, out errorMessage) ||
+                importFile?.Payload is not { } payload)
             {
-                errorMessage = "無効なスナップショットファイルです。";
                 return false;
             }
 
-            string name = importFile.Metadata?.Name ?? fallbackName;
-            if (!TrySaveImportedSnapshot(name, importFile.Payload, "imported", out importedName, out errorMessage))
+            string name = string.IsNullOrWhiteSpace(importFile.Metadata?.Name)
+                ? string.IsNullOrWhiteSpace(fallbackName) ? "Imported Snapshot" : fallbackName
+                : importFile.Metadata.Name;
+            if (!storage.TrySaveSnapshotsAtomically([(name, payload)], "imported", out IReadOnlyList<string> savedNames, out errorMessage))
             {
                 return false;
             }
+            importedName = savedNames[0];
             return true;
         }
         catch (Exception ex)
@@ -323,33 +348,62 @@ internal sealed class BrowserWorkspaceApplicationCoordinator
     {
         exportedCount = 0;
         errorMessage = string.Empty;
-        IReadOnlyList<(WorkspaceSnapshotEntry Entry, string PayloadJson)> all = LoadAllSnapshotsWithPayload();
-        if (all.Count == 0)
+        WorkspaceSnapshotStorage? storage = _session.Workspace.SnapshotStorage;
+        if (storage == null)
         {
-            errorMessage = "エクスポートするスナップショットがありません。";
+            errorMessage = "Workspace スナップショットの保存先を初期化できません。";
             return false;
         }
 
         try
         {
-            var backupSet = new WorkspaceSnapshotBackupSetFile();
-            foreach (var (entry, payloadJson) in all)
+            int completedCount = 0;
+            AtomicFileWriter.Write(destinationPath, stream =>
             {
-                backupSet.Snapshots.Add(new WorkspaceSnapshotExportFile
-                {
-                    Metadata = new WorkspaceSnapshotMetadata
-                    {
-                        Name = entry.Name,
-                        CreatedAtUtc = entry.CreatedAtUtc,
-                        UpdatedAtUtc = entry.UpdatedAtUtc
-                    },
-                    Payload = JsonSerializer.Deserialize<WorkspaceState>(payloadJson, new JsonSerializerOptions(JsonSerializerDefaults.Web))
-                });
-            }
+                using var limited = new SnapshotLimitWriteStream(stream, WorkspaceSnapshotImportSafety.MaxSnapshotJsonBytes);
+                using var writer = new Utf8JsonWriter(limited, new JsonWriterOptions { Indented = true });
+                writer.WriteStartObject();
+                writer.WriteString("kind", "MidFD.WorkspaceSnapshotBackupSet");
+                writer.WriteNumber("schemaVersion", 1);
+                writer.WriteString("exportedAtUtc", DateTime.UtcNow);
+                writer.WritePropertyName("snapshots");
+                writer.WriteStartArray();
+                writer.Flush();
 
-            string json = JsonSerializer.Serialize(backupSet, new JsonSerializerOptions(JsonSerializerDefaults.Web) { WriteIndented = true });
-            File.WriteAllText(destinationPath, json);
-            exportedCount = all.Count;
+                foreach ((WorkspaceSnapshotEntry entry, string payloadJson) in storage.EnumerateSnapshotsWithPayload())
+                {
+                    if (!WorkspaceSnapshotImportSafety.TryDeserializeWorkspacePayload(payloadJson, out WorkspaceState? state, out string payloadError) || state == null)
+                    {
+                        throw new InvalidDataException($"'{entry.Name}'のエクスポートに失敗しました: {payloadError}");
+                    }
+
+                    var exportFile = new WorkspaceSnapshotExportFile
+                    {
+                        Metadata = new WorkspaceSnapshotMetadata
+                        {
+                            Name = entry.Name,
+                            CreatedAtUtc = entry.CreatedAtUtc,
+                            UpdatedAtUtc = entry.UpdatedAtUtc
+                        },
+                        Payload = state
+                    };
+                    limited.BeginItem();
+                    JsonSerializer.Serialize(writer, exportFile, SnapshotExportJsonOptions);
+                    writer.Flush();
+                    limited.EndItem();
+                    checked { completedCount++; }
+                }
+
+                if (completedCount == 0)
+                {
+                    throw new InvalidOperationException("エクスポートするスナップショットがありません。");
+                }
+
+                writer.WriteEndArray();
+                writer.WriteEndObject();
+                writer.Flush();
+            });
+            exportedCount = completedCount;
             return true;
         }
         catch (Exception ex)
@@ -363,73 +417,6 @@ internal sealed class BrowserWorkspaceApplicationCoordinator
     {
         importedCount = 0;
         errorMessage = string.Empty;
-        if (_session.Workspace.SnapshotStorage == null)
-        {
-            errorMessage = "Workspace スナップショットの保存先を初期化できません。";
-            return false;
-        }
-
-        try
-        {
-            string json = File.ReadAllText(sourcePath);
-            var backupSet = JsonSerializer.Deserialize<WorkspaceSnapshotBackupSetFile>(json, new JsonSerializerOptions(JsonSerializerDefaults.Web));
-            if (backupSet?.Kind != "MidFD.WorkspaceSnapshotBackupSet" || backupSet.Snapshots == null)
-            {
-                errorMessage = "無効なバックアップセットファイルです。";
-                return false;
-            }
-            if (backupSet.Snapshots.Count == 0)
-            {
-                errorMessage = "インポートするスナップショットが含まれていません。";
-                return false;
-            }
-
-            foreach (WorkspaceSnapshotExportFile snapshotFile in backupSet.Snapshots)
-            {
-                if (snapshotFile.Payload == null)
-                {
-                    continue;
-                }
-                string name = snapshotFile.Metadata?.Name ?? "Imported Snapshot";
-                if (TrySaveImportedSnapshot(name, snapshotFile.Payload, "backup", out _, out _))
-                {
-                    importedCount++;
-                }
-            }
-
-            return true;
-        }
-        catch (Exception ex)
-        {
-            errorMessage = ex.Message;
-            return false;
-        }
-    }
-
-    private string CreateUniqueImportedSnapshotName(string requestedName, string sourceLabel)
-    {
-        string baseName = string.IsNullOrWhiteSpace(requestedName) ? "Imported Snapshot" : requestedName.Trim();
-        if (!SnapshotExistsByName(baseName)) return baseName;
-
-        string stampedName = $"{baseName} ({sourceLabel} {DateTime.Now:yyyy-MM-dd HH-mm-ss-fff})";
-        string candidate = stampedName;
-        int suffix = 2;
-        while (SnapshotExistsByName(candidate))
-        {
-            candidate = $"{stampedName} ({suffix++})";
-        }
-        return candidate;
-    }
-
-    private bool TrySaveImportedSnapshot(
-        string candidateName,
-        WorkspaceState state,
-        string sourceLabel,
-        out string savedName,
-        out string errorMessage)
-    {
-        savedName = string.Empty;
-        errorMessage = string.Empty;
         WorkspaceSnapshotStorage? storage = _session.Workspace.SnapshotStorage;
         if (storage == null)
         {
@@ -437,20 +424,33 @@ internal sealed class BrowserWorkspaceApplicationCoordinator
             return false;
         }
 
-        string requestedName = candidateName;
-        for (int attempt = 0; attempt < 100; attempt++)
+        try
         {
-            if (storage.TrySaveSnapshotIfNameAvailable(candidateName, state, out bool nameAlreadyExists, out errorMessage))
+            using var source = new FileStream(sourcePath, FileMode.Open, FileAccess.Read, FileShare.Read);
+            foreach ((string name, WorkspaceState state) in WorkspaceSnapshotImportSafety.ReadBackupSetSnapshots(source))
             {
-                savedName = candidateName;
-                return true;
+                if (!WorkspaceSnapshotStorage.TryPrepareImportedSnapshot(name.Trim(), state, out _, out errorMessage))
+                {
+                    return false;
+                }
             }
-            if (!nameAlreadyExists) return false;
-            candidateName = CreateUniqueImportedSnapshotName(requestedName, sourceLabel);
-        }
 
-        errorMessage = "一意なスナップショット名を確保できませんでした。";
-        return false;
+            source.Position = 0;
+            if (!storage.TryImportSnapshotsAtomically(
+                    WorkspaceSnapshotImportSafety.ReadBackupSetSnapshots(source),
+                    "backup",
+                    out importedCount,
+                    out errorMessage))
+            {
+                return false;
+            }
+            return true;
+        }
+        catch (Exception ex)
+        {
+            errorMessage = ex.Message;
+            return false;
+        }
     }
 
     public BrowserTabSessionSerializationResult StoreActiveCategorySessionState(
@@ -2419,6 +2419,68 @@ internal sealed class BrowserWorkspaceApplicationCoordinator
             }
         }
         return result;
+    }
+
+    private static void WriteSingleSnapshotExport(Stream destination, WorkspaceSnapshotExportFile exportFile)
+    {
+        using var limited = new SnapshotLimitWriteStream(destination, WorkspaceSnapshotImportSafety.MaxSnapshotJsonBytes);
+        using var writer = new Utf8JsonWriter(limited, new JsonWriterOptions { Indented = true });
+        limited.BeginItem();
+        JsonSerializer.Serialize(writer, exportFile, SnapshotExportJsonOptions);
+        writer.Flush();
+        limited.EndItem();
+    }
+
+    private sealed class SnapshotLimitWriteStream(Stream inner, int itemLimit) : Stream
+    {
+        private int _itemBytes;
+        private bool _trackingItem;
+
+        internal void BeginItem()
+        {
+            Flush();
+            _itemBytes = 0;
+            _trackingItem = true;
+        }
+
+        internal void EndItem()
+        {
+            Flush();
+            _trackingItem = false;
+        }
+
+        public override bool CanRead => false;
+        public override bool CanSeek => false;
+        public override bool CanWrite => true;
+        public override long Length => throw new NotSupportedException();
+        public override long Position { get => throw new NotSupportedException(); set => throw new NotSupportedException(); }
+        public override int Read(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+        public override void SetLength(long value) => throw new NotSupportedException();
+
+        public override void Flush() => inner.Flush();
+
+        public override void Write(byte[] buffer, int offset, int count)
+        {
+            EnsureWithinItemLimit(count);
+            inner.Write(buffer, offset, count);
+        }
+
+        public override void Write(ReadOnlySpan<byte> buffer)
+        {
+            EnsureWithinItemLimit(buffer.Length);
+            inner.Write(buffer);
+        }
+
+        private void EnsureWithinItemLimit(int count)
+        {
+            if (!_trackingItem) return;
+            if (count > itemLimit - _itemBytes)
+            {
+                throw new InvalidDataException($"個別スナップショットのエクスポートが上限サイズ（{itemLimit / (1024 * 1024)} MiB）を超えています。");
+            }
+            _itemBytes += count;
+        }
     }
 }
 

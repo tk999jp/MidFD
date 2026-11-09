@@ -11,31 +11,17 @@ namespace MidFD.Services;
 public static class TarFallbackService
 {
     private const string TarExe = "tar.exe";
+    internal const int MaxCapturedChars = 16 * 1024 * 1024;
+    internal const int MaxOutputLineChars = 256 * 1024;
 
     /// <summary>
     /// tar.exe が実行可能か確認します。
     /// </summary>
     public static bool IsAvailable()
     {
-        try
-        {
-            using var process = new Process();
-            process.StartInfo.FileName = TarExe;
-            process.StartInfo.Arguments = "--version";
-            process.StartInfo.UseShellExecute = false;
-            process.StartInfo.CreateNoWindow = true;
-            process.StartInfo.RedirectStandardOutput = true;
-            process.Start();
-            string output = process.StandardOutput.ReadToEnd();
-            process.WaitForExit();
-
-            // libarchive ベースの bsdtar であることを確認（通常 Windows 標準はこれ）
-            return process.ExitCode == 0 && output.Contains("bsdtar");
-        }
-        catch
-        {
-            return false;
-        }
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(3));
+        var result = RunTar(["--version"], timeout.Token);
+        return result.ExitCode == 0 && result.Output.Contains("bsdtar", StringComparison.Ordinal);
     }
 
     /// <summary>
@@ -114,59 +100,115 @@ public static class TarFallbackService
         CancellationToken token,
         Action<string>? onOutputLine = null)
     {
-        var outputBuilder = new StringBuilder();
-        var errorBuilder = new StringBuilder();
-
-        using var process = new Process();
-        process.StartInfo.FileName = TarExe;
-        foreach (var arg in args)
+        Encoding.RegisterProvider(CodePagesEncodingProvider.Instance);
+        // Windows bsdtar emits redirected names in the active system code page.
+        Encoding nativeEncoding = Encoding.GetEncoding(0);
+        var start = new ProcessStartInfo(TarExe)
         {
-            process.StartInfo.ArgumentList.Add(arg);
+            StandardOutputEncoding = nativeEncoding,
+            StandardErrorEncoding = nativeEncoding
+        };
+        foreach (string arg in args) start.ArgumentList.Add(arg);
+        return RunProcess(start, token, onOutputLine);
+    }
+
+    internal static (int ExitCode, string Output, string Error) RunProcess(
+        ProcessStartInfo start, CancellationToken token, Action<string>? onOutputLine = null)
+    {
+        if (token.IsCancellationRequested) return (-1, string.Empty, "キャンセルされました。");
+        start.UseShellExecute = false;
+        start.CreateNoWindow = true;
+        start.RedirectStandardOutput = true;
+        start.RedirectStandardError = true;
+        start.StandardOutputEncoding ??= Encoding.UTF8;
+        start.StandardErrorEncoding ??= Encoding.UTF8;
+        var output = new StringBuilder();
+        var error = new StringBuilder();
+        var callbackLock = new object();
+        Exception? callbackError = null;
+        using var process = new Process { StartInfo = start };
+        Task stdout = Task.CompletedTask, stderr = Task.CompletedTask;
+        bool started = false;
+        int code = -1;
+        string failure = string.Empty;
+        int captured = 0;
+        void OutputLimit() => Interlocked.CompareExchange(ref callbackError,
+            new IOException("tar出力が資源上限に達したため中断しました。outputは部分結果です。"), null);
+        async Task Drain(StreamReader reader, StringBuilder buffer)
+        {
+            char[] chunk = new char[4096];
+            var line = new StringBuilder();
+            bool omitLine = false;
+            void Publish()
+            {
+                if (line.Length > 0 && line[^1] == '\r') line.Length--;
+                if (!omitLine && Volatile.Read(ref callbackError) == null)
+                {
+                    if (Interlocked.Add(ref captured, line.Length + Environment.NewLine.Length) > MaxCapturedChars) OutputLimit();
+                    else
+                    {
+                        string text = line.ToString();
+                        buffer.AppendLine(text);
+                        lock (callbackLock)
+                        {
+                            if (callbackError == null)
+                            {
+                                try { onOutputLine?.Invoke(text); }
+                                catch (Exception ex) { Interlocked.CompareExchange(ref callbackError, ex, null); }
+                            }
+                        }
+                    }
+                }
+                line.Clear(); omitLine = false;
+            }
+            int count;
+            while ((count = await reader.ReadAsync(chunk).ConfigureAwait(false)) > 0)
+            {
+                for (int i = 0; i < count; i++)
+                {
+                    if (chunk[i] == '\n') { Publish(); continue; }
+                    if (omitLine || Volatile.Read(ref callbackError) != null) continue;
+                    if (line.Length >= MaxOutputLineChars) { OutputLimit(); line.Clear(); omitLine = true; }
+                    else line.Append(chunk[i]);
+                }
+            }
+            if (line.Length > 0) Publish();
         }
-        process.StartInfo.UseShellExecute = false;
-        process.StartInfo.CreateNoWindow = true;
-        process.StartInfo.RedirectStandardOutput = true;
-        process.StartInfo.RedirectStandardError = true;
-        process.StartInfo.StandardOutputEncoding = Encoding.UTF8; // bsdtar on Windows 11 usually uses UTF-8 for output
-        process.StartInfo.StandardErrorEncoding = Encoding.UTF8;
-
-        process.OutputDataReceived += (s, e) =>
-        {
-            if (e.Data != null)
-            {
-                outputBuilder.AppendLine(e.Data);
-                onOutputLine?.Invoke(e.Data);
-            }
-        };
-        process.ErrorDataReceived += (s, e) =>
-        {
-            if (e.Data != null)
-            {
-                errorBuilder.AppendLine(e.Data);
-                onOutputLine?.Invoke(e.Data);
-            }
-        };
 
         try
         {
-            process.Start();
-            process.BeginOutputReadLine();
-            process.BeginErrorReadLine();
-
-            while (!process.WaitForExit(100))
+            started = process.Start();
+            stdout = Task.Run(() => Drain(process.StandardOutput, output));
+            stderr = Task.Run(() => Drain(process.StandardError, error));
+            while (!process.WaitForExit(50))
             {
-                if (token.IsCancellationRequested)
-                {
-                    try { process.Kill(true); } catch { }
-                    return (-1, outputBuilder.ToString(), "キャンセルされました。");
-                }
+                token.ThrowIfCancellationRequested();
+                if (Volatile.Read(ref callbackError) is { } notificationError)
+                    throw new IOException("tar出力通知に失敗しました。", notificationError);
+                if (stdout.IsFaulted) stdout.GetAwaiter().GetResult();
+                if (stderr.IsFaulted) stderr.GetAwaiter().GetResult();
             }
-
-            return (process.ExitCode, outputBuilder.ToString(), errorBuilder.ToString());
+            code = process.ExitCode;
         }
-        catch (Exception ex)
+        catch (OperationCanceledException) { failure = "キャンセルされました。"; }
+        catch (Exception ex) { failure = $"tar.exe 実行エラー: {ex.Message}"; }
+        finally
         {
-            return (-1, outputBuilder.ToString(), $"tar.exe 実行エラー: {ex.Message}");
+            if (started)
+            {
+                try
+                {
+                    if (!process.HasExited) process.Kill(entireProcessTree: true);
+                    // Cancellation never returns while the child may still be writing files.
+                    process.WaitForExit();
+                }
+                catch (Exception ex) { failure += $" process終了確認失敗: {ex.Message}"; }
+                try { Task.WhenAll(stdout, stderr).GetAwaiter().GetResult(); }
+                catch (Exception ex) { failure += $" 出力読込失敗: {ex.Message}"; }
+            }
         }
+        if (token.IsCancellationRequested) failure = "キャンセルされました。" + failure;
+        if (callbackError != null) failure += $" 出力通知失敗: {callbackError.Message}";
+        return (failure.Length == 0 ? code : -1, output.ToString(), failure.Length == 0 ? error.ToString() : failure + error);
     }
 }

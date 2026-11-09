@@ -62,7 +62,7 @@ internal sealed class BrowserNavigationWorkflowApplicationCoordinator
         BrowserCursorTransition cursor = _browser.SetCursorIndex(globalIndex, itemsPerPage);
         if (!cursor.Applied || !cursor.PageChanged || isBusy)
         {
-            return new BrowserCursorNavigationExecution(cursor, null);
+            return CreateCursorNavigationExecution(cursor, null);
         }
 
         BrowserDirectoryLoadApplicationResult load = ExecuteAndApplyDirectoryLoad(
@@ -70,13 +70,35 @@ internal sealed class BrowserNavigationWorkflowApplicationCoordinator
             options with { SnapshotPolicy = BrowserLoadCoordinator.SnapshotPolicy.ReuseSnapshot },
             columnCount,
             isSwitchingBrowserTab: false);
-        return new BrowserCursorNavigationExecution(cursor, load)
+        if (!load.Succeeded)
+        {
+            BrowserCursorTransition restoredCursor = _browser.SetCursorIndex(cursor.PreviousIndex, itemsPerPage);
+            BrowserCursorTransition rejectedCursor = new(
+                cursor.PreviousIndex,
+                restoredCursor.CurrentIndex,
+                PageChanged: false,
+                Applied: false);
+            return CreateCursorNavigationExecution(rejectedCursor, load);
+        }
+
+        BrowserCursorNavigationExecution execution = CreateCursorNavigationExecution(cursor, load);
+        return execution with
         {
             PostLoadEffects = load.Succeeded
                 ? _refreshWorkflow?.PreparePostLoadEffects(shellState) ?? default
                 : default
         };
     }
+
+    private BrowserCursorNavigationExecution CreateCursorNavigationExecution(
+        BrowserCursorTransition cursor,
+        BrowserDirectoryLoadApplicationResult? load) =>
+        new(cursor, load)
+        {
+            TargetTabId = _browser.Workspace.ActiveTabSnapshot?.Id,
+            TargetDirectoryNavigationGeneration = _browser.DirectoryNavigationGeneration,
+            TargetDirectoryContentGeneration = _browser.DirectoryContentGeneration
+        };
 
     public BrowserCursorTransition ApplyCursorSelection(int globalIndex, int itemsPerPage) =>
         _browser.SetCursorIndex(globalIndex, itemsPerPage);
@@ -404,6 +426,37 @@ internal sealed class BrowserNavigationWorkflowApplicationCoordinator
             recordDirectoryMoveHistory);
     }
 
+    public BrowserNavigationCoordinator.DirectoryNavigationRequest? CreateMarkedItemNavigationRequest(
+        string fullPath,
+        bool requireVisibleTarget = false)
+    {
+        if (string.IsNullOrWhiteSpace(fullPath))
+        {
+            return null;
+        }
+
+        string? focusTargetName = Path.GetFileName(fullPath);
+        string? targetDirectory = Path.GetDirectoryName(fullPath);
+        if (Directory.Exists(fullPath))
+        {
+            string? directoryName = Path.GetFileName(fullPath.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
+            if (!string.IsNullOrWhiteSpace(targetDirectory) && Directory.Exists(targetDirectory))
+            {
+                focusTargetName = directoryName;
+            }
+            else
+            {
+                targetDirectory = fullPath;
+                focusTargetName = null;
+            }
+        }
+
+        return _browser.CreateNavigationRequest(
+            targetDirectory ?? string.Empty,
+            focusTargetName,
+            requireFocusTarget: requireVisibleTarget);
+    }
+
     public BrowserNavigationWorkflowExecution BeginNavigation(
         BrowserNavigationCoordinator.DirectoryNavigationRequest? request,
         int maxTabCount,
@@ -494,6 +547,46 @@ internal sealed class BrowserNavigationWorkflowApplicationCoordinator
                 null);
         }
 
+        using BrowserLoadCoordinator.SnapshotScope? snapshotScope = decision.Request.RequireFocusTarget
+            ? _browser.Directory.BeginSnapshotScope()
+            : null;
+
+        BrowserDirectoryLoadOptions executionOptions = options;
+        if (decision.Request.RequireFocusTarget)
+        {
+            BrowserLoadCoordinator.DirectoryLoadResult validationResult;
+            try
+            {
+                BrowserLoadCoordinator.DirectoryLoadRequest validationRequest = _browser.CreateDirectoryLoadRequest(
+                    decision.Request.TargetPath,
+                    decision.Request.FocusTargetName,
+                    decision.Request.IsHistoryNavigation,
+                    decision.Request.SuppressRecent,
+                    options with { SnapshotPolicy = BrowserLoadCoordinator.SnapshotPolicy.RebuildSnapshot });
+                validationResult = _browser.Directory.ExecuteLoad(validationRequest);
+            }
+            catch (Exception ex)
+            {
+                return new BrowserDirectoryNavigationExecution(
+                    BrowserDirectoryNavigationExecutionKind.Failed,
+                    null,
+                    null,
+                    ex);
+            }
+
+            if (!validationResult.FocusTargetFound)
+            {
+                return new BrowserDirectoryNavigationExecution(
+                    BrowserDirectoryNavigationExecutionKind.Failed,
+                    null,
+                    null,
+                    new InvalidOperationException(
+                        "指定したファイルは現在の表示条件で一覧に表示できないため選択できません。フィルターや表示設定を確認してください。"));
+            }
+
+            executionOptions = options with { SnapshotPolicy = BrowserLoadCoordinator.SnapshotPolicy.ReuseSnapshot };
+        }
+
         int? derivedTabIndex = null;
         if (decision.LocationChange == BrowserLocationChangeTransition.RequiresDerivedTab)
         {
@@ -524,9 +617,13 @@ internal sealed class BrowserNavigationWorkflowApplicationCoordinator
 
         BrowserDirectoryLoadApplicationResult load = ExecuteAndApplyDirectoryLoad(
             decision.Request,
-            options,
+            executionOptions,
             columnCount,
             isSwitchingBrowserTab: false);
+        if (load.Succeeded)
+        {
+            snapshotScope?.Commit();
+        }
         if (load.Succeeded && recordDirectoryMoveHistory)
         {
             _settings?.AddDirectoryMoveHistory(decision.Request.TargetPath);
@@ -831,7 +928,10 @@ internal sealed class BrowserNavigationWorkflowApplicationCoordinator
             request.FocusTargetName,
             request.IsHistoryNavigation,
             request.SuppressRecent,
-            options);
+            options) with
+        {
+            RequireFocusTarget = request.RequireFocusTarget
+        };
         return _browser.Directory.ExecuteAndApply(loadRequest, columnCount, isSwitchingBrowserTab);
     }
 
@@ -1355,6 +1455,9 @@ internal readonly record struct BrowserCursorNavigationExecution(
 {
     public BrowserDirectoryPostLoadEffects PostLoadEffects { get; init; }
     public bool PageLoaded => Load is { Succeeded: true };
+    public Guid? TargetTabId { get; init; }
+    public long TargetDirectoryNavigationGeneration { get; init; }
+    public long TargetDirectoryContentGeneration { get; init; }
 }
 
 internal readonly record struct BrowserColumnCountExecution(

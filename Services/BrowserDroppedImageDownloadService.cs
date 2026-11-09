@@ -27,14 +27,16 @@ public static class BrowserDroppedImageDownloadService
         DateTime? now = null,
         Func<IPAddress[], HttpMessageHandler>? handlerFactory = null,
         Func<string, CancellationToken, Task<IPAddress[]>>? dnsResolver = null,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        TimeSpan? totalDownloadTimeout = null)
     {
+        cancellationToken.ThrowIfCancellationRequested();
         Directory.CreateDirectory(directoryPath);
         string tempPath = Path.Combine(directoryPath, $".midfd-imgdrop-{Guid.NewGuid():N}.tmp");
         bool finalized = false;
 
         using var cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        cts.CancelAfter(TotalDownloadTimeout);
+        cts.CancelAfter(totalDownloadTimeout ?? TotalDownloadTimeout);
         CancellationToken combinedToken = cts.Token;
 
         Uri currentUri = imageUri;

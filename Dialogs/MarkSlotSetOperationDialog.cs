@@ -6,6 +6,7 @@ public sealed class MarkSlotSetOperationDialog : Form
 {
     private readonly Func<IReadOnlyList<MarkSlotDialog.MarkSlotSummaryViewItem>> _slotSummaryProvider;
     private readonly Func<int, int, string, MarkSlotSetOperationPreviewResult> _previewProvider;
+    private readonly Func<int, int, string, Task<MarkSlotSetOperationPreviewResult>>? _asyncPreviewProvider;
     private readonly Func<MarkSlotSetOperationSaveRequest, string> _saveResultAction;
     private readonly Func<MarkSlotSetOperationPreviewResult, string> _applyToCurrentTabAction;
     private readonly int _preferredSlotNumber;
@@ -21,6 +22,7 @@ public sealed class MarkSlotSetOperationDialog : Form
     private readonly Button _applyButton;
     private readonly Button _closeButton;
     private MarkSlotSetOperationPreviewResult? _currentPreview;
+    private int _previewLoadVersion;
 
     private sealed record SlotComboItem(int SlotNumber, string DisplayText)
     {
@@ -37,10 +39,12 @@ public sealed class MarkSlotSetOperationDialog : Form
         Func<int, int, string, MarkSlotSetOperationPreviewResult> previewProvider,
         Func<MarkSlotSetOperationSaveRequest, string> saveResultAction,
         Func<MarkSlotSetOperationPreviewResult, string> applyToCurrentTabAction,
-        int preferredSlotNumber)
+        int preferredSlotNumber,
+        Func<int, int, string, Task<MarkSlotSetOperationPreviewResult>>? asyncPreviewProvider = null)
     {
         _slotSummaryProvider = slotSummaryProvider;
         _previewProvider = previewProvider;
+        _asyncPreviewProvider = asyncPreviewProvider;
         _saveResultAction = saveResultAction;
         _applyToCurrentTabAction = applyToCurrentTabAction;
         _preferredSlotNumber = preferredSlotNumber;
@@ -272,6 +276,7 @@ public sealed class MarkSlotSetOperationDialog : Form
             _slotBComboBox.SelectedItem is not SlotComboItem slotB ||
             _operationComboBox.SelectedItem is not OperationComboItem operation)
         {
+            _previewLoadVersion++;
             _currentPreview = null;
             _previewListView.Items.Clear();
             _summaryLabel.Text = "Slot A / Slot B / 演算を選択してください。";
@@ -279,17 +284,51 @@ public sealed class MarkSlotSetOperationDialog : Form
             return;
         }
 
-        _currentPreview = _previewProvider(slotA.SlotNumber, slotB.SlotNumber, operation.Kind);
+        if (_asyncPreviewProvider != null)
+        {
+            int version = ++_previewLoadVersion;
+            _currentPreview = null;
+            _previewListView.Items.Clear();
+            _summaryLabel.Text = "保存済みPathの状態を確認しています...";
+            UpdateButtonState();
+            _ = RefreshPreviewAsync(slotA.SlotNumber, slotB.SlotNumber, operation.Kind, version);
+            return;
+        }
+
+        DisplayPreview(_previewProvider(slotA.SlotNumber, slotB.SlotNumber, operation.Kind));
+    }
+
+    private async Task RefreshPreviewAsync(int slotANumber, int slotBNumber, string operationKind, int version)
+    {
+        try
+        {
+            MarkSlotSetOperationPreviewResult preview = await _asyncPreviewProvider!(slotANumber, slotBNumber, operationKind);
+            if (IsDisposed || version != _previewLoadVersion) return;
+            DisplayPreview(preview);
+        }
+        catch (Exception ex)
+        {
+            if (IsDisposed || version != _previewLoadVersion) return;
+            _currentPreview = null;
+            _previewListView.Items.Clear();
+            _summaryLabel.Text = $"Path確認に失敗しました: {ex.Message}";
+            UpdateButtonState();
+        }
+    }
+
+    private void DisplayPreview(MarkSlotSetOperationPreviewResult preview)
+    {
+        _currentPreview = preview;
         _previewListView.BeginUpdate();
         _previewListView.Items.Clear();
         foreach (MarkSlotSetOperationPreviewItem item in _currentPreview.PreviewItems)
         {
-            var row = new ListViewItem(GetMarkItemTypeText(item.FullPath));
+            var row = new ListViewItem(GetMarkItemTypeText(item));
             row.SubItems.Add(item.Name);
             row.SubItems.Add(GetDisplayLocation(item.FullPath));
             row.SubItems.Add(item.IsInCurrentDirectory ? "現在DIR内" : "外");
             row.SubItems.Add(item.Exists ? "存在" : "不在");
-            row.ToolTipText = $"名前: {item.Name}\n種別: {GetMarkItemTypeText(item.FullPath)}\n範囲: {(item.IsInCurrentDirectory ? "現在DIR内" : "外")}\n状態: {(item.Exists ? "存在" : "不在")}\nパス: {item.FullPath}";
+            row.ToolTipText = $"名前: {item.Name}\n種別: {GetMarkItemTypeText(item)}\n範囲: {(item.IsInCurrentDirectory ? "現在DIR内" : "外")}\n状態: {(item.Exists ? "存在" : "不在")}\nパス: {item.FullPath}";
             if (!item.Exists)
             {
                 row.ForeColor = Color.Yellow;
@@ -362,11 +401,17 @@ public sealed class MarkSlotSetOperationDialog : Form
         return string.IsNullOrWhiteSpace(root) ? fullPath : root;
     }
 
-    private static string GetMarkItemTypeText(string fullPath)
+    private static string GetMarkItemTypeText(MarkSlotSetOperationPreviewItem item)
     {
+        string fullPath = item.FullPath;
         if (string.IsNullOrWhiteSpace(fullPath))
         {
             return "-";
+        }
+
+        if (item.IsDirectory.HasValue)
+        {
+            return item.IsDirectory.Value ? "DIR" : item.Exists ? "FILE" : "不明";
         }
 
         if (Directory.Exists(fullPath))

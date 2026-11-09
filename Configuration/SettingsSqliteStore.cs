@@ -88,7 +88,7 @@ public sealed class SettingsSqliteStore
 
             if (File.Exists(_legacyJsonPath))
             {
-                string json = File.ReadAllText(_legacyJsonPath);
+                string json = JsonResourceSafety.ReadValidatedJsonFile(_legacyJsonPath);
                 AppSettings? legacy = JsonSerializer.Deserialize<AppSettings>(json, JsonOptions);
                 if (legacy == null) throw new JsonException("Legacy settings payload is empty.");
                 legacy.NormalizeChildren();
@@ -136,6 +136,9 @@ public sealed class SettingsSqliteStore
         ArgumentNullException.ThrowIfNull(settings);
         ArgumentNullException.ThrowIfNull(metadata);
 
+        settings.Input ??= new InputSettings();
+        settings.Input.NormalizeCommandReferences();
+
         string tempPath = _dbPath + ".tmp-" + Guid.NewGuid().ToString("N");
         string snapshotPath = tempPath + ".backup";
         try
@@ -177,13 +180,17 @@ public sealed class SettingsSqliteStore
     {
         try
         {
-            string json = JsonSerializer.Serialize(new SettingsTransferDocument
+            JsonResourceSafety.WriteJsonAtomically(Path.GetFullPath(targetPath), stream =>
             {
-                FormatVersion = 1,
-                PayloadVersion = CurrentPayloadVersion,
-                Settings = JsonSerializer.SerializeToElement(settings, JsonOptions)
-            }, JsonOptions);
-            File.WriteAllText(Path.GetFullPath(targetPath), json);
+                using var writer = new Utf8JsonWriter(stream, new JsonWriterOptions { Indented = true, MaxDepth = JsonResourceSafety.MaxDepth });
+                writer.WriteStartObject();
+                writer.WriteNumber(nameof(SettingsTransferDocument.FormatVersion), 1);
+                writer.WriteNumber(nameof(SettingsTransferDocument.PayloadVersion), CurrentPayloadVersion);
+                writer.WritePropertyName(nameof(SettingsTransferDocument.Settings));
+                JsonSerializer.Serialize(writer, settings, JsonOptions);
+                writer.WriteEndObject();
+                writer.Flush();
+            });
             return new SettingsTransferResult(true, string.Empty, null, settings);
         }
         catch (Exception ex)
@@ -196,26 +203,32 @@ public sealed class SettingsSqliteStore
     {
         try
         {
-            string json = File.ReadAllText(Path.GetFullPath(sourcePath));
+            string json = JsonResourceSafety.ReadValidatedJsonFile(Path.GetFullPath(sourcePath));
+            ReadTransferHeader(json, out int formatVersion, out int payloadVersion, out bool settingsPresent);
+            if (formatVersion != 1 || !settingsPresent)
+            {
+                throw new JsonException("Unsupported settings transfer document.");
+            }
+
+            PayloadVersionDecision payloadDecision = EvaluatePayloadVersion(payloadVersion);
+            if (!payloadDecision.IsSupported)
+            {
+                return new SettingsTransferResult(
+                    false,
+                    $"未対応の設定形式です。検出PayloadVersion={payloadVersion}、対応PayloadVersion={CurrentPayloadVersion}。",
+                    $"PayloadVersion={payloadVersion}; supported={CurrentPayloadVersion}; status={payloadDecision.Status}",
+                    null,
+                    false,
+                    payloadVersion,
+                    CurrentPayloadVersion,
+                    payloadDecision.Status);
+            }
+
             SettingsTransferDocument document = JsonSerializer.Deserialize<SettingsTransferDocument>(json, JsonOptions)
                 ?? throw new JsonException("Settings transfer document is empty.");
             if (document.FormatVersion != 1 || document.Settings.ValueKind is JsonValueKind.Null or JsonValueKind.Undefined)
             {
                 throw new JsonException("Unsupported settings transfer document.");
-            }
-
-            PayloadVersionDecision payloadDecision = EvaluatePayloadVersion(document.PayloadVersion);
-            if (!payloadDecision.IsSupported)
-            {
-                return new SettingsTransferResult(
-                    false,
-                    $"未対応の設定形式です。検出PayloadVersion={document.PayloadVersion}、対応PayloadVersion={CurrentPayloadVersion}。",
-                    $"PayloadVersion={document.PayloadVersion}; supported={CurrentPayloadVersion}; status={payloadDecision.Status}",
-                    null,
-                    false,
-                    document.PayloadVersion,
-                    CurrentPayloadVersion,
-                    payloadDecision.Status);
             }
 
             AppSettings settings = document.Settings.Deserialize<AppSettings>(JsonOptions)
@@ -226,6 +239,40 @@ public sealed class SettingsSqliteStore
         catch (Exception ex)
         {
             return new SettingsTransferResult(false, "設定をインポートできませんでした。", ex.Message, null);
+        }
+    }
+
+    private static void ReadTransferHeader(string json, out int formatVersion, out int payloadVersion, out bool settingsPresent)
+    {
+        formatVersion = 0;
+        payloadVersion = 0;
+        settingsPresent = false;
+        byte[] utf8 = System.Text.Encoding.UTF8.GetBytes(json);
+        var reader = new Utf8JsonReader(utf8, new JsonReaderOptions { MaxDepth = JsonResourceSafety.MaxDepth });
+        if (!reader.Read() || reader.TokenType != JsonTokenType.StartObject)
+            throw new JsonException("Settings transfer document must be an object.");
+
+        while (reader.Read())
+        {
+            if (reader.TokenType != JsonTokenType.PropertyName || reader.CurrentDepth != 1)
+                continue;
+
+            string? propertyName = reader.GetString();
+            if (!reader.Read()) throw new JsonException("Settings transfer property has no value.");
+            if (string.Equals(propertyName, nameof(SettingsTransferDocument.FormatVersion), StringComparison.OrdinalIgnoreCase))
+            {
+                if (reader.TokenType != JsonTokenType.Number || !reader.TryGetInt32(out formatVersion))
+                    throw new JsonException("FormatVersion must be an integer.");
+            }
+            else if (string.Equals(propertyName, nameof(SettingsTransferDocument.PayloadVersion), StringComparison.OrdinalIgnoreCase))
+            {
+                if (reader.TokenType != JsonTokenType.Number || !reader.TryGetInt32(out payloadVersion))
+                    throw new JsonException("PayloadVersion must be an integer.");
+            }
+            else if (string.Equals(propertyName, nameof(SettingsTransferDocument.Settings), StringComparison.OrdinalIgnoreCase))
+            {
+                settingsPresent = reader.TokenType is not (JsonTokenType.Null or JsonTokenType.None);
+            }
         }
     }
 

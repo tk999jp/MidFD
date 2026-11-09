@@ -88,11 +88,13 @@ SearchのRegex checkboxは入力済みfilename/contentの両方へ適用しま�
 | `←` / `→` | 内容検索で同一file内のhitを移動します。 |
 | `Enter` | 名前検索は確認用Browserで開き、内容検索はPreviewします。 |
 | `Ctrl+Enter` | 新しい通常tabを使って開く／Previewします。 |
-| `Ctrl+F` | 検索完了後、非0件なら結果filterへfocusします。0件ならcriteriaを引き継いだSearch dialogを開きます。 |
+| `E` | 名前検索は選択file、内容検索は選択hitを設定外部Editorで開きます。Grep hit用templateは内容検索結果だけに適用します。 |
+| `Ctrl+Shift+O` / Function Bar `Output` | 通常完了またはpartial終端snapshot確定後、filter前の結果を出力します。 |
+| `Ctrl+F` | 通常完了またはpartial終端snapshot後、非0件なら結果filterへfocusします。0件ならcriteriaを引き継いだSearch dialogを開きます。 |
 | `F7` | criteriaを引き継いだSearch dialogを開きます。 |
 | `Esc` | 結果filter欄ではfilterをclearして一覧へ戻り、それ以外では検索結果を閉じて検索元Browserへ戻ります。 |
 
-結果filter欄で`Enter`を押すと一覧へ戻ります。結果filterは検索完了後に利用でき、case-insensitive部分一致でrelative path／nameまたは内容hit行を絞り込みます。path／nameに一致したfileは全hitを表示し、hit行に一致した場合は一致hitだけを表示します。filesystemを再検索せず、完了snapshot内を絞り込みます。clear後は選択位置を可能な範囲で復元します。
+結果filter欄で`Enter`を押すと一覧へ戻ります。結果filterは通常完了またはpartial終端snapshot後に利用でき、case-insensitive部分一致でrelative path／nameまたは内容hit行を絞り込みます。path／nameに一致したfileは全hitを表示し、hit行に一致した場合は一致hitだけを表示します。filesystemを再検索せず、終端snapshot内を絞り込みます。clear後は選択位置を可能な範囲で復元します。
 
 検索開始直後にMainForm内の一時検索surfaceを開き、走査件数、結果／file数、hit数、skip数、ellipsis付きcurrent pathを更新します。compact ringとcountで進捗を示し、検索停止／完了時またはsurface非表示時はring animationを停止します。全体件数の事前走査は行いません。内容検索は検索中から到着済み結果を順次表示し、名前検索は完了後に一覧を表示します。内容検索は1file 1rowで、file数／hit数とhitの行／列／内容を確認できます。
 
@@ -102,7 +104,7 @@ SearchのRegex checkboxは入力済みfilename/contentの両方へ適用しま�
 
 PreviewからViewerの`Enter`／`Esc`で同じ検索結果へ戻り、選択file・hit・filterを維持します。LargeTextではfull line index後にexact hit行へ移動します。通常Text／LargeTextは検索位置を示し、MarkdownはRaw source表示で行を示します。binary／行Preview非対応形式では既存のPreview表示を維持します。通常Browserから`V`でPreviewした場合は従来どおりBrowserへ戻ります。
 
-検索中も到着済み内容hitはPreviewできます。検索完了後はMainForm Function Barの**Expo**または**E 一覧出力**から、filter前の全snapshotをUTF-8 BOMなしの一時fileへ出力し、設定済み外部Editorで開けます。Editor未設定時は既存方針でnotepadを使用します。名前検索はfull path、内容検索は`fullPath:line:column:lineText`形式です。
+検索中も到着済み内容hitはPreviewできます。通常完了後、またはpartial終端snapshot確定後は、MainForm Function Barの**Output**または`Ctrl+Shift+O`から一覧をUTF-8 BOMなしの一時fileへ出力し、設定済み外部Editorで開けます。通常完了では全snapshotを、partial結果では受理済みhitと不完全理由を出力し、record除外がある場合は除外件数も出力します。record除外による0件のpartial snapshotも除外情報を出力できます。Editor未設定時は既存方針でnotepadを使用します。名前検索はfull path、内容検索は`fullPath:line:column:lineText`形式です。
 
 ## file・folder操作
 
@@ -209,10 +211,20 @@ Workspace Snapshotのshortcutはありません。Fullでは既定有効で、�
 | 操作 | キー |
 |---|---|
 | 頭文字ジャンプ | `@`の後に1文字入力（Browser一覧focus時） |
-| file名のみ | Ctrl+1 |
-| file名＋size | Ctrl+2 |
-| file名＋size＋更新日時 | Ctrl+3 |
-| 拡張子整列 | Ctrl+4 / Ctrl+NumPad4 |
+| file名のみ | Standard: Ctrl+1 / Ctrl+NumPad1。FDCompatibleではCtrl+1／Ctrl+NumPad1がDrive Aの既定キー |
+| file名＋size | Standard: Ctrl+2 / Ctrl+NumPad2。FDCompatibleではCtrl+2／Ctrl+NumPad2がDrive Bの既定キー |
+| file名＋size＋更新日時 | Standard: Ctrl+3 / Ctrl+NumPad3。FDCompatibleではCtrl+3／Ctrl+NumPad3がDrive Cの既定キー |
+| 拡張子整列 | Standard: Ctrl+4 / Ctrl+NumPad4。FDCompatibleではCtrl+4／Ctrl+NumPad4がDrive Dの既定キー |
+
+両profileとも`1〜9`で表示列数を変更します。NumPad1〜9も、同じキーへの明示Browser key割り当てがなければ列数を変更します。StandardではCtrl+NumPad1〜4で表示modeを切り替えます。FDCompatibleではCtrl+NumPad1〜9がDrive A〜Iの既定キーです。
+
+別のキーへ表示列数変更を割り当てる場合は、「入力割り当て」から「表示列数を変更」を選び、D1〜D9またはNumPad1〜9を含むキーを設定します。その数字が列数になります。たとえば`Ctrl+Alt+NumPad5`は5列を表示します。
+
+WinFD公式helpは`1〜9`を列数変更、`Ctrl+1〜9`をDrive A〜Iへの直接切替として記載しています。UのWinFD実機確認では`Ctrl+NumPad1〜9`も同じDrive A〜I切替です。FDCompatible profileでは両方をDrive A〜Iへ割り当てます。Standard profileの`Ctrl+D1〜D4`／`Ctrl+NumPad1〜4`は既存の表示mode切替を維持します。plain `D1〜D9`は表示列数を変更し、plain `NumPad1〜9`は明示Browser key割当がない場合に表示列数を変更します。数字キーへのShift／Alt併用は未確認です。
+
+## Drive A〜Z
+
+FDCompatible profileではCtrl+1〜9とCtrl+NumPad1〜9でDrive A〜Iへ移動します。Drive commandは`A:`〜`Z:`をMidFDの既存navigation経路へ渡すため、最終訪問directoryがあればそこへ、なければdrive rootへ解決します。これはMidFD側のnavigation動作です。A〜Zは「入力割り当て」の「機能別」または「キー別」から割り当てできます。J〜Zに既定キーはありません。
 
 Browser一覧focus時に`@`を押すとone-shot待機を開始します。次に入力した表示可能な1文字で現在一覧の表示順を大文字・小文字を区別せずに検索し、matchした場合だけcursorを移動して、その時点でジャンプ待機を終了します。`..`は対象外です。Filter／Mark／sortは変更しません。文字入力前のEnter／Escはcommandを実行せず、ジャンプ待機だけを終了します。複数文字で名前を探す場合は`Ctrl+F` / `F7`のSearchを使います。
 
@@ -224,7 +236,7 @@ Browser一覧focus時に`@`を押すとone-shot待機を開始します。次に
 | copy | Ctrl+C |
 | 全選択 | Ctrl+A |
 
-通常BrowserからVでPreviewした場合はBrowserへ戻ります。内容検索結果から起動したPreviewは検索結果childへ戻ります。Browser側でcustomizeしたkeyより、Viewer固有keyが優先されます。
+通常BrowserからVでPreviewした場合はBrowserへ戻ります。内容検索結果から起動したPreviewは検索結果childへ戻ります。Browser側でcustomizeしたkeyより、Viewer固有keyが優先されます。Enterは拡張子やfile内容に応じた通常の対象別Viewerを開き、Vは専用Viewerへの拡張子分岐を行わず、file内容を判定してText／LargeText／Binaryを選びます。
 
 ## text／LargeText Viewer
 
@@ -236,8 +248,11 @@ Browser一覧focus時に`@`を押すとone-shot待機を開始します。次に
 | 全選択 | Ctrl+A |
 | copy | Ctrl+C |
 | 閉じる | Esc |
+| 文字コード切替（Text） | L |
+| 折り返し切替（Text） | W |
 
 LargeText Viewerでは、大容量file向けの表示経路を使います。通常選択、Shift+click範囲選択、Ctrl+A、Ctrl+Cに対応します。
+TextのStatusStripには`[L:文字コード]`と`[W:折り返し]`が表示されます。LはAuto→UTF-8→Shift_JISを切り替えます。LargeTextは検出文字コード・行・hitを表示します。BrowserのL（Logdsk）やCtrl+L（パス入力）とは別のViewer操作です。
 
 ## 画像Viewer
 
@@ -245,37 +260,39 @@ LargeText Viewerでは、大容量file向けの表示経路を使います。通
 |---|---|
 | 矩形選択 | mouse drag |
 | 選択範囲copy／全画像copy | Ctrl+C |
+| 固定ON／OFF（Hosted通常画像） | Ctrl+Enter またはStatusStripの固定button |
 | 閉じる | Esc |
 
 回転、反転、画像情報はmenuまたは画面内操作から実行します。
 
-## 動画静止画preview
+Hosted画像ViewerではStatusStripの「固定: OFF（追従）／固定: ON」buttonまたはCtrl+Enterで追従／固定を切り替えます。OFFはBrowser選択に追従し、ONは表示中の画像を保持します。状態表示は切替要求への応答後に更新されます。Standalone Viewerには固定buttonを表示せず、通常画像のCtrl+Enterも固定切替に使いません。
 
-メディアEnter外部再生がOFFの場合:
-
-| キー | 動作 |
-|---|---|
-| Enter | 動画静止画preview |
-| Ctrl+Enter | 外部再生 |
-
-ONの場合:
+## Browserの画像・動画・音声
 
 | キー | 動作 |
 |---|---|
-| Enter | 外部再生 |
-| Ctrl+Enter | 動画静止画preview |
+| Enter（Susie対応画像） | 有効登録かつ検査済みSusie plugin metadataが拡張子を示す画像を、MidPlayerで開きます。PreviewFollow中はBrowser選択に追従します。 |
+| Ctrl+Enter（単一画像） | 通常画像とSusie対応画像を、既存の「再生モードで開く」routeでMidPlayerの固定ONとして開きます。 |
+| Enter（動画） | 内蔵MidPlayerで再生。PreviewFollowから始まり、再生中／一時停止中は自動で表示を固定します。 |
+| Ctrl+Enter（動画） | 既存の動画再生routeで内蔵MidPlayerを開きます。保存済みの旧外部再生設定値にかかわらず、動画はPreviewFollowから始まります。 |
+| Enter／Ctrl+Enter（対応音声） | ffplayで外部再生します。ffplay未検出時はWindowsの関連付けを使います。 |
 
-preview画面:
+旧`VideoEnterPlaysExternal`設定は保存済み設定の互換用に読み書きされますが、動画Enterの動作は切り替えません。通常動画はEnter／Ctrl+Enterで内蔵MidPlayerを開きます。Browserの`V`は内容probeによる明示Previewで、通常動画はBinary表示です。Windows関連付け起動はBrowserの`Z`を使います。
+
+Susie対応画像のBrowser分類は有効な登録と検査済み拡張子metadataを使います。Vの明示Previewは引き続きfile内容でText／LargeText／Binaryを判定し、Susie画像としてのdecodeは行いません。
+
+pluginの登録・検査、bitness別runtime、decoder選択は[PROFILES.md](PROFILES.md)を参照してください。
+
+## 動画Playback Viewer
 
 | 操作 | キー |
 |---|---|
-| seek | ← / → |
-| 大きくseek | Shift+← / Shift+→ |
-| 先頭 | Home |
-| 現在位置付近から外部再生 | Ctrl+Enter |
-| 閉じる | Esc |
+| 一時停止／再開 | Space |
+| 固定ONで再生中／一時停止中の動画を設定秒数戻す／進める | ← / → |
+| 固定ONで再生中／一時停止中の動画の音量を5%下げる／上げる | ↓ / ↑ |
+| 固定OFF中にBrowser選択を移動（動画再生中を含む） | ← / → / ↑ / ↓ |
 
-音声fileは設定に関係なく外部再生します。
+動画は常に選択追従表示（PreviewFollow）で開き、再生中／一時停止中は自動で表示を固定します。停止／終了／ErrorではPreviewFollowへ戻ります。保存済みの画像表示設定や「再生モードで開く」の要求は動画の開始状態を変えず、Close／Hide後の再OpenもPreviewFollowから始まります。画像Viewerは保存済み既定modeまたは明示Open modeを使い、Hosted動画のlock buttonで固定ON／OFFを手動切替できます。固定ON中の矢印は動画seek／音量、固定OFFへ手動解除した後の矢印は動画再生中でもBrowser選択を移動します。動画中は再生・停止・skip button、seek／volume、速度controlにfocusがあってもSpace／矢印を現在modeの操作へ使います。focus中buttonのSpaceではbuttonを実行しません。メニュー、編集欄、開いた速度リストではその操作を優先します。
 
 ## 標準Functionキー
 
@@ -355,6 +372,7 @@ Browserの空白部分からdragした場合も現在Markを使用します。ma
 設定の「入力割り当て」では次を変更できます。
 
 - Browser keybind（機能別／キー別）
+- Drive A〜Iのkeybind
 - Functionバーの通常／Shift／Ctrl／Alt layer
 - mouse gesture
 

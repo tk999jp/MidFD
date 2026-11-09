@@ -11,7 +11,6 @@ public sealed class FeatureProfileSelectionDialog : Form
     private readonly CheckBox _showFunctionBarTooltipsCheckBox;
     private readonly CheckBox _enableDragArchiveHandoffCheckBox;
     private readonly CheckBox _includeDragZipManifestCheckBox;
-    private readonly CheckBox _videoEnterPlaysExternalCheckBox;
     private readonly CheckBox _showPathAsBreadcrumbCheckBox;
     private readonly CheckBox _useMidFdManagedTrashCheckBox;
     private readonly CheckBox _clipboardPasteTextAsFileCheckBox;
@@ -31,6 +30,9 @@ public sealed class FeatureProfileSelectionDialog : Form
     private readonly Label _videoToolStatusLabel;
     private readonly Label _sevenZipStatusLabel;
     private readonly Label _externalEditorStatusLabel;
+    private string? _externalEditorSearchHitArgumentTemplate;
+    private string? _lastPresetEditorPath;
+    private readonly bool _externalEditorSearchHitArgumentTemplateManuallyEdited;
     private bool _updatingRange;
     private bool _initializingControls;
     private readonly bool? _initialWorkspaceSnapshotOverride;
@@ -39,7 +41,6 @@ public sealed class FeatureProfileSelectionDialog : Form
 
     public FeatureProfile SelectedProfile { get; private set; } = FeatureProfile.PracticalStable;
     public bool UseFdCompatibleFunctionKeys => _fdCompatibleInputRadioButton.Checked;
-    public bool VideoEnterPlaysExternal => _videoEnterPlaysExternalCheckBox.Checked;
     public bool RestoreStartupState => _restoreStartupStateCheckBox.Checked;
     public bool EnableMouseGestures => _enableMouseGesturesCheckBox.Checked;
     public bool ShowFunctionBarTooltips => _showFunctionBarTooltipsCheckBox.Checked;
@@ -61,8 +62,12 @@ public sealed class FeatureProfileSelectionDialog : Form
     public string? SevenZipPath => NullIfEmpty(_sevenZipPathBox.Text);
     public string? VideoToolDirectory => NullIfEmpty(_videoToolDirectoryBox.Text);
     public string? ExternalEditorPath => NullIfEmpty(_externalEditorPathBox.Text);
+    public string? ExternalEditorSearchHitArgumentTemplate => NullIfEmpty(_externalEditorSearchHitArgumentTemplate);
 
-    public FeatureProfileSelectionDialog(AppSettings? settings = null, bool isFirstLaunch = true)
+    public FeatureProfileSelectionDialog(
+        AppSettings? settings = null,
+        bool isFirstLaunch = true,
+        bool externalEditorSearchHitArgumentTemplateManuallyEdited = false)
     {
         Text = isFirstLaunch ? "MidFD 初回セットアップ" : "MidFD 基本セットアップ";
         StartPosition = isFirstLaunch ? FormStartPosition.CenterScreen : FormStartPosition.CenterParent;
@@ -83,6 +88,8 @@ public sealed class FeatureProfileSelectionDialog : Form
         BrowserTabSettings? browserTabs = settings?.BrowserTabs;
         SevenZipSettings? sevenZip = settings?.SevenZip;
         ExternalToolsSettings? externalTools = settings?.ExternalTools;
+        _externalEditorSearchHitArgumentTemplate = externalTools?.ExternalEditorSearchHitArgumentTemplate;
+        _externalEditorSearchHitArgumentTemplateManuallyEdited = externalEditorSearchHitArgumentTemplateManuallyEdited;
         var bodyPanel = new Panel
         {
             Dock = DockStyle.Fill,
@@ -122,15 +129,14 @@ public sealed class FeatureProfileSelectionDialog : Form
         _restoreStartupStateCheckBox = AddCheckBox(convenientGroup, "前回の状態を復元", 18, 28, isFirstLaunch ? true : settings?.Session?.RestoreStartupState ?? true);
         _enableMouseGesturesCheckBox = AddCheckBox(convenientGroup, "マウスジェスチャー", 18, 58, isFirstLaunch ? true : input?.EnableMouseGestures ?? true);
         _showFunctionBarTooltipsCheckBox = AddCheckBox(convenientGroup, "Functionバーの説明", 18, 88, isFirstLaunch ? true : input?.ShowFunctionBarTooltips ?? true);
-        _videoEnterPlaysExternalCheckBox = AddCheckBox(convenientGroup, "メディアファイルのEnter外部再生", 18, 118, isFirstLaunch ? true : preview?.VideoEnterPlaysExternal ?? false);
-        _showPathAsBreadcrumbCheckBox = AddCheckBox(convenientGroup, "パスをパンくず形式で表示", 18, 148, isFirstLaunch ? true : appearance?.ShowPathAsBreadcrumb ?? false);
+        _showPathAsBreadcrumbCheckBox = AddCheckBox(convenientGroup, "パスをパンくず形式で表示", 18, 118, isFirstLaunch ? true : appearance?.ShowPathAsBreadcrumb ?? false);
         _workspaceSnapshotCheckBox = AddCheckBox(
             convenientGroup,
             "Workspace Snapshotを有効にする",
             18,
-            178,
+            148,
             new FeatureGateService(SelectedProfile, _initialWorkspaceSnapshotOverride).IsEnabled(FeatureId.WorkspaceSnapshot));
-        convenientGroup.Controls.Add(new Label { Text = "外部アプリは、設定済みのパスまたは\r\n自動検出したツールを使用します。", AutoSize = false, Location = new Point(18, 204), Size = new Size(300, 42) });
+        convenientGroup.Controls.Add(new Label { Text = "外部アプリは、設定済みのパスまたは\r\n自動検出したツールを使用します。", AutoSize = false, Location = new Point(18, 178), Size = new Size(300, 42) });
         bodyPanel.Controls.Add(convenientGroup);
 
         var cautionGroup = new GroupBox { Text = "注意が必要な機能", Location = new Point(16, 294), Size = new Size(340, 220) };
@@ -185,17 +191,32 @@ public sealed class FeatureProfileSelectionDialog : Form
         _sevenZipStatusLabel = AddStatus(externalGroup, string.Empty, 142, _sevenZipPathBox.Bottom + 2, 440);
         externalRowTop = _sevenZipStatusLabel.Bottom + 2;
 
-        AddLabel(externalGroup, "動画ツール", 18, externalRowTop + 4, 120);
+        AddLabel(externalGroup, "音声外部再生", 18, externalRowTop + 4, 120);
         _videoToolDirectoryBox = AddReadOnlyTextBox(externalGroup, 142, externalRowTop, 440, preview?.VideoToolDirectory ?? string.Empty);
-        AddBrowseFolderButton(externalGroup, 592, externalRowTop - 1, 90, _videoToolDirectoryBox, "動画ツールフォルダを選択");
+        AddBrowseFolderButton(externalGroup, 592, externalRowTop - 1, 90, _videoToolDirectoryBox, "ffplayフォルダを選択");
         _videoToolStatusLabel = AddStatus(externalGroup, string.Empty, 142, _videoToolDirectoryBox.Bottom + 2, 440);
         externalRowTop = _videoToolStatusLabel.Bottom + 2;
 
         AddLabel(externalGroup, "外部エディタ", 18, externalRowTop + 4, 120);
         _externalEditorPathBox = AddReadOnlyTextBox(externalGroup, 142, externalRowTop, 440, externalTools?.ExternalEditorPath ?? string.Empty);
-        AddBrowseFileButton(externalGroup, 592, externalRowTop - 1, 90, _externalEditorPathBox, "外部エディタ実行ファイルを選択");
+        _lastPresetEditorPath = NullIfEmpty(_externalEditorPathBox.Text);
+        AddBrowseFileButton(
+            externalGroup,
+            592,
+            externalRowTop - 1,
+            90,
+            _externalEditorPathBox,
+            "外部エディタ実行ファイルを選択",
+            ApplyExternalEditorPresetForSelection);
         _externalEditorStatusLabel = AddStatus(externalGroup, string.Empty, 142, _externalEditorPathBox.Bottom + 2, 440);
-        externalGroup.Height = _externalEditorStatusLabel.Bottom + 16;
+        externalGroup.Controls.Add(new Label
+        {
+            Text = "対応Editorを選ぶとGrep hit用の推奨引数を設定します。既存の手動設定は維持します。",
+            Location = new Point(18, _externalEditorStatusLabel.Bottom + 4),
+            Size = new Size(664, 34),
+            ForeColor = SystemColors.GrayText
+        });
+        externalGroup.Height = externalGroup.Controls.Cast<Control>().Max(control => control.Bottom) + 16;
         ClientSize = new Size(ClientSize.Width, Math.Max(ClientSize.Height, externalGroup.Bottom + 56));
         bodyPanel.Controls.Add(externalGroup);
 
@@ -247,7 +268,7 @@ public sealed class FeatureProfileSelectionDialog : Form
         _basicRangeRadioButton.CheckedChanged += (_, _) => ApplyRangeFromRadio(0);
         _convenientRangeRadioButton.CheckedChanged += (_, _) => ApplyRangeFromRadio(1);
         _allRangeRadioButton.CheckedChanged += (_, _) => ApplyRangeFromRadio(2);
-        foreach (CheckBox checkBox in new[] { _restoreStartupStateCheckBox, _enableMouseGesturesCheckBox, _showFunctionBarTooltipsCheckBox, _videoEnterPlaysExternalCheckBox, _showPathAsBreadcrumbCheckBox, _useMidFdManagedTrashCheckBox, _enableDragArchiveHandoffCheckBox, _includeDragZipManifestCheckBox, _clipboardPasteTextAsFileCheckBox }) checkBox.CheckedChanged += (_, _) => RefreshRangeState();
+        foreach (CheckBox checkBox in new[] { _restoreStartupStateCheckBox, _enableMouseGesturesCheckBox, _showFunctionBarTooltipsCheckBox, _showPathAsBreadcrumbCheckBox, _useMidFdManagedTrashCheckBox, _enableDragArchiveHandoffCheckBox, _includeDragZipManifestCheckBox, _clipboardPasteTextAsFileCheckBox }) checkBox.CheckedChanged += (_, _) => RefreshRangeState();
         _workspaceSnapshotCheckBox.CheckedChanged += (_, _) =>
         {
             if (!_updatingRange)
@@ -259,7 +280,11 @@ public sealed class FeatureProfileSelectionDialog : Form
         _enableDragArchiveHandoffCheckBox.CheckedChanged += (_, _) => _includeDragZipManifestCheckBox.Enabled = _enableDragArchiveHandoffCheckBox.Checked;
         _videoToolDirectoryBox.TextChanged += (_, _) => RefreshExternalStatuses();
         _sevenZipPathBox.TextChanged += (_, _) => RefreshExternalStatuses();
-        _externalEditorPathBox.TextChanged += (_, _) => RefreshExternalStatuses();
+        _externalEditorPathBox.TextChanged += (_, _) =>
+        {
+            ApplyExternalEditorPresetForSelection();
+            RefreshExternalStatuses();
+        };
 
         int rangeIndex = ResolveRangeIndex();
         _updatingRange = true;
@@ -276,9 +301,9 @@ public sealed class FeatureProfileSelectionDialog : Form
 
     private int ResolveRangeIndex()
     {
-        bool basic = !_restoreStartupStateCheckBox.Checked && !_enableMouseGesturesCheckBox.Checked && _showFunctionBarTooltipsCheckBox.Checked && !_videoEnterPlaysExternalCheckBox.Checked && !_showPathAsBreadcrumbCheckBox.Checked && !_useMidFdManagedTrashCheckBox.Checked && !_enableDragArchiveHandoffCheckBox.Checked && !_includeDragZipManifestCheckBox.Checked && !_clipboardPasteTextAsFileCheckBox.Checked && !_workspaceSnapshotCheckBox.Checked;
-        bool convenient = _restoreStartupStateCheckBox.Checked && _enableMouseGesturesCheckBox.Checked && _showFunctionBarTooltipsCheckBox.Checked && _videoEnterPlaysExternalCheckBox.Checked && _showPathAsBreadcrumbCheckBox.Checked && !_useMidFdManagedTrashCheckBox.Checked && !_enableDragArchiveHandoffCheckBox.Checked && !_includeDragZipManifestCheckBox.Checked && !_clipboardPasteTextAsFileCheckBox.Checked && !_workspaceSnapshotCheckBox.Checked;
-        bool all = _restoreStartupStateCheckBox.Checked && _enableMouseGesturesCheckBox.Checked && _showFunctionBarTooltipsCheckBox.Checked && _videoEnterPlaysExternalCheckBox.Checked && _showPathAsBreadcrumbCheckBox.Checked && _useMidFdManagedTrashCheckBox.Checked && _enableDragArchiveHandoffCheckBox.Checked && _includeDragZipManifestCheckBox.Checked && _clipboardPasteTextAsFileCheckBox.Checked && _workspaceSnapshotCheckBox.Checked;
+        bool basic = !_restoreStartupStateCheckBox.Checked && !_enableMouseGesturesCheckBox.Checked && _showFunctionBarTooltipsCheckBox.Checked && !_showPathAsBreadcrumbCheckBox.Checked && !_useMidFdManagedTrashCheckBox.Checked && !_enableDragArchiveHandoffCheckBox.Checked && !_includeDragZipManifestCheckBox.Checked && !_clipboardPasteTextAsFileCheckBox.Checked && !_workspaceSnapshotCheckBox.Checked;
+        bool convenient = _restoreStartupStateCheckBox.Checked && _enableMouseGesturesCheckBox.Checked && _showFunctionBarTooltipsCheckBox.Checked && _showPathAsBreadcrumbCheckBox.Checked && !_useMidFdManagedTrashCheckBox.Checked && !_enableDragArchiveHandoffCheckBox.Checked && !_includeDragZipManifestCheckBox.Checked && !_clipboardPasteTextAsFileCheckBox.Checked && !_workspaceSnapshotCheckBox.Checked;
+        bool all = _restoreStartupStateCheckBox.Checked && _enableMouseGesturesCheckBox.Checked && _showFunctionBarTooltipsCheckBox.Checked && _showPathAsBreadcrumbCheckBox.Checked && _useMidFdManagedTrashCheckBox.Checked && _enableDragArchiveHandoffCheckBox.Checked && _includeDragZipManifestCheckBox.Checked && _clipboardPasteTextAsFileCheckBox.Checked && _workspaceSnapshotCheckBox.Checked;
         return basic ? 0 : convenient ? 1 : all ? 2 : -1;
     }
 
@@ -293,7 +318,6 @@ public sealed class FeatureProfileSelectionDialog : Form
         _restoreStartupStateCheckBox.Checked = index > 0;
         _enableMouseGesturesCheckBox.Checked = index > 0;
         _showFunctionBarTooltipsCheckBox.Checked = true;
-        _videoEnterPlaysExternalCheckBox.Checked = index > 0;
         _showPathAsBreadcrumbCheckBox.Checked = index > 0;
         _useMidFdManagedTrashCheckBox.Checked = index == 2;
         _enableDragArchiveHandoffCheckBox.Checked = index == 2;
@@ -335,11 +359,24 @@ public sealed class FeatureProfileSelectionDialog : Form
         string? sevenZipPath = SevenZipService.ResolveExecutable(NullIfEmpty(_sevenZipPathBox.Text));
         _sevenZipStatusLabel.Text = sevenZipPath == null ? "自動探索／fallback: 未検出" : $"自動検出済み: {Path.GetFileName(sevenZipPath)}";
         VideoToolResolutionResult video = VideoToolResolutionService.Resolve(NullIfEmpty(_videoToolDirectoryBox.Text));
-        _videoToolStatusLabel.Text = $"ffmpeg {OnOff(video.FfmpegFound)}／ffplay {OnOff(video.FfplayFound)}";
+        _videoToolStatusLabel.Text = video.FfplayFound
+            ? $"ffplay検出済み: {Path.GetFileName(video.FfplayPath)}"
+            : "ffplay未検出（音声はWindowsの関連付け）";
         string? editorPath = NullIfEmpty(_externalEditorPathBox.Text);
         _externalEditorStatusLabel.Text = !string.IsNullOrEmpty(editorPath) && File.Exists(editorPath)
             ? $"検出済み: {Path.GetFileName(editorPath)}"
             : "未検出（未設定時はnotepad.exeを使用）";
+    }
+
+    private void ApplyExternalEditorPresetForSelection()
+    {
+        string? selectedPath = NullIfEmpty(_externalEditorPathBox.Text);
+        _externalEditorSearchHitArgumentTemplate = KnownEditorSearchHitArgumentPresetService.GetTemplateAfterEditorSelection(
+            _lastPresetEditorPath,
+            selectedPath,
+            _externalEditorSearchHitArgumentTemplate,
+            _externalEditorSearchHitArgumentTemplateManuallyEdited);
+        _lastPresetEditorPath = selectedPath;
     }
 
     private static string OnOff(bool value) => value ? "検出済み" : "未検出";
@@ -363,10 +400,18 @@ public sealed class FeatureProfileSelectionDialog : Form
     private static string? NullIfEmpty(string? value) => string.IsNullOrWhiteSpace(value) ? null : value.Trim();
     private static FeatureProfile ResolveInitialProfile(AppSettings? settings) => FeatureProfileService.TryResolveProfile(settings?.Profile, out FeatureProfile profile) ? profile : FeatureProfile.PracticalStable;
 
-    private static void AddBrowseFileButton(Control parent, int x, int y, int width, TextBox target, string title)
+    private static void AddBrowseFileButton(Control parent, int x, int y, int width, TextBox target, string title, Action? onPathSelected = null)
     {
         var button = new Button { Text = "変更...", Location = new Point(x, y), Size = new Size(width, 25) };
-        button.Click += (_, _) => { using var dialog = new OpenFileDialog { Title = title, Filter = "実行ファイル|*.exe|すべてのファイル|*.*", CheckFileExists = true }; if (dialog.ShowDialog(parent.FindForm()) == DialogResult.OK) target.Text = dialog.FileName; };
+        button.Click += (_, _) =>
+        {
+            using var dialog = new OpenFileDialog { Title = title, Filter = "実行ファイル|*.exe|すべてのファイル|*.*", CheckFileExists = true };
+            if (dialog.ShowDialog(parent.FindForm()) == DialogResult.OK)
+            {
+                target.Text = dialog.FileName;
+                onPathSelected?.Invoke();
+            }
+        };
         parent.Controls.Add(button);
     }
 

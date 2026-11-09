@@ -19,6 +19,7 @@ ZIPを展開し、`MidFD.exe` を実行します。
 
 - Windows 10 / 11 64bit
 - .NET 10.0 Desktop Runtime x64
+- .NET 10.0 Desktop Runtime x86 (32-bit Susie SPI pluginを使用する場合)
 
 起動できない場合は、配布ZIP直下の `README_FIRST.txt` を参照してください。
 
@@ -27,9 +28,7 @@ ZIPを展開し、`MidFD.exe` を実行します。
 MidFDには次の外部ツールを同梱していません。必要な機能だけ別途用意できます。
 
 - 7-Zip: 圧縮・解凍
-- ffmpeg: 動画の静止画プレビュー
-- ffprobe: 動画情報・再生時間取得
-- ffplay: 動画・音声の外部再生
+- ffplay: 音声の外部再生（任意。未検出時はWindowsの関連付け）
 - 任意の外部エディタ
 
 ## スクリーンショット
@@ -62,7 +61,11 @@ MidFDには次の外部ツールを同梱していません。必要な機能だ
 
 ### 画像ビューア
 
-![MidFD Image Viewer](UserDocs/images/screenshot-image-viewer.png)
+![MidFD Image Viewer — 画像](UserDocs/images/screenshot-midplayer-image.png)
+
+### 動画ビューア
+
+![MidFD Image Viewer — 動画再生](UserDocs/images/screenshot-midplayer-video.png)
 
 ## 主な機能
 
@@ -95,7 +98,7 @@ MidFDには次の外部ツールを同梱していません。必要な機能だ
 
 - 統合ダイアログによる一覧Filter、配下Find、ファイル内容Grep
 - 内容検索の文字コードはAuto／UTF-8／Shift_JIS／UTF-16 LE／UTF-16 BEから選択。実際の検索engineとversionを結果画面に表示
-- 内容検索は結果を順次表示し、検索中もPreview可能。結果Filterと一覧出力は検索完了後に利用可能
+- 内容検索は結果を順次表示し、検索中もPreview可能。結果Filterと一覧出力は通常完了またはpartial終端snapshot確定後に利用可能
 - 同梱rg、PATH上のrg、内蔵検索の順で利用可能なengineを選択。正規表現はPCRE2非対応
 - Workspace SnapshotによるWorkspace全体の保存・復元（Fullで既定有効、個別override可）
 - 成功した一括tab openは1操作として、対応するfile操作と共通の時系列Undo／Redo履歴に記録
@@ -122,8 +125,9 @@ MidFDには次の外部ツールを同梱していません。必要な機能だ
 - UTF-16 LE／BEを含むテキストpreviewとbinary判定
 - 大きなテキストファイル向けLargeText Viewer
 - 画像の矩形選択コピー、回転、反転、画像情報表示
-- ffmpegを利用した動画静止画プレビュー
-- ffplayまたはWindows関連付けによるメディア外部再生
+- 同梱のMidPlayer Lite DLLによる画像・動画表示と、Susie `.spi`／`.sph` pluginによる対応画像形式の追加
+- Browser動画Enter／Ctrl+Enterは内蔵MidPlayerで再生し、Vは内容probeで判定する明示Previewを行います。通常動画はBinary表示です。ZはWindowsの関連付けで開きます。
+- Browser音声Enter／Ctrl+Enterはffplayで外部再生し、ffplay未検出時はWindowsの関連付けを使う
 - PowerShell、コマンドプロンプト、Explorer、外部エディタ、登録済み外部ツールの起動
 - Command Paletteによる機能・設定・外部ツール検索
 
@@ -149,10 +153,12 @@ MidFDには次の外部ツールを同梱していません。必要な機能だ
 | 選択 | 主な内容 |
 |---|---|
 | 基本機能のみ | ファイル閲覧、コピー、移動、名前変更、Mark、標準キー操作、内蔵Viewer |
-| 便利機能まで使う（推奨） | 基本機能＋前回状態復元、マウスジェスチャー、Functionバー説明、メディアEnter外部再生、パンくず表示 |
+| 便利機能まで使う（推奨） | 基本機能＋前回状態復元、マウスジェスチャー、Functionバー説明、パンくず表示 |
 | すべての機能を使う | 便利機能＋Workspace Snapshot（既定有効、個別override可）、MarkSlot集合演算／Backup Transfer、Image Quantization、SVG Clipboard、Command PaletteのFavorite／Recent利用情報保存、MidFD管理ゴミ箱、Drag ZIP／manifest、クリップボードのテキスト貼り付け |
 
 各項目は個別に変更できます。既知の組み合わせと一致しない場合は「個別設定」として扱われます。
+
+Browserの動画Enterは機能範囲presetにかかわらず内蔵MidPlayerで再生します。対応音声のEnter／Ctrl+Enterはffplayで外部再生し、ffplay未検出時はWindowsの関連付けを使います。
 
 ### 操作方式
 
@@ -163,7 +169,7 @@ MidFDには次の外部ツールを同梱していません。必要な機能だ
 
 ### 外部アプリ
 
-7-Zip、動画ツール、外部エディタを指定できます。未設定でも基本操作は可能で、自動検出または既存fallbackを使用します。
+7-Zip、音声外部再生用ffplay folder、外部エディタを指定できます。未設定でも基本操作は可能で、自動検出または既存fallbackを使用します。
 
 詳しくは [UserDocs/PROFILES.md](UserDocs/PROFILES.md) を参照してください。
 

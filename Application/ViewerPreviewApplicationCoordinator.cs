@@ -20,7 +20,7 @@ internal interface IViewerPreviewUiPort
     void ShowStatusMessage(string message);
     void ReturnToBrowserForVideo();
     void ApplyImagePreview(string path);
-    void ApplyVideoPreview(string path, VideoPreviewOptions options);
+    void ApplyVideoPreview(string path);
     void ApplyTextPreview(TextPreviewContent content);
     void ApplyMarkdownPreview(string text, string path, MarkdownViewerMode mode);
     void ApplyDelimitedPreview(DelimitedTextTable table);
@@ -31,11 +31,6 @@ internal interface IViewerPreviewUiPort
     void BeginLargeTextPreview(LargeFilePreviewState state);
     Task ApplyLargeTextInitialDisplayAsync(LargeFilePreviewState state, int requestId, CancellationToken token);
 }
-
-internal sealed record VideoPreviewOptions(
-    string? ToolDirectory,
-    int InitialSeconds,
-    int VolumePercent);
 
 /// <summary>
 /// Text Previewのrequest lifecycleと内容分岐を担当する。
@@ -74,7 +69,7 @@ internal sealed class ViewerPreviewApplicationCoordinator
             _state.CurrentPreviewTarget = null;
             _state.AutoPreviewSuppressed = false;
             _state.LastAutoPreviewSuppressedMessage = null;
-            ui.ClearPreview("選択なしのためプレビューなし", -1);
+            ClearPreview(ui, "選択なしのためプレビューなし", -1);
             return false;
         }
 
@@ -85,7 +80,7 @@ internal sealed class ViewerPreviewApplicationCoordinator
             if (!(_state.AutoPreviewSuppressed
                 && string.Equals(_state.LastAutoPreviewSuppressedMessage, message, StringComparison.Ordinal)))
             {
-                ui.ClearPreview(message, -1);
+                ClearPreview(ui, message, -1);
             }
             _state.CurrentPreviewTarget = requestPath;
             _state.AutoPreviewSuppressed = true;
@@ -102,6 +97,7 @@ internal sealed class ViewerPreviewApplicationCoordinator
 
         _state.AutoPreviewSuppressed = false;
         _state.LastAutoPreviewSuppressedMessage = null;
+        if (_state.Mode == ViewerApplicationMode.Viewer) ClearDisplayedPreview();
         _state.PreviewRequests.Cancel();
         CancellationToken token = _state.PreviewRequests.StartNewRequest(out int requestId);
         _state.ExchangeActiveRequestId(requestId);
@@ -158,13 +154,13 @@ internal sealed class ViewerPreviewApplicationCoordinator
             {
                 result = "SkippedDirectory";
                 stage = "DirectoryGuard";
-                ui.ClearPreview("プレビュー対象外", requestId);
+                ClearPreview(ui, "プレビュー対象外", requestId);
                 return;
             }
 
             if (!string.Equals(_state.CurrentPreviewTarget, requestPath, StringComparison.OrdinalIgnoreCase))
             {
-                ui.ClearPreview(string.Empty, requestId);
+                ClearPreview(ui, string.Empty, requestId);
                 _state.CurrentPreviewTarget = requestPath;
             }
 
@@ -177,10 +173,15 @@ internal sealed class ViewerPreviewApplicationCoordinator
             (PreviewKind rawKind, TextPreviewProbeResult? probe) = await Task.Run(
                 () =>
                 {
-                    PreviewKind kind = previewKindOverride.HasValue
-                        ? PreviewService.GetContentPreviewKind(requestPath, out TextPreviewProbeResult? detectedProbe)
-                        : PreviewService.GetPreviewKind(requestPath, out detectedProbe);
-                    return (kind, detectedProbe);
+                    if (previewKindOverride is { } selectedKind)
+                    {
+                        return (selectedKind, (TextPreviewProbeResult?)null);
+                    }
+
+                    PreviewKind detectedKind = PreviewService.GetPreviewKind(
+                        requestPath,
+                        out TextPreviewProbeResult? detectedProbe);
+                    return (detectedKind, detectedProbe);
                 },
                 token).ConfigureAwait(true);
 
@@ -199,11 +200,11 @@ internal sealed class ViewerPreviewApplicationCoordinator
             {
                 result = "SkippedUnsupported";
                 stage = "KindNone";
-                ui.ClearPreview($"プレビュー対象外\n{Path.GetExtension(requestPath)}", requestId);
+                ClearPreview(ui, $"プレビュー対象外\n{Path.GetExtension(requestPath)}", requestId);
                 return;
             }
 
-            ui.ClearPreview("プレビュー読み込み中...", requestId);
+            ClearPreview(ui, "プレビュー読み込み中...", requestId);
             await ApplyKindAsync(kind, requestPath, probe, requestId, token, ui).ConfigureAwait(true);
         }
         catch (OperationCanceledException)
@@ -218,7 +219,7 @@ internal sealed class ViewerPreviewApplicationCoordinator
             failure = ex;
             if (ui.IsLatestRequest(requestId, requestPath, token))
             {
-                ui.ClearPreview($"エラー: {ex.Message}", requestId);
+                ClearPreview(ui, $"エラー: {ex.Message}", requestId);
             }
         }
         finally
@@ -252,6 +253,7 @@ internal sealed class ViewerPreviewApplicationCoordinator
                 if (!ui.IsLatestRequest(requestId, path, token)) return;
                 _state.CurrentKind = PreviewKind.Image;
                 ui.ApplyImagePreview(path);
+                ClearDisplayedPreview();
                 return;
 
             case PreviewKind.Video:
@@ -261,13 +263,11 @@ internal sealed class ViewerPreviewApplicationCoordinator
                     _state.Mode = ViewerApplicationMode.Browser;
                     _state.CurrentKind = PreviewKind.None;
                     ui.ReturnToBrowserForVideo();
-                    ui.ShowStatusMessage("Enter/V: 画像プレビューで静止画表示 / Ctrl+Enter: 外部再生");
+                    ui.ShowStatusMessage("動画はMidPlayerで再生します。ZはWindowsの関連付けで開きます。");
                 }
                 _state.CurrentKind = PreviewKind.Video;
-                ui.ApplyVideoPreview(path, new VideoPreviewOptions(
-                    _settings.Value.Preview?.VideoToolDirectory,
-                    _settings.Value.Preview?.VideoSkipSeconds ?? 0,
-                    _settings.Value.Preview?.VideoPlaybackVolumePercent ?? 100));
+                ui.ApplyVideoPreview(path);
+                ClearDisplayedPreview();
                 return;
 
             case PreviewKind.Text:
@@ -282,6 +282,8 @@ internal sealed class ViewerPreviewApplicationCoordinator
                     _state.CurrentKind = PreviewKind.Text;
                     _state.DetectedEncodingLabel = text.EncodingLabel;
                     ui.ApplyTextPreview(text);
+                    SetDisplayedPreview(path, PreviewKind.Text);
+                    ui.ApplyViewerChromeState();
                 }
                 return;
 
@@ -300,6 +302,8 @@ internal sealed class ViewerPreviewApplicationCoordinator
                         markdown,
                         path,
                         _settings.Value.Preview?.MarkdownViewerMode ?? MarkdownViewerMode.Rendered);
+                    SetDisplayedPreview(path, PreviewKind.Markdown);
+                    ui.ApplyViewerChromeState();
                 }
                 return;
 
@@ -317,6 +321,8 @@ internal sealed class ViewerPreviewApplicationCoordinator
                         _state.CurrentKind = PreviewKind.Text;
                         _state.DetectedEncodingLabel = rawText.EncodingLabel;
                         ui.ApplyTextPreview(rawText);
+                        SetDisplayedPreview(path, PreviewKind.Text);
+                        ui.ApplyViewerChromeState();
                     }
                     return;
                 }
@@ -329,6 +335,8 @@ internal sealed class ViewerPreviewApplicationCoordinator
                     _state.CurrentKind = PreviewKind.CsvTsv;
                     _state.DetectedEncodingLabel = "CSV/TSV";
                     ui.ApplyDelimitedPreview(table);
+                    SetDisplayedPreview(path, PreviewKind.CsvTsv);
+                    ui.ApplyViewerChromeState();
                 }
                 return;
 
@@ -340,6 +348,7 @@ internal sealed class ViewerPreviewApplicationCoordinator
                     _state.CurrentKind = PreviewKind.Sqlite;
                     _state.DetectedEncodingLabel = "SQLite";
                     ui.ApplySqlitePreview(sqlite);
+                    ClearDisplayedPreview();
                 }
                 return;
 
@@ -354,6 +363,7 @@ internal sealed class ViewerPreviewApplicationCoordinator
                 {
                     _state.CurrentKind = PreviewKind.Binary;
                     ui.ApplyBinaryPreview(dump);
+                    ClearDisplayedPreview();
                 }
                 return;
         }
@@ -379,6 +389,8 @@ internal sealed class ViewerPreviewApplicationCoordinator
         _state.LargeFileState = state;
         _state.CurrentKind = PreviewKind.LargeText;
         ui.BeginLargeTextPreview(state);
+        SetDisplayedPreview(path, PreviewKind.LargeText);
+        ui.ApplyViewerChromeState();
 
         await DelayOpenAsync(path, token).ConfigureAwait(true);
         TextPreviewProbeResult detected = probe
@@ -396,7 +408,7 @@ internal sealed class ViewerPreviewApplicationCoordinator
 
         if (state.IsBinaryLike)
         {
-            ui.ClearPreview("LargeText対象外: binary-like file", requestId);
+            ClearPreview(ui, "LargeText対象外: binary-like file", requestId);
             ui.ApplyViewerStatus("LargeText binary-like guard");
             ui.ShowStatusMessage("LargeText対象外: binary-like file を検出しました。");
             return;
@@ -404,7 +416,7 @@ internal sealed class ViewerPreviewApplicationCoordinator
 
         if (state.IsEncodingUnsupportedForLargeText)
         {
-            ui.ClearPreview($"LargeText未対応: {state.DetectedEncodingLabel}", requestId);
+            ClearPreview(ui, $"LargeText未対応: {state.DetectedEncodingLabel}", requestId);
             ui.ApplyViewerStatus("LargeText unsupported encoding guard");
             ui.ShowStatusMessage($"LargeText未対応: {state.DetectedEncodingLabel}");
             return;
@@ -429,4 +441,18 @@ internal sealed class ViewerPreviewApplicationCoordinator
             _diagnosticDelayService.PreviewOpenDelayMs,
             token);
     }
+
+    private void ClearPreview(IViewerPreviewUiPort ui, string message, int requestId)
+    {
+        ClearDisplayedPreview();
+        ui.ClearPreview(message, requestId);
+    }
+
+    private void SetDisplayedPreview(string? path, PreviewKind kind)
+    {
+        _state.DisplayedPreviewTarget = path;
+        _state.DisplayedPreviewKind = path == null ? PreviewKind.None : kind;
+    }
+
+    private void ClearDisplayedPreview() => SetDisplayedPreview(null, PreviewKind.None);
 }

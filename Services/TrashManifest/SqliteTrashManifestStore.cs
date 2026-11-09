@@ -100,7 +100,8 @@ internal sealed class SqliteTrashManifestStore : ITrashManifestStore
         }
         catch (Exception ex)
         {
-            LogService.Warn($"[MidFdTrash] Failed to load manifest from SQLite; using empty manifest. error={ex.Message}");
+            LogService.Error($"[MidFdTrash] Failed to load manifest from SQLite; existing records are preserved. error={ex.Message}");
+            throw;
         }
 
         return manifest;

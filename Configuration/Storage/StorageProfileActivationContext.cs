@@ -17,8 +17,11 @@ public static class StorageProfileActivationContext
     }
 
     public static void Initialize(string[] args)
+        => Initialize(StartupArgumentParser.Parse(args));
+
+    public static void Initialize(StartupOptions options)
     {
-        StorageProfileActivation activation = StorageProfileActivationResolver.ResolveDefault(args);
+        StorageProfileActivation activation = StorageProfileActivationResolver.ResolveDefault(options);
         lock (SyncRoot)
         {
             _current = activation;

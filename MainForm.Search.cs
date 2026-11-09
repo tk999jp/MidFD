@@ -5,43 +5,21 @@ using MidFD.Models;
 using MidFD.Services;
 using MidFD.Configuration;
 using MidFD.Helpers;
+using System.Diagnostics;
 using System.Threading;
 
 namespace MidFD;
 
 public partial class MainForm
 {
+    private static readonly TimeSpan ContentProgressPublishInterval = TimeSpan.FromMilliseconds(250);
+
     private sealed class PendingUnifiedSearchHit
     {
         public required string FullPath { get; init; }
         public required UnifiedSearchMatch Match { get; init; }
         public required UnifiedSearchResultsView ResultsView { get; init; }
         public int RequestId { get; set; } = -1;
-    }
-
-    private enum UnifiedSearchActivationReturnKind
-    {
-        ReusableNameInspection,
-        AdditionalNameInspection,
-        ReusableGrepPreview,
-        AdditionalGrepPreview
-    }
-
-    private sealed record UnifiedSearchPreviewReturnContext(Guid SearchSessionId)
-    {
-        public string SourceCategoryId { get; init; } = string.Empty;
-        public Guid SourceTabId { get; init; }
-        public Guid ResultTabId { get; init; }
-        public UnifiedSearchActivationReturnKind Kind { get; init; }
-    }
-
-    private sealed class UnifiedSearchNameInspectionReturnContext
-    {
-        public Guid SearchSessionId { get; init; }
-        public string SourceCategoryId { get; init; } = string.Empty;
-        public Guid SourceTabId { get; init; }
-        public Guid ResultTabId { get; init; }
-        public UnifiedSearchActivationReturnKind Kind { get; init; }
     }
 
     private sealed class UnifiedSearchSession
@@ -55,22 +33,24 @@ public partial class MainForm
         public required CancellationTokenSource Cancellation { get; init; }
         public required UnifiedSearchResultsView View { get; init; }
         public UnifiedFilterFindSearchResult? Result { get; set; }
-        public Guid? ReusableInspectionTabId { get; set; }
-        public List<Guid> AdditionalResultTabIds { get; } = [];
         public UnifiedSearchProgress? LatestProgress;
         public Task? SearchTask { get; set; }
         public int ProgressUpdateScheduled;
+        public long ProgressCallbackScheduledAt;
+        public System.Windows.Forms.Timer? ContentProgressTimer { get; set; }
+        public EventHandler? ContentProgressTimerTickHandler { get; set; }
+        public long LastContentProgressTimerTickAt;
+        public int ContentProgressTimerTickActive;
         public bool IsActive { get; set; }
         public bool IsFinished { get; set; }
         public ContentSearchBatchDispatcher? Batches { get; set; }
+        public ContentSearchBatchUiScheduler? BatchScheduler { get; set; }
+        public long LastBatchDiagnosticTimestamp;
+        public UnifiedSearchUiDiagnostics? UiDiagnostics { get; set; }
     }
 
     private UnifiedSearchSession? _unifiedSearchSession;
     private PendingUnifiedSearchHit? _pendingUnifiedSearchHit;
-    private UnifiedSearchPreviewReturnContext? _unifiedSearchPreviewReturnContext;
-    private UnifiedSearchNameInspectionReturnContext? _unifiedSearchNameInspectionReturnContext;
-    private readonly List<BrowserTabNavigationSearchDerivedTab> _searchDerivedBrowserTabLineages = [];
-    private long _searchDerivedBrowserTabCreationOrder;
 
     private async Task RunUnifiedFilterFindAsync(UnifiedFilterFindInteractionRequest request)
     {
@@ -106,13 +86,60 @@ public partial class MainForm
                 request.RootPath,
                 mode,
                 request.CurrentCriteria,
-                (path, directory, hit) => ExecuteSearchResultActivation(path, directory, hit, false, null, sessionId),
-                snapshot => ExecuteUnifiedSearchExport(snapshot),
+                (path, directory, hit, origin) => DispatchUnifiedSearchResultActivation(
+                    CommandIds.BrowserSearchResultsActivate, path, directory, hit, origin, sessionId),
+                snapshot =>
+                {
+                    _ = ExecuteCommandFromUi(CommandIds.BrowserSearchExportResults, new CommandExecutionContext
+                    {
+                        Scope = CommandScope.Browser,
+                        Source = "UnifiedSearchResults.Export",
+                        UnifiedSearchResultsExport = new UnifiedSearchResultsExportCommandContext(sessionId, snapshot)
+                    });
+                    return null;
+                },
                 CreateUnifiedSearchResultAppearance,
-                (path, directory, hit) => ExecuteSearchResultActivation(path, directory, hit, true, null, sessionId))
+                (path, directory, hit, origin) => DispatchUnifiedSearchResultActivation(
+                    CommandIds.BrowserSearchResultsActivateInNewTab, path, directory, hit, origin, sessionId),
+                (path, hit) => DispatchUnifiedSearchHitInExternalEditor(path, hit, sessionId),
+                () => ConfiguredEditorService.GetSearchHitMenuCaption(
+                    _settingsCoordinator.Value.ExternalTools?.ExternalEditorSearchHitArgumentTemplate,
+                    _settingsCoordinator.Value.ExternalTools?.ExternalEditorPath))
         };
-        session.View.CloseRequested += (_, _) => CloseUnifiedSearchSession(restoreSource: true);
+        session.UiDiagnostics = mode == UnifiedFilterFindMode.SearchContentsRecursively
+            ? UnifiedSearchUiDiagnostics.TryCreate(session.Id)
+            : null;
+        session.View.UiDiagnostics = session.UiDiagnostics;
+        session.View.ResultFilterChanged += filterText =>
+        {
+            bool handled = ExecuteCommandFromUi(CommandIds.BrowserSearchResultsFilter, new CommandExecutionContext
+            {
+                Scope = CommandScope.Browser,
+                Source = "UnifiedSearchResults.Filter",
+                UnifiedSearchResultsFilter = new UnifiedSearchResultsFilterCommandContext(sessionId, filterText)
+            });
+            if (!handled && _unifiedSearchSession is { } currentSession &&
+                currentSession.Id == sessionId && !currentSession.View.IsDisposed)
+            {
+                currentSession.View.SetActionStatus("検索結果の絞り込みを適用できませんでした。");
+            }
+        };
+        session.View.CloseRequested += (_, _) =>
+        {
+            _ = ExecuteCommandFromUi(CommandIds.BrowserSearchCloseResults, new CommandExecutionContext
+            {
+                Scope = CommandScope.Browser,
+                Source = "UnifiedSearchResults.Close",
+                UnifiedSearchSession = new UnifiedSearchSessionCommandContext(sessionId)
+            });
+        };
         _unifiedSearchSession = session;
+        _commandApplicationCoordinator.RegisterUnifiedSearchSession(
+            session.Id,
+            session.SourceCategoryId,
+            session.SourceTabId,
+            session.RootPath,
+            session.Mode);
         mainAreaPanel.Controls.Add(session.View);
         ActivateUnifiedSearchSession(session, focusResults: true);
         RefreshBrowserTabHeaders();
@@ -124,59 +151,124 @@ public partial class MainForm
 
     private async Task RunUnifiedSearchWorkerAsync(UnifiedSearchSession session)
     {
+        UnifiedFilterFindSearchResult? completedResult = null;
+        string? failureMessage = null;
+        bool canceled = false;
+        string diagnosticTerminal = "failed";
+        session.UiDiagnostics?.StartSession();
         try
         {
+            session.BatchScheduler = new ContentSearchBatchUiScheduler(this);
+            session.UiDiagnostics?.Start(this);
+            StartContentProgressTimer(session);
             session.Batches = new ContentSearchBatchDispatcher(
-                () => ReferenceEquals(Volatile.Read(ref _unifiedSearchSession), session) && !session.IsFinished &&
+                canAccept: () => ReferenceEquals(Volatile.Read(ref _unifiedSearchSession), session) && !session.IsFinished &&
                     !session.Cancellation.IsCancellationRequested && !session.View.IsDisposed && !IsDisposed && !Disposing,
-                action => BeginInvoke((MethodInvoker)(() => action())),
-                batch => { session.View.AppendBatch(batch); if (session.IsActive) UpdateFunctionBar(); });
+                canApply: () => ReferenceEquals(Volatile.Read(ref _unifiedSearchSession), session) && !session.IsFinished &&
+                    !session.View.IsDisposed && !IsDisposed && !Disposing,
+                schedule: session.BatchScheduler.Schedule,
+                apply: batch => { session.View.AppendBatch(batch); if (session.IsActive) UpdateFunctionBar(); },
+                observeSlice: metrics => RecordUnifiedSearchBatchSlice(session, metrics),
+                uiDiagnostics: session.UiDiagnostics);
             Action<UnifiedSearchProgress> report = progress => QueueUnifiedSearchProgress(session, progress);
-            UnifiedFilterFindSearchResult result = session.Mode == UnifiedFilterFindMode.FindNamesRecursively
+            completedResult = session.Mode == UnifiedFilterFindMode.FindNamesRecursively
                 ? await Task.Run(
                     () => UnifiedFilterFindService.FindNames(session.RootPath, session.Criteria, session.Cancellation.Token, report),
                     session.Cancellation.Token)
-                : await UnifiedFilterFindService.SearchContentsAsync(
+                : await UnifiedFilterFindService.SearchContentsWithDiagnosticsAsync(
                     session.RootPath, session.Criteria, session.Cancellation.Token, report, session.Batches.Queue,
                     _integrationSeam?.ContentSearchEngine,
                     info => BeginInvoke((MethodInvoker)(() =>
                     {
                         if (ReferenceEquals(_unifiedSearchSession, session) && !session.Cancellation.IsCancellationRequested
                             && !session.View.IsDisposed) session.View.UpdateBackend(info);
-                    })));
-            if (!ReferenceEquals(_unifiedSearchSession, session) || IsDisposed || Disposing) return;
-            session.Batches.Drain();
-            session.Result = result;
-            session.IsFinished = true;
-            session.View.Complete(result);
-            session.LatestProgress = new UnifiedSearchProgress(
-                result.Mode == UnifiedFilterFindMode.FindNamesRecursively ? result.ResultCount : result.FileCount,
-                result.ResultCount,
-                result.Mode == UnifiedFilterFindMode.FindNamesRecursively ? 0 : result.FileCount,
-                result.MatchCount,
-                result.SkippedCount,
-                session.RootPath);
+                    })),
+                    session.UiDiagnostics);
         }
         catch (OperationCanceledException)
         {
-            if (ReferenceEquals(_unifiedSearchSession, session))
-            {
-                session.IsFinished = true;
-                session.View.CompleteCanceled();
-            }
+            canceled = true;
+            diagnosticTerminal = "canceled";
         }
         catch (Exception ex)
         {
             LogService.Error("[UnifiedFilterFind] search failed.", ex);
-            if (ReferenceEquals(_unifiedSearchSession, session))
+            failureMessage = ex.Message;
+            diagnosticTerminal = "failed";
+        }
+
+        try
+        {
+            StopContentProgressTimer(session);
+            if (!ReferenceEquals(_unifiedSearchSession, session) || IsDisposed || Disposing)
+            {
+                diagnosticTerminal = "detached";
+                session.Batches?.Abandon();
+                return;
+            }
+
+            if (session.Batches != null) await session.Batches.CompleteInputAsync();
+            if (!ReferenceEquals(_unifiedSearchSession, session) || IsDisposed || Disposing)
+            {
+                diagnosticTerminal = "detached";
+                session.Batches?.Abandon();
+                return;
+            }
+
+            session.IsFinished = true;
+            if (failureMessage != null)
+            {
+                session.View.CompleteFailed(failureMessage);
+            }
+            else if (canceled)
+            {
+                session.View.CompleteCanceled();
+            }
+            else if (completedResult != null)
+            {
+                session.Result = completedResult;
+                session.View.Complete(completedResult);
+                session.LatestProgress = new UnifiedSearchProgress(
+                    completedResult.Mode == UnifiedFilterFindMode.FindNamesRecursively
+                        ? completedResult.ResultCount
+                        : completedResult.FileCount,
+                    completedResult.ResultCount,
+                    completedResult.Mode == UnifiedFilterFindMode.FindNamesRecursively ? 0 : completedResult.FileCount,
+                    completedResult.MatchCount,
+                    completedResult.SkippedCount,
+                    session.RootPath);
+            }
+            else
+            {
+                failureMessage = "検索結果を完了できませんでした。";
+                session.View.CompleteFailed(failureMessage);
+            }
+            diagnosticTerminal = failureMessage != null ? "failed"
+                : canceled ? "canceled"
+                : completedResult?.IsPartial == true ? "partial"
+                : "completed";
+        }
+        catch (Exception ex)
+        {
+            LogService.Error("[UnifiedFilterFind] queued search result delivery failed.", ex);
+            failureMessage = string.IsNullOrWhiteSpace(failureMessage)
+                ? ex.Message
+                : $"{failureMessage} / UIへの結果反映に失敗しました: {ex.Message}";
+            if (ReferenceEquals(_unifiedSearchSession, session) && !session.View.IsDisposed && !IsDisposed && !Disposing)
             {
                 session.IsFinished = true;
-                session.View.CompleteFailed(ex.Message);
+                session.View.CompleteFailed(failureMessage);
             }
+            diagnosticTerminal = "failed";
         }
         finally
         {
+            StopContentProgressTimer(session);
+            session.UiDiagnostics?.Stop(diagnosticTerminal);
+            session.View.UiDiagnostics = null;
             session.IsFinished = true;
+            session.BatchScheduler?.Dispose();
+            session.BatchScheduler = null;
             session.Cancellation.Dispose();
             session.SearchTask = null;
             if (ReferenceEquals(_unifiedSearchSession, session) && !IsDisposed && !Disposing)
@@ -187,35 +279,164 @@ public partial class MainForm
         }
     }
 
-    private void QueueUnifiedSearchProgress(UnifiedSearchSession session, UnifiedSearchProgress progress)
+    private static void RecordUnifiedSearchBatchSlice(
+        UnifiedSearchSession session,
+        ContentSearchBatchSliceMetrics metrics)
     {
-        if (!ReferenceEquals(Volatile.Read(ref _unifiedSearchSession), session)) return;
-        Interlocked.Exchange(ref session.LatestProgress, progress);
-        if (Interlocked.Exchange(ref session.ProgressUpdateScheduled, 1) != 0) return;
+        UnifiedSearchUiDiagnostics? diagnostics = session.UiDiagnostics;
+        if (diagnostics == null) return;
+        diagnostics.RecordBatch(metrics);
+        if (metrics.ApplyDuration < TimeSpan.FromMilliseconds(50) &&
+            metrics.OldestHitWait < TimeSpan.FromMilliseconds(100) &&
+            metrics.PendingHitCount < 512)
+        {
+            return;
+        }
+
+        long now = Stopwatch.GetTimestamp();
+        long previous = Interlocked.Read(ref session.LastBatchDiagnosticTimestamp);
+        if (previous != 0 && Stopwatch.GetElapsedTime(previous, now) < TimeSpan.FromSeconds(1)) return;
+        if (Interlocked.CompareExchange(ref session.LastBatchDiagnosticTimestamp, now, previous) != previous) return;
+
+        LogService.Detail(
+            $"[UnifiedSearchBatch] session={session.Id} atMs={diagnostics.ElapsedMilliseconds:F0} sliceHits={metrics.HitCount} " +
+            $"pendingBatches={metrics.PendingBatchCount} pendingHits={metrics.PendingHitCount} " +
+            $"queueWaitMs={metrics.OldestHitWait.TotalMilliseconds:F1} " +
+            $"applyMs={metrics.ApplyDuration.TotalMilliseconds:F1} " +
+            $"sliceMs={metrics.SliceDuration.TotalMilliseconds:F1} " +
+            $"publicationIntervalMs={(metrics.PublicationInterval?.TotalMilliseconds.ToString("F1") ?? "first")}");
+    }
+
+    private void StartContentProgressTimer(UnifiedSearchSession session)
+    {
+        if (session.Mode != UnifiedFilterFindMode.SearchContentsRecursively) return;
+        if (InvokeRequired) throw new InvalidOperationException("Content progress timer must be created on the UI thread.");
+
+        var timer = new System.Windows.Forms.Timer { Interval = (int)ContentProgressPublishInterval.TotalMilliseconds };
+        EventHandler tickHandler = (_, _) => ApplyContentSearchProgressTimerTick(session);
+        session.ContentProgressTimer = timer;
+        session.ContentProgressTimerTickHandler = tickHandler;
+        session.LastContentProgressTimerTickAt = session.UiDiagnostics?.BeginSpan() ?? 0;
+        timer.Tick += tickHandler;
+        timer.Start();
+    }
+
+    private void StopContentProgressTimer(UnifiedSearchSession session)
+    {
+        bool isContentSearch = session.Mode == UnifiedFilterFindMode.SearchContentsRecursively;
+        if (isContentSearch) Interlocked.Exchange(ref session.LatestProgress, null);
+        System.Windows.Forms.Timer? timer = session.ContentProgressTimer;
+        if (timer == null) return;
+        if (InvokeRequired) throw new InvalidOperationException("Content progress timer must be stopped on the UI thread.");
+
+        session.ContentProgressTimer = null;
+        EventHandler? tickHandler = session.ContentProgressTimerTickHandler;
+        session.ContentProgressTimerTickHandler = null;
+        if (tickHandler != null) timer.Tick -= tickHandler;
+        timer.Stop();
+        timer.Dispose();
+        Interlocked.Exchange(ref session.LastContentProgressTimerTickAt, 0);
+    }
+
+    private void ApplyContentSearchProgressTimerTick(UnifiedSearchSession session)
+    {
+        if (Interlocked.Exchange(ref session.ContentProgressTimerTickActive, 1) != 0) return;
         try
         {
-            BeginInvoke((MethodInvoker)(() => ApplyQueuedUnifiedSearchProgress(session)));
+            if (!ReferenceEquals(Volatile.Read(ref _unifiedSearchSession), session) || session.IsFinished ||
+                session.View.IsDisposed || IsDisposed || Disposing)
+            {
+                StopContentProgressTimer(session);
+                return;
+            }
+
+            UnifiedSearchUiDiagnostics? diagnostics = session.UiDiagnostics;
+            if (diagnostics != null)
+            {
+                long now = diagnostics.BeginSpan();
+                long previous = Interlocked.Exchange(ref session.LastContentProgressTimerTickAt, now);
+                if (previous != 0)
+                {
+                    long expectedAt = previous + (long)(ContentProgressPublishInterval.TotalSeconds * Stopwatch.Frequency);
+                    diagnostics.RecordElapsed(UnifiedSearchUiDiagnosticMetric.ContentProgressTimerLag, expectedAt, now);
+                }
+            }
+
+            if (Volatile.Read(ref session.LatestProgress) != null)
+                ApplyQueuedUnifiedSearchProgress(session);
         }
-        catch (InvalidOperationException)
+        finally
         {
-            Interlocked.Exchange(ref session.ProgressUpdateScheduled, 0);
+            Interlocked.Exchange(ref session.ContentProgressTimerTickActive, 0);
+        }
+    }
+
+    private void QueueUnifiedSearchProgress(UnifiedSearchSession session, UnifiedSearchProgress progress)
+    {
+        UnifiedSearchUiDiagnostics? diagnostics = session.UiDiagnostics;
+        long queueStartedAt = diagnostics?.BeginSpan() ?? 0;
+        try
+        {
+            if (!ReferenceEquals(Volatile.Read(ref _unifiedSearchSession), session)) return;
+            long exchangeStartedAt = diagnostics?.BeginSpan() ?? 0;
+            Interlocked.Exchange(ref session.LatestProgress, progress);
+            diagnostics?.RecordSpan(UnifiedSearchUiDiagnosticMetric.QueueProgressExchange, exchangeStartedAt);
+            if (session.Mode == UnifiedFilterFindMode.SearchContentsRecursively) return;
+            if (Interlocked.Exchange(ref session.ProgressUpdateScheduled, 1) != 0) return;
+            if (diagnostics != null)
+                Interlocked.Exchange(ref session.ProgressCallbackScheduledAt, diagnostics.BeginSpan());
+            try
+            {
+                BeginInvoke((MethodInvoker)(() => ApplyQueuedUnifiedSearchProgress(session)));
+            }
+            catch (InvalidOperationException)
+            {
+                Interlocked.Exchange(ref session.ProgressUpdateScheduled, 0);
+                Interlocked.Exchange(ref session.ProgressCallbackScheduledAt, 0);
+            }
+        }
+        finally
+        {
+            diagnostics?.RecordSpan(UnifiedSearchUiDiagnosticMetric.QueueProgress, queueStartedAt);
         }
     }
 
     private void ApplyQueuedUnifiedSearchProgress(UnifiedSearchSession session)
     {
-        Interlocked.Exchange(ref session.ProgressUpdateScheduled, 0);
-        if (!ReferenceEquals(_unifiedSearchSession, session) || session.View.IsDisposed || session.IsFinished) return;
-        UnifiedSearchProgress? progress = Interlocked.Exchange(ref session.LatestProgress, null);
-        if (progress != null) session.View.UpdateProgress(progress);
-        if (Volatile.Read(ref session.LatestProgress) is { } pending) QueueUnifiedSearchProgress(session, pending);
+        UnifiedSearchUiDiagnostics? diagnostics = session.UiDiagnostics;
+        bool contentTimerTick = session.Mode == UnifiedFilterFindMode.SearchContentsRecursively;
+        long diagnosticStartedAt = diagnostics?.BeginSpan() ?? 0;
+        if (!contentTimerTick && diagnostics != null)
+        {
+            long scheduledAt = Interlocked.Exchange(ref session.ProgressCallbackScheduledAt, 0);
+            diagnostics.RecordElapsed(UnifiedSearchUiDiagnosticMetric.NameProgressCallbackWait, scheduledAt, diagnosticStartedAt);
+        }
+        try
+        {
+            if (!contentTimerTick) Interlocked.Exchange(ref session.ProgressUpdateScheduled, 0);
+            if (!ReferenceEquals(_unifiedSearchSession, session) || session.View.IsDisposed || session.IsFinished) return;
+            long exchangeStartedAt = diagnostics?.BeginSpan() ?? 0;
+            UnifiedSearchProgress? progress = Interlocked.Exchange(ref session.LatestProgress, null);
+            diagnostics?.RecordSpan(UnifiedSearchUiDiagnosticMetric.ApplyProgressExchange, exchangeStartedAt);
+            if (progress != null) session.View.UpdateProgress(progress);
+            if (!contentTimerTick && Volatile.Read(ref session.LatestProgress) is { } pending)
+            {
+                long rescheduleStartedAt = diagnostics?.BeginSpan() ?? 0;
+                try { QueueUnifiedSearchProgress(session, pending); }
+                finally { diagnostics?.RecordSpan(UnifiedSearchUiDiagnosticMetric.ProgressReschedule, rescheduleStartedAt); }
+            }
+        }
+        finally { diagnostics?.RecordSpan(UnifiedSearchUiDiagnosticMetric.ApplyProgress, diagnosticStartedAt); }
     }
 
     private string? ExecuteUnifiedSearchExport(UnifiedFilterFindSearchResult snapshot)
     {
         string? output = UnifiedSearchResultOutputService.Write(snapshot);
         if (output == null) return "出力する検索結果がありません。";
-        var launched = ConfiguredEditorService.Open(output, _settingsCoordinator.Value.ExternalTools?.ExternalEditorPath);
+        var launched = ConfiguredEditorService.Open(
+            output,
+            _settingsCoordinator.Value.ExternalTools?.ExternalEditorPath,
+            _integrationSeam?.ConfiguredEditorLaunchOverride);
         return launched.Succeeded ? launched.Message : $"一覧出力を開けませんでした: {launched.Message}";
     }
 
@@ -225,11 +446,12 @@ public partial class MainForm
         if (!TryEnsureUnifiedSearchSource(session)) return;
         if (_viewerApplicationCoordinator.Mode == ViewerApplicationMode.Viewer)
         {
-            SwitchUIMode(ViewerApplicationMode.Browser);
+            if (!TryExitViewerToBrowser()) return;
             ClearUnifiedSearchPreviewReturnContext();
         }
         if (!SwitchToUnifiedSearchSourceBrowserTab(session)) return;
         session.IsActive = true;
+        _commandApplicationCoordinator.SetUnifiedSearchSessionActive(session.Id, active: true);
         session.View.Visible = true;
         session.View.BringToFront();
         RefreshBrowserTabHeaders();
@@ -242,9 +464,47 @@ public partial class MainForm
         UnifiedSearchSession? session = _unifiedSearchSession;
         if (session == null || !session.IsActive) return;
         session.IsActive = false;
+        _commandApplicationCoordinator.SetUnifiedSearchSessionActive(session.Id, active: false);
         session.View.Visible = false;
         RefreshBrowserTabHeaders();
         UpdateFunctionBar();
+    }
+
+    private bool ApplyUnifiedSearchSurface(Guid sessionId, bool active)
+    {
+        UnifiedSearchSession? session = _unifiedSearchSession;
+        if (session == null || session.Id != sessionId || session.View.IsDisposed)
+        {
+            return false;
+        }
+
+        if (!active)
+        {
+            DeactivateUnifiedSearchSurface();
+            FocusBrowserFileList(force: true);
+            return true;
+        }
+
+        if (!string.Equals(
+                _browserApplicationCoordinator.Workspace.ActiveCategoryId,
+                session.SourceCategoryId,
+                StringComparison.OrdinalIgnoreCase) ||
+            _browserApplicationCoordinator.Workspace.ActiveTabSnapshot?.Id != session.SourceTabId)
+        {
+            return false;
+        }
+
+        session.IsActive = true;
+        _commandApplicationCoordinator.SetUnifiedSearchSessionActive(session.Id, active: true);
+        session.View.Visible = true;
+        session.View.BringToFront();
+        RefreshBrowserTabHeaders();
+        UpdateFunctionBar();
+        if (session.View.ResultList.CanFocus)
+        {
+            session.View.ResultList.Focus();
+        }
+        return true;
     }
 
     private bool TryEnsureUnifiedSearchSource(UnifiedSearchSession session)
@@ -277,42 +537,43 @@ public partial class MainForm
     {
         UnifiedSearchSession? session = _unifiedSearchSession;
         if (session == null || session.Id != sessionId) return false;
-        ClearNameSearchInspectionReturnContext();
-        if (!TryEnsureUnifiedSearchSource(session) || !SwitchToUnifiedSearchSourceBrowserTab(session)) return false;
-        ActivateUnifiedSearchSession(session, focusResults: true);
-        return true;
+        bool activated = ExecuteCommandFromUi(CommandIds.BrowserTabActivate, new CommandExecutionContext
+        {
+            Scope = CommandScope.Browser,
+            Source = "BrowserTab.UnifiedSearch.Activate",
+            CategoryId = session.SourceCategoryId,
+            ContextBrowserTabId = session.SourceTabId,
+            BrowserTabNavigation = new BrowserTabNavigationCommandContext(
+                IncludeUnifiedSearchResults: true,
+                UnifiedSearchSessionId: session.Id,
+                UnifiedSearchSourceCategoryId: session.SourceCategoryId,
+                UnifiedSearchSourceTabId: session.SourceTabId,
+                UnifiedSearchIsActive: session.IsActive)
+        });
+        if (activated) ClearNameSearchInspectionReturnContext();
+        return activated;
     }
 
-    private bool ReopenUnifiedSearchDialog(UnifiedSearchSession session)
+    private bool ReopenUnifiedSearchDialog(UnifiedSearchSession session, string source)
     {
         if (!ReferenceEquals(_unifiedSearchSession, session)
             || !TryEnsureUnifiedSearchSource(session)
             || !SwitchToUnifiedSearchSourceBrowserTab(session)) return false;
 
-        int sourceTabIndex = GetBrowserTabIndexById(
-            _browserApplicationCoordinator.Workspace.TabStates,
-            session.SourceTabId);
-        if (sourceTabIndex < 0) return false;
-
-        var request = new UnifiedFilterFindInteractionRequest(
-            sourceTabIndex,
-            session.RootPath,
-            session.Criteria.Clone(),
-            session.Mode,
-            PreserveSearchDraft: true);
-        UnifiedFilterFindDialogResult? selected = UnifiedFilterFindDialog.Show(this, request);
-        if (selected == null) return true;
-
-        var interaction = new UnifiedFilterFindCommandInteractionRequest(
-            sourceTabIndex,
-            session.RootPath,
-            session.Criteria.Clone(),
-            session.Mode);
-        var response = new UnifiedFilterFindCommandInteractionResponse(
-            true,
-            selected.Mode,
-            selected.Criteria);
-        return ApplyCommandApplicationResult(_commandApplicationCoordinator.Continue(interaction, response));
+        return ExecuteCommandFromUi(CommandIds.BrowserSearch, new CommandExecutionContext
+        {
+            Scope = CommandScope.Browser,
+            Source = source,
+            CategoryId = session.SourceCategoryId,
+            ContextBrowserTabId = session.SourceTabId,
+            UnifiedSearchResume = new UnifiedSearchResumeCommandContext(
+                session.Id,
+                session.SourceCategoryId,
+                session.SourceTabId,
+                session.RootPath,
+                session.Criteria.Clone(),
+                session.Mode)
+        });
     }
 
     private bool SwitchToUnifiedSearchSourceBrowserTab(UnifiedSearchSession session)
@@ -337,32 +598,16 @@ public partial class MainForm
             && _browserApplicationCoordinator.Workspace.ActiveTabSnapshot?.Id == session.SourceTabId;
     }
 
-    private bool NavigateAdjacentBrowserTabIncludingSearch(int delta)
-    {
-        if (GuardClipboardBusy()) return false;
-        UnifiedSearchSession? session = _unifiedSearchSession;
-        if (session == null || !string.Equals(_browserApplicationCoordinator.Workspace.ActiveCategoryId, session.SourceCategoryId, StringComparison.OrdinalIgnoreCase)) return false;
-        int browserCount = _browserApplicationCoordinator.Workspace.TabCount;
-        if (browserCount <= 0) return false;
-        int sourceIndex = GetBrowserTabIndexById(_browserApplicationCoordinator.Workspace.TabStates, session.SourceTabId);
-        if (sourceIndex < 0) return false;
-        int searchIndex = sourceIndex + 1;
-        int current = session.IsActive
-            ? searchIndex
-            : _browserApplicationCoordinator.Workspace.ActiveTabIndex <= sourceIndex
-                ? _browserApplicationCoordinator.Workspace.ActiveTabIndex
-                : _browserApplicationCoordinator.Workspace.ActiveTabIndex + 1;
-        int next = (current + delta) % (browserCount + 1);
-        if (next < 0) next += browserCount + 1;
-        if (next == searchIndex) return OpenUnifiedSearchTab(session.Id);
-        if (session.IsActive) DeactivateUnifiedSearchSurface();
-        return SwitchBrowserTab(next < searchIndex ? next : next - 1);
-    }
-
     private void CloseUnifiedSearchSession(bool restoreSource, bool refreshProjection = true)
     {
         UnifiedSearchSession? session = _unifiedSearchSession;
         if (session == null) return;
+        if (restoreSource &&
+            _viewerApplicationCoordinator.Mode == ViewerApplicationMode.Viewer &&
+            !TryExitViewerToBrowser())
+        {
+            return;
+        }
         DetachUnifiedSearchSession(session);
 
         if (restoreSource && !IsDisposed && !Disposing)
@@ -373,7 +618,6 @@ public partial class MainForm
             int sourceIndex = GetBrowserTabIndexById(tabs, session.SourceTabId);
             if (category != null && sourceIndex >= 0)
             {
-                if (_viewerApplicationCoordinator.Mode == ViewerApplicationMode.Viewer) SwitchUIMode(ViewerApplicationMode.Browser);
                 if (!string.Equals(_browserApplicationCoordinator.Workspace.ActiveCategoryId, session.SourceCategoryId, StringComparison.OrdinalIgnoreCase))
                     SwitchBrowserTabCategory(session.SourceCategoryId, sourceIndex);
                 else
@@ -388,12 +632,17 @@ public partial class MainForm
     private void DetachUnifiedSearchSession(UnifiedSearchSession session)
     {
         if (ReferenceEquals(_unifiedSearchSession, session)) _unifiedSearchSession = null;
-        ClearUnifiedSearchPreviewReturnContext(session.Id);
+        StopContentProgressTimer(session);
+        session.UiDiagnostics?.Stop("detached");
+        session.View.UiDiagnostics = null;
+        session.Batches?.Abandon();
+        session.BatchScheduler?.Dispose();
+        session.BatchScheduler = null;
+        _commandApplicationCoordinator.ClearUnifiedSearchSession(session.Id);
         if (_pendingUnifiedSearchHit is { } pending && ReferenceEquals(pending.ResultsView, session.View))
             _pendingUnifiedSearchHit = null;
         session.IsActive = false;
         session.View.Visible = false;
-        ClearNameSearchInspectionReturnContext(session.Id);
         if (!session.View.IsDisposed)
         {
             mainAreaPanel.Controls.Remove(session.View);
@@ -444,55 +693,32 @@ public partial class MainForm
 
     private void ClearUnifiedSearchPreviewReturnContext(Guid? searchSessionId = null)
     {
-        if (_unifiedSearchPreviewReturnContext is not { } context) return;
-        if (searchSessionId is { } requestedId && context.SearchSessionId != requestedId) return;
-        _unifiedSearchPreviewReturnContext = null;
+        _commandApplicationCoordinator.ClearUnifiedSearchPreviewReturnContext(searchSessionId);
     }
 
-    private void ReturnToUnifiedSearchAfterViewerExit()
+    private void ApplyUnifiedSearchPreviewReturnAfterViewerExit()
     {
-        UnifiedSearchPreviewReturnContext? context = _unifiedSearchPreviewReturnContext;
-        if (context == null) return;
-        ClearUnifiedSearchPreviewReturnContext(context.SearchSessionId);
-        UnifiedSearchSession? session = _unifiedSearchSession;
-        bool resultTabIsActive = session is { } activeSession
-            && activeSession.Id == context.SearchSessionId
-            && string.Equals(activeSession.SourceCategoryId, context.SourceCategoryId, StringComparison.OrdinalIgnoreCase)
-            && activeSession.SourceTabId == context.SourceTabId
-            && string.Equals(_browserApplicationCoordinator.Workspace.ActiveCategoryId, context.SourceCategoryId, StringComparison.OrdinalIgnoreCase)
-            && _browserApplicationCoordinator.Workspace.ActiveTabSnapshot?.Id == context.ResultTabId;
-        if (resultTabIsActive) OpenUnifiedSearchTab(context.SearchSessionId);
+        _commandApplicationCoordinator.ApplyUnifiedSearchPreviewReturn(
+            _viewerApplicationCoordinator.ActiveRequestId,
+            _browserApplicationCoordinator.Workspace.ActiveCategoryId,
+            _browserApplicationCoordinator.Workspace.ActiveTabSnapshot?.Id);
     }
 
     private void ClearNameSearchInspectionReturnContext(Guid? searchSessionId = null)
     {
-        if (_unifiedSearchNameInspectionReturnContext is not { } context) return;
-        if (searchSessionId is { } requestedId && context.SearchSessionId != requestedId) return;
-        _unifiedSearchNameInspectionReturnContext = null;
+        _commandApplicationCoordinator.ClearUnifiedSearchNameInspectionReturnContext(searchSessionId);
     }
 
     private void ClearNameSearchInspectionReturnContextUnlessSource(Guid targetTabId, string targetCategoryId)
     {
-        if (_unifiedSearchNameInspectionReturnContext is not { } context) return;
-        if (context.ResultTabId == targetTabId
-            || (context.SourceTabId == targetTabId
-                && string.Equals(context.SourceCategoryId, targetCategoryId, StringComparison.OrdinalIgnoreCase))) return;
-        ClearNameSearchInspectionReturnContext(context.SearchSessionId);
+        _commandApplicationCoordinator.ClearUnifiedSearchNameInspectionReturnUnlessSource(targetTabId, targetCategoryId);
     }
 
-    private bool TryReturnToNameSearchResultsAfterInspection()
+    private bool ApplyNameSearchInspectionReturn()
     {
-        if (_unifiedSearchNameInspectionReturnContext is not { } context) return false;
-        UnifiedSearchSession? session = _unifiedSearchSession;
-        bool sourceIsActive = session is { } activeSession
-            && activeSession.Id == context.SearchSessionId
-            && string.Equals(activeSession.SourceCategoryId, context.SourceCategoryId, StringComparison.OrdinalIgnoreCase)
-            && activeSession.SourceTabId == context.SourceTabId
-            && TryEnsureUnifiedSearchSource(activeSession)
-            && string.Equals(_browserApplicationCoordinator.Workspace.ActiveCategoryId, context.SourceCategoryId, StringComparison.OrdinalIgnoreCase)
-            && _browserApplicationCoordinator.Workspace.ActiveTabSnapshot?.Id == context.ResultTabId;
-        ClearNameSearchInspectionReturnContext(context.SearchSessionId);
-        return sourceIsActive && OpenUnifiedSearchTab(context.SearchSessionId);
+        return _commandApplicationCoordinator.ApplyUnifiedSearchNameInspectionReturn(
+            _browserApplicationCoordinator.Workspace.ActiveCategoryId,
+            _browserApplicationCoordinator.Workspace.ActiveTabSnapshot?.Id);
     }
 
     private void RequestSearchActivationForeground(bool preview)
@@ -534,208 +760,137 @@ public partial class MainForm
             theme.BorderColor, fileListView?.Font);
     }
 
-    internal string? ExecuteSearchResultActivation(
+    private string? DispatchUnifiedSearchResultActivation(
+        string commandId,
         string path,
         bool directory,
         UnifiedSearchMatch? hit,
-        bool inNewTab = false,
-        UnifiedSearchResultsView? resultView = null,
-        Guid? expectedSearchSessionId = null)
+        UnifiedSearchResultActivationOrigin origin,
+        Guid searchSessionId)
     {
         UnifiedSearchSession? session = _unifiedSearchSession;
-        if (session == null)
+        if (session == null || session.Id != searchSessionId)
+        {
             return "検索sessionが終了しました。検索結果を開き直してください。";
-        if (expectedSearchSessionId is { } expectedId && session?.Id != expectedId)
-            return "検索sessionが置き換わりました。検索結果を開き直してください。";
-        if (resultView != null && !ReferenceEquals(resultView, session.View))
-            return "検索結果が更新されました。検索結果を開き直してください。";
-        if (!TryEnsureUnifiedSearchSource(session)) return "検索元のBrowserタブは利用できません。";
-        ClearNameSearchInspectionReturnContext();
-        ClearUnifiedSearchPreviewReturnContext();
-        _pendingUnifiedSearchHit = null;
-        SwitchUIMode(ViewerApplicationMode.Browser);
-        if (!TryResolveSearchResultBrowserTab(session, inNewTab, out Guid resultTabId, out string? targetError))
-            return targetError;
-
-        string? error = UnifiedSearchResultActivationService.Activate(path, directory, hit != null,
-            (parent, name) =>
-            {
-                return ExecuteConfirmedUserDirectoryNavigation(parent, name);
-            },
-            () => GetCurrentBrowserItem()?.Tag as string,
-            () =>
-            {
-                if (hit == null) return false;
-                UnifiedSearchSession? activeSession = _unifiedSearchSession;
-                if (activeSession == null) return false;
-                _pendingUnifiedSearchHit = new PendingUnifiedSearchHit
-                {
-                    FullPath = hit.FullPath,
-                    Match = hit,
-                    ResultsView = activeSession.View
-                };
-                bool started = ExecuteCommandFromUi(CommandIds.BrowserPreview, CommandScope.Browser, "SearchResults.Preview");
-                if (started)
-                {
-                    _pendingUnifiedSearchHit.RequestId = _viewerApplicationCoordinator.ActiveRequestId;
-                    if (ReferenceEquals(_unifiedSearchSession, activeSession)
-                        && activeSession.Id == session.Id
-                        && activeSession.Mode == UnifiedFilterFindMode.SearchContentsRecursively)
-                    {
-                        _unifiedSearchPreviewReturnContext = new UnifiedSearchPreviewReturnContext(activeSession.Id)
-                        {
-                            SourceCategoryId = activeSession.SourceCategoryId,
-                            SourceTabId = activeSession.SourceTabId,
-                            ResultTabId = resultTabId,
-                            Kind = inNewTab
-                                ? UnifiedSearchActivationReturnKind.AdditionalGrepPreview
-                                : UnifiedSearchActivationReturnKind.ReusableGrepPreview
-                        };
-                    }
-                }
-                else
-                {
-                    _pendingUnifiedSearchHit = null;
-                    ClearUnifiedSearchPreviewReturnContext(activeSession.Id);
-                }
-                return started;
-            },
-            RequestSearchActivationForeground);
-        if (error == null && session.Mode == UnifiedFilterFindMode.FindNamesRecursively && hit == null)
-        {
-            _unifiedSearchNameInspectionReturnContext = new UnifiedSearchNameInspectionReturnContext
-            {
-                SearchSessionId = session.Id,
-                SourceCategoryId = session.SourceCategoryId,
-                SourceTabId = session.SourceTabId,
-                ResultTabId = resultTabId,
-                Kind = inNewTab
-                    ? UnifiedSearchActivationReturnKind.AdditionalNameInspection
-                    : UnifiedSearchActivationReturnKind.ReusableNameInspection
-            };
-        }
-        return error;
-    }
-
-    private bool TryResolveSearchResultBrowserTab(
-        UnifiedSearchSession session,
-        bool inNewTab,
-        out Guid resultTabId,
-        out string? error)
-    {
-        resultTabId = Guid.Empty;
-        error = null;
-        DeactivateUnifiedSearchSurface();
-        if (!SwitchToUnifiedSearchSourceBrowserTab(session))
-        {
-            error = "検索元のBrowserタブは利用できません。";
-            return false;
         }
 
-        IReadOnlyList<BrowserTabState> tabs = _browserApplicationCoordinator.Workspace.TabStates;
-        if (!inNewTab && session.ReusableInspectionTabId is { } reusableId)
-        {
-            int reusableIndex = GetBrowserTabIndexById(tabs, reusableId);
-            if (reusableIndex >= 0)
-            {
-                if (reusableIndex != _browserApplicationCoordinator.Workspace.ActiveTabIndex
-                    && !SwitchBrowserTab(reusableIndex))
-                {
-                    error = "確認用Browserタブへ切り替えられませんでした。";
-                    return false;
-                }
-                resultTabId = reusableId;
-                RefreshBrowserTabHeaders();
-                return true;
-            }
-            session.ReusableInspectionTabId = null;
-        }
-
-        session.AdditionalResultTabIds.RemoveAll(id => GetBrowserTabIndexById(tabs, id) < 0);
-        Guid anchorTabId = inNewTab ? session.AdditionalResultTabIds.LastOrDefault() : Guid.Empty;
-        if (anchorTabId == Guid.Empty && inNewTab
-            && session.ReusableInspectionTabId is { } existingInspection
-            && GetBrowserTabIndexById(tabs, existingInspection) >= 0)
-        {
-            anchorTabId = existingInspection;
-        }
-        if (anchorTabId == Guid.Empty)
-        {
-            anchorTabId = _searchDerivedBrowserTabLineages
-                .Where(item => string.Equals(item.SourceCategoryId, session.SourceCategoryId, StringComparison.OrdinalIgnoreCase)
-                    && item.SourceTabId == session.SourceTabId
-                    && GetBrowserTabIndexById(tabs, item.ResultTabId) >= 0)
-                .OrderByDescending(item => item.CreationOrder)
-                .Select(item => item.ResultTabId)
-                .FirstOrDefault();
-        }
-        if (anchorTabId == Guid.Empty) anchorTabId = session.SourceTabId;
-
-        int anchorIndex = GetBrowserTabIndexById(tabs, anchorTabId);
-        if (anchorIndex < 0)
-        {
-            error = "検索結果タブの挿入位置を取得できませんでした。";
-            return false;
-        }
-        if (anchorIndex != _browserApplicationCoordinator.Workspace.ActiveTabIndex
-            && !SwitchBrowserTab(anchorIndex))
-        {
-            error = "検索結果タブの挿入先へ切り替えられませんでした。";
-            return false;
-        }
-
-        if (!ExecuteCommandFromUi(CommandIds.BrowserTabNew, CommandScope.Browser, "SearchResults.CreateNormalTab"))
-        {
-            ActivateUnifiedSearchSession(session, focusResults: true);
-            error = "結果確認用のBrowserタブを作成できませんでした。";
-            return false;
-        }
-
-        BrowserTabState? createdTab = _browserApplicationCoordinator.Workspace.ActiveTabSnapshot;
-        if (createdTab == null)
-        {
-            ActivateUnifiedSearchSession(session, focusResults: true);
-            error = "作成したBrowserタブを取得できませんでした。";
-            return false;
-        }
-        resultTabId = createdTab.Id;
-        _searchDerivedBrowserTabLineages.Add(new BrowserTabNavigationSearchDerivedTab(
-            resultTabId,
+        var request = new UnifiedSearchResultActivationCommandContext(
+            session.Id,
             session.SourceCategoryId,
             session.SourceTabId,
-            ++_searchDerivedBrowserTabCreationOrder));
-        if (inNewTab) session.AdditionalResultTabIds.Add(resultTabId);
-        else session.ReusableInspectionTabId = resultTabId;
+            path,
+            directory,
+            session.Mode,
+            new UnifiedSearchResultIdentity(path, hit?.LineNumber, hit?.ColumnNumber, hit?.MatchText),
+            origin,
+            hit);
+        var commandContext = new CommandExecutionContext
+        {
+            Scope = CommandScope.Browser,
+            Source = $"UnifiedSearchResults.{origin}",
+            UnifiedSearchResultActivation = request
+        };
+        bool handled = ExecuteCommandCore(commandId, commandContext, out CommandApplicationResult result);
+        return result.Effect?.UnifiedSearchResultActivation?.ErrorMessage ??
+            (handled ? null : "検索結果を開けませんでした。");
+    }
 
-        int currentAnchorIndex = GetBrowserTabIndexById(_browserApplicationCoordinator.Workspace.TabStates, anchorTabId);
-        int createdIndex = GetBrowserTabIndexById(_browserApplicationCoordinator.Workspace.TabStates, resultTabId);
-        int desiredIndex = currentAnchorIndex + 1;
-        if (currentAnchorIndex < 0 || createdIndex < 0)
+    private string? DispatchUnifiedSearchHitInExternalEditor(
+        string path,
+        UnifiedSearchMatch? hit,
+        Guid searchSessionId)
+    {
+        UnifiedSearchSession? session = _unifiedSearchSession;
+        if (session == null || session.Id != searchSessionId)
         {
-            error = "検索結果タブの配置を確定できませんでした。";
-            return false;
+            return "検索sessionが終了しました。検索結果を開き直してください。";
         }
-        if (createdIndex != desiredIndex)
-        {
-            if (!_browserTabWorkflowApplicationCoordinator.ReorderTab(
-                    createdIndex,
-                    desiredIndex,
-                    BuildBrowserTabStateFromCurrentUi(validateMarks: true)))
+
+        var request = new UnifiedSearchHitEditorCommandContext(
+            session.Id,
+            path,
+            new UnifiedSearchResultIdentity(path, hit?.LineNumber, hit?.ColumnNumber, hit?.MatchText),
+            hit);
+        bool handled = ExecuteCommandCore(
+            CommandIds.BrowserSearchResultsOpenHitInEditor,
+            new CommandExecutionContext
             {
-                error = "検索結果タブを検索元の後方へ配置できませんでした。";
-                return false;
-            }
-        }
+                Scope = CommandScope.Browser,
+                Source = "UnifiedSearchResults.OpenHitInExternalEditor",
+                UnifiedSearchHitEditor = request
+            },
+            out CommandApplicationResult result);
+        return result.Effect?.UnifiedSearchHitEditor?.ErrorMessage ??
+            (handled ? null : "検索hitを外部Editorで開けませんでした。");
+    }
 
-        if (_browserApplicationCoordinator.Workspace.ActiveTabSnapshot?.Id != resultTabId)
+    bool IUnifiedSearchResultActivationUiPort.IsSearchSessionCurrent(Guid sessionId) =>
+        _unifiedSearchSession is { } session && session.Id == sessionId && !session.View.IsDisposed;
+
+    bool IUnifiedSearchResultActivationUiPort.IsViewerMode =>
+        _viewerApplicationCoordinator.Mode == ViewerApplicationMode.Viewer;
+
+    bool IUnifiedSearchResultActivationUiPort.TryExitViewerToBrowser() => TryExitViewerToBrowser();
+
+    bool IUnifiedSearchResultActivationUiPort.SetSearchSurfaceActive(Guid sessionId, bool active) =>
+        ApplyUnifiedSearchSurface(sessionId, active);
+
+    bool IUnifiedSearchResultActivationUiPort.DispatchCommand(string commandId, CommandExecutionContext context)
+    {
+        bool? overrideResult = _integrationSeam?.UnifiedSearchResultActivationCommandOverride?.Invoke(
+            commandId,
+            context.Source ?? string.Empty);
+        return overrideResult ?? ExecuteCommandFromUi(commandId, context);
+    }
+
+    bool IUnifiedSearchResultActivationUiPort.TryOpenPreview(
+        Guid sessionId,
+        Guid resultTabId,
+        UnifiedSearchMatch hit,
+        out int requestId)
+    {
+        requestId = -1;
+        if (_unifiedSearchSession is not { } session || session.Id != sessionId || session.View.IsDisposed)
         {
-            ActivateUnifiedSearchSession(session, focusResults: true);
-            error = "作成した検索結果タブが有効になりませんでした。";
             return false;
         }
-        RefreshBrowserTabHeaders();
+
+        _pendingUnifiedSearchHit = new PendingUnifiedSearchHit
+        {
+            FullPath = hit.FullPath,
+            Match = hit,
+            ResultsView = session.View
+        };
+        bool started = ExecuteCommandFromUi(CommandIds.BrowserPreview, new CommandExecutionContext
+        {
+            Scope = CommandScope.Browser,
+            Source = "UnifiedSearchResults.Preview",
+            ContextTargetPath = hit.FullPath
+        });
+        if (!started || _unifiedSearchSession?.Id != sessionId)
+        {
+            _pendingUnifiedSearchHit = null;
+            return false;
+        }
+
+        requestId = _viewerApplicationCoordinator.ActiveRequestId;
+        _pendingUnifiedSearchHit.RequestId = requestId;
         return true;
     }
+
+    void IUnifiedSearchResultActivationUiPort.ClearPendingPreview(Guid sessionId)
+    {
+        if (_unifiedSearchSession is { } session && session.Id == sessionId &&
+            _pendingUnifiedSearchHit is { } pending && ReferenceEquals(pending.ResultsView, session.View))
+        {
+            _pendingUnifiedSearchHit = null;
+        }
+    }
+
+    void IUnifiedSearchResultActivationUiPort.RefreshSearchTabProjection() => RefreshBrowserTabHeaders();
+
+    void IUnifiedSearchResultActivationUiPort.RequestForeground(bool preview) =>
+        RequestSearchActivationForeground(preview);
 
     private bool IsSearchHitPreviewPending(string path)
         => _pendingUnifiedSearchHit is { } pending

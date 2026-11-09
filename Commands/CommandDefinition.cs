@@ -15,6 +15,7 @@ public sealed class CommandDefinition
     public CommandScope Scope { get; init; }
     public string DisplayName { get; init; } = string.Empty;
     public string Description { get; init; } = string.Empty;
+    public string Category { get; init; } = string.Empty;
     public bool IsCustomizable { get; init; }
     public bool IsDangerous { get; init; }
     public CommandInputSurface InputSurfaces { get; init; }

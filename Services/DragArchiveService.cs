@@ -604,24 +604,51 @@ public static class DragArchiveService
         try
         {
             if (!Directory.Exists(tempDir)) return;
-            foreach (var file in Directory.GetFiles(tempDir, $"{DragArchivePrefix}*.zip"))
+
+            DateTime nowUtc = DateTime.UtcNow;
+            string[] suffixes = { ".zip", ".zip.tmp" };
+
+            foreach (string suffix in suffixes)
             {
+                string pattern = $"{DragArchivePrefix}*{suffix}";
+                string[] files;
                 try
                 {
-                    if (minimumAge.HasValue)
+                    files = Directory.GetFiles(tempDir, pattern, SearchOption.TopDirectoryOnly);
+                }
+                catch (Exception ex)
+                {
+                    LogService.Warn($"[DragArchive] Cleanup skipped for pattern '{pattern}': {ex.Message}");
+                    continue;
+                }
+
+                foreach (string file in files)
+                {
+                    try
                     {
-                        var writeTime = File.GetLastWriteTime(file);
-                        if (DateTime.Now - writeTime < minimumAge.Value)
+                        string fileName = Path.GetFileName(file);
+                        if (!fileName.StartsWith(DragArchivePrefix, StringComparison.OrdinalIgnoreCase)
+                            || !fileName.EndsWith(suffix, StringComparison.OrdinalIgnoreCase))
                         {
                             continue;
                         }
-                    }
 
-                    File.Delete(file);
-                }
-                catch
-                {
-                    // 取得/削除できないものは静かに残す
+                        if ((File.GetAttributes(file) & FileAttributes.Directory) != 0)
+                        {
+                            continue;
+                        }
+
+                        if (minimumAge.HasValue && nowUtc - File.GetLastWriteTimeUtc(file) < minimumAge.Value)
+                        {
+                            continue;
+                        }
+
+                        File.Delete(file);
+                    }
+                    catch
+                    {
+                        // 取得/削除できないものは静かに残す
+                    }
                 }
             }
         }

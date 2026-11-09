@@ -155,13 +155,25 @@ public partial class MainForm
             return;
         }
         bool ascending = sortKind == _browserApplicationCoordinator.CurrentSort ? !_browserApplicationCoordinator.SortAscending : _browserApplicationCoordinator.SortAscending;
-        ApplySortState(sortKind, ascending);
+        ExecuteCommandFromUi(CommandIds.BrowserSort, new CommandExecutionContext
+        {
+            Scope = CommandScope.Browser,
+            Source = "Header.Sort.Selection",
+            SortKind = sortKind,
+            SortAscending = ascending
+        });
     }
     private void ApplyHeaderSortDirection(bool ascending)
     {
         if (!GuardClipboardBusy())
         {
-            ApplySortState(_browserApplicationCoordinator.CurrentSort, ascending);
+            ExecuteCommandFromUi(CommandIds.BrowserSort, new CommandExecutionContext
+            {
+                Scope = CommandScope.Browser,
+                Source = "Header.Sort.Direction",
+                SortKind = _browserApplicationCoordinator.CurrentSort,
+                SortAscending = ascending
+            });
         }
     }
     private static bool IsHeaderSortText(string text)
@@ -214,7 +226,7 @@ public partial class MainForm
     {
         if (e.Button == MouseButtons.Left && !_suppressBrowserPathEntryPanelClick)
         {
-            OpenBrowserPathEntry();
+            _ = ExecuteCommandFromUi(CommandIds.BrowserPathEntryOpen, CommandScope.Browser, "Header.PathEntry.Mouse");
         }
     }
     private void HeaderItem_MouseClick(object? sender, MouseEventArgs e)
@@ -224,50 +236,76 @@ public partial class MainForm
             CopySelectedItemFullPathFromHeader();
         }
     }
-    private void CopyCurrentDirectoryFromHeader()
-    {
-        string? path = GetCurrentDirectoryForHeaderCopy();
-        CopyTextToClipboardWithStatus(path, "パスをコピーしました。");
-    }
     private void CopySelectedItemFullPathFromHeader()
     {
         string? fullPath = GetSelectedItemFullPathForHeaderCopy();
-        CopyTextToClipboardWithStatus(fullPath, "フルパスをコピーしました。");
+        if (string.IsNullOrWhiteSpace(fullPath))
+        {
+            CopyTextToClipboardWithStatus(null, "フルパスをコピーしました。");
+            return;
+        }
+        _ = ExecuteCommandFromUi(CommandIds.BrowserCopyFullPath, new CommandExecutionContext
+        {
+            Scope = CommandScope.Browser,
+            Source = "Header.Item.CopyFullPath",
+            SelectionSnapshot = new SelectionResult(new[] { fullPath }, hasMarkedSelection: false)
+        });
     }
-    private void CopySelectedOrMarkedFullPathsToClipboard()
+    private bool CopySelectedOrMarkedFullPathsToClipboard(SelectionResult? selectionSnapshot = null)
     {
-        SelectionResult selection = ResolveSelection();
+        SelectionResult selection = selectionSnapshot is { Count: > 0 } ? selectionSnapshot : ResolveSelection();
         if (!selection.FullPaths.Any())
         {
             ShowStatusMessage("コピーできるパスがありません。");
-            return;
+            return false;
         }
 
-        CopyTextToClipboardWithStatus(
+        return CopyTextToClipboardWithStatus(
             string.Join(Environment.NewLine, selection.FullPaths),
             $"{selection.FullPaths.Count} 件のパスをクリップボードにコピーしました。");
     }
     private void CopySelectedItemNameFromHeader()
     {
         string? fileName = GetSelectedItemNameForHeaderCopy();
-        CopyTextToClipboardWithStatus(fileName, "ファイル名をコピーしました。");
+        _ = ExecuteCommandFromUi(CommandIds.BrowserCopyItemName, new CommandExecutionContext
+        {
+            Scope = CommandScope.Browser,
+            Source = "Header.Item.CopyName",
+            HeaderCopy = new HeaderCopyCommandContext(GetSelectedItemFullPathForHeaderCopy(), fileName)
+        });
     }
-    private void CopyTextToClipboardWithStatus(string? text, string successMessage)
+    private bool CopyTextToClipboardWithStatus(string? text, string successMessage, bool allowWhitespace = false)
     {
-        if (string.IsNullOrWhiteSpace(text))
+        if (allowWhitespace ? string.IsNullOrEmpty(text) : string.IsNullOrWhiteSpace(text))
         {
             ShowStatusMessage("コピーできる内容がありません。");
-            return;
+            return false;
         }
         try
         {
-            Clipboard.SetText(text, TextDataFormat.UnicodeText);
+            bool copied;
+            if (_integrationSeam?.ClipboardTextWriter is { } clipboardTextWriter)
+            {
+                copied = clipboardTextWriter(text);
+            }
+            else
+            {
+                Clipboard.SetText(text, TextDataFormat.UnicodeText);
+                copied = true;
+            }
+            if (!copied)
+            {
+                ShowStatusMessage("クリップボードへコピーできませんでした。");
+                return false;
+            }
             ShowStatusMessage(successMessage);
+            return true;
         }
         catch (Exception ex)
         {
             ShowStatusMessage("クリップボードへコピーできませんでした。");
             LogService.Info($"[HeaderCopy] Clipboard copy failed: {ex}");
+            return false;
         }
     }
     private string? GetCurrentDirectoryForHeaderCopy()

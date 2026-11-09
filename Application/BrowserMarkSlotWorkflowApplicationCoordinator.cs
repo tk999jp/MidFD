@@ -128,6 +128,37 @@ internal sealed class BrowserMarkSlotWorkflowApplicationCoordinator
             category.OpenTabs);
     }
 
+    public Task<BrowserMarkSlotSaveAggregation> BuildCurrentCategoryAggregationAsync(BrowserTabState activeState)
+    {
+        _tabs.SyncActiveStateAndPersist(activeState);
+        BrowserTabRestoreSnapshot snapshot = _persistence.EnsureRestoreSnapshot().Clone();
+        string categoryId = _browser.Workspace.ResolveCategoryId(_browser.Workspace.ActiveCategoryId);
+        BrowserTabRestoreCategoryState? category = snapshot.Categories.FirstOrDefault(
+            item => string.Equals(item.Id, categoryId, StringComparison.OrdinalIgnoreCase));
+        if (category == null)
+        {
+            return Task.FromResult(new BrowserMarkSlotSaveAggregation(
+                MarkSlotSourceScopes.CurrentCategory,
+                "現在カテゴリ",
+                categoryId,
+                "既定",
+                1,
+                0,
+                0,
+                Array.Empty<string>()));
+        }
+
+        string categoryName = string.IsNullOrWhiteSpace(category.DisplayName) ? "既定" : category.DisplayName;
+        BrowserTabSessionState[] tabs = category.OpenTabs.ToArray();
+        return Task.Run(() => BuildAggregation(
+            MarkSlotSourceScopes.CurrentCategory,
+            "現在カテゴリ",
+            categoryId,
+            categoryName,
+            1,
+            tabs));
+    }
+
     public BrowserMarkSlotSaveAggregation BuildWorkspaceAggregation(BrowserTabState activeState)
     {
         _tabs.SyncActiveStateAndPersist(activeState);
@@ -139,6 +170,23 @@ internal sealed class BrowserMarkSlotWorkflowApplicationCoordinator
             null,
             snapshot.Categories.Count,
             snapshot.Categories.SelectMany(static category => category.OpenTabs ?? new List<BrowserTabSessionState>()));
+    }
+
+    public Task<BrowserMarkSlotSaveAggregation> BuildWorkspaceAggregationAsync(BrowserTabState activeState)
+    {
+        _tabs.SyncActiveStateAndPersist(activeState);
+        BrowserTabRestoreSnapshot snapshot = _persistence.EnsureRestoreSnapshot().Clone();
+        int categoryCount = snapshot.Categories.Count;
+        BrowserTabSessionState[] tabs = snapshot.Categories
+            .SelectMany(static category => category.OpenTabs ?? new List<BrowserTabSessionState>())
+            .ToArray();
+        return Task.Run(() => BuildAggregation(
+            MarkSlotSourceScopes.Workspace,
+            "全Workspace",
+            null,
+            null,
+            categoryCount,
+            tabs));
     }
 
     public MarkSlotActionResult SaveCurrentTab(
@@ -267,7 +315,9 @@ internal sealed class BrowserMarkSlotWorkflowApplicationCoordinator
         int slotANumber,
         int slotBNumber,
         string operationKind,
-        string currentPath)
+        string currentPath,
+        IReadOnlySet<string>? existingPaths = null,
+        IReadOnlyDictionary<string, bool>? existingDirectoryPaths = null)
     {
         MarkSlotEntry slotA = GetSlot(slotANumber);
         MarkSlotEntry slotB = GetSlot(slotBNumber);
@@ -294,11 +344,16 @@ internal sealed class BrowserMarkSlotWorkflowApplicationCoordinator
                     currentDir,
                     StringComparison.OrdinalIgnoreCase);
                 string name = Path.GetFileName(path);
+                bool exists = existingPaths?.Contains(path) ?? PathExists(path);
+                bool? isDirectory = existingDirectoryPaths != null && existingDirectoryPaths.TryGetValue(path, out bool value)
+                    ? value
+                    : null;
                 return new MarkSlotSetOperationPreviewItem(
                     string.IsNullOrWhiteSpace(name) ? path : name,
                     path,
                     inCurrentDirectory,
-                    PathExists(path));
+                    exists,
+                    isDirectory);
             })
             .OrderByDescending(static item => item.IsInCurrentDirectory)
             .ThenByDescending(static item => item.Exists)
@@ -404,6 +459,12 @@ internal sealed class BrowserMarkSlotWorkflowApplicationCoordinator
         MarkSlotClipboardImportResult importResult,
         string? repositoryRoot,
         BrowserTabState currentState)
+        => ApplyClipboardReplacementCore(importResult, repositoryRoot, currentState);
+
+    private MarkSlotClipboardActionResult ApplyClipboardReplacementCore(
+        MarkSlotClipboardImportResult importResult,
+        string? repositoryRoot,
+        BrowserTabState currentState)
     {
         MarkSlotClipboardActionResult result = BuildClipboardReplacementResult(importResult, repositoryRoot);
         if (!result.Success)
@@ -434,7 +495,12 @@ internal sealed class BrowserMarkSlotWorkflowApplicationCoordinator
                 importResult.DuplicatePathCount,
                 importResult.IgnoredEarlierResultCount,
                 importResult.UnresolvedPaths,
-                IsNoOp: true);
+                IsNoOp: true,
+                SyntaxInvalidEntryCount: importResult.SyntaxInvalidEntryCount,
+                OutsideRepositoryPathCount: importResult.OutsideRepositoryPathCount,
+                EntryDiagnostics: importResult.EntryDiagnostics,
+                DeclaredCount: importResult.DeclaredCount,
+                ListedEntryCount: importResult.ListedEntryCount);
         }
 
         IReadOnlyList<string> replacementPaths = importResult.Paths
@@ -456,7 +522,12 @@ internal sealed class BrowserMarkSlotWorkflowApplicationCoordinator
             importResult.DirectoryPathCount,
             importResult.DuplicatePathCount,
             importResult.IgnoredEarlierResultCount,
-            importResult.UnresolvedPaths);
+            importResult.UnresolvedPaths,
+            SyntaxInvalidEntryCount: importResult.SyntaxInvalidEntryCount,
+            OutsideRepositoryPathCount: importResult.OutsideRepositoryPathCount,
+            EntryDiagnostics: importResult.EntryDiagnostics,
+            DeclaredCount: importResult.DeclaredCount,
+            ListedEntryCount: importResult.ListedEntryCount);
     }
 
     internal static MarkSlotClipboardActionResult BuildClipboardImportFailure(
@@ -483,7 +554,12 @@ internal sealed class BrowserMarkSlotWorkflowApplicationCoordinator
             importResult.DirectoryPathCount,
             importResult.DuplicatePathCount,
             importResult.IgnoredEarlierResultCount,
-            importResult.UnresolvedPaths);
+            importResult.UnresolvedPaths,
+            SyntaxInvalidEntryCount: importResult.SyntaxInvalidEntryCount,
+            OutsideRepositoryPathCount: importResult.OutsideRepositoryPathCount,
+            EntryDiagnostics: importResult.EntryDiagnostics,
+            DeclaredCount: importResult.DeclaredCount,
+            ListedEntryCount: importResult.ListedEntryCount);
     }
 
     internal static MarkSlotClipboardActionResult BuildClipboardImportFailure(

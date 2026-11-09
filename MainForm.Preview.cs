@@ -4,6 +4,7 @@ using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Forms;
+using MidFD.Commands;
 using MidFD.Configuration;
 using MidFD.Dialogs;
 using MidFD.Helpers;
@@ -63,11 +64,19 @@ public partial class MainForm
     private ContextMenuStrip CreateMarkdownBrowserContextMenu(WebBrowser browser)
     {
         var menu = new ContextMenuStrip();
-        var copySelection = new ToolStripMenuItem("選択範囲をコピー", null, (_, _) => browser.Document?.ExecCommand("Copy", false, string.Empty));
-        var copySelectedMarkdown = new ToolStripMenuItem("選択部分を含むMarkdownをコピー", null, (_, _) => CopyMarkdownContextText(GetMarkdownBrowserSelectionSourceText(browser)));
-        var copySource = new ToolStripMenuItem("このブロックのMarkdownをコピー", null, (_, _) => CopyMarkdownContextText(_markdownBrowserContext.SourceText));
-        var copyLink = new ToolStripMenuItem("リンク先をコピー", null, (_, _) => CopyMarkdownContextText(_markdownBrowserContext.LinkTarget));
-        var copyImage = new ToolStripMenuItem("画像のパスをコピー", null, (_, _) => CopyMarkdownContextText(_markdownBrowserContext.ImageTarget));
+        var copySelection = new ToolStripMenuItem("選択範囲をコピー", null, (_, _) =>
+            _ = DispatchTextViewerCopy(
+                "Markdown.ContextMenu.RenderedSelection",
+                TextViewerCopyOrigin.EmbeddedViewer,
+                renderedSelection: true));
+        var copySelectedMarkdown = new ToolStripMenuItem("選択部分を含むMarkdownをコピー", null, (_, _) =>
+            _ = DispatchMarkdownSourceCopy(GetMarkdownBrowserSelectionSourceText(browser)));
+        var copySource = new ToolStripMenuItem("このブロックのMarkdownをコピー", null, (_, _) =>
+            _ = DispatchMarkdownSourceCopy(_markdownBrowserContext.SourceText));
+        var copyLink = new ToolStripMenuItem("リンク先をコピー", null, (_, _) =>
+            _ = DispatchMarkdownSourceCopy(_markdownBrowserContext.LinkTarget));
+        var copyImage = new ToolStripMenuItem("画像のパスをコピー", null, (_, _) =>
+            _ = DispatchMarkdownSourceCopy(_markdownBrowserContext.ImageTarget));
         var selectAll = new ToolStripMenuItem("すべて選択", null, (_, _) => browser.Document?.ExecCommand("SelectAll", false, string.Empty));
         var separator = new ToolStripSeparator();
         menu.Items.AddRange([copySelection, copySelectedMarkdown, copySource, copyLink, copyImage, separator, selectAll]);
@@ -187,14 +196,17 @@ public partial class MainForm
         return string.IsNullOrEmpty(value) ? null : value;
     }
 
-    private void CopyMarkdownContextText(string? text)
+    private bool DispatchMarkdownSourceCopy(string? text)
     {
         if (string.IsNullOrEmpty(text))
         {
-            return;
+            return false;
         }
-        Clipboard.SetText(text);
-        ShowStatusMessage("Markdownをコピーしました。");
+        return DispatchTextViewerCopy(
+            "Markdown.ContextMenu.SourceCopy",
+            TextViewerCopyOrigin.EmbeddedViewer,
+            selectedText: text,
+            statusMessage: "Markdownをコピーしました。");
     }
 
     private void HandleMarkdownBrowserNavigating(WebBrowserNavigatingEventArgs e)
@@ -241,7 +253,14 @@ public partial class MainForm
                 return;
             }
 
-            Process.Start(new ProcessStartInfo(targetUri.AbsoluteUri) { UseShellExecute = true });
+            ExternalUrlLaunchResult launchResult = OpenExternalUrlThroughCommand(
+                targetUri.AbsoluteUri,
+                "TextViewer.Markdown.ExternalLink");
+            TextPreviewInteractionHelper.ReportExternalUrlLaunchResult(
+                launchResult,
+                ShowStatusMessage,
+                this,
+                showErrorDialog: false);
         }
         catch (Exception ex)
         {
@@ -251,6 +270,35 @@ public partial class MainForm
         {
             _markdownExternalNavigationPending = false;
         }
+    }
+
+    private ExternalUrlLaunchResult OpenExternalUrlThroughCommand(string target, string source)
+    {
+        if (!TextPreviewInteractionHelper.CanOpenWebLink(target)
+            || !Uri.TryCreate(target, UriKind.Absolute, out Uri? targetUri))
+        {
+            return ExternalUrlLaunchResult.InvalidTarget();
+        }
+
+        bool applied = ExecuteCommandCore(
+            CommandIds.AppOpenExternalUrl,
+            new CommandExecutionContext
+            {
+                Scope = CommandScope.Global,
+                Source = source,
+                ExternalUrlOpen = new ExternalUrlOpenCommandContext(targetUri)
+            },
+            out CommandApplicationResult commandResult,
+            out string? effectFailureMessage);
+
+        if (!commandResult.Handled)
+        {
+            return ExternalUrlLaunchResult.CommandRejected();
+        }
+
+        return applied
+            ? ExternalUrlLaunchResult.Opened()
+            : ExternalUrlLaunchResult.EffectFailed(effectFailureMessage);
     }
 
     private DataGridView CreateDelimitedGrid()
@@ -325,12 +373,36 @@ public partial class MainForm
             _largeFileControl);
         ApplyFunctionBarVisibilityForCurrentContext();
         UpdateMarkdownViewerModeStatus();
+        UpdateViewerEditorStatus();
+    }
+
+    private void UpdateViewerEditorStatus()
+    {
+        if (_viewerEditorStatusLabel == null) return;
+        PreviewKind kind = _viewerApplicationCoordinator.DisplayedPreviewKind;
+        bool supported = kind is PreviewKind.Text or PreviewKind.LargeText or PreviewKind.Markdown or PreviewKind.CsvTsv;
+        bool viewer = _viewerApplicationCoordinator.Mode == ViewerApplicationMode.Viewer;
+        string? displayedSource = _viewerApplicationCoordinator.DisplayedPreviewTarget;
+        _viewerEditorStatusLabel.Visible = viewer && supported;
+        _viewerEditorStatusLabel.Enabled = viewer && supported && !string.IsNullOrWhiteSpace(displayedSource);
+        _viewerEditorStatusLabel.ToolTipText = "E: 表示中のsource fileを外部Editorで開きます。";
     }
     private bool IsMarkdownViewerRawMode => _viewerWorkflowApplicationCoordinator.IsMarkdownViewerRawMode;
 
     private void SetMarkdownViewerMode(MarkdownViewerMode mode, bool save = true)
     {
-        _viewerWorkflowApplicationCoordinator.SetMarkdownViewerMode(mode, save);
+        if (save)
+        {
+            ExecuteCommandFromUi(CommandIds.TextViewerMarkdownModeSet, new CommandExecutionContext
+            {
+                Scope = CommandScope.TextViewer,
+                Source = "Viewer.MarkdownModeStatus",
+                TextViewerMarkdownMode = mode
+            });
+            return;
+        }
+
+        _viewerWorkflowApplicationCoordinator.SetMarkdownViewerMode(mode, save: false);
 
         if (_viewerApplicationCoordinator.Mode != ViewerApplicationMode.Viewer || _viewerApplicationCoordinator.CurrentKind != PreviewKind.Markdown || _viewerApplicationCoordinator.MarkdownSource == null)
         {
@@ -382,184 +454,61 @@ public partial class MainForm
     }
     private void ExecuteViewerFind()
     {
-        if (_viewerApplicationCoordinator.CurrentKind == PreviewKind.LargeText && _viewerApplicationCoordinator.LargeFileState != null)
+        bool largeFile = _viewerApplicationCoordinator.CurrentKind == PreviewKind.LargeText
+            && _viewerApplicationCoordinator.LargeFileState != null;
+        if (!largeFile && !viewerTextBox.Visible) return;
+        string initialQuery = largeFile
+            && !string.IsNullOrWhiteSpace(_viewerApplicationCoordinator.LargeFileState?.LastSearchText)
+                ? _viewerApplicationCoordinator.LargeFileState!.LastSearchText
+                : _viewerApplicationCoordinator.SearchKeyword;
+        ExecuteCommandFromUi(CommandIds.TextViewerSearch, new CommandExecutionContext
         {
-            ExecuteLargeFileFind();
-            return;
-        }
-        if (!viewerTextBox.Visible) return;
-        string? query = SimpleInputDialog.ShowNullable("検索:", "Viewer 検索 (Ctrl+F)", _viewerApplicationCoordinator.SearchKeyword);
-        if (query == null) return; // キャンセル時は現状維持
-        _viewerWorkflowApplicationCoordinator.SetSearchKeyword(query ?? string.Empty);
-        ApplyViewerStatusLine(); // ステータスに反映
-        if (string.IsNullOrWhiteSpace(query))
-        {
-            ShowStatusMessage("検索キーワードをクリアしました。");
-            return;
-        }
-        // 初回検索: 現在位置の次から前方へ
-        int start = viewerTextBox.SelectionStart + viewerTextBox.SelectionLength;
-        _ = InnerExecuteViewerSearch(query, start, backward: false);
+            Scope = CommandScope.TextViewer,
+            Source = "Viewer.Search",
+            TextViewerSearch = new TextViewerSearchCommandContext(
+                largeFile ? string.Empty : viewerTextBox.Text,
+                initialQuery,
+                largeFile ? 0 : viewerTextBox.SelectionStart + viewerTextBox.SelectionLength,
+                IsLargeFile: largeFile)
+        });
     }
     private void ExecuteViewerFindNext(bool backward)
     {
-        if (_viewerApplicationCoordinator.CurrentKind == PreviewKind.LargeText && _viewerApplicationCoordinator.LargeFileState != null)
-        {
-            ExecuteLargeFileFindNext(backward);
-            return;
-        }
-        if (!viewerTextBox.Visible) return;
-        if (string.IsNullOrWhiteSpace(_viewerApplicationCoordinator.SearchKeyword))
+        bool largeFile = _viewerApplicationCoordinator.CurrentKind == PreviewKind.LargeText
+            && _viewerApplicationCoordinator.LargeFileState != null;
+        if (!largeFile && !viewerTextBox.Visible) return;
+        string currentQuery = largeFile
+            ? _viewerApplicationCoordinator.LargeFileState!.LastSearchText
+            : _viewerApplicationCoordinator.SearchKeyword;
+        if (string.IsNullOrWhiteSpace(currentQuery))
         {
             ShowStatusMessage("検索キーワードが未設定です。新規検索ダイアログを開きます...");
             ExecuteViewerFind();
             return;
         }
-        int start;
-        if (backward)
-        {
-            // 前方向: 現在の選択開始位置より前から探す
-            start = viewerTextBox.SelectionStart;
-        }
-        else
-        {
-            // 次方向: 現在の選択終了位置から探す
-            start = viewerTextBox.SelectionStart + viewerTextBox.SelectionLength;
-        }
-        _ = InnerExecuteViewerSearch(_viewerApplicationCoordinator.SearchKeyword, start, backward);
-    }
-    private async Task InnerExecuteViewerSearch(string query, int start, bool backward, bool isWrapAround = false, int chunkCrossoverCount = 0)
-    {
-        if (_viewerApplicationCoordinator.CurrentKind == PreviewKind.LargeText && _viewerApplicationCoordinator.LargeFileState != null)
-        {
-            await ExecuteLargeFileSearchAsync(query, backward, isWrapAround);
-            return;
-        }
-        ViewerTextSearchResult search = _viewerWorkflowApplicationCoordinator.FindText(
-            viewerTextBox.Text,
-            query,
-            start,
-            backward,
-            allowWrap: !isWrapAround);
-        if (search.Found)
-        {
-            if (search.Wrapped)
+        string query = currentQuery;
+        ExecuteCommandFromUi(
+            backward ? CommandIds.TextViewerSearchPrevious : CommandIds.TextViewerSearchNext,
+            new CommandExecutionContext
             {
-                ShowStatusMessage(backward ? "末尾から再検索しました" : "先頭から再検索しました");
-            }
-            viewerTextBox.Select(search.Index, query.Length);
-            viewerTextBox.Focus();
-        }
-        else
-        {
-            ShowStatusMessage($"一致する文字列が見つかりません: \"{query}\"");
-        }
-    }
-    private async Task ExecuteLargeFileSearchAsync(string query, bool backward, bool isWrapAround)
-    {
-        if (_viewerApplicationCoordinator.LargeFileState == null) return;
-        var state = _viewerApplicationCoordinator.LargeFileState;
-        string normalizedQuery = query?.Trim() ?? string.Empty;
-        if (string.IsNullOrWhiteSpace(normalizedQuery))
-        {
-            _viewerWorkflowApplicationCoordinator.InvalidateLargeFileSearchRequest(state);
-            _viewerWorkflowApplicationCoordinator.ClearLargeFileSearchState(state);
-            ShowStatusMessage("検索キーワードが未設定です。");
-            return;
-        }
-        _viewerWorkflowApplicationCoordinator.PrepareLargeFileSearch(state, normalizedQuery, backward);
-        ApplyViewerStatusLine();
-        ShowStatusMessage($"検索中: {normalizedQuery}");
-        var token = _viewerApplicationCoordinator.Token;
-        var encoding = _viewerWorkflowApplicationCoordinator.ResolveCurrentViewerEncoding();
-        try
-        {
-            LargeFileSearchResult search = await _viewerWorkflowApplicationCoordinator.SearchLargeFileAsync(
-                state,
-                normalizedQuery,
-                backward,
-                isWrapAround,
-                encoding,
-                token);
-            if (!_viewerWorkflowApplicationCoordinator.IsLargeFileSearchRequestActive(state, search.RequestId))
-            {
-                return;
-            }
-            if (search.Found)
-            {
-                await ApplyLargeFileSearchHitAsync(
-                    state,
-                    search.RequestId,
-                    normalizedQuery,
-                    search.Line,
-                    search.Column,
-                    search.Length,
+                Scope = CommandScope.TextViewer,
+                Source = backward ? "Viewer.SearchPrevious" : "Viewer.SearchNext",
+                TextViewerSearch = new TextViewerSearchCommandContext(
+                    largeFile ? string.Empty : viewerTextBox.Text,
+                    query,
+                    largeFile
+                        ? 0
+                        : backward
+                            ? viewerTextBox.SelectionStart
+                            : viewerTextBox.SelectionStart + viewerTextBox.SelectionLength,
                     backward,
-                    search.Wrapped);
-                return;
-            }
-            ClearLargeFileSearchHit(state);
-            ShowStatusMessage($"一致する文字列が見つかりません: \"{normalizedQuery}\"");
-        }
-        catch (OperationCanceledException)
-        {
-        }
+                    largeFile,
+                    PreserveLargeFileSearchHit: largeFile)
+            });
     }
     private void EnsureStatusBarVisible()
     {
         Presentation.PreviewUiPresenter.EnsureStatusBarVisible(statusStrip, statusLabel);
-    }
-    private void ExecuteLargeFileFind()
-    {
-        if (_viewerApplicationCoordinator.LargeFileState == null)
-        {
-            return;
-        }
-        string initialQuery = string.IsNullOrWhiteSpace(_viewerApplicationCoordinator.LargeFileState.LastSearchText)
-            ? _viewerApplicationCoordinator.SearchKeyword
-            : _viewerApplicationCoordinator.LargeFileState.LastSearchText;
-        string? query = SimpleInputDialog.ShowNullable("検索:", "LargeText 検索 (Ctrl+F)", initialQuery);
-        if (query == null)
-        {
-            return;
-        }
-        string normalizedQuery = query.Trim();
-        bool continueFromActiveHit = !string.IsNullOrWhiteSpace(normalizedQuery)
-            && string.Equals(_viewerApplicationCoordinator.LargeFileState.LastSearchText, normalizedQuery, StringComparison.OrdinalIgnoreCase)
-            && _viewerApplicationCoordinator.LargeFileState.ActiveSearchHitLine.HasValue;
-        _viewerWorkflowApplicationCoordinator.PrepareLargeFileSearch(
-            _viewerApplicationCoordinator.LargeFileState,
-            normalizedQuery,
-            _viewerApplicationCoordinator.LargeFileState.LastSearchBackward);
-        ApplyViewerStatusLine();
-        if (string.IsNullOrWhiteSpace(normalizedQuery))
-        {
-            LargeFilePreviewState state = _viewerApplicationCoordinator.LargeFileState;
-            _viewerWorkflowApplicationCoordinator.InvalidateLargeFileSearchRequest(state);
-            _viewerWorkflowApplicationCoordinator.ClearLargeFileSearchState(state);
-            ShowStatusMessage("検索キーワードをクリアしました。");
-            return;
-        }
-        if (!continueFromActiveHit)
-        {
-            _viewerWorkflowApplicationCoordinator.ClearLargeFileSearchState(
-                _viewerApplicationCoordinator.LargeFileState);
-        }
-        _ = ExecuteLargeFileSearchAsync(normalizedQuery, backward: false, isWrapAround: false);
-    }
-    private void ExecuteLargeFileFindNext(bool backward)
-    {
-        if (_viewerApplicationCoordinator.LargeFileState == null)
-        {
-            return;
-        }
-        if (string.IsNullOrWhiteSpace(_viewerApplicationCoordinator.LargeFileState.LastSearchText))
-        {
-            ShowStatusMessage("検索キーワードが未設定です。新規検索ダイアログを開きます...");
-            ExecuteLargeFileFind();
-            return;
-        }
-        _ = ExecuteLargeFileSearchAsync(_viewerApplicationCoordinator.LargeFileState.LastSearchText, backward, false);
     }
     private async Task ApplyLargeFileSearchHitAsync(
         LargeFilePreviewState state,
@@ -651,16 +600,10 @@ public partial class MainForm
         }
     }
 
-    void IViewerPreviewUiPort.ApplyVideoPreview(string path, VideoPreviewOptions options)
+    void IViewerPreviewUiPort.ApplyVideoPreview(string path)
     {
-        ClearPreview("Enter/V: 画像プレビューで静止画表示\nCtrl+Enter: 外部再生", -1);
-        ShowStatusMessage("Enter/V: 画像プレビューで静止画表示 / Ctrl+Enter: 外部再生");
-        var openViewer = GetReusableImageViewer();
-        openViewer?.LoadVideoStill(
-            path,
-            options.ToolDirectory,
-            options.InitialSeconds,
-            options.VolumePercent);
+        ClearPreview("内蔵MidPlayerで動画を再生します。", -1);
+        OpenImageViewerCore(path, PreviewKind.Video);
     }
 
     void IViewerPreviewUiPort.ApplyTextPreview(TextPreviewContent content)

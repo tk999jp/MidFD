@@ -460,6 +460,19 @@ public sealed class LargeFilePreviewControl : UserControl
                 }
 
                 TextRenderer.DrawText(g, drawText, _font, new Point((int)layout.TextStartX, (int)y), currentTextColor, textFlags);
+                if (isSearchHit && !isSelected && _activeSearchHitLength > 0)
+                {
+                    int start = Math.Min(_activeSearchHitColumn, Math.Min(lineText.Length, MaxRenderableLineLength));
+                    int length = Math.Min(_activeSearchHitLength, Math.Min(lineText.Length, MaxRenderableLineLength) - start);
+                    if (length > 0)
+                    {
+                        string hitText = lineText.Substring(start, length);
+                        float hitX = layout.TextStartX + MeasureTextWidth(g, lineText.Substring(0, start));
+                        float hitWidth = MeasureTextWidth(g, hitText);
+                        g.FillRectangle(selectedBackBrush, hitX, y, Math.Max(1F, hitWidth), layout.LineHeight);
+                        TextRenderer.DrawText(g, hitText, _font, new Point((int)hitX, (int)y), SystemColors.HighlightText, textFlags);
+                    }
+                }
             }
         }
     }

@@ -37,7 +37,6 @@ public sealed class InstalledStoragePathProvider : IStoragePathProvider
             Path.Combine(profileRoot, "Data", "Trash", "manifest.db"),
             Path.Combine(profileRoot, "Logs"),
             Path.Combine(profileRoot, "Logs"),
-            Path.Combine(profileRoot, "video-still-preview-cache"),
             _tempRoot,
             Path.Combine(profileRoot, "Backups"));
     }

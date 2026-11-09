@@ -476,7 +476,7 @@ public partial class MainForm
     void IFileOperationUiPort.ShowHashResult(string targetSummary, SevenZipHashAlgorithm algorithm, string output)
         => InvokeFileOperationUi(() =>
         {
-            using var dialog = new Dialogs.HashResultDialog(targetSummary, algorithm, output);
+            using var dialog = new Dialogs.HashResultDialog(targetSummary, algorithm, output, ExecuteCommandFromUi);
             dialog.ShowDialog(this);
         });
 
@@ -489,6 +489,9 @@ public partial class MainForm
 
         ShowStatusMessage(FileOperationPresentationHelper.GetOperationStartingMessage(operationName, totalCount));
         StartFileOperationProgressIndicator(operationName, totalCount);
+        UpdateMenuStripState();
+        RefreshBrowserStatusSummary();
+        UpdateFunctionBar();
         _integrationSeam?.Observer?.OnOperationStarted(operationName, totalCount);
     }
 

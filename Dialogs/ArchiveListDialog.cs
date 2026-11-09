@@ -1,5 +1,7 @@
 using MidFD.Models;
 using MidFD.Services;
+using MidFD.Commands;
+using MidFD.Runtime;
 using System.Threading.Tasks;
 
 namespace MidFD.Dialogs;
@@ -30,14 +32,49 @@ public sealed class ArchiveListDialog : Form
     private ArchiveListSortColumn _sortColumn = ArchiveListSortColumn.Name;
     private SortOrder _sortOrder = SortOrder.Ascending;
     private ArchiveTextPreviewForm? _activeTextPreviewForm;
+    private long _navigationVersion;
+    private bool _suppressPreviewRefresh;
+    private readonly Action? _beforeNavigationRender;
 
     public ArchiveExtractRequest? PendingExtractRequest { get; private set; }
 
     private readonly string? _dateFormat;
     private readonly string? _sizeFormat;
     private readonly string? _sevenZipPath;
+    private readonly Func<string, ExternalUrlLaunchResult>? _launchExternalUrl;
+    private readonly Func<string, bool>? _dispatchCopySelection;
+    private readonly Action<IWin32Window?, string>? _showCopyErrorDialogHandler;
+    private readonly Guid _navigationSessionId;
+    private readonly Func<ArchiveListNavigationCommandContext, bool>? _dispatchNavigation;
+    private readonly Func<ArchiveTextPreviewCommandContext, bool>? _dispatchTextPreview;
 
-    public ArchiveListDialog(string archivePath, IReadOnlyList<ArchiveEntry> entries, string initialExtractDirectory, bool isReadOnly = false, string? dateFormat = null, string? sizeFormat = null, string? sevenZipPath = null)
+    public ArchiveListDialog(
+        string archivePath,
+        IReadOnlyList<ArchiveEntry> entries,
+        string initialExtractDirectory,
+        bool isReadOnly = false,
+        string? dateFormat = null,
+        string? sizeFormat = null,
+        string? sevenZipPath = null)
+        : this(archivePath, entries, initialExtractDirectory, isReadOnly, dateFormat, sizeFormat, sevenZipPath, null, null)
+    {
+    }
+
+    internal ArchiveListDialog(
+        string archivePath,
+        IReadOnlyList<ArchiveEntry> entries,
+        string initialExtractDirectory,
+        bool isReadOnly,
+        string? dateFormat,
+        string? sizeFormat,
+        string? sevenZipPath,
+        Func<string, ExternalUrlLaunchResult>? launchExternalUrl,
+        Func<string, bool>? dispatchCopySelection = null,
+        Action<IWin32Window?, string>? showCopyErrorDialogHandler = null,
+        Guid navigationSessionId = default,
+        Func<ArchiveListNavigationCommandContext, bool>? dispatchNavigation = null,
+        Func<ArchiveTextPreviewCommandContext, bool>? dispatchTextPreview = null,
+        Action? beforeNavigationRender = null)
     {
         _archivePath = archivePath;
         _initialExtractDirectory = initialExtractDirectory;
@@ -46,6 +83,13 @@ public sealed class ArchiveListDialog : Form
         _dateFormat = dateFormat;
         _sizeFormat = sizeFormat;
         _sevenZipPath = sevenZipPath;
+        _launchExternalUrl = launchExternalUrl;
+        _dispatchCopySelection = dispatchCopySelection;
+        _showCopyErrorDialogHandler = showCopyErrorDialogHandler;
+        _navigationSessionId = navigationSessionId;
+        _dispatchNavigation = dispatchNavigation;
+        _dispatchTextPreview = dispatchTextPreview;
+        _beforeNavigationRender = beforeNavigationRender;
 
         Text = $"Archive Contents - {Path.GetFileName(archivePath)}";
         ClientSize = new Size(800, 650);
@@ -210,6 +254,101 @@ public sealed class ArchiveListDialog : Form
     {
         Activate();
         _listView.Focus();
+    }
+
+    internal bool ApplyNavigation(ArchiveListNavigationExecution navigation)
+    {
+        if (navigation.SessionId != _navigationSessionId || IsDisposed || Disposing ||
+            navigation.ExpectedVersion != _navigationVersion ||
+            !string.Equals(_currentPath, navigation.PreviousPath, StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        return TryApplyPath(navigation.CurrentPath, navigation.ExpectedVersion + 1);
+    }
+
+    internal bool RollbackNavigation(ArchiveListNavigationExecution navigation)
+    {
+        if (navigation.SessionId != _navigationSessionId || IsDisposed || Disposing ||
+            _navigationVersion != navigation.ExpectedVersion + 1 ||
+            !string.Equals(_currentPath, navigation.CurrentPath, StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        return TryApplyPath(navigation.PreviousPath, navigation.ExpectedVersion);
+    }
+
+    internal bool CompleteNavigation(ArchiveListNavigationExecution navigation)
+    {
+        if (navigation.SessionId != _navigationSessionId || IsDisposed || Disposing ||
+            _navigationVersion != navigation.ExpectedVersion + 1 ||
+            !string.Equals(_currentPath, navigation.CurrentPath, StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        UpdatePreviewIfFormOpen();
+        return true;
+    }
+
+    private bool TryApplyPath(string path, long version)
+    {
+        string previousPath = _currentPath;
+        long previousVersion = _navigationVersion;
+        string? previousSelection = GetSelectedArchiveEntry()?.EntryPath;
+        bool previousSuppressPreviewRefresh = _suppressPreviewRefresh;
+        _suppressPreviewRefresh = true;
+        try
+        {
+            _currentPath = path;
+            _beforeNavigationRender?.Invoke();
+            PopulateItems();
+            FocusFirstVisibleItem();
+            _navigationVersion = version;
+            return true;
+        }
+        catch
+        {
+            _currentPath = previousPath;
+            _navigationVersion = previousVersion;
+            try
+            {
+                PopulateItems();
+                RestoreSelection(previousSelection);
+                UpdateDialogState();
+            }
+            catch
+            {
+                // The navigation is rejected even if a broken control prevents restoring its previous rows.
+            }
+            return false;
+        }
+        finally
+        {
+            _suppressPreviewRefresh = previousSuppressPreviewRefresh;
+        }
+    }
+
+    private void RestoreSelection(string? entryPath)
+    {
+        if (string.IsNullOrEmpty(entryPath))
+        {
+            return;
+        }
+
+        foreach (ListViewItem item in _listView.Items)
+        {
+            if (item.Tag is ArchiveEntry entry &&
+                string.Equals(entry.EntryPath, entryPath, StringComparison.OrdinalIgnoreCase))
+            {
+                item.Selected = true;
+                item.Focused = true;
+                item.EnsureVisible();
+                return;
+            }
+        }
     }
 
     public void FocusPreviewText()
@@ -491,47 +630,129 @@ public sealed class ArchiveListDialog : Form
             return;
         }
 
-        // ファイルの場合の Enter 挙動
-        string archiveExt = Path.GetExtension(_archivePath);
-        bool isZip = string.Equals(archiveExt, ".zip", StringComparison.OrdinalIgnoreCase);
-        bool isSevenZip = string.Equals(archiveExt, ".7z", StringComparison.OrdinalIgnoreCase);
-        bool isText = ArchiveEntryPreviewService.IsTextFile(entry.EntryPath);
-
-        if ((isZip || isSevenZip) && isText)
-        {
-            string archivePath = _archivePath;
-            string entryPath = string.IsNullOrEmpty(entry.RawEntryPath) ? entry.EntryPath : entry.RawEntryPath;
-
-            ArchiveEntryPreviewResult result;
-            if (isZip)
-            {
-                result = ArchiveEntryPreviewService.GetZipEntryTextPreview(archivePath, entryPath);
-            }
-            else
-            {
-                result = ArchiveEntryPreviewService.Get7zEntryTextPreview(archivePath, entryPath, _sevenZipPath);
-            }
-
-            _activeTextPreviewForm?.Close();
-            _activeTextPreviewForm?.Dispose();
-
-            _activeTextPreviewForm = new ArchiveTextPreviewForm(entry.Name, result.Text);
-            _activeTextPreviewForm.FormClosed += (_, _) => _activeTextPreviewForm = null;
-
-            PositionTextPreviewForm(_activeTextPreviewForm);
-
-            _activeTextPreviewForm.Show(this);
-            _activeTextPreviewForm.Activate();
-
-            // テキストプレビューを開いた後も一覧操作を継続できるようにフォーカスを戻す
-            Activate();
-            _listView.Focus();
-        }
-        else
+        if (!DispatchTextPreview(entry, ArchiveTextPreviewOperation.Open))
         {
             System.Media.SystemSounds.Beep.Play();
         }
     }
+
+    internal bool ApplyTextPreview(ArchiveTextPreviewExecution execution)
+    {
+        if (execution.SessionId != _navigationSessionId || execution.NavigationVersion != _navigationVersion ||
+            IsDisposed || Disposing)
+        {
+            return false;
+        }
+
+        ArchiveEntry? selected = GetSelectedArchiveEntry();
+        if (execution.EntryPath == null)
+        {
+            if (selected != null)
+            {
+                return false;
+            }
+        }
+        else if (selected == null ||
+                 !string.Equals(selected.EntryPath, execution.EntryPath, StringComparison.OrdinalIgnoreCase) ||
+                 (execution.Operation == ArchiveTextPreviewOperation.Open &&
+                  (selected.IsDirectory || selected.IsSyntheticDirectory)))
+        {
+            return false;
+        }
+
+        if (execution.Operation == ArchiveTextPreviewOperation.RefreshExisting)
+        {
+            if (_activeTextPreviewForm == null || _activeTextPreviewForm.IsDisposed || !_activeTextPreviewForm.Visible)
+            {
+                return false;
+            }
+
+            try
+            {
+                _activeTextPreviewForm.SetContent(execution.DisplayName, execution.Result.Text);
+                return true;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        if (execution.EntryPath == null)
+        {
+            return false;
+        }
+
+        ArchiveTextPreviewForm? previousPreview = _activeTextPreviewForm;
+        if (previousPreview is { IsDisposed: false, Visible: true })
+        {
+            try
+            {
+                previousPreview.SetContent(execution.DisplayName, execution.Result.Text);
+                previousPreview.Activate();
+                Activate();
+                _listView.Focus();
+                return true;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        ArchiveTextPreviewForm nextPreview;
+        try
+        {
+            nextPreview = new ArchiveTextPreviewForm(
+                execution.DisplayName,
+                execution.Result.Text,
+                _launchExternalUrl,
+                _dispatchCopySelection,
+                _showCopyErrorDialogHandler);
+            PositionTextPreviewForm(nextPreview);
+        }
+        catch
+        {
+            return false;
+        }
+
+        try
+        {
+            nextPreview.FormClosed += (_, _) =>
+            {
+                if (ReferenceEquals(_activeTextPreviewForm, nextPreview))
+                {
+                    _activeTextPreviewForm = null;
+                }
+            };
+            nextPreview.Show(this);
+            nextPreview.Activate();
+            _activeTextPreviewForm = nextPreview;
+            previousPreview?.Close();
+            previousPreview?.Dispose();
+            Activate();
+            _listView.Focus();
+            return true;
+        }
+        catch
+        {
+            if (!nextPreview.IsDisposed)
+            {
+                nextPreview.Dispose();
+            }
+            _activeTextPreviewForm = previousPreview is { IsDisposed: false } ? previousPreview : null;
+            return false;
+        }
+    }
+
+    private bool DispatchTextPreview(ArchiveEntry entry, ArchiveTextPreviewOperation operation)
+        => _dispatchTextPreview?.Invoke(new ArchiveTextPreviewCommandContext(
+            _navigationSessionId,
+            _navigationVersion,
+            operation,
+            entry.EntryPath,
+            entry.RawEntryPath,
+            entry.Name)) == true;
 
     private void PositionTextPreviewForm(ArchiveTextPreviewForm previewForm)
     {
@@ -566,37 +787,36 @@ public sealed class ArchiveListDialog : Form
 
     private void NavigateUp()
     {
-        if (string.IsNullOrEmpty(_currentPath)) return;
-        
-        string normalized = _currentPath.TrimEnd('/');
-        int lastSlash = normalized.LastIndexOf('/');
-        
-        if (lastSlash < 0)
-        {
-            _currentPath = string.Empty;
-        }
-        else
-        {
-            _currentPath = normalized[..lastSlash] + "/";
-        }
-        
-        PopulateItems();
-        if (_listView.Items.Count > 0)
-        {
-            _listView.Items[0].Selected = true;
-            _listView.Items[0].Focused = true;
-        }
+        DispatchNavigation(ArchiveListNavigationAction.Parent);
     }
 
     private void NavigateDown(string entryPath)
     {
-        _currentPath = entryPath.EndsWith("/") ? entryPath : entryPath + "/";
-        PopulateItems();
-        if (_listView.Items.Count > 0)
+        DispatchNavigation(ArchiveListNavigationAction.EnterDirectory, entryPath);
+    }
+
+    private void DispatchNavigation(ArchiveListNavigationAction action, string? targetEntryPath = null)
+    {
+        if (_navigationSessionId == Guid.Empty || _dispatchNavigation == null)
         {
-            _listView.Items[0].Selected = true;
-            _listView.Items[0].Focused = true;
+            return;
         }
+
+        _dispatchNavigation(new ArchiveListNavigationCommandContext(
+            _navigationSessionId,
+            action,
+            targetEntryPath));
+    }
+
+    private void FocusFirstVisibleItem()
+    {
+        if (_listView.Items.Count == 0)
+        {
+            return;
+        }
+
+        _listView.Items[0].Selected = true;
+        _listView.Items[0].Focused = true;
     }
 
     private void QueueExtractMarked()
@@ -795,51 +1015,20 @@ public sealed class ArchiveListDialog : Form
 
     private void UpdatePreviewIfFormOpen()
     {
-        if (_activeTextPreviewForm == null)
+        if (_suppressPreviewRefresh || _activeTextPreviewForm == null ||
+            _activeTextPreviewForm.IsDisposed || !_activeTextPreviewForm.Visible)
         {
             return;
         }
 
         ArchiveEntry? entry = GetSelectedArchiveEntry();
-        if (entry == null)
-        {
-            _activeTextPreviewForm.SetContent("なし", "[プレビューするファイルが選択されていません。]");
-            return;
-        }
-
-        if (entry.IsDirectory || entry.IsSyntheticDirectory)
-        {
-            _activeTextPreviewForm.SetContent(entry.Name, "[フォルダはプレビューできません。]");
-            return;
-        }
-
-        string archiveExt = Path.GetExtension(_archivePath);
-        bool isZip = string.Equals(archiveExt, ".zip", StringComparison.OrdinalIgnoreCase);
-        bool isSevenZip = string.Equals(archiveExt, ".7z", StringComparison.OrdinalIgnoreCase);
-        bool isText = ArchiveEntryPreviewService.IsTextFile(entry.EntryPath);
-
-        if ((isZip || isSevenZip) && isText)
-        {
-            string entryPath = string.IsNullOrEmpty(entry.RawEntryPath) ? entry.EntryPath : entry.RawEntryPath;
-            ArchiveEntryPreviewResult result;
-            if (isZip)
-            {
-                result = ArchiveEntryPreviewService.GetZipEntryTextPreview(_archivePath, entryPath);
-            }
-            else
-            {
-                result = ArchiveEntryPreviewService.Get7zEntryTextPreview(_archivePath, entryPath, _sevenZipPath);
-            }
-            _activeTextPreviewForm.SetContent(entry.Name, result.Text);
-        }
-        else if (!isZip && !isSevenZip)
-        {
-            _activeTextPreviewForm.SetContent(entry.Name, "[ZIP/7z以外のファイルはプレビュー対象外です。]");
-        }
-        else
-        {
-            _activeTextPreviewForm.SetContent(entry.Name, "[このファイル形式はテキストプレビュー対象外です。]");
-        }
+        _dispatchTextPreview?.Invoke(new ArchiveTextPreviewCommandContext(
+            _navigationSessionId,
+            _navigationVersion,
+            ArchiveTextPreviewOperation.RefreshExisting,
+            entry?.EntryPath,
+            entry?.RawEntryPath,
+            entry?.Name));
     }
 
     private ArchiveEntry? GetSelectedArchiveEntry()

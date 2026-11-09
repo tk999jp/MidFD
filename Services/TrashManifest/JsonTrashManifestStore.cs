@@ -15,12 +15,11 @@ internal sealed class JsonTrashManifestStore : ITrashManifestStore
 
     public TrashManifest Load()
     {
-        string json;
+        TrashManifest? manifest;
         try
         {
             using FileStream stream = File.Open(_manifestPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
-            using var reader = new StreamReader(stream);
-            json = reader.ReadToEnd();
+            manifest = JsonSerializer.Deserialize<TrashManifest>(stream, _jsonOptions);
         }
         catch (FileNotFoundException)
         {
@@ -30,20 +29,19 @@ internal sealed class JsonTrashManifestStore : ITrashManifestStore
         {
             return new TrashManifest();
         }
-        return JsonSerializer.Deserialize<TrashManifest>(json, _jsonOptions)
-            ?? throw new JsonException("Trash manifest payload is empty.");
+        if (manifest == null) throw new JsonException("Trash manifest payload is empty.");
+        if (manifest.Records == null || manifest.Records.Any(record => record == null))
+            throw new JsonException("Trash manifest records are invalid.");
+        return manifest;
     }
 
     public void Save(TrashManifest manifest)
     {
-        string? directory = Path.GetDirectoryName(_manifestPath);
-        if (!string.IsNullOrWhiteSpace(directory))
-        {
-            Directory.CreateDirectory(directory);
-        }
-
-        string json = JsonSerializer.Serialize(manifest, _jsonOptions);
-        File.WriteAllText(_manifestPath, json);
+        ArgumentNullException.ThrowIfNull(manifest);
+        // Refuse to replace unreadable/corrupt persistent state with a normal empty state.
+        _ = Load();
+        Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(_manifestPath))!);
+        AtomicFileWriter.Write(_manifestPath, stream => JsonSerializer.Serialize(stream, manifest, _jsonOptions));
     }
 
     public void RegisterNewRecord(TrashManifest manifest, TrashManifestRecord record)

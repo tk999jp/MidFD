@@ -46,9 +46,7 @@ internal interface ICommandPaletteLayerHost
     MarkSlotStore GetMarkSlotStoreClone();
     SelectionResult ResolveSelection();
     IReadOnlyDictionary<string, bool> GetPassiveSelectionPathKinds();
-    void NavigateToPath(string path);
-    void RestoreMarksFromSlot(int slotNumber);
-    void ShowArchiveContents(string archivePath);
+    bool ExecuteCommandFromUi(string commandId, CommandExecutionContext context);
     void ExecuteCommandFromUi(
         string commandId,
         CommandScope scope,
@@ -320,7 +318,12 @@ internal sealed class QuickAccessLayerProvider : ICommandPaletteLayerProvider
                         : string.IsNullOrWhiteSpace(entry.Path)
                             ? "移動先が未設定です。"
                             : "移動先が見つかりません。",
-                Execute = () => host.NavigateToPath(entry.Path)
+                Execute = () => host.ExecuteCommandFromUi(CommandIds.BrowserNavigateToPath, new CommandExecutionContext
+                {
+                    Scope = CommandScope.Browser,
+                    Source = "CommandPalette.Layer.QuickAccess",
+                    ContextTargetPath = entry.Path
+                })
             });
         }
     }
@@ -377,7 +380,12 @@ internal sealed class MarkSlotLayerProvider : ICommandPaletteLayerProvider
                 NonExecutableMessage = host.IsFileOperationBusy
                     ? "ファイル操作中は実行できません。"
                     : slot.SlotNumber > 0 ? null : "このスロットは実行できません。",
-                Execute = () => host.RestoreMarksFromSlot(slot.SlotNumber)
+                Execute = () => host.ExecuteCommandFromUi(CommandIds.BrowserMarkSlotRestore, new CommandExecutionContext
+                {
+                    Scope = CommandScope.Browser,
+                    Source = "CommandPalette.Layer.MarkSlot",
+                    MarkSlotNumber = slot.SlotNumber
+                })
             });
         }
 
@@ -504,7 +512,12 @@ internal sealed class ArchiveLayerProvider : ICommandPaletteLayerProvider
             Category = "Archive",
             CanExecute = available ? null : () => false,
             NonExecutableMessage = available ? null : status,
-            Execute = () => host.ShowArchiveContents(path)
+            Execute = () => host.ExecuteCommandFromUi(CommandIds.ArchiveContentsOpen, new CommandExecutionContext
+            {
+                Scope = CommandScope.Browser,
+                Source = "CommandPalette.Layer.ArchiveContents",
+                ContextTargetPath = path
+            })
         };
     }
 

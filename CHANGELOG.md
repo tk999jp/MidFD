@@ -2,6 +2,44 @@
 
 利用者向けの主な変更概要です。内部の開発ログやtest追加は原則として記載しません。
 
+## v2026.11.09 — コマンド体系の統合・画像／動画表示とファイル操作の改善
+
+### 追加・操作変更
+
+- 画像・動画を同梱のMidPlayerで表示・再生します。Browserの動画Enter／Ctrl+Enterはprofileにかかわらず内蔵再生、Vは内容probeによる明示Previewで通常動画はBinary表示、音声Enter／Ctrl+Enterはffplayで外部再生、ZはWindowsの関連付けで開きます。動画EnterはPreviewFollowから始まり、再生・一時停止中は表示を固定します。
+- 設定の「画像デコーダー」でSusie `.spi`／`.sph` pluginを登録・検査し、拡張子ごとにdecoderを選べます。Browser Enterは有効なpluginの検査済みmetadataに合う形式をMidPlayerで開きます。対応形式はpluginごとに異なります。
+- BrowserのVはfile内容からText／LargeText／Binaryを選ぶ明示Previewで、通常動画はBinary表示です。BrowserのEnterはMarkdown、CSV／TSV、SQLiteなどを含む対象別Viewerへ進みます。Text ViewerではLで文字コード、Wで折り返しを切り替えます。
+- Grep結果のEで選択hitを外部Editorへfile／行／列付きで渡せます。対応Editorを選択すると推奨引数を提案し、既存のcustom引数は維持します。
+- Grep結果のOutput／`Ctrl+Shift+O`で通常完了またはpartial終端snapshotを出力できます。partial結果は不完全理由と、該当時は除外record数を含みます。
+- FDCompatible profileで`Ctrl+1〜9`／`Ctrl+NumPad1〜9`からDrive A〜Iへ移動できます。Standard profileの表示mode切替を保ち、両profileで数字1〜9による表示列数変更を使えます。
+- Browserの全path入力から選択fileへ移動でき、非active tabの配色変更も一覧へ反映します。
+
+### コマンド体系・カスタマイズ
+
+- Command IDとCommand Registryを拡充し、対応する操作の識別子、表示名、説明、カテゴリなどを整理しました。キーボード、Functionバー、メニュー、右クリックメニュー、マウスジェスチャー、Command Paletteなど、複数の操作入口を同じコマンド体系へ接続する範囲を拡大しました。
+- Command DispatcherからApplication層へ操作を接続する構造を整理しました。実際のファイル操作や状態管理の責務は従来のApplication層が担います。
+- コマンド一覧画面でカテゴリ別の表示と全カテゴリ検索に対応し、Command IDやカスタマイズ可否などを確認しやすくしました。
+- キー割り当ての識別子を正規化し、対応する旧設定値の移行・互換処理を拡充しました。
+
+### 修正・改善
+
+- 内容検索のpartial結果を保持し、未完了理由と除外数を含めて確認・出力できるようにしました。検索切替・cancel後に古い非同期結果を新しい結果へ適用しません。
+- FileDrop／Outlook添付の部分失敗・skip・cancelを結果へ反映し、確認中の再入操作や一時fileの残留を抑えます。
+- 設定・Workspace Snapshotの不正／過大payloadを読込・保存前に検査し、既存dataの保護と失敗理由の表示を整えました。
+- 画像・動画の切替／終了、Viewerの入力、Browserの非同期一覧更新を調整しました。
+
+### 設定・互換性
+
+- 旧`VideoEnterPlaysExternal`値は互換用に読み書きしますが、Browser動画Enterの再生先は切り替えません。動画のWindows関連付け起動はZ、音声のffplay未検出時はWindowsの関連付けを使います。
+- QuickAccessの`Commands`欄は廃止しました。既存`quickaccess.json`の同欄は読み飛ばし、Bookmarks／Aliases／Recentsの通常保存時に再出力しません。外部toolは「外部連携」から引き続き実行できます。
+- Workspace Snapshotの1件のpayload上限は16MiBです。上限を超える既存payloadは復元・JSON出力できない場合があります。
+- Susie HostのDIB出力は8bpp BI_RGB palette、24／32bppを扱います。RLE8は非対応です。
+
+### 配布・必要環境
+
+- 本配布ではMidFD内でMidPlayer.Lite.dllを使用します。単独起動用MidPlayer.exeは含まず、Susie Hostはx86／x64別processです。MidFD用.NET Desktop Runtime x64が必要で、32-bit SPI pluginには追加でx86 runtimeが必要です。
+- 動画再生はWindows Media Foundationのみです。LibVLC backendは採用せず、LibVLCとSkiaSharpの依存fileを含みません。外部字幕には対応しません。WebPはPreviewの既定形式ではありませんが、対応するSusie pluginの登録でBrowser Enterから利用できます。Susie Hostはx86／x64別processです。ffplayは音声外部再生用の任意toolで、動画再生にffmpeg／ffprobeは必要ありません。
+
 ## v2026.10.05 — 内容検索・Browser操作・一覧表示の改善
 
 ### 追加・操作変更

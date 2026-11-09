@@ -115,6 +115,7 @@ internal sealed class CommandStateCoordinator
             case CommandIds.FileCopy:
             case CommandIds.FileMove:
             case CommandIds.FileDelete:
+            case CommandIds.FileDeletePermanent:
                 case CommandIds.BrowserCopyFullPath:
                 return snapshot.SelectionKind == BrowserSelectionKind.Directory ||
                        snapshot.SelectionKind == BrowserSelectionKind.File ||

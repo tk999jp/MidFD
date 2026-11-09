@@ -1138,6 +1138,24 @@ internal sealed class BrowserTabWorkflowApplicationCoordinator
             validateMarks,
             markValidationSucceeded);
 
+    public bool UpdateActiveTabCursorFocusForCurrentGeneration(
+        Guid tabId,
+        long directoryNavigationGeneration,
+        long directoryContentGeneration,
+        int cursorIndex,
+        string? focusTargetName)
+    {
+        if (tabId == Guid.Empty ||
+            _browser.Workspace.ActiveTabSnapshot?.Id != tabId ||
+            _browser.DirectoryNavigationGeneration != directoryNavigationGeneration ||
+            _browser.DirectoryContentGeneration != directoryContentGeneration)
+        {
+            return false;
+        }
+
+        return _browser.Workspace.UpdateActiveTabCursorFocus(tabId, cursorIndex, focusTargetName);
+    }
+
     public void SyncActiveTabMarks(IEnumerable<string> paths) =>
         _browser.Workspace.SyncActiveTabMarks(paths);
 
@@ -1953,7 +1971,11 @@ internal readonly record struct BrowserMarkMutationCommit(bool ExactDeltaApplied
 
 internal readonly record struct BrowserSelectionMarkExecution(
     BrowserSelectionMarkTransition Transition,
-    BrowserMarkMutationCommit Commit);
+    BrowserMarkMutationCommit Commit,
+    bool SkippedMissingTarget = false)
+{
+    public bool Added => Transition.ChangeKind == BrowserSelectionMarkChangeKind.Added;
+}
 
 internal readonly record struct BrowserTabToggleLockExecution(
     BrowserTabSwitchWorkflowResult? Switch,

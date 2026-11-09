@@ -1,4 +1,5 @@
 using MidFD.Models;
+using MidFD.ViewerIpc;
 
 namespace MidFD.Configuration;
 
@@ -64,6 +65,7 @@ public class AppSettings
         Input.FunctionBarLabelOverridesCtrlFdCompatible ??= new Dictionary<string, FunctionBarLabelOverride>(StringComparer.OrdinalIgnoreCase);
         Input.FunctionBarLabelOverridesAltStandard ??= new Dictionary<string, FunctionBarLabelOverride>(StringComparer.OrdinalIgnoreCase);
         Input.FunctionBarLabelOverridesAltFdCompatible ??= new Dictionary<string, FunctionBarLabelOverride>(StringComparer.OrdinalIgnoreCase);
+        Input.NormalizeCommandReferences();
         SevenZip ??= new SevenZipSettings();
         if (!Enum.IsDefined(SevenZip.PackDialogMode))
         {
@@ -80,6 +82,12 @@ public class AppSettings
         Appearance.MigrateLegacyProfileColors(Input.FunctionKeyProfile);
         Logging ??= new LoggingSettings();
         Preview ??= new PreviewSettings();
+        if (!Enum.IsDefined(Preview.DefaultMediaViewerPresentationMode))
+        {
+            Preview.DefaultMediaViewerPresentationMode = ViewerPresentationMode.PreviewFollow;
+        }
+        Preview.SusiePlugins ??= new SusiePluginSettings();
+        Preview.SusiePlugins.Normalize();
         Rename ??= new RenameSettings();
         QuickAccess ??= new List<string>();
         BrowserTabs ??= new BrowserTabSettings();
@@ -579,6 +587,8 @@ public class PreviewSettings
     public bool ReuseImageViewer { get; set; } = true;
     public bool CloseImageViewerOnNonImageSelection { get; set; } = false;
     public bool RememberImageViewerBounds { get; set; } = true;
+    [System.Text.Json.Serialization.JsonConverter(typeof(ViewerPresentationModeJsonConverter))]
+    public ViewerPresentationMode DefaultMediaViewerPresentationMode { get; set; } = ViewerPresentationMode.PreviewFollow;
     public int ImageViewerX { get; set; } = -1;
     public int ImageViewerY { get; set; } = -1;
     public int ImageViewerWidth { get; set; } = 960;
@@ -586,6 +596,12 @@ public class PreviewSettings
     public int InitialFitLimitWidth { get; set; } = 1920;
     public int InitialFitLimitHeight { get; set; } = 1080;
     public int VideoSkipSeconds { get; set; } = 0;
+    private int _videoSeekStepSeconds = 10;
+    public int VideoSeekStepSeconds
+    {
+        get => _videoSeekStepSeconds;
+        set => _videoSeekStepSeconds = Math.Clamp(value, 1, 600);
+    }
     public bool VideoStillInitialSecondsMigratedToZero { get; set; } = false;
     public bool VideoStillPreviewEnabled { get; set; } = true;
     public string? VideoToolDirectory { get; set; }
@@ -593,9 +609,22 @@ public class PreviewSettings
     [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
     public string? VideoStillPreviewFfmpegPath { get; set; }
     public int VideoPlaybackVolumePercent { get; set; } = 100;
+    private string _videoPlaybackBackend = VideoPlaybackBackendKind.Auto;
+    [System.Text.Json.Serialization.JsonConverter(typeof(VideoPlaybackBackendNameConverter))]
+    public string VideoPlaybackBackend
+    {
+        get => _videoPlaybackBackend;
+        set => _videoPlaybackBackend = VideoPlaybackBackendKind.Normalize(value);
+    }
     public bool VideoEnterPlaysExternal { get; set; } = false;
+    public SusiePluginSettings SusiePlugins { get; set; } = new();
 
-    public PreviewSettings Clone() => (PreviewSettings)MemberwiseClone();
+    public PreviewSettings Clone()
+    {
+        var clone = (PreviewSettings)MemberwiseClone();
+        clone.SusiePlugins = (SusiePlugins ?? new SusiePluginSettings()).Clone();
+        return clone;
+    }
 }
 
 public class RenameSettings
@@ -638,6 +667,9 @@ public class ExternalToolsSettings
 
     /// <summary>外部 Editor の実行ファイルパス。未設定の場合は null。</summary>
     public string? ExternalEditorPath { get; set; }
+
+    /// <summary>Grep検索hitから外部Editorを開く際の任意引数テンプレート。</summary>
+    public string? ExternalEditorSearchHitArgumentTemplate { get; set; }
 
     /// <summary>外部 Diff ツールの実行ファイルパス。未設定の場合は null。</summary>
     public string? ExternalDiffPath { get; set; }

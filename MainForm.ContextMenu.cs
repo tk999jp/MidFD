@@ -247,32 +247,32 @@ public partial class MainForm : Form
         _toggleBrowserTabLockContextMenuItem = new ToolStripMenuItem();
         _toggleBrowserTabLockContextMenuItem.Click += (_, _) =>
         {
-            if (!TryActivateBrowserTabContextTarget(out int contextTabIndex))
+            if (!TryActivateBrowserTabContextCommandTarget(out int contextTabIndex, out Guid contextTabId))
             {
                 return;
             }
-            ExecuteCommandFromUi(CommandIds.BrowserTabLock, CommandScope.Browser, "BrowserTabContextMenu.Lock", contextTabIndex: contextTabIndex);
+            ExecuteBrowserTabContextCommand(CommandIds.BrowserTabLock, "BrowserTabContextMenu.Lock", contextTabIndex, contextTabId);
         };
         _toggleBrowserTabReadOnlyContextMenuItem = new ToolStripMenuItem();
         _toggleBrowserTabReadOnlyContextMenuItem.Click += (_, _) =>
         {
-            if (!TryActivateBrowserTabContextTarget(out int contextTabIndex))
+            if (!TryActivateBrowserTabContextCommandTarget(out int contextTabIndex, out Guid contextTabId))
             {
                 return;
             }
-            ExecuteCommandFromUi(CommandIds.BrowserTabReadOnlyToggle, CommandScope.Browser, "BrowserTabContextMenu.ReadOnly", contextTabIndex: contextTabIndex);
+            ExecuteBrowserTabContextCommand(CommandIds.BrowserTabReadOnlyToggle, "BrowserTabContextMenu.ReadOnly", contextTabIndex, contextTabId);
         };
         _openBrowserTabFilterLockContextMenuItem = new ToolStripMenuItem("フィルタ...");
         _openBrowserTabFilterLockContextMenuItem.Click += (_, _) =>
         {
-            if (!TryActivateBrowserTabContextTarget(out int contextTabIndex)) return;
-            ExecuteCommandFromUi(CommandIds.BrowserFilter, CommandScope.Browser, "BrowserTabContextMenu.FilterFind", contextTabIndex: contextTabIndex);
+            if (!TryActivateBrowserTabContextCommandTarget(out int contextTabIndex, out Guid contextTabId)) return;
+            ExecuteBrowserTabContextCommand(CommandIds.BrowserFilter, "BrowserTabContextMenu.FilterFind", contextTabIndex, contextTabId);
         };
         _clearBrowserTabFilterLockContextMenuItem = new ToolStripMenuItem("フィルタを解除");
         _clearBrowserTabFilterLockContextMenuItem.Click += (_, _) =>
         {
-            if (!TryActivateBrowserTabContextTarget(out int contextTabIndex)) return;
-            ExecuteCommandFromUi(CommandIds.BrowserFilterClear, CommandScope.Browser, "BrowserTabContextMenu.FilterClear", contextTabIndex: contextTabIndex);
+            if (!TryActivateBrowserTabContextCommandTarget(out int contextTabIndex, out Guid contextTabId)) return;
+            ExecuteBrowserTabContextCommand(CommandIds.BrowserFilterClear, "BrowserTabContextMenu.FilterClear", contextTabIndex, contextTabId);
         };
         _createBrowserTabGroupContextMenuItem = new ToolStripMenuItem("グループを作成...");
         _createBrowserTabGroupContextMenuItem.Click += (_, _) =>
@@ -295,7 +295,7 @@ public partial class MainForm : Form
             {
                 return;
             }
-            _ = SaveCurrentWorkspaceSnapshot(this);
+            _ = SaveWorkspaceSnapshotFromDialog(this);
         });
         _undoBrowserTabContextMenuItem = new ToolStripMenuItem("元に戻す");
         _undoBrowserTabContextMenuItem.Click += (_, _) =>
@@ -306,26 +306,42 @@ public partial class MainForm : Form
         _closeBrowserTabContextMenuItem = new ToolStripMenuItem("このタブを閉じる");
         _closeBrowserTabContextMenuItem.Click += (_, _) =>
         {
-            if (!TryActivateBrowserTabContextTarget(out int contextTabIndex)) return;
-            ExecuteCommandFromUi(CommandIds.BrowserTabClose, CommandScope.Browser, "BrowserTabContextMenu.Close", contextTabIndex: contextTabIndex);
+            if (!TryActivateBrowserTabContextCommandTarget(out int contextTabIndex, out Guid contextTabId)) return;
+            ExecuteBrowserTabContextCommand(
+                CommandIds.BrowserTabClose,
+                "BrowserTabContextMenu.Close",
+                contextTabIndex,
+                contextTabId);
         };
         _closeRightBrowserTabsContextMenuItem = new ToolStripMenuItem("右側の全てのタブを閉じる");
         _closeRightBrowserTabsContextMenuItem.Click += (_, _) =>
         {
-            if (!TryActivateBrowserTabContextTarget(out int contextTabIndex)) return;
-            ExecuteCommandFromUi(CommandIds.BrowserTabCloseRight, CommandScope.Browser, "BrowserTabContextMenu.CloseRight", contextTabIndex: contextTabIndex);
+            if (!TryActivateBrowserTabContextCommandTarget(out int contextTabIndex, out Guid contextTabId)) return;
+            ExecuteBrowserTabContextCommand(
+                CommandIds.BrowserTabCloseRight,
+                "BrowserTabContextMenu.CloseRight",
+                contextTabIndex,
+                contextTabId);
         };
         _closeLeftBrowserTabsContextMenuItem = new ToolStripMenuItem("左側の全てのタブを閉じる");
         _closeLeftBrowserTabsContextMenuItem.Click += (_, _) =>
         {
-            if (!TryActivateBrowserTabContextTarget(out int contextTabIndex)) return;
-            ExecuteCommandFromUi(CommandIds.BrowserTabCloseLeft, CommandScope.Browser, "BrowserTabContextMenu.CloseLeft", contextTabIndex: contextTabIndex);
+            if (!TryActivateBrowserTabContextCommandTarget(out int contextTabIndex, out Guid contextTabId)) return;
+            ExecuteBrowserTabContextCommand(
+                CommandIds.BrowserTabCloseLeft,
+                "BrowserTabContextMenu.CloseLeft",
+                contextTabIndex,
+                contextTabId);
         };
         _closeOtherBrowserTabsContextMenuItem = new ToolStripMenuItem("このタブ以外を閉じる");
         _closeOtherBrowserTabsContextMenuItem.Click += (_, _) =>
         {
-            if (!TryActivateBrowserTabContextTarget(out int contextTabIndex)) return;
-            ExecuteCommandFromUi(CommandIds.BrowserTabCloseOther, CommandScope.Browser, "BrowserTabContextMenu.CloseOther", contextTabIndex: contextTabIndex);
+            if (!TryActivateBrowserTabContextCommandTarget(out int contextTabIndex, out Guid contextTabId)) return;
+            ExecuteBrowserTabContextCommand(
+                CommandIds.BrowserTabCloseOther,
+                "BrowserTabContextMenu.CloseOther",
+                contextTabIndex,
+                contextTabId);
         };
         _browserTabContextMenu.Items.Add(_toggleBrowserTabLockContextMenuItem);
         _browserTabContextMenu.Items.Add(_toggleBrowserTabReadOnlyContextMenuItem);
@@ -410,6 +426,15 @@ public partial class MainForm : Form
         return BuildStoredBrowserTabPresentationStates(categoryId);
     }
 
+    private bool ExecuteBrowserTabContextCommand(string commandId, string source, int contextTabIndex, Guid contextTabId)
+        => ExecuteCommandFromUi(commandId, new CommandExecutionContext
+        {
+            Scope = CommandScope.Browser,
+            Source = source,
+            ContextTabIndex = contextTabIndex,
+            ContextBrowserTabId = contextTabId
+        });
+
     private bool TryActivateBrowserTabContextTarget(out int contextTabIndex)
     {
         contextTabIndex = _browserApplicationCoordinator.Workspace.ContextTabIndex;
@@ -426,8 +451,16 @@ public partial class MainForm : Form
                 _browserApplicationCoordinator.Workspace.ActiveCategoryId,
                 StringComparison.OrdinalIgnoreCase))
         {
-            SwitchBrowserTabCategory(targetCategoryId, contextTabIndex);
-            if (!string.Equals(
+            BrowserTabState targetTab = targetTabs[contextTabIndex];
+            bool activated = ExecuteCommandFromUi(CommandIds.BrowserTabActivate, new CommandExecutionContext
+            {
+                Scope = CommandScope.Browser,
+                Source = "BrowserTab.Context.Activate",
+                CategoryId = targetCategoryId,
+                ContextTabIndex = contextTabIndex,
+                ContextBrowserTabId = targetTab.Id
+            });
+            if (!activated || !string.Equals(
                     _browserApplicationCoordinator.Workspace.ResolveCategoryId(targetCategoryId),
                     _browserApplicationCoordinator.Workspace.ActiveCategoryId,
                     StringComparison.OrdinalIgnoreCase))
@@ -439,6 +472,54 @@ public partial class MainForm : Form
 
         return contextTabIndex >= 0
             && contextTabIndex < _browserApplicationCoordinator.Workspace.TabCount;
+    }
+
+    private bool TryActivateBrowserTabContextCommandTarget(out int contextTabIndex, out Guid contextTabId)
+    {
+        contextTabId = _browserTabContextTabId ?? Guid.Empty;
+        contextTabIndex = -1;
+        if (contextTabId == Guid.Empty)
+        {
+            return false;
+        }
+
+        string targetCategoryId = _browserTabContextCategoryId
+            ?? _browserApplicationCoordinator.Workspace.ActiveCategoryId;
+        IReadOnlyList<BrowserTabState> targetTabs = GetBrowserTabContextStates(targetCategoryId);
+        contextTabIndex = GetBrowserTabIndexById(targetTabs, contextTabId);
+        if (contextTabIndex < 0 || contextTabIndex >= targetTabs.Count)
+        {
+            return false;
+        }
+        _browserTabWorkflowApplicationCoordinator.SetContextTabIndex(contextTabIndex);
+
+        if (!string.Equals(
+                _browserApplicationCoordinator.Workspace.ResolveCategoryId(targetCategoryId),
+                _browserApplicationCoordinator.Workspace.ActiveCategoryId,
+                StringComparison.OrdinalIgnoreCase))
+        {
+            bool activated = ExecuteCommandFromUi(CommandIds.BrowserTabActivate, new CommandExecutionContext
+            {
+                Scope = CommandScope.Browser,
+                Source = "BrowserTab.Context.Activate",
+                CategoryId = targetCategoryId,
+                ContextTabIndex = contextTabIndex,
+                ContextBrowserTabId = contextTabId
+            });
+            if (!activated || !string.Equals(
+                    _browserApplicationCoordinator.Workspace.ResolveCategoryId(targetCategoryId),
+                    _browserApplicationCoordinator.Workspace.ActiveCategoryId,
+                    StringComparison.OrdinalIgnoreCase)
+                || _browserApplicationCoordinator.Workspace.ActiveTabSnapshot?.Id != contextTabId)
+            {
+                return false;
+            }
+            contextTabIndex = _browserApplicationCoordinator.Workspace.ActiveTabIndex;
+        }
+
+        return contextTabIndex >= 0
+            && contextTabIndex < _browserApplicationCoordinator.Workspace.TabCount
+            && _browserApplicationCoordinator.Workspace.TabStates[contextTabIndex].Id == contextTabId;
     }
 
     private static int CountClosableBrowserContextTabs(
@@ -510,6 +591,23 @@ public partial class MainForm : Form
                 openSelection)
         };
         menu.Items.Add(openItem);
+        ViewerOpenRequest? playbackLockedRequest = canUseItemPath && !isDirectoryItem && itemPath != null
+            ? _viewerWorkflowApplicationCoordinator.CreatePlaybackLockedOpenRequest(itemPath)
+            : null;
+        if (playbackLockedRequest != null)
+        {
+            var playbackLockedItem = new ToolStripMenuItem("再生モードで開く", null, (s, e) =>
+                ExecuteCommandFromUi(
+                    CommandIds.BrowserOpenPlaybackLocked,
+                    CommandScope.Browser,
+                    "Browser.ContextMenu.PlaybackLockedOpen",
+                    defaultOpenTarget))
+            {
+                ShortcutKeyDisplayString = "Ctrl+Enter",
+                Enabled = !isBusy
+            };
+            menu.Items.Add(playbackLockedItem);
+        }
         var openInNewTabItem = new ToolStripMenuItem("新しいタブで開く", null, (s, e) =>
             ExecuteCommandFromUi(CommandIds.BrowserOpenInNewTab, CommandScope.Browser, "Browser.ContextMenu.OpenInNewTab", selection))
         {
@@ -541,10 +639,14 @@ public partial class MainForm : Form
             currentItemName: null,
             currentItemPath: null);
         var openMarkedItem = new ToolStripMenuItem("マークしたファイルを既定アプリで開く", null, (s, e) =>
-            ExecuteCommandFromUi(
+            ExecuteBrowserItemContextCommand(
                 CommandIds.BrowserDefaultOpenMarked,
-                CommandScope.Browser,
-                "Browser.ContextMenu.DefaultOpenMarked"))
+                new CommandExecutionContext
+                {
+                    Scope = CommandScope.Browser,
+                    Source = "Browser.ContextMenu.DefaultOpenMarked",
+                    SelectionSnapshot = markedOpenTarget
+                }))
         {
             Enabled = !isBusy && BrowserOpenSelectionResolver.IsCommandEnabled(
                 CommandIds.BrowserDefaultOpenMarked,
@@ -560,7 +662,7 @@ public partial class MainForm : Form
         }
 
         var sendToMenu = new ToolStripMenuItem("送る(&N)");
-        PopulateSendToMenu(sendToMenu);
+        PopulateSendToMenu(sendToMenu, selection);
         if (sendToMenu.DropDownItems.Count == 0)
         {
             sendToMenu.Enabled = false;
@@ -658,7 +760,7 @@ public partial class MainForm : Form
             Enabled = !isBusy && hasSelection && !isReadOnly
         };
         menu.Items.Add(attributeItem);
-        var quickAccessItem = new ToolStripMenuItem("QuickAccessへ登録", null, (_, _) => AddSelectedBrowserItemToFavorites())
+        var quickAccessItem = new ToolStripMenuItem("QuickAccessへ登録", null, (_, _) => AddSelectedBrowserItemToFavorites(canRegisterItem ? itemPath : null))
         {
             Enabled = canRegisterItem
         };
@@ -689,7 +791,7 @@ public partial class MainForm : Form
         });
         menu.Items.Add(new ToolStripMenuItem("新規フォルダ", null, (s, e) => ExecuteCommandFromUi(CommandIds.BrowserCreateDirectory, CommandScope.Browser, "BrowserContextMenu.Blank.CreateDirectory"))
         {
-            Enabled = !isReadOnly && !isBusy
+            Enabled = canCurrentPath && !isReadOnly && !isBusy
         });
         var createFileMenu = new ToolStripMenuItem("新規作成");
         foreach (BrowserNewFileCreationMenuEntry entry in BrowserNewFileCreationMenuProjection.Build(
@@ -753,11 +855,11 @@ public partial class MainForm : Form
         });
         menu.Items.Add(new ToolStripMenuItem("現在のパスをコピー", null, (_, _) => ExecuteCommandFromUi(CommandIds.BrowserCopyCurrentPath, CommandScope.Browser, "BrowserContextMenu.Blank.CopyCurrentPath"))
         {
-            Enabled = canCurrentPath
+            Enabled = canCurrentPath && !isBusy
         });
     }
 
-    private void PopulateSendToMenu(ToolStripMenuItem sendToMenu)
+    private void PopulateSendToMenu(ToolStripMenuItem sendToMenu, SelectionResult selection)
     {
         string sendToPath = Environment.GetFolderPath(Environment.SpecialFolder.SendTo);
         if (!Directory.Exists(sendToPath)) return;
@@ -789,8 +891,7 @@ public partial class MainForm : Form
                 {
                     LogService.Detail($"SendTo アイコン取得失敗 (安全に無視): {file}, {ex.Message}");
                 }
-                var item = new ToolStripMenuItem(name, iconImage, (s, e) => ExecuteSendTo(file));
-                sendToMenu.DropDownItems.Add(item);
+                sendToMenu.DropDownItems.Add(CreateBrowserSendToMenuItem(name, iconImage, file, selection));
             }
         }
         catch (Exception ex)
@@ -802,10 +903,37 @@ public partial class MainForm : Form
         }
     }
 
-    private void ExecuteSendTo(string targetExeOrShortcut)
+    private ToolStripMenuItem CreateBrowserSendToMenuItem(
+        string name,
+        Image? icon,
+        string targetExeOrShortcut,
+        SelectionResult selection) =>
+        new(name, icon, (_, _) => ExecuteSendTo(targetExeOrShortcut, selection));
+
+    private void ExecuteSendTo(string targetExeOrShortcut, SelectionResult selection)
     {
-        SelectionResult res = ResolveSelection();
-        if (!res.FullPaths.Any()) return;
+        if (selection.Count == 0) return;
+        _ = ExecuteBrowserItemContextCommand(CommandIds.BrowserSendTo, new CommandExecutionContext
+        {
+            Scope = CommandScope.Browser,
+            Source = "Browser.ContextMenu.SendTo",
+            ContextTargetPath = targetExeOrShortcut,
+            SelectionSnapshot = selection
+        });
+    }
+
+    private bool ExecuteBrowserItemContextCommand(string commandId, CommandExecutionContext context)
+    {
+        bool? overrideResult = _integrationSeam?.BrowserItemContextCommandOverride?.Invoke(commandId, context);
+        return overrideResult ?? ExecuteCommandFromUi(commandId, context);
+    }
+
+    private bool ApplySendTo(string? targetExeOrShortcut, SelectionResult? selection)
+    {
+        if (string.IsNullOrWhiteSpace(targetExeOrShortcut) || selection is not { Count: > 0 })
+        {
+            return false;
+        }
         try
         {
             var psi = new System.Diagnostics.ProcessStartInfo
@@ -814,18 +942,20 @@ public partial class MainForm : Form
                 UseShellExecute = true
             };
             var sb = new System.Text.StringBuilder();
-            foreach (var path in res.FullPaths)
+            foreach (var path in selection.FullPaths)
             {
                 string escaped = (path ?? string.Empty).Replace("\"", "\\\"");
                 sb.Append('"').Append(escaped).Append("\" ");
             }
             psi.Arguments = sb.ToString().TrimEnd();
             System.Diagnostics.Process.Start(psi);
+            return true;
         }
         catch (Exception ex)
         {
             LogService.Error($"SendTo 実行失敗: {ex.Message}");
             ShowStatusMessage($"送る操作に失敗しました: {ex.Message}");
+            return false;
         }
     }
 
@@ -848,15 +978,12 @@ public partial class MainForm : Form
                 return;
             }
         }
-        string? error = ExternalToolLauncherService.Launch(definition, context);
-        if (error != null)
+        _ = ExecuteCommandFromUi(CommandIds.BrowserLaunchConfiguredExternalTool, new CommandExecutionContext
         {
-            MessageBox.Show(this, error, "外部ツール起動エラー", MessageBoxButtons.OK, MessageBoxIcon.Error);
-        }
-        else
-        {
-            ShowStatusMessage($"外部ツールを起動しました: {definition.DisplayName}");
-        }
+            Scope = CommandScope.Browser,
+            Source = "Browser.ExternalToolLaunch",
+            ExternalToolLaunch = new ExternalToolLaunchCommandContext(definition, context)
+        });
     }
 
     private DialogResult ShowEmptyMarkedPathsConfirmationDialog(string message)

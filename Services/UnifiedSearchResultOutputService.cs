@@ -9,7 +9,7 @@ public static class UnifiedSearchResultOutputService
 {
     public static string? Write(UnifiedFilterFindSearchResult result)
     {
-        if (result.ResultCount == 0)
+        if (result.ResultCount == 0 && !result.IsPartial)
         {
             return null;
         }
@@ -26,9 +26,28 @@ public static class UnifiedSearchResultOutputService
 
     public static IEnumerable<string> EnumerateLines(UnifiedFilterFindSearchResult result)
     {
+        if (result.IsPartial)
+        {
+            yield return result.IsScanCompleteWithExclusions
+                ? $"# 検索状態: 走査完了・一部結果除外（{result.ExcludedRecordCount:N0}件）"
+                : "# 検索状態: 部分結果（検索未完了）";
+            string reason = (result.IncompleteReason ?? "検索未完了です。")
+                .Replace('\r', ' ')
+                .Replace('\n', ' ')
+                .Trim();
+            yield return result.IsScanCompleteWithExclusions
+                ? $"# 除外理由: {reason}"
+                : $"# 未完了理由: {reason}";
+        }
+
         if (result.Mode == UnifiedFilterFindMode.FindNamesRecursively)
-            return result.NameResults.Select(item => item.FullPath);
-        return result.Files.SelectMany(file => file.Matches.Select(hit =>
-            $"{file.FullPath}:{hit.LineNumber}:{hit.ColumnNumber}:{hit.LineText}"));
+        {
+            foreach (UnifiedSearchNameResult item in result.NameResults) yield return item.FullPath;
+            yield break;
+        }
+
+        foreach (UnifiedSearchResultFile file in result.Files)
+            foreach (UnifiedSearchMatch hit in file.Matches)
+                yield return $"{file.FullPath}:{hit.LineNumber}:{hit.ColumnNumber}:{hit.LineText}";
     }
 }

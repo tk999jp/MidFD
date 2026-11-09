@@ -58,10 +58,13 @@ internal sealed class ViewerModeApplicationCoordinator
 
         _workflow.CycleEncodingPreference();
         ui.ApplyViewerStatus();
+        PreviewKind? currentKind = _state.CurrentKind == PreviewKind.None
+            ? null
+            : _state.CurrentKind;
         _preview.RequestRefresh(
             ui.GetCurrentPreviewSelectionPath(),
             force: true,
-            previewKindOverride: null,
+            previewKindOverride: currentKind,
             ui);
     }
 
@@ -122,6 +125,8 @@ internal sealed class ViewerModeApplicationCoordinator
             _preview.CancelRequest();
         }
 
+        _state.DisplayedPreviewTarget = null;
+        _state.DisplayedPreviewKind = PreviewKind.None;
         _state.Mode = mode;
         ViewerModeLifecyclePlan lifecyclePlan =
             _workflow.CreateModeLifecyclePlan(

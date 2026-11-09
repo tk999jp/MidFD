@@ -16,6 +16,7 @@ internal sealed class DirectoryPathCompletionOptions
     public bool UseNativeHistoryDropdown { get; init; }
     public Func<Point, bool>? IsInsideExternalControl { get; init; }
     public Action? OutsideClick { get; init; }
+    public Action? PopupEscapeAction { get; init; }
 }
 
 internal sealed class DirectoryPathCompletionController : IDisposable
@@ -295,7 +296,7 @@ internal sealed class DirectoryPathCompletionController : IDisposable
             return;
         }
 
-        if (!HandlePopupKey(e.KeyCode))
+        if (!HandlePopupKey(e.KeyCode, e.Modifiers))
         {
             return;
         }
@@ -735,7 +736,7 @@ internal sealed class DirectoryPathCompletionController : IDisposable
         }
     }
 
-    private bool HandlePopupKey(Keys keyCode)
+    private bool HandlePopupKey(Keys keyCode, Keys modifiers = Keys.None)
     {
         if (_disposed || !IsPopupVisible)
         {
@@ -754,7 +755,12 @@ internal sealed class DirectoryPathCompletionController : IDisposable
                 CommitSelection();
                 return true;
             case Keys.Escape:
+                if (modifiers != Keys.None)
+                {
+                    return false;
+                }
                 ClosePopup();
+                _options.PopupEscapeAction?.Invoke();
                 return true;
             default:
                 return false;
@@ -1060,7 +1066,7 @@ internal sealed class DirectoryPathCompletionController : IDisposable
             }
 
             Keys keyCode = (Keys)(nint)m.WParam & Keys.KeyCode;
-            return _owner.HandlePopupKey(keyCode);
+            return _owner.HandlePopupKey(keyCode, Control.ModifierKeys);
         }
     }
 

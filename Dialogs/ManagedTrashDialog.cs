@@ -4,6 +4,7 @@ using System.Drawing;
 using System.IO;
 using System.Linq;
 using System.Windows.Forms;
+using MidFD.Commands;
 using MidFD.Configuration;
 using MidFD.Models;
 using MidFD.Runtime;
@@ -15,17 +16,19 @@ namespace MidFD.Dialogs;
 public sealed class ManagedTrashDialog : Form
 {
     private readonly AppSettings _settings;
-    private readonly FileOperationApplicationCoordinator _fileOperations;
+    private readonly Func<string, CommandExecutionContext, CommandApplicationResult> _executeCommand;
     private readonly DataGridView _grid;
     private readonly Label _summaryLabel;
     private readonly List<Button> _mutationButtons = new();
     private readonly Button _restoreButton;
     private readonly Button _deleteButton;
 
-    internal ManagedTrashDialog(AppSettings settings, FileOperationApplicationCoordinator fileOperations)
+    internal ManagedTrashDialog(
+        AppSettings settings,
+        Func<string, CommandExecutionContext, CommandApplicationResult> executeCommand)
     {
         _settings = settings ?? throw new ArgumentNullException(nameof(settings));
-        _fileOperations = fileOperations ?? throw new ArgumentNullException(nameof(fileOperations));
+        _executeCommand = executeCommand ?? throw new ArgumentNullException(nameof(executeCommand));
 
         Text = "MidFD管理ゴミ箱の確認・管理";
         Size = new Size(1000, 600);
@@ -297,27 +300,11 @@ public sealed class ManagedTrashDialog : Form
             .Select(static row => row.Tag)
             .OfType<ManagedTrashRecordView>()
             .ToList();
-        ManagedTrashOperationResult operation = _fileOperations.RestoreManagedTrash(selected);
-        int successCount = operation.SuccessCount;
-        List<ManagedTrashOperationFailure> errors = operation.Failures.ToList();
-
-        LoadTrashRecords();
-
-        if (errors.Count > 0)
-        {
-            string errSummary = string.Join(
-                "\r\n\r\n",
-                errors.Take(5).Select(static error => $"復元失敗: {error.ItemName}\r\n原因: {error.Detail}"));
-            if (errors.Count > 5)
-            {
-                errSummary += $"\r\n\r\n他 {errors.Count - 5} 件のエラーがあります。";
-            }
-            MessageBox.Show($"{successCount} 件を復元しましたが、以下のエラーが発生しました。\r\n\r\n{errSummary}", "一部復元失敗", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-        }
-        else
-        {
-            MessageBox.Show($"{successCount} 件の項目を復元しました。", "完了", MessageBoxButtons.OK, MessageBoxIcon.Information);
-        }
+        RunManagedTrashCommand(
+            CommandIds.AppRestoreManagedTrash,
+            ManagedTrashCommandAction.RestoreSelected,
+            selected,
+            "ManagedTrashDialog.Restore");
     }
 
     private void ExecuteSelectedDelete()
@@ -342,11 +329,11 @@ public sealed class ManagedTrashDialog : Form
             .Select(static row => row.Tag)
             .OfType<ManagedTrashRecordView>()
             .ToList();
-        ManagedTrashOperationResult operation = _fileOperations.DeleteManagedTrashForever(selected);
-        int successCount = operation.SuccessCount;
-
-        LoadTrashRecords();
-        MessageBox.Show($"{successCount} 件の項目を完全に削除しました。", "完了", MessageBoxButtons.OK, MessageBoxIcon.Information);
+        RunManagedTrashCommand(
+            CommandIds.AppDeleteManagedTrashForever,
+            ManagedTrashCommandAction.DeleteSelectedForever,
+            selected,
+            "ManagedTrashDialog.DeleteForever");
     }
 
     private void ExecuteEmptyTrash()
@@ -360,28 +347,79 @@ public sealed class ManagedTrashDialog : Form
 
         if (result != DialogResult.Yes) return;
 
-        ManagedTrashOperationResult operation = _fileOperations.EmptyManagedTrash();
-        if (operation.ExitStatus == FileOpExitStatus.Error)
-        {
-            MessageBox.Show($"ゴミ箱のクリアに失敗しました。Error={operation.ErrorMessage ?? "不明なエラー"}", "エラー", MessageBoxButtons.OK, MessageBoxIcon.Error);
-            return;
-        }
-
-        LoadTrashRecords();
-        MessageBox.Show("ゴミ箱を空にしました。", "完了", MessageBoxButtons.OK, MessageBoxIcon.Information);
+        RunManagedTrashCommand(
+            CommandIds.AppEmptyManagedTrash,
+            ManagedTrashCommandAction.Empty,
+            null,
+            "ManagedTrashDialog.Empty");
     }
 
     private void ExecuteCleanMissing()
     {
-        ManagedTrashOperationResult operation = _fileOperations.CleanMissingManagedTrash();
-        if (operation.ExitStatus == FileOpExitStatus.Error)
+        RunManagedTrashCommand(
+            CommandIds.AppCleanMissingManagedTrash,
+            ManagedTrashCommandAction.CleanMissing,
+            null,
+            "ManagedTrashDialog.CleanMissing");
+    }
+
+    private void RunManagedTrashCommand(
+        string commandId,
+        ManagedTrashCommandAction action,
+        IReadOnlyList<ManagedTrashRecordView>? selected,
+        string source)
+    {
+        CommandApplicationResult routed = _executeCommand(commandId, new CommandExecutionContext
         {
-            MessageBox.Show($"欠損レコードの掃除に失敗しました。Error={operation.ErrorMessage ?? "不明なエラー"}", "エラー", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            Scope = CommandScope.Global,
+            Source = source,
+            ManagedTrash = new ManagedTrashCommandContext(action, selected)
+        });
+        if (!routed.Handled || routed.Effect?.ManagedTrashOperation is not { } operation)
+        {
+            MessageBox.Show("操作を開始できませんでした。ファイル操作中の場合は完了後に再試行してください。", "MidFD管理ゴミ箱", MessageBoxButtons.OK, MessageBoxIcon.Warning);
             return;
         }
 
-        LoadTrashRecords();
-        MessageBox.Show($"{operation.SuccessCount} 件の欠損レコードを掃除しました。", "完了", MessageBoxButtons.OK, MessageBoxIcon.Information);
+        if (operation.ExitStatus != FileOpExitStatus.Error)
+        {
+            LoadTrashRecords();
+        }
+
+        ShowManagedTrashOperationResult(action, operation);
+    }
+
+    private void ShowManagedTrashOperationResult(
+        ManagedTrashCommandAction action,
+        ManagedTrashOperationResult operation)
+    {
+        if (operation.ExitStatus != FileOpExitStatus.Success || operation.Failures.Count > 0)
+        {
+            string details = operation.Failures.Count == 0
+                ? operation.ErrorMessage ?? "原因を特定できないエラーが発生しました。"
+                : string.Join("\r\n\r\n", operation.Failures.Take(5)
+                    .Select(static failure => $"{failure.ItemName}\r\n原因: {failure.Detail}"));
+            if (operation.Failures.Count > 5)
+            {
+                details += $"\r\n\r\n他 {operation.Failures.Count - 5} 件のエラーがあります。";
+            }
+            MessageBox.Show(
+                $"成功: {operation.SuccessCount} 件 / 対象: {operation.TotalCount} 件\r\n\r\n{details}",
+                "MidFD管理ゴミ箱の一部失敗",
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Warning);
+            return;
+        }
+
+        string message = action switch
+        {
+            ManagedTrashCommandAction.RestoreSelected => $"{operation.SuccessCount} 件の項目を復元しました。",
+            ManagedTrashCommandAction.DeleteSelectedForever => $"{operation.SuccessCount} 件の項目を完全に削除しました。",
+            ManagedTrashCommandAction.Empty => "ゴミ箱を空にしました。",
+            ManagedTrashCommandAction.CleanMissing => $"{operation.SuccessCount} 件の欠損レコードを掃除しました。",
+            _ => "操作が完了しました。"
+        };
+        MessageBox.Show(message, "完了", MessageBoxButtons.OK, MessageBoxIcon.Information);
     }
 
     private static string FormatSize(long bytes)

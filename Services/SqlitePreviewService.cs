@@ -11,6 +11,9 @@ public static class SqlitePreviewService
 {
     public const int DefaultRowLimit = 50;
     private const int MaxObjects = 40;
+    internal const int MaxValueBytes = 1024 * 1024;
+    internal const int MaxPreviewChars = 1024 * 1024;
+    private const int MaxColumns = 128;
     private const int MaxCellTextLength = 240;
     private const int BlobHexPrefixBytes = 16;
     private const string Separator = "------------------------------------------------------------";
@@ -39,6 +42,15 @@ public static class SqlitePreviewService
 
             using var connection = new SqliteConnection(connectionString);
             connection.Open();
+            // SQLite enforces this before materializing a value/row, not after GetValue.
+            SQLitePCL.raw.sqlite3_limit(connection.Handle, SQLitePCL.raw.SQLITE_LIMIT_LENGTH, MaxValueBytes);
+            SQLitePCL.raw.sqlite3_limit(connection.Handle, SQLitePCL.raw.SQLITE_LIMIT_SQL_LENGTH, 128 * 1024);
+            SQLitePCL.raw.sqlite3_limit(connection.Handle, SQLitePCL.raw.SQLITE_LIMIT_COLUMN, MaxColumns);
+            SQLitePCL.raw.sqlite3_limit(connection.Handle, SQLitePCL.raw.SQLITE_LIMIT_EXPR_DEPTH, 100);
+            var elapsed = System.Diagnostics.Stopwatch.StartNew();
+            int steps = 0;
+            SQLitePCL.raw.sqlite3_progress_handler(connection.Handle, 1000,
+                _ => token.IsCancellationRequested || ++steps >= 5000 || elapsed.Elapsed > TimeSpan.FromSeconds(2) ? 1 : 0, null);
 
             var objects = LoadObjects(connection, token);
             if (objects.Count == 0)
@@ -48,8 +60,8 @@ public static class SqlitePreviewService
             }
 
             sb.AppendLine("== Tables / Views ==");
-            sb.AppendLine($"Objects: {objects.Count}");
-            foreach (var obj in objects)
+            sb.AppendLine($"Objects: {Math.Min(objects.Count, MaxObjects)}{(objects.Count > MaxObjects ? " (more omitted)" : string.Empty)}");
+            foreach (var obj in objects.Take(MaxObjects))
             {
                 sb.AppendLine($"- {obj.Type}: {obj.Name}");
             }
@@ -59,20 +71,26 @@ public static class SqlitePreviewService
             foreach (var obj in objects.Take(MaxObjects))
             {
                 token.ThrowIfCancellationRequested();
+                if (sb.Length >= MaxPreviewChars)
+                {
+                    sb.AppendLine("[Preview omitted: output resource limit reached]");
+                    break;
+                }
                 index++;
-                AppendObjectPreview(sb, connection, obj, index, objects.Count, rowLimit, token);
+                AppendObjectPreview(sb, connection, obj, index, Math.Min(objects.Count, MaxObjects), rowLimit, token);
                 sb.AppendLine();
             }
 
             if (objects.Count > MaxObjects)
             {
-                sb.AppendLine($"[Skipped] {objects.Count - MaxObjects} more objects.");
+                sb.AppendLine($"[Skipped] Additional objects beyond the first {MaxObjects} were omitted.");
             }
 
             return sb.ToString();
         }
         catch (SqliteException ex)
         {
+            token.ThrowIfCancellationRequested();
             return sb.AppendLine($"[プレビュー不可: SQLite として開けません] {ex.Message}").ToString();
         }
         catch (IOException)
@@ -89,11 +107,12 @@ public static class SqlitePreviewService
     {
         using var command = connection.CreateCommand();
         command.CommandText = """
-            SELECT name, type, COALESCE(sql, '')
+            SELECT CASE WHEN length(name) <= 4096 THEN name END, type, substr(COALESCE(sql, ''), 1, 16384)
             FROM sqlite_schema
             WHERE type IN ('table', 'view')
               AND name NOT LIKE 'sqlite_%'
             ORDER BY type, name
+            LIMIT 41
             """;
 
         var objects = new List<SqliteObjectInfo>();
@@ -101,10 +120,12 @@ public static class SqlitePreviewService
         while (reader.Read())
         {
             token.ThrowIfCancellationRequested();
+            if (reader.IsDBNull(0)) throw new IOException("SQLite object name exceeds preview resource limit.");
             objects.Add(new SqliteObjectInfo(
                 reader.GetString(0),
                 reader.GetString(1),
                 reader.GetString(2)));
+            if (objects[^1].Name.Length > 4096) throw new IOException("SQLite object name exceeds preview resource limit.");
         }
 
         return objects;
@@ -147,10 +168,11 @@ public static class SqlitePreviewService
             while (reader.Read())
             {
                 token.ThrowIfCancellationRequested();
+                if (sb.Length >= MaxPreviewChars) { sb.AppendLine("[Preview omitted: metadata output resource limit reached]"); break; }
                 hasColumn = true;
                 string cid = Convert.ToString(reader["cid"], CultureInfo.InvariantCulture) ?? string.Empty;
-                string name = Convert.ToString(reader["name"], CultureInfo.InvariantCulture) ?? string.Empty;
-                string type = Convert.ToString(reader["type"], CultureInfo.InvariantCulture) ?? string.Empty;
+                string name = FormatValue(reader["name"]);
+                string type = FormatValue(reader["type"]);
                 bool notNull = Convert.ToInt32(reader["notnull"], CultureInfo.InvariantCulture) != 0;
                 bool pk = Convert.ToInt32(reader["pk"], CultureInfo.InvariantCulture) != 0;
                 sb.AppendLine($"{cid}\t{name}\t{(string.IsNullOrWhiteSpace(type) ? "(none)" : type)}\t{(notNull ? "NO" : "YES")}\t{(pk ? "YES" : "NO")}");
@@ -163,7 +185,8 @@ public static class SqlitePreviewService
         }
         catch (SqliteException ex)
         {
-            sb.AppendLine($"- [column read failed] {ex.Message}");
+            token.ThrowIfCancellationRequested();
+            sb.AppendLine($"- [column read failed / preview resource limit] {ex.Message}");
         }
     }
 
@@ -192,6 +215,11 @@ public static class SqlitePreviewService
             while (reader.Read())
             {
                 token.ThrowIfCancellationRequested();
+                if (sb.Length >= MaxPreviewChars)
+                {
+                    sb.AppendLine("[Preview omitted: output resource limit reached]");
+                    break;
+                }
                 var values = new string[reader.FieldCount];
                 for (int i = 0; i < reader.FieldCount; i++)
                 {
@@ -211,7 +239,8 @@ public static class SqlitePreviewService
         }
         catch (SqliteException ex)
         {
-            sb.AppendLine($"[row read failed] {ex.Message}");
+            token.ThrowIfCancellationRequested();
+            sb.AppendLine($"[row read failed / preview resource limit] {ex.Message}");
         }
     }
 

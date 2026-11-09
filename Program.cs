@@ -10,11 +10,12 @@ static class Program
     {
         // 早期に例外フックを登録
         RegisterStartupExceptionHooks();
+        Configuration.StartupOptions startup = Configuration.StartupArgumentParser.Parse(args);
 
-        if (HasStorageProfileDiagnosticsRequest(args))
+        if (startup.Mode == Configuration.StartupMode.StorageDiagnostics)
         {
-            Configuration.Storage.StorageProfileActivation activation = Configuration.Storage.StorageProfileActivationResolver.ResolveDefault(args);
-            string? diagnosticsPath = TryGetStorageProfileDiagnosticsPath(args);
+            Configuration.Storage.StorageProfileActivation activation = Configuration.Storage.StorageProfileActivationResolver.ResolveDefault(startup);
+            string? diagnosticsPath = startup.DiagnosticsFilePath;
             string writtenPath = Configuration.Storage.StorageProfileDiagnosticsService.RunToFile(activation, diagnosticsPath);
             if (!string.IsNullOrWhiteSpace(diagnosticsPath))
             {
@@ -23,10 +24,10 @@ static class Program
             return;
         }
 
-        if (args.Any(arg => string.Equals(arg, "--shell-delete-probe", StringComparison.OrdinalIgnoreCase)))
+        if (startup.Mode == Configuration.StartupMode.ShellDeleteProbe)
         {
-            int cancelAfter = TryGetShellDeleteProbeCancelAfter(args);
-            int count = TryGetShellDeleteProbeCount(args);
+            int cancelAfter = startup.ProbeCancelAfter;
+            int count = startup.ProbeCount;
             string reportPath = Helpers.ShellDeleteCapabilityProbe.Run(cancelAfter, count);
             Console.WriteLine(reportPath);
             return;
@@ -34,24 +35,24 @@ static class Program
 
         // To customize application configuration such as set high DPI settings or default font,
         // see https://aka.ms/applicationconfiguration.
-        Configuration.Storage.StorageProfileActivationContext.Initialize(args);
+        Configuration.Storage.StorageProfileActivationContext.Initialize(startup);
         ApplicationConfiguration.Initialize();
         System.Text.Encoding.RegisterProvider(System.Text.CodePagesEncodingProvider.Instance);
 
         try
         {
-            Configuration.AuthorToolsStartupResult authorToolsStartup = Configuration.AuthorToolsStartup.Resolve(args);
+            Configuration.AuthorToolsStartupResult authorToolsStartup = Configuration.AuthorToolsStartup.Resolve(startup.AuthorToolsCommand);
             if (!string.IsNullOrWhiteSpace(authorToolsStartup.Notification))
             {
                 MessageBox.Show(authorToolsStartup.Notification, "MidFD 作者機能", MessageBoxButtons.OK, MessageBoxIcon.Information);
             }
 
-            if (!TryResolveStartupProfileOverride(args, out string? startupProfileOverride))
+            if (!TryResolveStartupProfileOverride(startup.ProfileValue, out string? startupProfileOverride))
             {
                 return;
             }
 
-            var mainForm = new MainForm(startupProfileOverride, authorToolsStartup.Enabled);
+            var mainForm = new MainForm(startupProfileOverride, authorToolsStartup.Enabled, integrationSeam: null, startup);
             Application.Run(mainForm);
         }
         catch (Exception ex)
@@ -104,86 +105,9 @@ static class Program
     }
 
 
-    private static int TryGetShellDeleteProbeCancelAfter(string[] args)
+    private static bool TryResolveStartupProfileOverride(string? profileArgument, out string? startupProfileOverride)
     {
-        const string prefix = "--shell-delete-probe-cancel-after=";
-        foreach (string arg in args)
-        {
-            if (arg.StartsWith(prefix, StringComparison.OrdinalIgnoreCase) &&
-                int.TryParse(arg[prefix.Length..], out int value))
-            {
-                return Math.Max(0, value);
-            }
-        }
-
-        return 0;
-    }
-
-    private static int TryGetShellDeleteProbeCount(string[] args)
-    {
-        const string prefix = "--shell-delete-probe-count=";
-        foreach (string arg in args)
-        {
-            if (arg.StartsWith(prefix, StringComparison.OrdinalIgnoreCase) &&
-                int.TryParse(arg[prefix.Length..], out int value))
-            {
-                return Math.Clamp(value, 1, 200);
-            }
-        }
-
-        return 10;
-    }
-
-    private static string? TryGetProfileArgument(string[] args)
-    {
-        for (int i = 0; i < args.Length; i++)
-        {
-            string arg = args[i];
-            if (string.Equals(arg, "--profile", StringComparison.OrdinalIgnoreCase))
-            {
-                return i + 1 < args.Length ? args[i + 1] : null;
-            }
-
-            const string prefix = "--profile=";
-            if (arg.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
-            {
-                return arg[prefix.Length..];
-            }
-        }
-
-        return null;
-    }
-
-    private static string? TryGetStorageProfileDiagnosticsPath(string[] args)
-    {
-        for (int i = 0; i < args.Length; i++)
-        {
-            string arg = args[i];
-            if (string.Equals(arg, "--storage-profile-diagnostics-file", StringComparison.OrdinalIgnoreCase))
-            {
-                return i + 1 < args.Length ? args[i + 1] : string.Empty;
-            }
-
-            const string prefix = "--storage-profile-diagnostics-file=";
-            if (arg.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
-            {
-                return arg[prefix.Length..];
-            }
-        }
-
-        return null;
-    }
-
-    private static bool HasStorageProfileDiagnosticsRequest(string[] args)
-    {
-        return args.Any(arg =>
-            string.Equals(arg, "--storage-profile-diagnostics", StringComparison.OrdinalIgnoreCase) ||
-            arg.StartsWith("--storage-profile-diagnostics-file", StringComparison.OrdinalIgnoreCase));
-    }
-
-    private static bool TryResolveStartupProfileOverride(string[] args, out string? startupProfileOverride)
-    {
-        startupProfileOverride = TryGetProfileArgument(args);
+        startupProfileOverride = profileArgument;
         Configuration.AppSettings settings = Configuration.SettingsManager.Load(out Configuration.SettingsManager.SettingsLoadMetadata settingsLoadMetadata);
 
         if (Services.FeatureProfileService.TryResolveProfile(startupProfileOverride, out Models.FeatureProfile startupProfile))
@@ -227,7 +151,6 @@ static class Program
             settings.Input.FunctionKeyProfile = dialog.UseFdCompatibleFunctionKeys
                 ? Configuration.InputSettings.FdCompatibleProfileValue
                 : Configuration.InputSettings.StandardProfileValue;
-            settings.Preview.VideoEnterPlaysExternal = dialog.VideoEnterPlaysExternal;
             settings.Input.EnableMouseGestures = dialog.EnableMouseGestures;
             settings.Input.ShowFunctionBarTooltips = dialog.ShowFunctionBarTooltips;
             settings.FileOperations.EnableDragArchiveHandoff = dialog.EnableDragArchiveHandoff;
@@ -240,8 +163,32 @@ static class Program
             settings.SevenZip.ExePath = NormalizeOptionalPath(dialog.SevenZipPath);
             settings.Preview.VideoToolDirectory = NormalizeOptionalPath(dialog.VideoToolDirectory);
             settings.ExternalTools.ExternalEditorPath = NormalizeOptionalPath(dialog.ExternalEditorPath);
+            settings.ExternalTools.ExternalEditorSearchHitArgumentTemplate = NormalizeOptionalPath(dialog.ExternalEditorSearchHitArgumentTemplate);
             ApplyStartupRestorePreset(settings.Session, dialog.RestoreStartupState);
-            Configuration.SettingsManager.Save(settings);
+            Runtime.CommandApplicationResult saveResult = DispatchInitialSettingsSave(settings, new Runtime.SettingsApplicationCoordinator());
+            InitialSettingsSaveEvaluation saveEvaluation = EvaluateInitialSettingsSave(saveResult);
+            if (saveEvaluation.Outcome == InitialSettingsSaveOutcome.CommandNotAccepted)
+            {
+                return false;
+            }
+
+            if (saveEvaluation.Outcome == InitialSettingsSaveOutcome.PrimarySaveFailed)
+            {
+                MessageBox.Show(
+                    saveEvaluation.UserMessage,
+                    "設定保存エラー",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Error);
+            }
+            else if (saveEvaluation.Outcome == InitialSettingsSaveOutcome.PrimarySavedBackupFailed)
+            {
+                MessageBox.Show(
+                    saveEvaluation.UserMessage,
+                    "設定バックアップ警告",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Warning);
+            }
+
             startupProfileOverride = Services.FeatureProfileService.ToSettingValue(dialog.SelectedProfile);
             return true;
         }
@@ -257,6 +204,61 @@ static class Program
         ArgumentNullException.ThrowIfNull(metadata);
         return metadata.LoadKind == Configuration.SettingsManager.SettingsLoadKind.TrueFirstLaunch;
     }
+
+    internal static Runtime.CommandApplicationResult DispatchInitialSettingsSave(
+        Configuration.AppSettings settings,
+        Runtime.ISettingsApplicationPort settingsApplication)
+    {
+        var application = new Runtime.BootstrapSettingsCommandApplicationCoordinator(settingsApplication);
+        var dispatcher = new Commands.CommandDispatcher(new Commands.CommandRegistry(), application);
+        return dispatcher.Dispatch(
+            Commands.CommandIds.AppSettingsSave,
+            new Commands.CommandExecutionContext
+            {
+                Scope = Commands.CommandScope.Global,
+                Source = "Program.FirstLaunchProfileSelection",
+                SettingsSave = new Commands.SettingsSaveCommandContext(settings)
+            });
+    }
+
+    internal static InitialSettingsSaveEvaluation EvaluateInitialSettingsSave(Runtime.CommandApplicationResult commandResult)
+    {
+        if (!commandResult.Handled ||
+            commandResult.Effect is not { } effect ||
+            effect.Kind != Runtime.CommandApplicationEffectKind.SettingsSaveCompleted ||
+            effect.SettingsSaveResult is not { } saveResult)
+        {
+            return new InitialSettingsSaveEvaluation(InitialSettingsSaveOutcome.CommandNotAccepted, null);
+        }
+
+        if (!saveResult.PrimarySaved)
+        {
+            return new InitialSettingsSaveEvaluation(
+                InitialSettingsSaveOutcome.PrimarySaveFailed,
+                string.IsNullOrWhiteSpace(saveResult.UserMessage) ? "設定を保存できませんでした。" : saveResult.UserMessage);
+        }
+
+        if (!saveResult.BackupSucceeded)
+        {
+            return new InitialSettingsSaveEvaluation(
+                InitialSettingsSaveOutcome.PrimarySavedBackupFailed,
+                string.IsNullOrWhiteSpace(saveResult.UserMessage) ? "設定は保存されましたが、バックアップ更新に失敗しました。" : saveResult.UserMessage);
+        }
+
+        return new InitialSettingsSaveEvaluation(InitialSettingsSaveOutcome.Saved, null);
+    }
+
+    internal enum InitialSettingsSaveOutcome
+    {
+        CommandNotAccepted,
+        Saved,
+        PrimarySavedBackupFailed,
+        PrimarySaveFailed
+    }
+
+    internal readonly record struct InitialSettingsSaveEvaluation(
+        InitialSettingsSaveOutcome Outcome,
+        string? UserMessage);
 
     private static string? NormalizeOptionalPath(string? value)
     {

@@ -16,7 +16,8 @@ public sealed record MarkSlotSetOperationPreviewItem(
     string Name,
     string FullPath,
     bool IsInCurrentDirectory,
-    bool Exists);
+    bool Exists,
+    bool? IsDirectory = null);
 
 public sealed record MarkSlotSetOperationPreviewResult(
     int SlotANumber,

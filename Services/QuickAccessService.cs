@@ -9,10 +9,22 @@ public static class QuickAccessService
     public static int RecentLimit => MaxRecentCount;
 
     public static QuickAccessStore LoadOrMigrate(IEnumerable<string>? legacyPaths)
+        => LoadOrMigrate(legacyPaths, out _);
+
+    public static QuickAccessStore LoadOrMigrate(
+        IEnumerable<string>? legacyPaths,
+        out bool? migrationPersistenceSucceeded)
+        => LoadOrMigrate(legacyPaths, null, out migrationPersistenceSucceeded);
+
+    internal static QuickAccessStore LoadOrMigrate(
+        IEnumerable<string>? legacyPaths,
+        string? filePath,
+        out bool? migrationPersistenceSucceeded)
     {
-        if (QuickAccessStorage.Exists())
+        migrationPersistenceSucceeded = null;
+        if (filePath == null ? QuickAccessStorage.Exists() : QuickAccessStorage.Exists(filePath))
         {
-            return QuickAccessStorage.Load();
+            return filePath == null ? QuickAccessStorage.Load() : QuickAccessStorage.Load(filePath);
         }
 
         var store = new QuickAccessStore();
@@ -42,7 +54,9 @@ public static class QuickAccessService
 
         if (migrated)
         {
-            QuickAccessStorage.Save(store);
+            migrationPersistenceSucceeded = filePath == null
+                ? QuickAccessStorage.Save(store)
+                : QuickAccessStorage.Save(store, filePath);
         }
 
         return store;
@@ -238,87 +252,15 @@ public static class QuickAccessService
         return true;
     }
 
-    public static bool TryAddExternalCommand(
-        QuickAccessStore store,
-        string displayName,
-        string executablePath,
-        string arguments,
-        QuickAccessCommandWorkingDirectoryMode workingDirectoryMode,
-        QuickAccessCommandTargetMode targetMode,
-        string? currentPath,
-        out string normalizedExecutablePath,
-        out string message)
-    {
-        normalizedExecutablePath = string.Empty;
-        string trimmedName = displayName.Trim();
-        if (string.IsNullOrWhiteSpace(trimmedName))
-        {
-            message = "表示名が空です。";
-            return false;
-        }
-
-        string? normalized = NormalizePath(executablePath, currentPath);
-        if (string.IsNullOrWhiteSpace(normalized))
-        {
-            message = "実行ファイルパスが空です。";
-            return false;
-        }
-
-        store.Commands.Add(new QuickAccessEntry
-        {
-            Kind = QuickAccessEntryKind.ExternalCommand,
-            DisplayName = trimmedName,
-            ExecutablePath = normalized,
-            Arguments = arguments ?? string.Empty,
-            WorkingDirectoryMode = workingDirectoryMode,
-            TargetMode = targetMode
-        });
-
-        normalizedExecutablePath = normalized;
-        message = "外部コマンドを追加しました。";
-        return true;
-    }
-
     public static bool TryUpdateEntry(QuickAccessStore store, QuickAccessEntry entry, string displayName, string path, string? currentPath, out string normalizedPath, out string message)
     {
         normalizedPath = string.Empty;
 
         if (entry.Kind != QuickAccessEntryKind.Bookmark &&
-            entry.Kind != QuickAccessEntryKind.Alias &&
-            entry.Kind != QuickAccessEntryKind.ExternalCommand)
+            entry.Kind != QuickAccessEntryKind.Alias)
         {
             message = "この項目は編集できません。";
             return false;
-        }
-
-        if (entry.Kind == QuickAccessEntryKind.ExternalCommand)
-        {
-            string trimmedName = displayName.Trim();
-            if (string.IsNullOrWhiteSpace(trimmedName))
-            {
-                message = "表示名が空です。";
-                return false;
-            }
-
-            string? normalizedExecutablePath = NormalizePath(path, currentPath);
-            if (string.IsNullOrWhiteSpace(normalizedExecutablePath))
-            {
-                message = "実行ファイルパスが空です。";
-                return false;
-            }
-
-            QuickAccessEntry? commandTarget = FindManagedEntry(store, entry);
-            if (commandTarget == null)
-            {
-                message = "編集対象が見つかりません。";
-                return false;
-            }
-
-            commandTarget.DisplayName = trimmedName;
-            commandTarget.ExecutablePath = normalizedExecutablePath;
-            normalizedPath = normalizedExecutablePath;
-            message = "項目を更新しました。";
-            return true;
         }
 
         return TrySaveManagedLocationEntry(
@@ -348,10 +290,6 @@ public static class QuickAccessService
         else if (existing.Kind == QuickAccessEntryKind.Alias)
         {
             store.Aliases.Remove(existing);
-        }
-        else if (existing.Kind == QuickAccessEntryKind.ExternalCommand)
-        {
-            store.Commands.Remove(existing);
         }
 
         return true;
@@ -474,7 +412,7 @@ public static class QuickAccessService
 
         var categories = new List<string>();
         var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        foreach (QuickAccessEntry entry in store.Bookmarks.Concat(store.Aliases).Concat(store.Commands))
+        foreach (QuickAccessEntry entry in store.Bookmarks.Concat(store.Aliases))
         {
             string? category = NormalizeCategoryName(entry.CategoryName);
             if (string.IsNullOrWhiteSpace(category))
@@ -588,7 +526,6 @@ public static class QuickAccessService
         {
             QuickAccessEntryKind.Bookmark => "登録先",
             QuickAccessEntryKind.Alias => "登録先(タブ表示)",
-            QuickAccessEntryKind.ExternalCommand => "コマンド",
             QuickAccessEntryKind.Recent => "最近",
             QuickAccessEntryKind.History => entry.DisplayName.StartsWith("進む:", StringComparison.Ordinal) ? "進む履歴" : "戻る履歴",
             _ => string.Empty
@@ -597,13 +534,6 @@ public static class QuickAccessService
 
     public static string GetEntryValueLabel(QuickAccessEntry entry)
     {
-        if (entry.Kind == QuickAccessEntryKind.ExternalCommand)
-        {
-            return string.IsNullOrWhiteSpace(entry.ExecutablePath)
-                ? "(未設定)"
-                : entry.ExecutablePath;
-        }
-
         return entry.Path;
     }
 
@@ -614,17 +544,6 @@ public static class QuickAccessService
         string? precomputedStatus = null)
     {
         string statusLabel = precomputedStatus ?? GetEntryStatusLabel(entry, currentPath, diagnostics);
-        if (entry.Kind == QuickAccessEntryKind.ExternalCommand)
-        {
-            return $"表示名: {entry.DisplayName}\r\n" +
-                   $"実行ファイル: {GetEntryValueLabel(entry)}\r\n" +
-                   $"区分: {GetEntryKindLabel(entry)}\r\n" +
-                   $"状態: {statusLabel}\r\n" +
-                   $"対象: {GetExternalCommandTargetLabel(entry.TargetMode)}\r\n" +
-                   $"作業: {GetExternalCommandWorkingDirectoryLabel(entry.WorkingDirectoryMode)}\r\n" +
-                   $"引数: {(string.IsNullOrWhiteSpace(entry.Arguments) ? "(なし)" : entry.Arguments)}";
-        }
-
         return $"表示名: {entry.DisplayName}\r\n" +
                $"カテゴリ: {GetEntryCategoryLabel(entry)}\r\n" +
                $"移動先: {GetEntryValueLabel(entry)}\r\n" +
@@ -632,26 +551,8 @@ public static class QuickAccessService
                $"状態: {statusLabel}";
     }
 
-    public static string GetEntryStatusLabel(QuickAccessEntry entry, QuickAccessCommandContext context)
-    {
-        if (entry.Kind != QuickAccessEntryKind.ExternalCommand)
-        {
-            return string.Empty;
-        }
-
-        return TryResolveExternalCommand(entry, context, out _, out _, out _, out string message)
-            ? $"実行可 / {GetExternalCommandTargetLabel(entry.TargetMode)}"
-            : message;
-    }
-
     public static string GetEntryStatusLabel(QuickAccessEntry entry, string? currentPath, QuickAccessOpenDiagnostics? diagnostics = null)
     {
-        if (entry.Kind == QuickAccessEntryKind.ExternalCommand)
-        {
-            string availability = GetExternalCommandAvailabilityLabel(entry, diagnostics);
-            return $"{availability} / {GetExternalCommandTargetLabel(entry.TargetMode)}";
-        }
-
         string candidatePath = entry.Path ?? string.Empty;
         if (string.IsNullOrWhiteSpace(candidatePath))
         {
@@ -708,139 +609,6 @@ public static class QuickAccessService
             resolvedSync: !usedCached,
             reason: usedCached ? "cached-entry-status" : "local-or-drive-letter");
         return "移動可";
-    }
-
-    public static string GetExternalCommandTargetLabel(QuickAccessCommandTargetMode targetMode)
-    {
-        return targetMode switch
-        {
-            QuickAccessCommandTargetMode.None => "対象: なし",
-            QuickAccessCommandTargetMode.CurrentPath => "対象: 現在地",
-            QuickAccessCommandTargetMode.CurrentItem => "対象: 選択項目",
-            QuickAccessCommandTargetMode.CurrentFile => "対象: 選択ファイル",
-            QuickAccessCommandTargetMode.CurrentDirectory => "対象: 選択フォルダ",
-            QuickAccessCommandTargetMode.MarkedItems => "対象: マーク項目",
-            _ => "対象: なし"
-        };
-    }
-
-    public static string GetExternalCommandWorkingDirectoryLabel(QuickAccessCommandWorkingDirectoryMode workingDirectoryMode)
-    {
-        return workingDirectoryMode switch
-        {
-            QuickAccessCommandWorkingDirectoryMode.CurrentPath => "作業: 現在地",
-            QuickAccessCommandWorkingDirectoryMode.ExecutableDirectory => "作業: 実行ファイルのフォルダ",
-            _ => "作業: 現在地"
-        };
-    }
-
-    public static bool TryExecuteExternalCommand(QuickAccessEntry entry, QuickAccessCommandContext context, out string message)
-    {
-        if (!TryResolveExternalCommand(entry, context, out string executablePath, out string arguments, out string workingDirectory, out message))
-        {
-            return false;
-        }
-
-        string? error = ExternalToolService.ExecuteCommand(executablePath, arguments, workingDirectory);
-        if (error != null)
-        {
-            message = error;
-            return false;
-        }
-
-        message = "外部コマンドを起動しました。";
-        return true;
-    }
-
-    public static bool TryResolveExternalCommand(
-        QuickAccessEntry entry,
-        QuickAccessCommandContext context,
-        out string executablePath,
-        out string arguments,
-        out string workingDirectory,
-        out string message)
-    {
-        executablePath = string.Empty;
-        arguments = string.Empty;
-        workingDirectory = context.CurrentPath;
-
-        if (entry.Kind != QuickAccessEntryKind.ExternalCommand)
-        {
-            message = "外部コマンドではありません。";
-            return false;
-        }
-
-        executablePath = NormalizePath(entry.ExecutablePath, context.CurrentPath) ?? string.Empty;
-        if (string.IsNullOrWhiteSpace(executablePath))
-        {
-            message = "外部コマンドの実行ファイルが未設定です。";
-            return false;
-        }
-
-        if (!File.Exists(executablePath))
-        {
-            message = "外部コマンドの実行ファイルが見つかりません。";
-            return false;
-        }
-
-        if (!TryResolveCommandTarget(entry.TargetMode, context, out message))
-        {
-            return false;
-        }
-
-        if (!TryExpandArguments(entry.Arguments ?? string.Empty, context, out arguments, out message))
-        {
-            return false;
-        }
-
-        workingDirectory = entry.WorkingDirectoryMode switch
-        {
-            QuickAccessCommandWorkingDirectoryMode.ExecutableDirectory => Path.GetDirectoryName(executablePath) ?? context.CurrentPath,
-            _ => context.CurrentPath
-        };
-
-        if (string.IsNullOrWhiteSpace(workingDirectory) || !Directory.Exists(workingDirectory))
-        {
-            workingDirectory = context.CurrentPath;
-        }
-
-        message = string.Empty;
-        return true;
-    }
-
-    private static string GetExternalCommandAvailabilityLabel(QuickAccessEntry entry, QuickAccessOpenDiagnostics? diagnostics = null)
-    {
-        string executablePath = NormalizePath(entry.ExecutablePath, null) ?? string.Empty;
-        if (string.IsNullOrWhiteSpace(executablePath))
-        {
-            return "未設定";
-        }
-
-        if (NetworkPathResolutionPolicy.IsAuxiliaryResolutionDeferred(executablePath))
-        {
-            NetworkPathResolutionPolicy.LogDecision(
-                "NetworkPathResolutionDeferral.Skip",
-                "QuickAccessStatus",
-                nameof(GetExternalCommandAvailabilityLabel),
-                executablePath,
-                usedCached: false,
-                resolvedSync: false,
-                reason: "unc-executable");
-            return string.Empty;
-        }
-
-        bool exists = diagnostics?.MeasureFileExists("QuickAccess.ResolveShellInfo", executablePath, "command-executable")
-            ?? File.Exists(executablePath);
-        bool usedCached = diagnostics?.LastProbeUsedCache ?? false;
-        NetworkPathResolutionPolicy.LogDecision(
-            "NetworkPathResolutionDeferral.AllowCritical",
-            "QuickAccessStatus",
-            nameof(GetExternalCommandAvailabilityLabel),
-            executablePath,
-            usedCached: usedCached,
-            resolvedSync: !usedCached,
-            reason: usedCached ? "cached-command-executable" : "local-or-drive-letter");
-        return exists ? "実行可" : "見つからない";
     }
 
     public static IReadOnlyList<QuickAccessEntry> BuildHistoryEntries(IEnumerable<string> backHistory, IEnumerable<string> forwardHistory)
@@ -916,16 +684,6 @@ public static class QuickAccessService
             {
                 result.Aliases.Add(normalized);
             }
-        }
-
-        foreach (QuickAccessEntry entry in store.Commands)
-        {
-            if (!TryNormalizeLoadedEntry(entry, QuickAccessEntryKind.ExternalCommand, out QuickAccessEntry? normalized))
-            {
-                continue;
-            }
-
-            result.Commands.Add(normalized);
         }
 
         foreach (QuickAccessEntry entry in store.Recents)
@@ -1014,9 +772,7 @@ public static class QuickAccessService
             return false;
         }
 
-        string? path = expectedKind == QuickAccessEntryKind.ExternalCommand
-            ? NormalizePath(entry.ExecutablePath, null)
-            : NormalizePath(entry.Path, null);
+        string? path = NormalizePath(entry.Path, null);
         if (string.IsNullOrWhiteSpace(path))
         {
             return false;
@@ -1031,23 +787,8 @@ public static class QuickAccessService
             Kind = expectedKind,
             Path = path,
             DisplayName = displayName,
-            CategoryName = NormalizeCategoryName(entry.CategoryName),
-            ExecutablePath = expectedKind == QuickAccessEntryKind.ExternalCommand
-                ? path
-                : (entry.ExecutablePath ?? string.Empty),
-            Arguments = entry.Arguments ?? string.Empty,
-            WorkingDirectoryMode = entry.WorkingDirectoryMode,
-            TargetMode = entry.TargetMode
+            CategoryName = NormalizeCategoryName(entry.CategoryName)
         };
-
-        if (expectedKind == QuickAccessEntryKind.ExternalCommand)
-        {
-            normalized.Path = string.Empty;
-            if (string.IsNullOrWhiteSpace(displayName))
-            {
-                return false;
-            }
-        }
 
         return true;
     }
@@ -1090,11 +831,7 @@ public static class QuickAccessService
             Kind = entry.Kind,
             Path = entry.Path,
             DisplayName = entry.DisplayName,
-            CategoryName = entry.CategoryName,
-            ExecutablePath = entry.ExecutablePath,
-            Arguments = entry.Arguments,
-            WorkingDirectoryMode = entry.WorkingDirectoryMode,
-            TargetMode = entry.TargetMode
+            CategoryName = entry.CategoryName
         };
     }
 
@@ -1144,13 +881,10 @@ public static class QuickAccessService
 
     private static QuickAccessEntry? FindManagedEntry(QuickAccessStore store, QuickAccessEntry entry)
     {
-        return store.Bookmarks.Concat(store.Aliases).Concat(store.Commands)
+        return store.Bookmarks.Concat(store.Aliases)
             .FirstOrDefault(item =>
                 item.Kind == entry.Kind &&
-                (item.Kind == QuickAccessEntryKind.ExternalCommand
-                    ? PathsEqual(item.ExecutablePath, entry.ExecutablePath) &&
-                      string.Equals(item.DisplayName, entry.DisplayName, StringComparison.Ordinal)
-                    : PathsEqual(item.Path, entry.Path)));
+                PathsEqual(item.Path, entry.Path));
     }
 
     private static List<QuickAccessEntry>? GetManagedList(QuickAccessStore store, QuickAccessEntryKind kind)
@@ -1275,133 +1009,4 @@ public static class QuickAccessService
         }
     }
 
-    private static bool TryResolveCommandTarget(QuickAccessCommandTargetMode targetMode, QuickAccessCommandContext context, out string message)
-    {
-        message = string.Empty;
-        return targetMode switch
-        {
-            QuickAccessCommandTargetMode.None => true,
-            QuickAccessCommandTargetMode.CurrentPath => true,
-            QuickAccessCommandTargetMode.CurrentItem => EnsureCurrentItem(context, "現在項目がありません。", out message),
-            QuickAccessCommandTargetMode.CurrentFile => EnsureCurrentFile(context, out message),
-            QuickAccessCommandTargetMode.CurrentDirectory => EnsureCurrentDirectory(context, out message),
-            QuickAccessCommandTargetMode.MarkedItems => EnsureMarkedItems(context, out message),
-            _ => true
-        };
-    }
-
-    private static bool TryExpandArguments(string template, QuickAccessCommandContext context, out string expandedArguments, out string message)
-    {
-        expandedArguments = template ?? string.Empty;
-        message = string.Empty;
-
-        if (expandedArguments.Contains("{CurrentItemPath}", StringComparison.Ordinal))
-        {
-            if (!EnsureCurrentItem(context, "現在項目がありません。", out message))
-            {
-                return false;
-            }
-
-            expandedArguments = expandedArguments.Replace("{CurrentItemPath}", context.CurrentItemPath);
-        }
-
-        if (expandedArguments.Contains("{CurrentItemName}", StringComparison.Ordinal))
-        {
-            if (!EnsureCurrentItem(context, "現在項目がありません。", out message) || string.IsNullOrWhiteSpace(context.CurrentItemName))
-            {
-                message = "現在項目がありません。";
-                return false;
-            }
-
-            expandedArguments = expandedArguments.Replace("{CurrentItemName}", context.CurrentItemName);
-        }
-
-        if (expandedArguments.Contains("{CurrentFilePath}", StringComparison.Ordinal))
-        {
-            if (!EnsureCurrentFile(context, out message) || string.IsNullOrWhiteSpace(context.CurrentItemPath))
-            {
-                message = "選択ファイルがありません。";
-                return false;
-            }
-
-            expandedArguments = expandedArguments.Replace("{CurrentFilePath}", QuoteArgument(context.CurrentItemPath));
-        }
-
-        if (expandedArguments.Contains("{MarkedItemPaths}", StringComparison.Ordinal))
-        {
-            if (!EnsureMarkedItems(context, out message))
-            {
-                return false;
-            }
-
-            string joinedMarkedPaths = string.Join(" ", context.MarkedPaths.Select(QuoteArgument));
-            expandedArguments = expandedArguments.Replace("{MarkedItemPaths}", joinedMarkedPaths);
-        }
-
-        expandedArguments = expandedArguments.Replace("{CurrentPath}", context.CurrentPath ?? string.Empty);
-        expandedArguments = expandedArguments.Replace("{CurrentDirectoryPath}", context.CurrentPath ?? string.Empty);
-        return true;
-    }
-
-    private static bool EnsureCurrentItem(QuickAccessCommandContext context, string failureMessage, out string message)
-    {
-        if (string.IsNullOrWhiteSpace(context.CurrentItemPath))
-        {
-            message = failureMessage;
-            return false;
-        }
-
-        message = string.Empty;
-        return true;
-    }
-
-    private static bool EnsureCurrentFile(QuickAccessCommandContext context, out string message)
-    {
-        if (!EnsureCurrentItem(context, "選択ファイルがありません。", out message))
-        {
-            return false;
-        }
-
-        if (context.CurrentItemIsDirectory)
-        {
-            message = "選択ファイルがありません。";
-            return false;
-        }
-
-        return true;
-    }
-
-    private static bool EnsureCurrentDirectory(QuickAccessCommandContext context, out string message)
-    {
-        if (!EnsureCurrentItem(context, "選択フォルダがありません。", out message))
-        {
-            return false;
-        }
-
-        if (!context.CurrentItemIsDirectory)
-        {
-            message = "選択フォルダがありません。";
-            return false;
-        }
-
-        return true;
-    }
-
-    private static bool EnsureMarkedItems(QuickAccessCommandContext context, out string message)
-    {
-        if (context.MarkedPaths.Count == 0)
-        {
-            message = "マーク対象がありません。";
-            return false;
-        }
-
-        message = string.Empty;
-        return true;
-    }
-
-    private static string QuoteArgument(string value)
-    {
-        string escaped = (value ?? string.Empty).Replace("\"", "\\\"");
-        return $"\"{escaped}\"";
-    }
 }

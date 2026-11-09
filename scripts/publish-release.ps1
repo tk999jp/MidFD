@@ -10,6 +10,8 @@ param (
 )
 
 . (Join-Path $PSScriptRoot "publish-release-preflight.ps1")
+. (Join-Path $PSScriptRoot "ripgrep-bundle.ps1")
+. (Join-Path $PSScriptRoot "release-package-contract.ps1")
 
 # 1. Validation
 if ($ReleaseTag -notmatch '^v\d{4}\.\d{2}\.\d{2}(\.\d+)?$') {
@@ -128,60 +130,6 @@ if (Test-Path $readmeFirstSource) {
     Copy-Item $readmeFirstSource -Destination $tempPublishDir -Force
 }
 
-function Get-PackageRelativePath([string]$packageRoot, [string]$fullPath) {
-    return [System.IO.Path]::GetRelativePath($packageRoot, $fullPath).Replace([System.IO.Path]::DirectorySeparatorChar, '/')
-}
-
-function Test-ForbiddenPackagePath([string]$relativePath) {
-    $forbiddenSegments = @('.codex', 'tests', 'artifacts', 'scratch')
-    $segments = $relativePath -split '[\\/]'
-    foreach ($segment in $segments) {
-        if ($forbiddenSegments -contains $segment) { return $true }
-    }
-    return $false
-}
-
-function Assert-PackageContents([string]$packageRoot) {
-    . (Join-Path $PSScriptRoot 'ripgrep-bundle.ps1')
-    Assert-RipgrepBundle -PackageRoot $packageRoot
-    $requiredRootFiles = @(
-        "MidFD.exe",
-        "MidFD.FileOperationHelper.exe",
-        "MidFD.FileOperationHelper.dll",
-        "MidFD.FileOperationHelper.deps.json",
-        "MidFD.FileOperationHelper.runtimeconfig.json",
-        "README_FIRST.txt",
-        "README.md",
-        "CHANGELOG.md",
-        "LICENSE"
-    )
-    $requiredUserDocs = @("BUILD.md", "KEYBINDINGS.md", "PROFILES.md", "SUPPORT.md", "USER_GUIDE.md")
-    $missing = [System.Collections.Generic.List[string]]::new()
-    foreach ($relativePath in $requiredRootFiles) {
-        if (-not (Test-Path (Join-Path $packageRoot $relativePath) -PathType Leaf)) { $missing.Add($relativePath) }
-    }
-    if (-not (Test-Path (Join-Path $packageRoot "UserDocs") -PathType Container)) { $missing.Add("UserDocs/") }
-    foreach ($relativePath in $requiredUserDocs) {
-        if (-not (Test-Path (Join-Path $packageRoot "UserDocs\$relativePath") -PathType Leaf)) { $missing.Add("UserDocs\$relativePath") }
-    }
-
-    $forbidden = Get-ChildItem $packageRoot -Recurse -Force -File | ForEach-Object {
-        $relativePath = Get-PackageRelativePath $packageRoot $_.FullName
-        if ($_.Extension -ieq ".pdb" -or (Test-ForbiddenPackagePath $relativePath)) { $relativePath }
-    }
-    $forbiddenDirectories = Get-ChildItem $packageRoot -Recurse -Force -Directory | ForEach-Object {
-        $relativePath = Get-PackageRelativePath $packageRoot $_.FullName
-        if (Test-ForbiddenPackagePath $relativePath) { $relativePath }
-    }
-    if ($missing.Count -gt 0 -or @($forbidden).Count -gt 0 -or @($forbiddenDirectories).Count -gt 0) {
-        $details = @()
-        if ($missing.Count -gt 0) { $details += "missing: $($missing -join ', ')" }
-        if (@($forbidden).Count -gt 0) { $details += "forbidden: $($forbidden -join ', ')" }
-        if (@($forbiddenDirectories).Count -gt 0) { $details += "forbidden directories: $($forbiddenDirectories -join ', ')" }
-        throw "Package gate failed: $($details -join '; ')"
-    }
-}
-
 # 6. Create ZIP archive
 $zipPath = Join-Path $releaseDir "MidFD-win-x64.zip"
 Write-Host "Creating ZIP archive at: $zipPath"
@@ -199,6 +147,7 @@ $null = New-Item -ItemType Directory -Path $releaseTestDir -Force
 Expand-Archive -Path $zipPath -DestinationPath $extractedDest -Force
 
 # 7.1 Verify complete package contents and helper runtime dependencies
+Assert-RipgrepBundle -PackageRoot $extractedDest
 Assert-PackageContents $extractedDest
 
 # Verify exe exists

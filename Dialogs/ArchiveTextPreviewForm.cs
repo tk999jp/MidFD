@@ -3,6 +3,7 @@ using System.Drawing;
 using System.Windows.Forms;
 using MidFD.Helpers;
 using MidFD.Models;
+using MidFD.Services;
 
 namespace MidFD.Dialogs;
 
@@ -11,6 +12,16 @@ public sealed class ArchiveTextPreviewForm : Form
     private readonly RichTextBox _textBox;
 
     public ArchiveTextPreviewForm(string title, string content)
+        : this(title, content, null, null, null)
+    {
+    }
+
+    internal ArchiveTextPreviewForm(
+        string title,
+        string content,
+        Func<string, ExternalUrlLaunchResult>? launchExternalUrl,
+        Func<string, bool>? dispatchCopySelection,
+        Action<IWin32Window?, string>? showCopyErrorDialogHandler = null)
     {
         Text = $"Preview - {title}";
         ClientSize = new Size(720, 560);
@@ -43,7 +54,13 @@ public sealed class ArchiveTextPreviewForm : Form
         _textBox.TabIndex = 0;
 
         Controls.Add(_textBox);
-        TextPreviewInteractionHelper.Attach(_textBox, dialogOwner: this, showErrorDialog: true);
+        TextPreviewInteractionHelper.Attach(
+            _textBox,
+            dialogOwner: this,
+            showErrorDialog: true,
+            launchExternalUrl: launchExternalUrl,
+            dispatchCopySelection: dispatchCopySelection,
+            showErrorDialogHandler: showCopyErrorDialogHandler);
 
         // Esc, Q, Enter キーでフォームを閉じる。Tab, F6 キーは閉じることなく一覧へフォーカスを戻す。
         KeyDown += (sender, e) =>

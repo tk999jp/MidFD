@@ -90,18 +90,27 @@ public sealed class UnifiedFilterFindSearchResult
     public IReadOnlyList<UnifiedSearchResultFile> Files { get; }
     public int SkippedCount { get; }
     public IReadOnlyList<string> SkipReasons { get; }
+    public bool IsPartial { get; }
+    public string? IncompleteReason { get; }
+    public bool IsScanCompleteWithExclusions { get; }
+    public long ExcludedRecordCount { get; }
     public int ResultCount => Mode == UnifiedFilterFindMode.FindNamesRecursively ? NameResults.Count : Files.Count;
     public int FileCount => Files.Count;
     public int MatchCount { get; }
     public UnifiedFilterFindSearchResult(UnifiedFilterFindMode mode,
         IEnumerable<UnifiedSearchNameResult> nameResults, IEnumerable<UnifiedSearchResultFile> files,
-        int skippedCount, IEnumerable<string> skipReasons)
+        int skippedCount, IEnumerable<string> skipReasons, bool isPartial = false, string? incompleteReason = null,
+        bool isScanCompleteWithExclusions = false, long excludedRecordCount = 0)
     {
         Mode = mode;
         NameResults = Array.AsReadOnly(nameResults.ToArray());
         Files = Array.AsReadOnly(files.ToArray());
         SkippedCount = skippedCount;
         SkipReasons = Array.AsReadOnly(skipReasons.ToArray());
+        IsPartial = isPartial;
+        IncompleteReason = isPartial ? incompleteReason : null;
+        IsScanCompleteWithExclusions = isPartial && isScanCompleteWithExclusions;
+        ExcludedRecordCount = Math.Max(0, excludedRecordCount);
         MatchCount = mode == UnifiedFilterFindMode.FindNamesRecursively ? NameResults.Count : Files.Sum(f => f.Matches.Count);
     }
 }

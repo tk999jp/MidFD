@@ -102,12 +102,79 @@ public static class UnifiedFilterFindService
         Action<ContentSearchBatch>? batch = null,
         IContentSearchEngine? engine = null,
         Action<ContentSearchBackendInfo>? backendSelected = null)
+        => SearchContentsCore(rootPath, criteria, cancellationToken, progress, batch, engine, backendSelected, diagnostics: null);
+
+    internal static Task<UnifiedFilterFindSearchResult> SearchContentsWithDiagnosticsAsync(
+        string rootPath,
+        UnifiedFilterFindCriteria criteria,
+        CancellationToken cancellationToken,
+        Action<UnifiedSearchProgress>? progress,
+        Action<ContentSearchBatch>? batch,
+        IContentSearchEngine? engine,
+        Action<ContentSearchBackendInfo>? backendSelected,
+        UnifiedSearchUiDiagnostics? diagnostics)
+        => SearchContentsCore(rootPath, criteria, cancellationToken, progress, batch, engine, backendSelected, diagnostics);
+
+    private static Task<UnifiedFilterFindSearchResult> SearchContentsCore(
+        string rootPath,
+        UnifiedFilterFindCriteria criteria,
+        CancellationToken cancellationToken,
+        Action<UnifiedSearchProgress>? progress,
+        Action<ContentSearchBatch>? batch,
+        IContentSearchEngine? engine,
+        Action<ContentSearchBackendInfo>? backendSelected,
+        UnifiedSearchUiDiagnostics? diagnostics)
     {
+        diagnostics?.MarkMilestone(UnifiedSearchUiMilestone.SearchServiceEntered);
         ArgumentNullException.ThrowIfNull(criteria);
         ValidateContentCriteria(criteria);
+        Action<ContentSearchBackendInfo>? effectiveBackendSelected = backendSelected;
+        ContentSearchBackendKind? initialBackend = null;
+        if (diagnostics != null)
+        {
+            var backendGate = new object();
+            effectiveBackendSelected = info =>
+            {
+                bool fallback;
+                lock (backendGate)
+                {
+                    fallback = initialBackend == ContentSearchBackendKind.Ripgrep && info.Kind == ContentSearchBackendKind.Internal;
+                    initialBackend ??= info.Kind;
+                }
+                diagnostics.RecordBackendSelection(info.Kind, fallback);
+                backendSelected?.Invoke(info);
+            };
+        }
         var request = new ContentSearchRequest(NormalizeRoot(rootPath), criteria.Clone(), criteria.ContentEncoding)
-        { BackendSelected = backendSelected };
-        return (engine ?? new ContentSearchEngineResolver().Resolve()).SearchAsync(request, cancellationToken, progress, batch);
+        { BackendSelected = effectiveBackendSelected };
+        IContentSearchEngine resolvedEngine = engine ?? new ContentSearchEngineResolver().Resolve();
+        diagnostics?.MarkMilestone(UnifiedSearchUiMilestone.EngineResolved);
+        initialBackend ??= resolvedEngine switch
+        {
+            RipgrepContentSearchEngine => ContentSearchBackendKind.Ripgrep,
+            InternalContentSearchEngine => ContentSearchBackendKind.Internal,
+            _ => null
+        };
+        if (diagnostics != null && initialBackend is { } selectedBackend)
+            diagnostics.RecordBackendSelection(selectedBackend, isFallback: false);
+        if (diagnostics == null) return resolvedEngine.SearchAsync(request, cancellationToken, progress, batch);
+        return SearchContentsWithActiveDiagnosticsAsync(
+            resolvedEngine, request, cancellationToken, progress, batch, diagnostics);
+    }
+
+    private static async Task<UnifiedFilterFindSearchResult> SearchContentsWithActiveDiagnosticsAsync(
+        IContentSearchEngine engine,
+        ContentSearchRequest request,
+        CancellationToken cancellationToken,
+        Action<UnifiedSearchProgress>? progress,
+        Action<ContentSearchBatch>? batch,
+        UnifiedSearchUiDiagnostics diagnostics)
+    {
+        using (diagnostics.ActivateContentSearch())
+        {
+            diagnostics.MarkMilestone(UnifiedSearchUiMilestone.SearchEngineInvoked);
+            return await engine.SearchAsync(request, cancellationToken, progress, batch).ConfigureAwait(false);
+        }
     }
     internal static bool MatchesDetail(FileSystemInfo entry, TabFilterLockState? detail, string rootPath)
     {

@@ -7,6 +7,7 @@ using MidFD.Configuration;
 using MidFD.Helpers;
 using MidFD.Models;
 using MidFD.Services;
+using MidFD.ViewerIpc;
 
 namespace MidFD.Runtime;
 
@@ -21,18 +22,29 @@ internal enum ViewerOpenRoute
 internal readonly record struct ViewerOpenRequest(
     string FullPath,
     ViewerOpenRoute Route,
-    PreviewKind ViewerKind = PreviewKind.None);
+    PreviewKind ViewerKind = PreviewKind.None,
+    ViewerPresentationMode? PresentationMode = null);
 
 internal readonly record struct ViewerEnterDecision(
     ViewerOpenRequest? OpenRequest,
     bool UseExternalMediaPlayback,
     bool IsAudio);
 
-internal readonly record struct ViewerCtrlEnterDecision(
-    bool Handled,
-    ViewerOpenRequest? OpenRequest,
-    bool UseExternalMediaPlayback,
-    bool IsAudio);
+internal readonly record struct ViewerAudioCtrlEnterDecision(bool Handled, bool UseExternalMediaPlayback);
+
+internal enum BrowserCtrlEnterRoute
+{
+    None,
+    OpenVideoPlaybackLocked,
+    PlayAudioExternally
+}
+
+internal readonly record struct ViewerPresentationAcknowledgement(
+    bool IsCurrent,
+    bool Accepted,
+    ViewerPresentationMode AppliedMode,
+    int Generation,
+    bool SynchronizeBrowserSelection);
 
 internal readonly record struct ViewerModeLifecyclePlan(
     PreviewKind NextViewerKind,
@@ -70,6 +82,10 @@ internal readonly record struct LargeFileSearchResult(
     public bool Found => Line >= 0;
 }
 
+internal readonly record struct TextViewerExternalEditorPreparation(
+    string? TargetPath,
+    string? ErrorMessage);
+
 /// <summary>
 /// Viewer/Preview の意味判断と状態遷移を所有する。
 /// WinForms control、MainForm、Dialog、Shell を参照せず、具体的な表示反映は呼び出し側へ返す。
@@ -81,6 +97,19 @@ internal sealed class ViewerWorkflowApplicationCoordinator
     private readonly ViewerSessionState _state;
     private readonly SettingsApplicationCoordinator _settings;
     private readonly ILargeFileTextSearch _largeFileTextSearch;
+    private readonly Dictionary<Guid, MediaViewerPresentationState> _mediaViewerPresentation = new();
+
+    private readonly record struct MediaViewerPresentationState(
+        ViewerPresentationMode AppliedMode,
+        ViewerPresentationMode DesiredMode,
+        int Generation,
+        int SelectionGeneration,
+        bool IsPending,
+        bool SynchronizeBrowserSelectionOnApply,
+        long MediaRequestId,
+        PreviewKind MediaKind,
+        ViewerVideoPlaybackState PlaybackState,
+        ViewerPresentationMode? ManualOverrideMode);
 
     public ViewerWorkflowApplicationCoordinator(
         ViewerSessionState state,
@@ -93,15 +122,27 @@ internal sealed class ViewerWorkflowApplicationCoordinator
     }
 
     public PreviewKind ResolveEffectivePreviewKind(string path, PreviewKind rawKind)
-        => PreviewRoutingService.Route(
-            path,
-            rawKind,
-            _settings.Value.Preview?.VideoToolDirectory).EffectiveKind;
+        => PreviewRoutingService.Route(path, rawKind).EffectiveKind;
 
     public PreviewKind ResolveEffectivePreviewKind(string path)
-        => PreviewRoutingService.Route(
-            path,
-            _settings.Value.Preview?.VideoToolDirectory).EffectiveKind;
+        => PreviewRoutingService.Route(path).EffectiveKind;
+
+    /// <summary>
+    /// Browserのmedia候補だけに、設定済み・検査済みSusie拡張子の分類を適用する。
+    /// Vの内容判定や汎用Preview分類には適用しない。
+    /// </summary>
+    public PreviewKind ResolveBrowserSelectionPreviewKind(string? fullPath, PreviewKind shallowKind, bool isDirectory)
+    {
+        if (isDirectory
+            || string.IsNullOrWhiteSpace(fullPath)
+            || shallowKind != PreviewKind.None
+            || IsNonMediaBrowserPath(fullPath))
+        {
+            return shallowKind;
+        }
+
+        return HasInspectedSusieImageCandidate(fullPath) ? PreviewKind.Image : shallowKind;
+    }
 
     public PreviewKind ResolveSelectionPreviewKind(string? fullPath)
     {
@@ -112,6 +153,269 @@ internal sealed class ViewerWorkflowApplicationCoordinator
 
         return ResolveEffectivePreviewKind(fullPath);
     }
+
+    public TextViewerExternalEditorPreparation PrepareDisplayedTextExternalEditor(
+        string? requestedPath,
+        PreviewKind requestedKind)
+    {
+        string? displayedPath = _state.DisplayedPreviewTarget;
+        PreviewKind displayedKind = _state.DisplayedPreviewKind;
+        if (_state.Mode != ViewerApplicationMode.Viewer)
+            return new(null, "Viewerが表示されていません。");
+        if (string.IsNullOrWhiteSpace(displayedPath) || displayedKind is not
+            (PreviewKind.Text or PreviewKind.LargeText or PreviewKind.Markdown or PreviewKind.CsvTsv))
+            return new(null, "現在のViewer内容は外部Editorで開けるテキストsourceではありません。");
+
+        string fullPath;
+        try { fullPath = Path.GetFullPath(requestedPath ?? string.Empty); }
+        catch (Exception ex) when (ex is ArgumentException or IOException or NotSupportedException or System.Security.SecurityException)
+        { return new(null, "表示中のsource pathが不正です。"); }
+
+        string currentFullPath;
+        try { currentFullPath = Path.GetFullPath(displayedPath); }
+        catch (Exception ex) when (ex is ArgumentException or IOException or NotSupportedException or System.Security.SecurityException)
+        { return new(null, "表示中のsource pathが不正です。"); }
+
+        if (!string.Equals(fullPath, currentFullPath, StringComparison.OrdinalIgnoreCase) || requestedKind != displayedKind)
+            return new(null, "Viewer sourceが切り替わりました。現在表示中のsourceを確認してください。");
+        if (Directory.Exists(fullPath) || !File.Exists(fullPath))
+            return new(null, $"表示中のsource fileが見つかりません: {fullPath}");
+
+        return new(fullPath, null);
+    }
+
+    public ViewerPresentationMode ResolveMediaViewerOpenMode(ViewerPresentationMode? explicitMode)
+    {
+        if (explicitMode is { } requested && Enum.IsDefined(requested))
+        {
+            return requested;
+        }
+
+        ViewerPresentationMode configured = _settings.Value.Preview?.DefaultMediaViewerPresentationMode
+            ?? ViewerPresentationMode.PreviewFollow;
+        return Enum.IsDefined(configured) ? configured : ViewerPresentationMode.PreviewFollow;
+    }
+
+    public ViewerPresentationMode RegisterMediaViewer(
+        Guid viewerId,
+        ViewerPresentationMode initialMode = ViewerPresentationMode.PreviewFollow)
+    {
+        if (viewerId == Guid.Empty) return ViewerPresentationMode.PreviewFollow;
+        if (!_mediaViewerPresentation.ContainsKey(viewerId))
+        {
+            ViewerPresentationMode mode = Enum.IsDefined(initialMode) ? initialMode : ViewerPresentationMode.PreviewFollow;
+            _mediaViewerPresentation[viewerId] = new MediaViewerPresentationState(
+                mode, mode, 1, 0, false, false, 0, PreviewKind.None, ViewerVideoPlaybackState.Empty, null);
+        }
+        return _mediaViewerPresentation[viewerId].AppliedMode;
+    }
+
+    public ViewerPresentationMode GetMediaViewerPresentationMode(Guid viewerId)
+        => _mediaViewerPresentation.TryGetValue(viewerId, out var state)
+            ? state.AppliedMode
+            : ViewerPresentationMode.PreviewFollow;
+
+    public ViewerPresentationMode GetEffectiveMediaViewerPresentationMode(Guid viewerId)
+    {
+        if (!_mediaViewerPresentation.TryGetValue(viewerId, out MediaViewerPresentationState state))
+        {
+            return ViewerPresentationMode.PreviewFollow;
+        }
+
+        if (state.MediaKind == PreviewKind.Video && state.MediaRequestId > 0)
+        {
+            if (state.IsPending) return state.DesiredMode;
+            if (state.ManualOverrideMode is { } manualMode) return manualMode;
+            return GetAutomaticVideoPresentationMode(state.PlaybackState);
+        }
+
+        return state.IsPending ? state.DesiredMode : state.AppliedMode;
+    }
+
+    private static ViewerPresentationMode GetAutomaticVideoPresentationMode(ViewerVideoPlaybackState playbackState)
+        => playbackState is ViewerVideoPlaybackState.Playing or ViewerVideoPlaybackState.Paused
+            ? ViewerPresentationMode.PlaybackLocked
+            : ViewerPresentationMode.PreviewFollow;
+
+    public bool IsMediaViewerPlaybackAutoManaged(Guid viewerId)
+        => _mediaViewerPresentation.TryGetValue(viewerId, out var state)
+            && state.MediaKind == PreviewKind.Video
+            && state.MediaRequestId > 0;
+
+    public (ViewerPresentationMode Mode, int Generation)? BeginMediaViewerRequest(
+        Guid viewerId,
+        long requestId,
+        PreviewKind mediaKind)
+    {
+        if (viewerId == Guid.Empty || requestId <= 0) return null;
+        RegisterMediaViewer(viewerId);
+        MediaViewerPresentationState state = _mediaViewerPresentation[viewerId];
+        if (requestId < state.MediaRequestId) return null;
+        if (requestId == state.MediaRequestId && mediaKind == state.MediaKind) return null;
+        ViewerPresentationMode currentMode = state.IsPending
+            ? state.DesiredMode
+            : state.ManualOverrideMode ?? state.AppliedMode;
+
+        _mediaViewerPresentation[viewerId] = state with
+        {
+            MediaRequestId = requestId,
+            MediaKind = mediaKind,
+            PlaybackState = mediaKind == PreviewKind.Video
+                ? ViewerVideoPlaybackState.Opening
+                : ViewerVideoPlaybackState.Empty,
+            ManualOverrideMode = null
+        };
+
+        if (mediaKind == PreviewKind.Video && currentMode != ViewerPresentationMode.PreviewFollow)
+        {
+            return SetMediaViewerPresentationMode(viewerId, ViewerPresentationMode.PreviewFollow);
+        }
+        return null;
+    }
+
+    public (ViewerPresentationMode Mode, int Generation)? UpdateMediaViewerPlaybackState(
+        Guid viewerId,
+        long requestId,
+        ViewerVideoPlaybackState playbackState)
+    {
+        if (!_mediaViewerPresentation.TryGetValue(viewerId, out MediaViewerPresentationState state)
+            || state.MediaKind != PreviewKind.Video
+            || state.MediaRequestId != requestId
+            || !Enum.IsDefined(playbackState)
+            || state.PlaybackState == playbackState)
+        {
+            return null;
+        }
+
+        state = state with
+        {
+            PlaybackState = playbackState,
+            ManualOverrideMode = null
+        };
+        _mediaViewerPresentation[viewerId] = state;
+
+        ViewerPresentationMode target = GetAutomaticVideoPresentationMode(playbackState);
+        ViewerPresentationMode current = state.IsPending ? state.DesiredMode : state.AppliedMode;
+        if (current == target) return null;
+
+        bool synchronizeSelection = target == ViewerPresentationMode.PreviewFollow
+            && (state.IsPending ? state.DesiredMode : state.AppliedMode) == ViewerPresentationMode.PlaybackLocked
+            && playbackState is ViewerVideoPlaybackState.Stopped or ViewerVideoPlaybackState.Ended;
+        return SetMediaViewerPresentationMode(viewerId, target, synchronizeSelection);
+    }
+
+    public int GetMediaViewerPresentationGeneration(Guid viewerId)
+        => _mediaViewerPresentation.TryGetValue(viewerId, out var state)
+            ? state.Generation
+            : 0;
+
+    public (ViewerPresentationMode Mode, int Generation) SetMediaViewerPresentationMode(
+        Guid viewerId,
+        ViewerPresentationMode mode,
+        bool synchronizeBrowserSelectionOnApply = false)
+    {
+        RegisterMediaViewer(viewerId);
+        var state = _mediaViewerPresentation[viewerId];
+        int generation = checked(state.Generation + 1);
+        ViewerPresentationMode desiredMode = Enum.IsDefined(mode) ? mode : ViewerPresentationMode.PreviewFollow;
+        _mediaViewerPresentation[viewerId] = state with
+        {
+            DesiredMode = desiredMode,
+            Generation = generation,
+            IsPending = true,
+            SynchronizeBrowserSelectionOnApply = synchronizeBrowserSelectionOnApply
+        };
+        return (desiredMode, generation);
+    }
+
+    public (ViewerPresentationMode Mode, int Generation) ToggleMediaViewerPresentationMode(Guid viewerId)
+    {
+        RegisterMediaViewer(viewerId);
+        MediaViewerPresentationState state = _mediaViewerPresentation[viewerId];
+        if (state.MediaKind == PreviewKind.Video && state.MediaRequestId > 0)
+        {
+            ViewerPresentationMode videoCurrent = state.IsPending
+                ? state.DesiredMode
+                : state.ManualOverrideMode ?? state.AppliedMode;
+            ViewerPresentationMode videoNext = videoCurrent == ViewerPresentationMode.PreviewFollow
+                ? ViewerPresentationMode.PlaybackLocked
+                : ViewerPresentationMode.PreviewFollow;
+            (ViewerPresentationMode Mode, int Generation) request = SetMediaViewerPresentationMode(
+                viewerId,
+                videoNext,
+                synchronizeBrowserSelectionOnApply: videoNext == ViewerPresentationMode.PreviewFollow);
+            state = _mediaViewerPresentation[viewerId];
+            _mediaViewerPresentation[viewerId] = state with { ManualOverrideMode = videoNext };
+            return request;
+        }
+        ViewerPresentationMode current = state.IsPending ? state.DesiredMode : state.AppliedMode;
+        ViewerPresentationMode next = current == ViewerPresentationMode.PreviewFollow
+            ? ViewerPresentationMode.PlaybackLocked
+            : ViewerPresentationMode.PreviewFollow;
+        return SetMediaViewerPresentationMode(
+            viewerId,
+            next,
+            synchronizeBrowserSelectionOnApply: next == ViewerPresentationMode.PreviewFollow);
+    }
+
+    public ViewerPresentationAcknowledgement AcknowledgeMediaViewerPresentationMode(
+        Guid viewerId,
+        ViewerPresentationMode mode,
+        int generation,
+        bool accepted)
+    {
+        if (!_mediaViewerPresentation.TryGetValue(viewerId, out MediaViewerPresentationState state)
+            || !state.IsPending
+            || generation != state.Generation)
+        {
+            return new ViewerPresentationAcknowledgement(false, false, GetMediaViewerPresentationMode(viewerId), generation, false);
+        }
+
+        bool applied = accepted && mode == state.DesiredMode && Enum.IsDefined(mode);
+        ViewerPresentationMode appliedMode = applied ? mode : state.AppliedMode;
+        bool synchronizeBrowserSelection = applied
+            ? state.SynchronizeBrowserSelectionOnApply
+            : state.AppliedMode == ViewerPresentationMode.PreviewFollow
+                && state.DesiredMode == ViewerPresentationMode.PlaybackLocked;
+        _mediaViewerPresentation[viewerId] = state with
+        {
+            AppliedMode = appliedMode,
+            DesiredMode = appliedMode,
+            IsPending = false,
+            SynchronizeBrowserSelectionOnApply = false,
+            ManualOverrideMode = applied ? state.ManualOverrideMode : null
+        };
+        return new ViewerPresentationAcknowledgement(true, applied, appliedMode, generation, synchronizeBrowserSelection);
+    }
+
+    public void RejectMediaViewerPresentationMode(Guid viewerId, int generation)
+    {
+        if (!_mediaViewerPresentation.TryGetValue(viewerId, out MediaViewerPresentationState state)
+            || !state.IsPending
+            || generation != state.Generation)
+        {
+            return;
+        }
+        _mediaViewerPresentation[viewerId] = state with
+        {
+            DesiredMode = state.AppliedMode,
+            IsPending = false,
+            SynchronizeBrowserSelectionOnApply = false,
+            ManualOverrideMode = null
+        };
+    }
+
+    public int NextMediaViewerSelectionGeneration(Guid viewerId)
+    {
+        RegisterMediaViewer(viewerId);
+        MediaViewerPresentationState state = _mediaViewerPresentation[viewerId];
+        int generation = checked(state.SelectionGeneration + 1);
+        _mediaViewerPresentation[viewerId] = state with { SelectionGeneration = generation };
+        return generation;
+    }
+
+    public void ForgetMediaViewer(Guid viewerId)
+        => _mediaViewerPresentation.Remove(viewerId);
 
     public ViewerModeLifecyclePlan CreateModeLifecyclePlan(
         bool isBrowserMode,
@@ -304,9 +608,133 @@ internal sealed class ViewerWorkflowApplicationCoordinator
         }
 
         PreviewKind kind = ResolveEffectivePreviewKind(fullPath);
+        kind = ResolveBrowserOpenMediaKind(fullPath, kind);
         return new ViewerOpenRequest(fullPath, kind is PreviewKind.Image or PreviewKind.Video
             ? ViewerOpenRoute.MediaViewer
             : ViewerOpenRoute.InternalViewer, kind);
+    }
+
+    public ViewerOpenRequest? CreatePlaybackLockedOpenRequest(string? fullPath)
+    {
+        if (string.IsNullOrWhiteSpace(fullPath)
+            || Directory.Exists(fullPath)
+            || !File.Exists(fullPath))
+        {
+            return null;
+        }
+
+        // Keep Browser media metadata classification consistent for locked opens.
+        PreviewKind kind = ResolveBrowserOpenMediaKind(fullPath, PreviewService.GetPreviewKind(fullPath));
+        return kind is PreviewKind.Image or PreviewKind.Video
+            ? new ViewerOpenRequest(fullPath, ViewerOpenRoute.MediaViewer, kind, ViewerPresentationMode.PlaybackLocked)
+            : null;
+    }
+
+    private static readonly string[] NonMediaBrowserExtensions = [".exe", ".com", ".bat", ".cmd", ".lnk", ".url"];
+
+    private PreviewKind ResolveBrowserOpenMediaKind(string fullPath, PreviewKind rawKind)
+    {
+        if (rawKind is not (PreviewKind.None or PreviewKind.Binary))
+        {
+            return rawKind;
+        }
+
+        // Keep known Browser classifications ahead of optional Susie metadata.
+        PreviewKind shallowKind = PreviewService.GetPreviewKindShallow(fullPath, isDirectory: false);
+        if (shallowKind != PreviewKind.None || IsNonMediaBrowserPath(fullPath))
+        {
+            return rawKind;
+        }
+
+        return HasInspectedSusieImageCandidate(fullPath) ? PreviewKind.Image : rawKind;
+    }
+
+    private static bool IsNonMediaBrowserPath(string fullPath)
+        => ArchiveFileTypeHelper.IsArchive(fullPath)
+            || Array.Exists(NonMediaBrowserExtensions, extension =>
+                string.Equals(extension, Path.GetExtension(fullPath), StringComparison.OrdinalIgnoreCase));
+
+    private bool HasInspectedSusieImageCandidate(string fullPath)
+    {
+        SusiePluginSettings? susieSettings = _settings.Value.Preview?.SusiePlugins;
+        if (susieSettings == null)
+        {
+            return false;
+        }
+
+        string extension = SusiePluginSettings.NormalizeExtension(Path.GetExtension(fullPath));
+        if (extension.Length <= 1)
+        {
+            return false;
+        }
+
+        bool hasExplicitSelection = false;
+        string? selectedDecoder = null;
+        foreach ((string configuredExtension, string decoder) in susieSettings.DecoderByExtension
+                     ?? new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase))
+        {
+            if (!string.Equals(
+                    SusiePluginSettings.NormalizeExtension(configuredExtension),
+                    extension,
+                    StringComparison.OrdinalIgnoreCase)
+                || string.IsNullOrWhiteSpace(decoder))
+            {
+                continue;
+            }
+
+            selectedDecoder = decoder.Trim();
+            hasExplicitSelection = true;
+            break;
+        }
+
+        if (hasExplicitSelection && string.Equals(selectedDecoder, "standard", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        IEnumerable<SusiePluginRegistration> registrations = susieSettings.Plugins
+            ?? new List<SusiePluginRegistration>();
+        if (hasExplicitSelection)
+        {
+            return registrations.Any(registration =>
+                registration != null
+                && registration.IsEnabled
+                && HasInspectedExtension(registration, extension)
+                && PathsReferToSamePlugin(registration.PluginPath, selectedDecoder));
+        }
+
+        return registrations.Any(registration =>
+            registration != null
+            && registration.IsEnabled
+            && HasInspectedExtension(registration, extension));
+    }
+
+    private static bool HasInspectedExtension(SusiePluginRegistration registration, string extension)
+        => !string.IsNullOrWhiteSpace(registration.PluginPath)
+            && registration.InspectionMetadata?.Extensions?.Any(candidate =>
+                string.Equals(
+                    SusiePluginSettings.NormalizeExtension(candidate),
+                    extension,
+                    StringComparison.OrdinalIgnoreCase)) == true;
+
+    private static bool PathsReferToSamePlugin(string? registeredPath, string? selectedPath)
+    {
+        if (string.IsNullOrWhiteSpace(registeredPath) || string.IsNullOrWhiteSpace(selectedPath))
+        {
+            return false;
+        }
+
+        try
+        {
+            return string.Equals(
+                Path.GetFullPath(registeredPath),
+                Path.GetFullPath(selectedPath),
+                StringComparison.OrdinalIgnoreCase);
+        }
+        catch (Exception ex) when (ex is ArgumentException or IOException or NotSupportedException or System.Security.SecurityException)
+        {
+            return false;
+        }
     }
 
     public ViewerEnterDecision ResolveEnter(string fullPath)
@@ -315,34 +743,42 @@ internal sealed class ViewerWorkflowApplicationCoordinator
         if (rawKind == PreviewKind.Video)
         {
             bool isAudio = PreviewService.IsSupportedAudioExtension(fullPath);
-            if (isAudio || _settings.Value.Preview?.VideoEnterPlaysExternal == true)
+            if (isAudio)
             {
                 return new ViewerEnterDecision(null, true, isAudio);
             }
+
+            return new ViewerEnterDecision(
+                new ViewerOpenRequest(fullPath, ViewerOpenRoute.MediaViewer, PreviewKind.Video),
+                false,
+                false);
         }
 
         return new ViewerEnterDecision(CreateBrowserOpenRequest(fullPath, allowExecuteTarget: true), false, false);
     }
 
-    public ViewerCtrlEnterDecision ResolveCtrlEnter(string fullPath)
+    public BrowserCtrlEnterRoute ResolveBrowserCtrlEnter(string fullPath)
     {
-        if (PreviewService.GetPreviewKind(fullPath) != PreviewKind.Video)
+        if (string.IsNullOrWhiteSpace(fullPath) || !File.Exists(fullPath))
         {
-            return new ViewerCtrlEnterDecision(false, null, false, false);
+            return BrowserCtrlEnterRoute.None;
         }
 
-        bool isAudio = PreviewService.IsSupportedAudioExtension(fullPath);
-        if (_settings.Value.Preview?.VideoEnterPlaysExternal == true && !isAudio)
+        if (PreviewService.IsSupportedAudioExtension(fullPath))
         {
-            return new ViewerCtrlEnterDecision(
-                true,
-                CreateBrowserOpenRequest(fullPath, allowExecuteTarget: true),
-                false,
-                false);
+            return BrowserCtrlEnterRoute.PlayAudioExternally;
         }
 
-        return new ViewerCtrlEnterDecision(true, null, true, isAudio);
+        ViewerOpenRequest? request = CreatePlaybackLockedOpenRequest(fullPath);
+        return request is { ViewerKind: PreviewKind.Image or PreviewKind.Video }
+            ? BrowserCtrlEnterRoute.OpenVideoPlaybackLocked
+            : BrowserCtrlEnterRoute.None;
     }
+
+    public ViewerAudioCtrlEnterDecision ResolveAudioCtrlEnter(string fullPath)
+        => PreviewService.IsSupportedAudioExtension(fullPath)
+            ? new ViewerAudioCtrlEnterDecision(true, true)
+            : new ViewerAudioCtrlEnterDecision(false, false);
 
     public PreviewKind ResolvePreviewLaunchKind(string fullPath)
     {

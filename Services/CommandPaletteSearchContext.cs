@@ -12,7 +12,6 @@ namespace MidFD.Services;
 internal interface ICommandPaletteHost : ICommandPaletteLayerHost
 {
     CommandRegistry GetCommandRegistry();
-    void OpenSettingsForm(SettingsForm.InitialTab initialTab);
     string GetCurrentFunctionKeyProfileValue();
     Dictionary<string, List<string>>? GetBrowserKeyCommandOverrides();
     string ResolveKeyBindingText(string commandId);
@@ -42,13 +41,35 @@ public sealed class CommandPaletteSearchContext
         _host.ExecuteCommandFromUi(commandId, scope, source, selectionSnapshot, hashAlgorithm);
     }
 
-    public void OpenSettingsForm(SettingsForm.InitialTab initialTab) => _host.OpenSettingsForm(initialTab);
+    public void OpenSettingsForm(SettingsForm.InitialTab initialTab)
+    {
+        SettingsInitialPage page = initialTab switch
+        {
+            SettingsForm.InitialTab.Color => SettingsInitialPage.Color,
+            SettingsForm.InitialTab.Operation => SettingsInitialPage.Operation,
+            SettingsForm.InitialTab.InputAssignment => SettingsInitialPage.InputAssignment,
+            SettingsForm.InitialTab.External => SettingsInitialPage.External,
+            SettingsForm.InitialTab.StartupAndLog => SettingsInitialPage.StartupAndLog,
+            _ => SettingsInitialPage.Display
+        };
+        _host.ExecuteCommandFromUi(CommandIds.AppOpenSettings, new CommandExecutionContext
+        {
+            Scope = CommandScope.Global,
+            Source = "CommandPalette.Search.SettingsPage",
+            SettingsInitialPage = page
+        });
+    }
     public SelectionResult ResolveSelection() => _selectionOverride ?? _host.ResolveSelection();
     public string GetCurrentBrowserPath() => _host.GetCurrentBrowserPath();
     public IReadOnlyDictionary<string, bool> GetPassiveSelectionPathKinds() => _host.GetPassiveSelectionPathKinds();
     public void ShowArchiveContents(string archivePath)
     {
-        _host.ShowArchiveContents(archivePath);
+        _host.ExecuteCommandFromUi(CommandIds.ArchiveContentsOpen, new CommandExecutionContext
+        {
+            Scope = CommandScope.Browser,
+            Source = "CommandPalette.Search.ArchiveContents",
+            ContextTargetPath = archivePath
+        });
     }
     public string ResolveKeyBindingText(string commandId) => _host.ResolveKeyBindingText(commandId);
 

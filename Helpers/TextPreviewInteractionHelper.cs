@@ -1,4 +1,3 @@
-using System.Diagnostics;
 using System.Windows.Forms;
 using MidFD.Services;
 
@@ -19,7 +18,9 @@ internal static class TextPreviewInteractionHelper
         IWin32Window? dialogOwner = null,
         bool showErrorDialog = false,
         Func<string?, string?>? resolveClickedUrl = null,
-        Action<string>? launchExternalUrl = null)
+        Func<string, ExternalUrlLaunchResult>? launchExternalUrl = null,
+        Action<IWin32Window?, string>? showErrorDialogHandler = null,
+        Func<string, bool>? dispatchCopySelection = null)
     {
         if (textBox == null) throw new ArgumentNullException(nameof(textBox));
 
@@ -32,7 +33,7 @@ internal static class TextPreviewInteractionHelper
             richTextBox.LinkClicked += (_, e) =>
             {
                 string? url = resolveClickedUrl?.Invoke(e.LinkText) ?? e.LinkText;
-                OpenWebLink(url, showStatusMessage, dialogOwner, showErrorDialog, launchExternalUrl);
+                OpenWebLink(url, showStatusMessage, dialogOwner, showErrorDialog, launchExternalUrl, showErrorDialogHandler);
             };
         }
         else if (textBox is TextBox plainTextBox)
@@ -60,7 +61,7 @@ internal static class TextPreviewInteractionHelper
                 }
 
                 string? url = resolveClickedUrl?.Invoke(linkText) ?? linkText;
-                OpenWebLink(url, showStatusMessage, dialogOwner, showErrorDialog, launchExternalUrl);
+                OpenWebLink(url, showStatusMessage, dialogOwner, showErrorDialog, launchExternalUrl, showErrorDialogHandler);
             };
             plainTextBox.MouseMove += (_, e) =>
             {
@@ -88,7 +89,14 @@ internal static class TextPreviewInteractionHelper
             }
             else if (e.KeyCode == Keys.C && textBox.SelectionLength > 0)
             {
-                textBox.Copy();
+                CopySelectedText(
+                    textBox,
+                    dispatchCopySelection,
+                    showStatusMessage,
+                    dialogOwner,
+                    showErrorDialog,
+                    showErrorDialogHandler,
+                    reportNativeCopySuccess: false);
                 e.Handled = true;
                 e.SuppressKeyPress = true;
             }
@@ -99,8 +107,14 @@ internal static class TextPreviewInteractionHelper
         copyItem.Click += (_, _) =>
         {
             if (textBox.SelectionLength <= 0) return;
-            textBox.Copy();
-            showStatusMessage?.Invoke("選択範囲をコピーしました。");
+            CopySelectedText(
+                textBox,
+                dispatchCopySelection,
+                showStatusMessage,
+                dialogOwner,
+                showErrorDialog,
+                showErrorDialogHandler,
+                reportNativeCopySuccess: true);
         };
 
         var selectAllItem = new ToolStripMenuItem("すべて選択 (&A)");
@@ -114,6 +128,62 @@ internal static class TextPreviewInteractionHelper
         };
 
         textBox.ContextMenuStrip = menu;
+    }
+
+    private static bool CopySelectedText(
+        TextBoxBase textBox,
+        Func<string, bool>? dispatchCopySelection,
+        Action<string>? showStatusMessage,
+        IWin32Window? dialogOwner,
+        bool showErrorDialog,
+        Action<IWin32Window?, string>? showErrorDialogHandler,
+        bool reportNativeCopySuccess)
+    {
+        bool copied;
+        try
+        {
+            if (dispatchCopySelection is null)
+            {
+                textBox.Copy();
+                copied = true;
+            }
+            else
+            {
+                copied = dispatchCopySelection(textBox.SelectedText);
+            }
+        }
+        catch (Exception ex)
+        {
+            LogService.Error("Failed to copy selected text from preview.", ex);
+            copied = false;
+        }
+
+        if (!copied)
+        {
+            const string message = "選択範囲をコピーできませんでした。";
+            if (showErrorDialog)
+            {
+                if (showErrorDialogHandler is { } showDialog)
+                {
+                    showDialog(dialogOwner, message);
+                }
+                else
+                {
+                    MessageBox.Show(dialogOwner, message, "コピーに失敗しました", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                }
+            }
+            else
+            {
+                showStatusMessage?.Invoke(message);
+            }
+            return false;
+        }
+
+        if (dispatchCopySelection is null && reportNativeCopySuccess)
+        {
+            showStatusMessage?.Invoke("選択範囲をコピーしました。");
+        }
+        return true;
     }
 
     internal static string? FindWebUrlAt(string? text, int index)
@@ -244,30 +314,82 @@ internal static class TextPreviewInteractionHelper
         Action<string>? showStatusMessage,
         IWin32Window? dialogOwner,
         bool showErrorDialog,
-        Action<string>? launchExternalUrl)
+        Func<string, ExternalUrlLaunchResult>? launchExternalUrl,
+        Action<IWin32Window?, string>? showErrorDialogHandler)
     {
         if (!CanOpenWebLink(url))
         {
-            showStatusMessage?.Invoke("無効または安全ではないスキームのリンクのため起動をブロックしました。");
+            ReportExternalUrlLaunchResult(
+                ExternalUrlLaunchResult.InvalidTarget(),
+                showStatusMessage,
+                dialogOwner,
+                showErrorDialog,
+                showErrorDialogHandler);
             return;
         }
 
+        if (launchExternalUrl == null)
+        {
+            ReportExternalUrlLaunchResult(
+                ExternalUrlLaunchResult.CommandRejected(),
+                showStatusMessage,
+                dialogOwner,
+                showErrorDialog,
+                showErrorDialogHandler);
+            return;
+        }
+
+        ExternalUrlLaunchResult result;
         try
         {
-            (launchExternalUrl ?? LaunchExternalUrl)(url!);
+            result = launchExternalUrl(url!);
         }
         catch (Exception ex)
         {
             LogService.Error($"Failed to open URL '{url}': {ex.Message}");
-            if (showErrorDialog)
+            result = ExternalUrlLaunchResult.EffectFailed(ex.Message);
+        }
+
+        ReportExternalUrlLaunchResult(result, showStatusMessage, dialogOwner, showErrorDialog, showErrorDialogHandler);
+    }
+
+    internal static void ReportExternalUrlLaunchResult(
+        ExternalUrlLaunchResult result,
+        Action<string>? showStatusMessage,
+        IWin32Window? dialogOwner,
+        bool showErrorDialog,
+        Action<IWin32Window?, string>? showErrorDialogHandler = null)
+    {
+        if (result.Status == ExternalUrlLaunchStatus.Opened)
+        {
+            return;
+        }
+
+        string message = result.Status switch
+        {
+            ExternalUrlLaunchStatus.InvalidTarget => "無効または安全ではないスキームのリンクのため起動をブロックしました。",
+            ExternalUrlLaunchStatus.CommandRejected => "リンクを開けませんでした。",
+            ExternalUrlLaunchStatus.EffectFailed when !string.IsNullOrWhiteSpace(result.ErrorMessage)
+                => $"リンクを開けませんでした: {result.ErrorMessage}",
+            ExternalUrlLaunchStatus.EffectFailed => "リンクを開けませんでした。",
+            _ => "リンクを開けませんでした。"
+        };
+
+        if (showErrorDialog)
+        {
+            if (showErrorDialogHandler is { } showDialog)
             {
-                MessageBox.Show(dialogOwner, $"リンクを開けませんでした: {ex.Message}", "エラー", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                showDialog(dialogOwner, message);
             }
+            else
+            {
+                MessageBox.Show(dialogOwner, message, "エラー", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+        }
+        else
+        {
+            showStatusMessage?.Invoke(message);
         }
     }
 
-    private static void LaunchExternalUrl(string url)
-    {
-        Process.Start(new ProcessStartInfo(url) { UseShellExecute = true });
-    }
 }

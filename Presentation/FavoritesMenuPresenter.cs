@@ -10,7 +10,7 @@ public static class FavoritesMenuPresenter
     public static void Build(
         ToolStripMenuItem favoritesMenu,
         IReadOnlyList<QuickAccessEntry> entries,
-        Action<string> navigateToPath,
+        Action<QuickAccessEntry> activateEntry,
         Action addCurrentLocation,
         Action openQuickAccess,
         Action<ToolStripDropDownItem, Color, Color>? applyDropDownTheme,
@@ -28,7 +28,7 @@ public static class FavoritesMenuPresenter
 
         if (categorizedEntries.Count == 0)
         {
-            AddFavoritesMenuEntries(favoritesMenu.DropDownItems, favoriteEntries, navigateToPath);
+            AddFavoritesMenuEntries(favoritesMenu.DropDownItems, favoriteEntries, activateEntry);
         }
         else
         {
@@ -42,7 +42,7 @@ public static class FavoritesMenuPresenter
                 }
 
                 var categoryMenu = new MidFD.Controls.TightCascadeToolStripMenuItem(categoryName) { Tag = "FavoriteCategory" };
-                AddFavoritesMenuEntries(categoryMenu.DropDownItems, categoryGroup.ToList(), navigateToPath);
+                AddFavoritesMenuEntries(categoryMenu.DropDownItems, categoryGroup.ToList(), activateEntry);
                 favoritesMenu.DropDownItems.Add(categoryMenu);
             }
 
@@ -56,7 +56,7 @@ public static class FavoritesMenuPresenter
                     favoritesMenu.DropDownItems.Add(new ToolStripSeparator());
                 }
 
-                AddFavoritesMenuEntries(favoritesMenu.DropDownItems, uncategorizedEntries, navigateToPath);
+                AddFavoritesMenuEntries(favoritesMenu.DropDownItems, uncategorizedEntries, activateEntry);
             }
         }
 
@@ -74,7 +74,7 @@ public static class FavoritesMenuPresenter
     private static void AddFavoritesMenuEntries(
         ToolStripItemCollection targetItems,
         IReadOnlyList<QuickAccessEntry> entries,
-        Action<string> navigateToPath)
+        Action<QuickAccessEntry> activateEntry)
     {
         HashSet<string> duplicateDisplayNames = entries
             .Select(ResolveFavoritesMenuDisplayName)
@@ -98,7 +98,7 @@ public static class FavoritesMenuPresenter
                 ToolTipText = path,
                 Tag = "FavoriteItem"
             };
-            item.Click += (_, _) => navigateToPath(path);
+            item.Click += (_, _) => activateEntry(entry);
             targetItems.Add(item);
         }
     }

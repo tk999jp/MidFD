@@ -1,0 +1,66 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <ApplicationIcon>../../Assets/appicon/MidFD.ico</ApplicationIcon>
+    <AssemblyName>MidPlayer</AssemblyName>
+    <RootNamespace>MidFD</RootNamespace>
+    <PlatformTarget Condition="'$(PlatformTarget)' == ''">x64</PlatformTarget>
+    <MidPlayerIncludeLibVlc Condition="'$(MidPlayerIncludeLibVlc)' == ''">true</MidPlayerIncludeLibVlc>
+    <OutputPath Condition="'$(MidPlayerBuildRoot)' != ''">$(MidPlayerBuildRoot)\Standalone\$(Configuration)\$(TargetFramework)\$(RuntimeIdentifier)\</OutputPath>
+    <IntermediateOutputPath Condition="'$(MidPlayerBuildRoot)' != ''">$(MidPlayerBuildRoot)\obj\Standalone\$(Configuration)\$(TargetFramework)\$(PlatformTarget)\$(RuntimeIdentifier)\</IntermediateOutputPath>
+    <AppendTargetFrameworkToOutputPath Condition="'$(MidPlayerBuildRoot)' != ''">false</AppendTargetFrameworkToOutputPath>
+    <AppendRuntimeIdentifierToOutputPath Condition="'$(MidPlayerBuildRoot)' != ''">false</AppendRuntimeIdentifierToOutputPath>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Remove="**\*.cs" />
+    <Compile Include="Program.cs" />
+    <Compile Include="ImageViewerIpcClient.cs" />
+    <Compile Include="Properties\AssemblyInfo.cs" />
+    <Compile Include="AssemblyForwarders.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="MidPlayer.Lite.csproj">
+      <SkipGetTargetFrameworkProperties>true</SkipGetTargetFrameworkProperties>
+      <SetTargetFramework>TargetFramework=net10.0-windows</SetTargetFramework>
+    </ProjectReference>
+    <ProjectReference Include="MidPlayer.Full.csproj"
+                      Condition="'$(MidPlayerIncludeLibVlc)' == 'true'">
+      <SkipGetTargetFrameworkProperties>true</SkipGetTargetFrameworkProperties>
+      <SetTargetFramework>TargetFramework=net10.0-windows</SetTargetFramework>
+    </ProjectReference>
+  </ItemGroup>
+
+  <Target Name="BuildAndCopySusieHosts" AfterTargets="Build">
+    <PropertyGroup>
+      <SusieHost32OutputPath Condition="'$(MidPlayerBuildRoot)' != ''">$(MidPlayerBuildRoot)\SusieHost32\$(Configuration)\net10.0-windows\win-x86\</SusieHost32OutputPath>
+      <SusieHost64OutputPath Condition="'$(MidPlayerBuildRoot)' != ''">$(MidPlayerBuildRoot)\SusieHost64\$(Configuration)\net10.0-windows\win-x64\</SusieHost64OutputPath>
+      <SusieHost32OutputPath Condition="'$(MidPlayerBuildRoot)' == ''">../SusieHost/bin/$(Configuration)/net10.0-windows/win-x86/</SusieHost32OutputPath>
+      <SusieHost64OutputPath Condition="'$(MidPlayerBuildRoot)' == ''">../SusieHost/bin/$(Configuration)/net10.0-windows/win-x64/</SusieHost64OutputPath>
+      <SusieHost32BuildProperties Condition="'$(MidPlayerBuildRoot)' != ''">Configuration=$(Configuration);PlatformTarget=x86;RuntimeIdentifier=win-x86;OutputPath=$(SusieHost32OutputPath);IntermediateOutputPath=$(MidPlayerBuildRoot)\obj\SusieHost32\$(Configuration)\net10.0-windows\win-x86\</SusieHost32BuildProperties>
+      <SusieHost64BuildProperties Condition="'$(MidPlayerBuildRoot)' != ''">Configuration=$(Configuration);PlatformTarget=x64;RuntimeIdentifier=win-x64;OutputPath=$(SusieHost64OutputPath);IntermediateOutputPath=$(MidPlayerBuildRoot)\obj\SusieHost64\$(Configuration)\net10.0-windows\win-x64\</SusieHost64BuildProperties>
+      <SusieHost32BuildProperties Condition="'$(MidPlayerBuildRoot)' == ''">Configuration=$(Configuration);PlatformTarget=x86;RuntimeIdentifier=win-x86</SusieHost32BuildProperties>
+      <SusieHost64BuildProperties Condition="'$(MidPlayerBuildRoot)' == ''">Configuration=$(Configuration);PlatformTarget=x64;RuntimeIdentifier=win-x64</SusieHost64BuildProperties>
+    </PropertyGroup>
+    <MSBuild Projects="../SusieHost/SusieHost32.csproj" Targets="Restore;Build" Properties="$(SusieHost32BuildProperties)" />
+    <MSBuild Projects="../SusieHost/SusieHost64.csproj" Targets="Restore;Build" Properties="$(SusieHost64BuildProperties)" />
+    <ItemGroup>
+      <SusieHost32Output Include="$(SusieHost32OutputPath)*" />
+      <SusieHost64Output Include="$(SusieHost64OutputPath)*" />
+    </ItemGroup>
+    <Copy SourceFiles="@(SusieHost32Output)" DestinationFolder="$(TargetDir)SusieHost32" SkipUnchangedFiles="true" />
+    <Copy SourceFiles="@(SusieHost64Output)" DestinationFolder="$(TargetDir)SusieHost64" SkipUnchangedFiles="true" />
+  </Target>
+
+  <Target Name="PublishSusieHosts" AfterTargets="Publish">
+    <MSBuild Projects="../SusieHost/SusieHost32.csproj" Targets="Restore;Publish"
+             Properties="Configuration=$(Configuration);PlatformTarget=x86;RuntimeIdentifier=win-x86;PublishDir=$(PublishDir)SusieHost32\;SelfContained=$(SelfContained)" />
+    <MSBuild Projects="../SusieHost/SusieHost64.csproj" Targets="Restore;Publish"
+             Properties="Configuration=$(Configuration);PlatformTarget=x64;RuntimeIdentifier=win-x64;PublishDir=$(PublishDir)SusieHost64\;SelfContained=$(SelfContained)" />
+  </Target>
+</Project>

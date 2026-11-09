@@ -78,6 +78,7 @@ public sealed class MarkSlotManagementDialog : Form
     private readonly int _initialSlotNumber;
     private readonly Func<IReadOnlyList<MarkSlotDialog.MarkSlotSummaryViewItem>> _slotItemsProvider;
     private readonly Func<int, IReadOnlyList<MarkSlotDialog.MarkListViewItem>> _slotItemsDetailProvider;
+    private readonly Func<int, Task<IReadOnlyList<MarkSlotDialog.MarkListViewItem>>>? _slotItemsDetailAsyncProvider;
     private readonly Func<int, string?, string> _renameSlotAction;
     private readonly Func<int, string> _deleteSlotAction;
     private readonly Func<int, IReadOnlyCollection<string>, MarkSlotActionResult> _removeSlotItemsAction;
@@ -88,6 +89,8 @@ public sealed class MarkSlotManagementDialog : Form
     private string? _mouseDownItemPath;
     private readonly Func<int, string> _saveCategorySlotAction;
     private readonly Func<int, string> _saveWorkspaceSlotAction;
+    private readonly Func<int, Task<string>>? _saveCategorySlotAsyncAction;
+    private readonly Func<int, Task<string>>? _saveWorkspaceSlotAsyncAction;
     private readonly Action<int> _openSlotSetOperationAction;
     private readonly bool _allowSlotSetOperation;
     private readonly Func<int, string> _exportSlotAction;
@@ -96,6 +99,7 @@ public sealed class MarkSlotManagementDialog : Form
     private readonly Func<string> _importAllSlotsAction;
     private readonly bool _allowSlotBackupTransfer;
     private readonly Action<string, string, MessageBoxIcon> _showMessageAction;
+    private int _slotContentLoadVersion;
 
     private readonly SplitContainer _mainSplitContainer;
     private readonly ListView _slotListView;
@@ -138,16 +142,22 @@ public sealed class MarkSlotManagementDialog : Form
         Func<string> exportAllSlotsAction,
         Func<string> importAllSlotsAction,
         bool allowSlotBackupTransfer,
-        Action<string, string, MessageBoxIcon>? showMessageAction = null)
+        Action<string, string, MessageBoxIcon>? showMessageAction = null,
+        Func<int, Task<string>>? saveCategorySlotAsyncAction = null,
+        Func<int, Task<string>>? saveWorkspaceSlotAsyncAction = null,
+        Func<int, Task<IReadOnlyList<MarkSlotDialog.MarkListViewItem>>>? slotItemsDetailAsyncProvider = null)
     {
         _initialSlotNumber = initialSlotNumber;
         _slotItemsProvider = slotItemsProvider;
         _slotItemsDetailProvider = slotItemsDetailProvider;
+        _slotItemsDetailAsyncProvider = slotItemsDetailAsyncProvider;
         _renameSlotAction = renameSlotAction;
         _deleteSlotAction = deleteSlotAction;
         _removeSlotItemsAction = removeSlotItemsAction;
         _saveCategorySlotAction = saveCategorySlotAction;
         _saveWorkspaceSlotAction = saveWorkspaceSlotAction;
+        _saveCategorySlotAsyncAction = saveCategorySlotAsyncAction;
+        _saveWorkspaceSlotAsyncAction = saveWorkspaceSlotAsyncAction;
         _openSlotSetOperationAction = openSlotSetOperationAction;
         _allowSlotSetOperation = allowSlotSetOperation;
         _exportSlotAction = exportSlotAction;
@@ -405,6 +415,7 @@ public sealed class MarkSlotManagementDialog : Form
         var selected = GetSelectedSlotSummary();
         if (selected == null)
         {
+            _slotContentLoadVersion++;
             _slotHeaderLabel.Text = "選択中スロット: なし";
             _slotContentHeaderLabel.Text = "保存済み内容（0件 / Mark 0件）";
             _slotContentListView.Items.Clear();
@@ -433,10 +444,35 @@ public sealed class MarkSlotManagementDialog : Form
 
     private void RefreshSlotContentItems(int slotNumber)
     {
+        if (_slotItemsDetailAsyncProvider != null)
+        {
+            _ = RefreshSlotContentItemsAsync(slotNumber, ++_slotContentLoadVersion);
+            return;
+        }
+
+        ApplySlotContentItems(_slotItemsDetailProvider(slotNumber));
+    }
+
+    private async Task RefreshSlotContentItemsAsync(int slotNumber, int version)
+    {
+        try
+        {
+            IReadOnlyList<MarkSlotDialog.MarkListViewItem> details = await _slotItemsDetailAsyncProvider!(slotNumber);
+            if (IsDisposed || version != _slotContentLoadVersion || GetSelectedSlotSummary()?.SlotNumber != slotNumber) return;
+            ApplySlotContentItems(details);
+        }
+        catch (Exception ex)
+        {
+            if (IsDisposed || version != _slotContentLoadVersion) return;
+            _slotContentHeaderLabel.Text = $"保存済み内容の確認に失敗: {ex.Message}";
+        }
+    }
+
+    private void ApplySlotContentItems(IReadOnlyList<MarkSlotDialog.MarkListViewItem> details)
+    {
         _slotContentListView.BeginUpdate();
         _slotContentListView.Items.Clear();
 
-        var details = _slotItemsDetailProvider(slotNumber);
         var detailPaths = new HashSet<string>(details.Select(d => d.FullPath), StringComparer.OrdinalIgnoreCase);
         _markedPaths.RemoveWhere(path => !detailPaths.Contains(path));
 
@@ -446,7 +482,7 @@ public sealed class MarkSlotManagementDialog : Form
         {
             bool isMarked = _markedPaths.Contains(item.FullPath);
             var row = new ListViewItem(isMarked ? "ON" : "");
-            row.SubItems.Add(GetMarkItemTypeText(item.FullPath));
+            row.SubItems.Add(GetMarkItemTypeText(item));
             row.SubItems.Add(item.Name);
             row.SubItems.Add(item.FullPath);
             row.SubItems.Add(item.Exists ? "存在" : "不在");
@@ -464,12 +500,17 @@ public sealed class MarkSlotManagementDialog : Form
         UpdateDeleteMarkedButtonState();
     }
 
-    private static string GetMarkItemTypeText(string path)
+    private static string GetMarkItemTypeText(MarkSlotDialog.MarkListViewItem item)
     {
+        if (item.IsDirectory.HasValue)
+        {
+            return item.IsDirectory.Value ? "DIR" : item.Exists ? "FILE" : "UNKNOWN";
+        }
+
         try
         {
-            if (System.IO.Directory.Exists(path)) return "DIR";
-            if (System.IO.File.Exists(path)) return "FILE";
+            if (System.IO.Directory.Exists(item.FullPath)) return "DIR";
+            if (System.IO.File.Exists(item.FullPath)) return "FILE";
         }
         catch { }
         return "UNKNOWN";
@@ -544,24 +585,30 @@ public sealed class MarkSlotManagementDialog : Form
         return true;
     }
 
-    private void ExecuteSaveCategoryToSelectedSlot()
+    private async void ExecuteSaveCategoryToSelectedSlot()
     {
         var selected = GetSelectedSlotSummary();
         if (selected == null) return;
 
-        string message = _saveCategorySlotAction(selected.SlotNumber);
+        string message = _saveCategorySlotAsyncAction != null
+            ? await _saveCategorySlotAsyncAction(selected.SlotNumber)
+            : _saveCategorySlotAction(selected.SlotNumber);
+        if (IsDisposed || Disposing) return;
         if (ShowActionMessageIfPresent(message, "カテゴリ全タブのMark保存", MessageBoxIcon.Information))
         {
             RefreshSlotItems();
         }
     }
 
-    private void ExecuteSaveWorkspaceToSelectedSlot()
+    private async void ExecuteSaveWorkspaceToSelectedSlot()
     {
         var selected = GetSelectedSlotSummary();
         if (selected == null) return;
 
-        string message = _saveWorkspaceSlotAction(selected.SlotNumber);
+        string message = _saveWorkspaceSlotAsyncAction != null
+            ? await _saveWorkspaceSlotAsyncAction(selected.SlotNumber)
+            : _saveWorkspaceSlotAction(selected.SlotNumber);
+        if (IsDisposed || Disposing) return;
         if (ShowActionMessageIfPresent(message, "Workspace全体のMark保存", MessageBoxIcon.Information))
         {
             RefreshSlotItems();

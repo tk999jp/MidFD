@@ -45,11 +45,12 @@ internal sealed class BrowserDirectoryApplicationCoordinator
         navigation.TotalItemCount = result.TotalItemCount;
         navigation.CursorIndex = result.LastIndex;
         navigation.ItemsPerPage = itemsPerPage;
+        bool? quickAccessPersistenceSucceeded = null;
         if (!result.SuppressRecent && !result.IsReload && !string.IsNullOrWhiteSpace(result.PreviousPath) &&
             !QuickAccessService.PathsEqual(result.PreviousPath, result.NewPath) &&
             QuickAccessService.RecordRecent(_state.Workspace.QuickAccess, result.NewPath))
         {
-            QuickAccessService.Save(_state.Workspace.QuickAccess);
+            quickAccessPersistenceSucceeded = QuickAccessService.Save(_state.Workspace.QuickAccess);
         }
 
         BrowserTabState? activeTab = _state.Tabs.ActiveTab;
@@ -88,7 +89,10 @@ internal sealed class BrowserDirectoryApplicationCoordinator
             ShouldApplySelection: true,
             ShouldApplyActiveTabPresentation: !isSwitchingBrowserTab,
             ShouldInvalidateBrowserPanel: !isSwitchingBrowserTab,
-            ShouldConfigureDirectoryCost: !result.ReusedSnapshot);
+            ShouldConfigureDirectoryCost: !result.ReusedSnapshot)
+        {
+            QuickAccessPersistenceSucceeded = quickAccessPersistenceSucceeded
+        };
     }
 
     public BrowserDirectoryLoadApplicationResult ExecuteAndApply(
@@ -100,6 +104,13 @@ internal sealed class BrowserDirectoryApplicationCoordinator
         if (execution.Succeeded)
         {
             BrowserLoadCoordinator.DirectoryLoadResult result = execution.Result!;
+            if (request.RequireFocusTarget && !result.FocusTargetFound)
+            {
+                return BrowserDirectoryLoadApplicationResult.Failure(
+                    new InvalidOperationException(
+                        "指定したファイルは現在の表示条件で一覧に表示できないため選択できません。フィルターや表示設定を確認してください。"));
+            }
+
             BrowserDirectoryApplicationTransition transition = ApplyDirectoryLoad(
                 result,
                 request.ItemsPerPage,
@@ -137,6 +148,9 @@ internal sealed class BrowserDirectoryApplicationCoordinator
         return _loadCoordinator.Execute(request);
     }
 
+    internal BrowserLoadCoordinator.SnapshotScope BeginSnapshotScope() =>
+        _loadCoordinator.BeginSnapshotScope();
+
     public bool TryGetCurrentSnapshotTargetPaths(
         string expectedPath,
         bool includeDirectories,
@@ -168,9 +182,11 @@ internal sealed class BrowserDirectoryApplicationCoordinator
 
     private void CancelCountAudit()
     {
-        _state.NavigationState.CountAuditCancellation?.Cancel();
-        _state.NavigationState.CountAuditCancellation?.Dispose();
-        _state.NavigationState.CountAuditCancellation = null;
+        BrowserNavigationSessionState navigation = _state.NavigationState;
+        lock (navigation.CountAuditSyncRoot)
+        {
+            navigation.CountAuditCancellation?.Cancel();
+        }
     }
 }
 
@@ -179,7 +195,10 @@ internal readonly record struct BrowserDirectoryApplicationTransition(
     bool ShouldApplySelection,
     bool ShouldApplyActiveTabPresentation,
     bool ShouldInvalidateBrowserPanel,
-    bool ShouldConfigureDirectoryCost);
+    bool ShouldConfigureDirectoryCost)
+{
+    public bool? QuickAccessPersistenceSucceeded { get; init; }
+}
 
 internal readonly record struct BrowserDirectoryLoadApplicationResult(
     BrowserLoadCoordinator.DirectoryLoadResult? Result,

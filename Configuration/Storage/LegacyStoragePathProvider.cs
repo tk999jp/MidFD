@@ -50,7 +50,6 @@ public sealed class LegacyStoragePathProvider : IStoragePathProvider
             Path.Combine(appBase, "Data", "Trash", "manifest.db"),
             Path.Combine(appBase, "logs"),
             Path.Combine(midFdLocalAppData, "Logs"),
-            Path.Combine(midFdLocalAppData, "video-still-preview-cache"),
             _tempRoot,
             Path.Combine(profileRoot, "Backups"));
     }

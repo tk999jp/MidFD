@@ -12,6 +12,7 @@ public static class MarkdownHtmlRenderer
         html.Replace(
             "</style>",
             $".md-image-preview{{display:block;max-width:{MarkdownInlineImageResolver.MaxMarkdownInlinePreviewWidth}px;width:auto}}.md-image-preview img{{display:block;width:100%;max-width:100%;height:auto}}</style>");
+        var imageBudget = new MarkdownInlineImageResolver.PreviewBudget();
         bool inCode = false;
         bool inList = false;
         bool inTable = false;
@@ -34,7 +35,7 @@ public static class MarkdownHtmlRenderer
             if (!inTable && line.Contains('|') && lineIndex + 1 < lines.Length && IsTableSeparator(WebUtility.HtmlEncode(lines[lineIndex + 1])))
             {
                 inTable = true; tableHeaderWritten = true;
-                html.Append("<div class=\"md-table-scroll\"><table><thead><tr").Append(sourceAttributes).Append(">"); AppendTableCells(html, TokenizeTableCells(rawLine), "th", sourceOffset, markdownPath); html.Append("</tr></thead><tbody>");
+                html.Append("<div class=\"md-table-scroll\"><table><thead><tr").Append(sourceAttributes).Append(">"); AppendTableCells(html, TokenizeTableCells(rawLine), "th", sourceOffset, markdownPath, imageBudget); html.Append("</tr></thead><tbody>");
                 sourceOffset += sourceLineLengths[lineIndex];
                 lineIndex++;
                 sourceOffset += sourceLineLengths[lineIndex];
@@ -44,26 +45,27 @@ public static class MarkdownHtmlRenderer
             if (inTable && line.Contains('|'))
             {
                 IReadOnlyList<TableCell> cells = TokenizeTableCells(rawLine);
-                if (!tableHeaderWritten) { html.Append("<div class=\"md-table-scroll\"><table><thead><tr").Append(sourceAttributes).Append(">"); AppendTableCells(html, cells, "th", sourceOffset, markdownPath); html.Append("</tr></thead><tbody>"); tableHeaderWritten = true; }
-                else { html.Append("<tr").Append(sourceAttributes).Append(">"); AppendTableCells(html, cells, "td", sourceOffset, markdownPath); html.Append("</tr>"); }
+                if (!tableHeaderWritten) { html.Append("<div class=\"md-table-scroll\"><table><thead><tr").Append(sourceAttributes).Append(">"); AppendTableCells(html, cells, "th", sourceOffset, markdownPath, imageBudget); html.Append("</tr></thead><tbody>"); tableHeaderWritten = true; }
+                else { html.Append("<tr").Append(sourceAttributes).Append(">"); AppendTableCells(html, cells, "td", sourceOffset, markdownPath, imageBudget); html.Append("</tr>"); }
                 sourceOffset += sourceLineLengths[lineIndex];
                 continue;
             }
             if (inTable) { html.Append("</tbody></table></div>"); inTable = false; }
             Match heading = Regex.Match(line, "^(#{1,6})\\s+(.+)$");
-            if (heading.Success) { CloseList(html, ref inList); int level = heading.Groups[1].Value.Length; html.Append("<h").Append(level).Append(sourceAttributes).Append('>').Append(Inline(rawLine[(level + 1)..], sourceOffset + level + 1, markdownPath)).Append("</h").Append(level).Append('>'); sourceOffset += sourceLineLengths[lineIndex]; continue; }
-            if (line.StartsWith("> ")) { html.Append("<blockquote").Append(sourceAttributes).Append(">").Append(Inline(rawLine[2..], sourceOffset + 2, markdownPath)).Append("</blockquote>"); sourceOffset += sourceLineLengths[lineIndex]; continue; }
-            if (line.StartsWith("- ") || line.StartsWith("* ")) { if (!inList) { html.Append("<ul>"); inList = true; } html.Append("<li").Append(sourceAttributes).Append(">").Append(Inline(rawLine[2..], sourceOffset + 2, markdownPath)).Append("</li>"); sourceOffset += sourceLineLengths[lineIndex]; continue; }
+            if (heading.Success) { CloseList(html, ref inList); int level = heading.Groups[1].Value.Length; html.Append("<h").Append(level).Append(sourceAttributes).Append('>').Append(Inline(rawLine[(level + 1)..], sourceOffset + level + 1, markdownPath, imageBudget)).Append("</h").Append(level).Append('>'); sourceOffset += sourceLineLengths[lineIndex]; continue; }
+            if (line.StartsWith("> ")) { html.Append("<blockquote").Append(sourceAttributes).Append(">").Append(Inline(rawLine[2..], sourceOffset + 2, markdownPath, imageBudget)).Append("</blockquote>"); sourceOffset += sourceLineLengths[lineIndex]; continue; }
+            if (line.StartsWith("- ") || line.StartsWith("* ")) { if (!inList) { html.Append("<ul>"); inList = true; } html.Append("<li").Append(sourceAttributes).Append(">").Append(Inline(rawLine[2..], sourceOffset + 2, markdownPath, imageBudget)).Append("</li>"); sourceOffset += sourceLineLengths[lineIndex]; continue; }
             CloseList(html, ref inList);
-            html.Append(string.IsNullOrWhiteSpace(line) ? $"<br{sourceAttributes}>" : $"<p{sourceAttributes}>{Inline(rawLine, sourceOffset, markdownPath)}</p>");
+            html.Append(string.IsNullOrWhiteSpace(line) ? $"<br{sourceAttributes}>" : $"<p{sourceAttributes}>{Inline(rawLine, sourceOffset, markdownPath, imageBudget)}</p>");
             sourceOffset += sourceLineLengths[lineIndex];
         }
         if (inTable) html.Append("</tbody></table></div>");
         CloseList(html, ref inList);
+        if (imageBudget.WasLimited) html.Append("<p class=\"md-image-fallback\">[一部画像プレビューを資源上限で省略しました]</p>");
         return html.Append("</body></html>").ToString();
     }
 
-    private static string Inline(string source, int sourceOffset, string? markdownPath)
+    private static string Inline(string source, int sourceOffset, string? markdownPath, MarkdownInlineImageResolver.PreviewBudget imageBudget)
     {
         var result = new StringBuilder();
         int cursor = 0;
@@ -75,7 +77,7 @@ public static class MarkdownHtmlRenderer
             string attributes = SourceAttributes(sourceOffset + match.Index, match.Length);
             if (match.Groups[1].Success)
             {
-                if (MarkdownInlineImageResolver.TryCreateDataUri(markdownPath, target, out string? dataUri, out int displayWidth, out int displayHeight))
+                if (MarkdownInlineImageResolver.TryCreateDataUri(markdownPath, target, out string? dataUri, out int displayWidth, out int displayHeight, imageBudget))
                 {
                     bool constrainedPreview = displayWidth > 0 && displayHeight > 0;
                     if (constrainedPreview)
@@ -138,9 +140,9 @@ public static class MarkdownHtmlRenderer
         return cells;
     }
 
-    private static void AppendTableCells(StringBuilder html, IEnumerable<TableCell> cells, string tag, int sourceOffset, string? markdownPath)
+    private static void AppendTableCells(StringBuilder html, IEnumerable<TableCell> cells, string tag, int sourceOffset, string? markdownPath, MarkdownInlineImageResolver.PreviewBudget imageBudget)
     {
-        foreach (TableCell cell in cells) html.Append('<').Append(tag).Append('>').Append(Inline(cell.Text, sourceOffset + cell.SourceOffset, markdownPath)).Append("</").Append(tag).Append('>');
+        foreach (TableCell cell in cells) html.Append('<').Append(tag).Append('>').Append(Inline(cell.Text, sourceOffset + cell.SourceOffset, markdownPath, imageBudget)).Append("</").Append(tag).Append('>');
     }
     private static void CloseList(StringBuilder html, ref bool inList)
     {

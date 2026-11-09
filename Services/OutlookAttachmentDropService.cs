@@ -1,8 +1,11 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Runtime.InteropServices;
 using System.Runtime.InteropServices.ComTypes;
+using System.Runtime.ExceptionServices;
+using System.Threading;
 using System.Windows.Forms;
 using MidFD.Helpers;
 
@@ -33,15 +36,17 @@ namespace MidFD.Services
         public bool AllSucceeded => AttachmentCount > 0 && SuccessCount == AttachmentCount;
 
         public string Classification =>
-            HadFailure
-                ? AnySucceeded ? "partial-failure" : "failed"
-                : AttachmentCount == 0
-                    ? "no-op"
-                    : AllSucceeded
-                    ? "all-succeeded"
-                    : WasCanceled
-                        ? AnySucceeded ? "partial-canceled" : "canceled"
-                        : AnySucceeded ? "partial-skipped" : "skipped";
+            WasCanceled
+                ? HadFailure
+                    ? AnySucceeded ? "partial-canceled-with-failure" : "canceled-with-failure"
+                    : AnySucceeded ? "partial-canceled" : "canceled"
+                : HadFailure
+                    ? AnySucceeded ? "partial-failure" : "failed"
+                    : AttachmentCount == 0
+                        ? "no-op"
+                        : AllSucceeded
+                            ? "all-succeeded"
+                            : AnySucceeded ? "partial-skipped" : "skipped";
     }
 
     public static class OutlookAttachmentDropService
@@ -195,6 +200,23 @@ namespace MidFD.Services
             Func<string, OverwriteConfirmResult> confirmOverwrite,
             Action<string>? showTypeMismatch = null,
             Action<string, Exception?>? showCopyFailure = null)
+            => ProcessDrop(
+                data,
+                targetDir,
+                confirmOverwrite,
+                CancellationToken.None,
+                showTypeMismatch,
+                showCopyFailure);
+
+        public static OutlookAttachmentDropResult ProcessDrop(
+            System.Windows.Forms.IDataObject data,
+            string targetDir,
+            Func<string, OverwriteConfirmResult> confirmOverwrite,
+            CancellationToken cancellationToken,
+            Action<string>? showTypeMismatch = null,
+            Action<string, Exception?>? showCopyFailure = null,
+            IReadOnlyList<string>? attachmentNames = null,
+            Action<Action>? invokeComOwnerThread = null)
         {
             showTypeMismatch ??= destinationPath => MessageBox.Show(
                 $"型が異なるため上書きできません。\n宛先: {destinationPath}",
@@ -207,14 +229,17 @@ namespace MidFD.Services
                 MessageBoxButtons.OK,
                 MessageBoxIcon.Error);
 
-            var comDataObject = data as System.Runtime.InteropServices.ComTypes.IDataObject;
+            var comDataObject = SynchronousThreadDispatcher.Invoke(
+                invokeComOwnerThread,
+                () => data as System.Runtime.InteropServices.ComTypes.IDataObject);
             if (comDataObject == null)
             {
                 LogService.Warn("[OutlookDrop] DataObject cannot be cast to ComTypes.IDataObject.");
                 return LogResult(new OutlookAttachmentDropResult(0, 0, 0, 1, 0, false));
             }
 
-            var fileNames = GetAttachmentNames(data);
+            List<string> fileNames = attachmentNames?.ToList()
+                ?? SynchronousThreadDispatcher.Invoke(invokeComOwnerThread, () => GetAttachmentNames(data));
             if (fileNames.Count == 0)
             {
                 LogService.Warn("[OutlookDrop] No attachment names resolved.");
@@ -225,9 +250,15 @@ namespace MidFD.Services
                 fileNames,
                 targetDir,
                 confirmOverwrite,
-                (index, destPath) => SaveAttachmentFile(comDataObject, index, destPath),
+                (index, temporaryPath) => SaveAttachmentFile(
+                    comDataObject,
+                    index,
+                    temporaryPath,
+                    cancellationToken,
+                    invokeComOwnerThread),
                 showTypeMismatch,
-                showCopyFailure);
+                showCopyFailure,
+                cancellationToken);
         }
 
         internal static OutlookAttachmentDropResult ProcessAttachmentFiles(
@@ -237,6 +268,23 @@ namespace MidFD.Services
             Func<int, string, bool> saveAttachmentFile,
             Action<string> showTypeMismatch,
             Action<string, Exception?> showCopyFailure)
+            => ProcessAttachmentFiles(
+                fileNames,
+                targetDir,
+                confirmOverwrite,
+                saveAttachmentFile,
+                showTypeMismatch,
+                showCopyFailure,
+                CancellationToken.None);
+
+        internal static OutlookAttachmentDropResult ProcessAttachmentFiles(
+            IReadOnlyList<string> fileNames,
+            string targetDir,
+            Func<string, OverwriteConfirmResult> confirmOverwrite,
+            Func<int, string, bool> saveAttachmentFile,
+            Action<string> showTypeMismatch,
+            Action<string, Exception?> showCopyFailure,
+            CancellationToken cancellationToken)
         {
             int processedCount = 0;
             int successCount = 0;
@@ -246,6 +294,12 @@ namespace MidFD.Services
             var savedFileNames = new List<string>();
             for (int i = 0; i < fileNames.Count; i++)
             {
+                if (cancellationToken.IsCancellationRequested)
+                {
+                    wasCanceled = true;
+                    break;
+                }
+
                 processedCount++;
                 string fileName = fileNames[i];
                 string destPath = Path.Combine(targetDir, fileName);
@@ -275,26 +329,61 @@ namespace MidFD.Services
                     }
                 }
 
+                string temporaryPath = Path.Combine(
+                    targetDir,
+                    $".midfd-outlook-attachment-{Guid.NewGuid():N}.tmp");
+                bool ownsTemporaryFile = false;
                 try
                 {
-                    if (saveAttachmentFile(i, destPath))
+                    cancellationToken.ThrowIfCancellationRequested();
+                    using (var temporaryFile = new FileStream(
+                        temporaryPath,
+                        FileMode.CreateNew,
+                        FileAccess.Write,
+                        FileShare.None))
                     {
-                        successCount++;
-                        savedFileNames.Add(fileName);
+                        ownsTemporaryFile = true;
                     }
-                    else
+
+                    if (!saveAttachmentFile(i, temporaryPath))
                     {
                         failureCount++;
+                        wasCanceled |= cancellationToken.IsCancellationRequested;
                         LogService.Error($"[OutlookDrop] Failed to save virtual file index {i}: {fileName}; SaveAttachmentFile returned false.");
                         showCopyFailure(fileName, null);
+                        if (wasCanceled)
+                        {
+                            break;
+                        }
+                        continue;
                     }
+
+                    cancellationToken.ThrowIfCancellationRequested();
+                    PromoteTemporaryAttachment(temporaryPath, destPath, destExists);
+                    ownsTemporaryFile = false;
+                    successCount++;
+                    savedFileNames.Add(fileName);
+                }
+                catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                {
+                    wasCanceled = true;
+                    LogService.Info($"[OutlookDrop] Attachment save canceled: {fileName}");
+                    break;
                 }
                 catch (Exception ex)
                 {
                     failureCount++;
+                    wasCanceled |= cancellationToken.IsCancellationRequested;
                     LogService.Error($"[OutlookDrop] Failed to save virtual file index {i}: {fileName}", ex);
                     showCopyFailure(fileName, ex);
                     break;
+                }
+                finally
+                {
+                    if (ownsTemporaryFile)
+                    {
+                        TryDeleteTemporaryAttachment(temporaryPath);
+                    }
                 }
             }
 
@@ -319,8 +408,61 @@ namespace MidFD.Services
             return result;
         }
 
-        private static bool SaveAttachmentFile(System.Runtime.InteropServices.ComTypes.IDataObject comDataObject, int index, string destPath)
+        private static void PromoteTemporaryAttachment(
+            string temporaryPath,
+            string destinationPath,
+            bool overwriteConfirmed)
         {
+            if (Directory.Exists(destinationPath))
+            {
+                throw new IOException($"保存先にディレクトリが存在します: {destinationPath}");
+            }
+
+            if (!File.Exists(destinationPath))
+            {
+                // File.Move is deliberately non-overwriting: a new collision after the
+                // initial existence check must not replace data without confirmation.
+                File.Move(temporaryPath, destinationPath);
+                return;
+            }
+
+            if (!overwriteConfirmed)
+            {
+                throw new IOException($"確認後に同名ファイルが作成されたため上書きしません: {destinationPath}");
+            }
+
+            FileAttributes attributes = File.GetAttributes(destinationPath);
+            if ((attributes & FileAttributes.ReparsePoint) != 0)
+            {
+                throw new IOException($"再解析ポイントの既存ファイルは安全な置換方式を保証できません: {destinationPath}");
+            }
+
+            File.Replace(temporaryPath, destinationPath, destinationBackupFileName: null);
+        }
+
+        private static void TryDeleteTemporaryAttachment(string temporaryPath)
+        {
+            try
+            {
+                if (File.Exists(temporaryPath))
+                {
+                    File.Delete(temporaryPath);
+                }
+            }
+            catch (Exception ex)
+            {
+                LogService.Error($"[OutlookDrop] Failed to remove owned temporary file: {temporaryPath}", ex);
+            }
+        }
+
+        private static bool SaveAttachmentFile(
+            System.Runtime.InteropServices.ComTypes.IDataObject comDataObject,
+            int index,
+            string temporaryPath,
+            CancellationToken cancellationToken,
+            Action<Action>? invokeComOwnerThread)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
             FORMATETC formatetc = new FORMATETC
             {
                 cfFormat = (short)FileContentsFormat,
@@ -329,10 +471,18 @@ namespace MidFD.Services
                 tymed = TYMED.TYMED_ISTREAM
             };
 
-            STGMEDIUM medium;
+            STGMEDIUM medium = default;
+            bool mediumAcquired = false;
+            IStream? comStream = null;
             try
             {
-                comDataObject.GetData(ref formatetc, out medium);
+                medium = SynchronousThreadDispatcher.Invoke(invokeComOwnerThread, () =>
+                {
+                    FORMATETC request = formatetc;
+                    comDataObject.GetData(ref request, out STGMEDIUM acquiredMedium);
+                    return acquiredMedium;
+                });
+                mediumAcquired = true;
             }
             catch (Exception ex)
             {
@@ -340,50 +490,133 @@ namespace MidFD.Services
                 return false;
             }
 
-            if (medium.tymed == TYMED.TYMED_ISTREAM && medium.unionmember != IntPtr.Zero)
+            try
             {
-                // COM IStream を .NET IStream にラップして読み込む
-                var comStream = Marshal.GetObjectForIUnknown(medium.unionmember) as IStream;
+                if (medium.tymed != TYMED.TYMED_ISTREAM || medium.unionmember == IntPtr.Zero)
+                {
+                    return false;
+                }
+
+                // GetData、IStream操作、COM解放はすべて IDataObject の所有STAで行う。
+                comStream = SynchronousThreadDispatcher.Invoke(
+                    invokeComOwnerThread,
+                    () => Marshal.GetObjectForIUnknown(medium.unionmember) as IStream);
+                if (comStream == null)
+                {
+                    return false;
+                }
+
+                using var destFileStream = new FileStream(
+                    temporaryPath,
+                    FileMode.Truncate,
+                    FileAccess.Write,
+                    FileShare.None);
+                byte[] buffer = new byte[8192];
+                while (true)
+                {
+                    // A blocking COM Read cannot be interrupted; cancellation is
+                    // accepted at the boundaries around each read/write iteration.
+                    cancellationToken.ThrowIfCancellationRequested();
+                    int bytesRead = SynchronousThreadDispatcher.Invoke(invokeComOwnerThread, () =>
+                    {
+                        IntPtr pBytesRead = Marshal.AllocHGlobal(sizeof(int));
+                        try
+                        {
+                            comStream.Read(buffer, buffer.Length, pBytesRead);
+                            return Marshal.ReadInt32(pBytesRead);
+                        }
+                        finally
+                        {
+                            Marshal.FreeHGlobal(pBytesRead);
+                        }
+                    });
+
+                    cancellationToken.ThrowIfCancellationRequested();
+                    if (bytesRead == 0)
+                    {
+                        break;
+                    }
+                    if (bytesRead < 0 || bytesRead > buffer.Length)
+                    {
+                        throw new IOException($"添付ストリームが不正な読み取り長を返しました: {bytesRead}");
+                    }
+
+                    cancellationToken.ThrowIfCancellationRequested();
+                    destFileStream.Write(buffer, 0, bytesRead);
+                }
+
+                cancellationToken.ThrowIfCancellationRequested();
+                return true;
+            }
+            finally
+            {
+                Action? releaseComStream = null;
                 if (comStream != null)
                 {
-                    try
+                    IStream streamToRelease = comStream;
+                    releaseComStream = () => SynchronousThreadDispatcher.Invoke(invokeComOwnerThread, () =>
                     {
-                        using (var destFileStream = new FileStream(destPath, FileMode.Create, FileAccess.Write, FileShare.None))
+                        if (Marshal.IsComObject(streamToRelease))
                         {
-                            byte[] buffer = new byte[8192];
-                            int bytesRead;
-                            do
-                            {
-                                IntPtr pBytesRead = Marshal.AllocHGlobal(sizeof(int));
-                                try
-                                {
-                                    comStream.Read(buffer, buffer.Length, pBytesRead);
-                                    bytesRead = Marshal.ReadInt32(pBytesRead);
-                                }
-                                finally
-                                {
-                                    Marshal.FreeHGlobal(pBytesRead);
-                                }
-
-                                if (bytesRead > 0)
-                                {
-                                    destFileStream.Write(buffer, 0, bytesRead);
-                                }
-                            } while (bytesRead > 0);
+                            Marshal.ReleaseComObject(streamToRelease);
                         }
-                        return true;
-                    }
-                    finally
-                    {
-                        Marshal.ReleaseComObject(comStream);
-                        // STGMEDIUM を解放
-                        ReleaseStgMedium(ref medium);
-                    }
+                    });
                 }
+
+                Action? releaseStorageMedium = null;
+                if (mediumAcquired)
+                {
+                    releaseStorageMedium = () => SynchronousThreadDispatcher.Invoke(invokeComOwnerThread, () =>
+                    {
+                        STGMEDIUM releaseMedium = medium;
+                        ReleaseStgMedium(ref releaseMedium);
+                    });
+                }
+
+                ReleaseAttachmentResources(releaseComStream, releaseStorageMedium);
+            }
+        }
+
+        internal static void ReleaseAttachmentResources(Action? releaseComObject, Action? releaseStgMedium)
+        {
+            Exception? comReleaseFailure = null;
+            Exception? mediumReleaseFailure = null;
+
+            try
+            {
+                releaseComObject?.Invoke();
+            }
+            catch (Exception ex)
+            {
+                comReleaseFailure = ex;
             }
 
-            ReleaseStgMedium(ref medium);
-            return false;
+            try
+            {
+                releaseStgMedium?.Invoke();
+            }
+            catch (Exception ex)
+            {
+                mediumReleaseFailure = ex;
+            }
+
+            if (comReleaseFailure != null && mediumReleaseFailure != null)
+            {
+                throw new AggregateException(
+                    "Both Outlook COM stream and storage medium cleanup failed.",
+                    comReleaseFailure,
+                    mediumReleaseFailure);
+            }
+
+            if (comReleaseFailure != null)
+            {
+                ExceptionDispatchInfo.Capture(comReleaseFailure).Throw();
+            }
+
+            if (mediumReleaseFailure != null)
+            {
+                ExceptionDispatchInfo.Capture(mediumReleaseFailure).Throw();
+            }
         }
 
         [DllImport("ole32.dll")]

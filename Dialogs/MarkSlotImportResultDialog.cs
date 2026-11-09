@@ -22,7 +22,7 @@ public sealed class MarkSlotImportResultDialog : Form
         _summary = new Label
         {
             Dock = DockStyle.Top,
-            Height = 70,
+            Height = 82,
             Padding = new Padding(10, 8, 10, 4),
             AutoEllipsis = true,
             Text = BuildSummary(result)
@@ -45,7 +45,13 @@ public sealed class MarkSlotImportResultDialog : Form
         AddPaths(result);
 
         var footer = new Panel { Dock = DockStyle.Bottom, Height = 48, Padding = new Padding(0, 6, 10, 6) };
-        _okButton = new Button { Text = "OK", DialogResult = DialogResult.OK, AutoSize = true, Dock = DockStyle.Right };
+        _okButton = new Button
+        {
+            Text = "OK",
+            DialogResult = DialogResult.OK,
+            AutoSize = true,
+            Dock = DockStyle.Right
+        };
         footer.Controls.Add(_okButton);
         Controls.Add(_paths);
         Controls.Add(_summary);
@@ -95,6 +101,7 @@ public sealed class MarkSlotImportResultDialog : Form
 
     private static string BuildSummary(MarkSlotClipboardActionResult result)
     {
+        string countSummary = BuildCountSummary(result);
         string ignored = result.IgnoredEarlierResultCount > 0
             ? $"\n末尾RESULT採用（過去{result.IgnoredEarlierResultCount}件を無視）"
             : string.Empty;
@@ -103,8 +110,13 @@ public sealed class MarkSlotImportResultDialog : Form
             + result.MissingFileCount
             + result.DirectoryPathCount
             + result.DuplicatePathCount;
-        return $"現在Markに反映: {result.RegisteredCount}件（RESULT報告{reportedCount}件中の有効file）\n未解決: {unresolvedCount}件（削除・不存在: {result.MissingFileCount}件 / directory: {result.DirectoryPathCount}件） / 重複: {result.DuplicatePathCount}件{ignored}";
+        return $"{countSummary}現在Markに反映: {result.RegisteredCount}件（RESULT報告{reportedCount}件中の有効file）\n回復: {result.RecoveredEntryCount}件 / 未解決: {unresolvedCount}件（削除・不存在: {result.MissingFileCount}件 / directory: {result.DirectoryPathCount}件） / 重複: {result.DuplicatePathCount}件{ignored}";
     }
+
+    private static string BuildCountSummary(MarkSlotClipboardActionResult result)
+        => result.DeclaredCount.HasValue
+            ? $"宣言: {result.DeclaredCount.Value}件 / 列挙: {result.ListedEntryCount}entry / 有効file: {result.RegisteredCount}件\n"
+            : string.Empty;
 
     private static string GetRelativePath(string? repositoryRoot, string fullPath)
     {
@@ -138,5 +150,7 @@ public sealed class MarkSlotImportResultDialog : Form
     internal IReadOnlyList<string> RelativePathsForTest => _paths.Items.Cast<ListViewItem>().Select(item => item.SubItems[1].Text).ToList();
     internal IReadOnlyList<string> FullPathsForTest => _paths.Items.Cast<ListViewItem>().Select(item => item.Tag as string ?? string.Empty).ToList();
     internal string SummaryTextForTest => _summary.Text;
+    internal string ApplyButtonTextForTest => _okButton.Text;
+    internal void ApplyForTest() => _okButton.PerformClick();
     internal void HandleKeyForTest(Keys key) => OnKeyDown(new KeyEventArgs(key));
 }

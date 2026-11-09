@@ -1,0 +1,38 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AssemblyName>MidPlayer.Lite</AssemblyName>
+    <RootNamespace>MidFD</RootNamespace>
+    <PlatformTarget Condition="'$(PlatformTarget)' == ''">x64</PlatformTarget>
+    <MidPlayerPlatformTarget>$(PlatformTarget)</MidPlayerPlatformTarget>
+    <IntermediateOutputPath Condition="'$(MidPlayerBuildRoot)' != ''">$(MidPlayerBuildRoot)\obj\Lite\$(Configuration)\$(TargetFramework)\$(MidPlayerPlatformTarget)\$(RuntimeIdentifier)\</IntermediateOutputPath>
+    <OutputPath Condition="'$(MidPlayerBuildRoot)' != ''">$(MidPlayerBuildRoot)\Lite\$(Configuration)\$(TargetFramework)\$(RuntimeIdentifier)\</OutputPath>
+    <AppendTargetFrameworkToOutputPath Condition="'$(MidPlayerBuildRoot)' != ''">false</AppendTargetFrameworkToOutputPath>
+    <AppendRuntimeIdentifierToOutputPath Condition="'$(MidPlayerBuildRoot)' != ''">false</AppendRuntimeIdentifierToOutputPath>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Remove="artifacts\**\*;Program.cs;ImageViewerIpcClient.cs;LibVlcPlaybackBackend.cs;VideoCodecProbe.cs;FullVideoPlaybackExtension.cs;AssemblyForwarders.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Svg" Version="3.4.7" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Compile Include="../../Configuration/SusiePluginSettings.cs" Link="Configuration/SusiePluginSettings.cs" />
+    <Compile Include="../../Configuration/VideoPlaybackBackendKind.cs" Link="Configuration/VideoPlaybackBackendKind.cs" />
+    <Compile Include="../SusieHost/SusieHostProtocol.cs" Link="SusieHost/SusieHostProtocol.cs" />
+    <Compile Include="../../Services/ImagePreviewService.cs" Link="Services/ImagePreviewService.cs" />
+    <Compile Include="../../Services/VideoMediaCatalog.cs" Link="Services/VideoMediaCatalog.cs" />
+    <Compile Include="../../Services/VideoPlaybackLaunchService.cs" Link="Services/VideoPlaybackLaunchService.cs" />
+    <Compile Include="../../Services/VideoToolResolutionService.cs" Link="Services/VideoToolResolutionService.cs" />
+    <Compile Include="../../Services/SvgClipboardExportService.cs" Link="Services/SvgClipboardExportService.cs" />
+    <Compile Include="../../Services/ImageQuantizationService.cs" Link="Services/ImageQuantizationService.cs" />
+    <Compile Include="../../Dialogs/ImageQuantizationDialog.cs" Link="Dialogs/ImageQuantizationDialog.cs" />
+    <Compile Include="../../Helpers/DialogKeyboardHelper.cs" Link="Helpers/DialogKeyboardHelper.cs" />
+  </ItemGroup>
+</Project>

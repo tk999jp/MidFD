@@ -15,6 +15,7 @@ public sealed class BrowserNavigationCoordinator
         public string? FocusTargetName { get; init; }
         public bool IsHistoryNavigation { get; init; }
         public bool SuppressRecent { get; init; }
+        public bool RequireFocusTarget { get; init; }
     }
 
     public DirectoryNavigationRequest? CreateParentNavigationRequest(string currentPath)
@@ -39,14 +40,16 @@ public sealed class BrowserNavigationCoordinator
         string targetPath,
         string? focusTargetName = null,
         bool isHistoryNavigation = false,
-        bool suppressRecent = false)
+        bool suppressRecent = false,
+        bool requireFocusTarget = false)
     {
         return new DirectoryNavigationRequest
         {
             TargetPath = targetPath,
             FocusTargetName = focusTargetName,
             IsHistoryNavigation = isHistoryNavigation,
-            SuppressRecent = suppressRecent
+            SuppressRecent = suppressRecent,
+            RequireFocusTarget = requireFocusTarget
         };
     }
 

@@ -28,6 +28,8 @@ partial class ImageViewerForm
         this.menuPaste = new System.Windows.Forms.ToolStripMenuItem();
         this.statusStrip1 = new System.Windows.Forms.StatusStrip();
         this.statusLabel = new System.Windows.Forms.ToolStripStatusLabel();
+        this.decoderStatusLabel = new System.Windows.Forms.ToolStripStatusLabel();
+        this._imagePresentationLockButton = new System.Windows.Forms.ToolStripButton();
         this.imageScrollPanel.SuspendLayout();
         ((System.ComponentModel.ISupportInitialize)(this.pictureBox1)).BeginInit();
         this.menuStrip1.SuspendLayout();
@@ -52,7 +54,7 @@ partial class ImageViewerForm
         this.pictureBox1.SizeMode = System.Windows.Forms.PictureBoxSizeMode.StretchImage;
         this.pictureBox1.TabIndex = 0;
         this.pictureBox1.TabStop = false;
-        this.pictureBox1.BackColor = System.Drawing.Color.FromArgb(30, 30, 30);
+        this.pictureBox1.BackColor = System.Drawing.SystemColors.Control;
         //
         // menuStrip1
         //
@@ -80,7 +82,7 @@ partial class ImageViewerForm
         this.menuOpen.Name = "menuOpen";
         this.menuOpen.ShortcutKeys = ((System.Windows.Forms.Keys)((System.Windows.Forms.Keys.Control | System.Windows.Forms.Keys.O)));
         this.menuOpen.Size = new System.Drawing.Size(204, 22);
-        this.menuOpen.Text = "開く(&O)";
+        this.menuOpen.Text = "メディアを開く(&O)";
         this.menuOpen.Click += new System.EventHandler(this.menuOpen_Click);
         //
         // menuSaveAs
@@ -126,30 +128,65 @@ partial class ImageViewerForm
         // statusStrip1
         //
         this.statusStrip1.Items.AddRange(new System.Windows.Forms.ToolStripItem[] {
-        this.statusLabel});
+        this.statusLabel,
+        this.decoderStatusLabel,
+        this._imagePresentationLockButton});
         this.statusStrip1.Location = new System.Drawing.Point(0, 428);
         this.statusStrip1.Name = "statusStrip1";
         this.statusStrip1.Size = new System.Drawing.Size(800, 22);
         this.statusStrip1.TabIndex = 3;
+        this.statusStrip1.BackColor = System.Drawing.SystemColors.Control;
+        this.statusStrip1.ForeColor = System.Drawing.SystemColors.ControlText;
         //
         // statusLabel
         //
         this.statusLabel.Name = "statusLabel";
         this.statusLabel.Size = new System.Drawing.Size(39, 17);
+        this.statusLabel.Spring = true;
+        this.statusLabel.TextAlign = System.Drawing.ContentAlignment.MiddleLeft;
+        this.statusLabel.BackColor = System.Drawing.SystemColors.Control;
+        this.statusLabel.ForeColor = System.Drawing.SystemColors.ControlText;
         this.statusLabel.Text = "倍率 0%";
+        //
+        // decoderStatusLabel
+        //
+        this.decoderStatusLabel.Alignment = System.Windows.Forms.ToolStripItemAlignment.Right;
+        this.decoderStatusLabel.Name = "decoderStatusLabel";
+        this.decoderStatusLabel.Size = new System.Drawing.Size(0, 17);
+        this.decoderStatusLabel.BackColor = System.Drawing.SystemColors.Control;
+        this.decoderStatusLabel.ForeColor = System.Drawing.SystemColors.ControlText;
+        this.decoderStatusLabel.Text = "";
+        //
+        // _imagePresentationLockButton
+        //
+        this._imagePresentationLockButton.Alignment = System.Windows.Forms.ToolStripItemAlignment.Right;
+        this._imagePresentationLockButton.AccessibleName = "固定: OFF（追従）";
+        this._imagePresentationLockButton.AccessibleDescription = "クリックすると現在の画像を固定します。";
+        this._imagePresentationLockButton.AccessibleRole = System.Windows.Forms.AccessibleRole.CheckButton;
+        this._imagePresentationLockButton.AutoSize = true;
+        this._imagePresentationLockButton.CheckOnClick = false;
+        this._imagePresentationLockButton.DisplayStyle = System.Windows.Forms.ToolStripItemDisplayStyle.Text;
+        this._imagePresentationLockButton.Enabled = false;
+        this._imagePresentationLockButton.Name = "imagePresentationLockButton";
+        this._imagePresentationLockButton.Overflow = System.Windows.Forms.ToolStripItemOverflow.Never;
+        this._imagePresentationLockButton.Size = new System.Drawing.Size(111, 17);
+        this._imagePresentationLockButton.Text = "固定: OFF（追従）";
+        this._imagePresentationLockButton.ToolTipText = "固定: OFF（追従）。クリックすると現在の画像を固定します。";
+        this._imagePresentationLockButton.Visible = false;
         //
         // ImageViewerForm
         //
-        this.AutoScaleDimensions = new System.Drawing.SizeF(7F, 15F);
-        this.AutoScaleMode = System.Windows.Forms.AutoScaleMode.Font;
+        this.AutoScaleDimensions = new System.Drawing.SizeF(96F, 96F);
+        this.AutoScaleMode = System.Windows.Forms.AutoScaleMode.Dpi;
         this.ClientSize = new System.Drawing.Size(800, 450);
+        this.MinimumSize = new System.Drawing.Size(560, 320);
         this.Controls.Add(this.imageScrollPanel);
         this.Controls.Add(this.statusStrip1);
         this.Controls.Add(this.menuStrip1);
         this.MainMenuStrip = this.menuStrip1;
         this.Name = "ImageViewerForm";
         this.Text = "MidFD Image Viewer";
-        this.BackColor = System.Drawing.Color.FromArgb(30, 30, 30);
+        this.BackColor = System.Drawing.SystemColors.Control;
         this.imageScrollPanel.ResumeLayout(false);
         ((System.ComponentModel.ISupportInitialize)(this.pictureBox1)).EndInit();
         this.menuStrip1.ResumeLayout(false);
@@ -172,4 +209,6 @@ partial class ImageViewerForm
     private System.Windows.Forms.ToolStripMenuItem menuPaste;
     private System.Windows.Forms.StatusStrip statusStrip1;
     private System.Windows.Forms.ToolStripStatusLabel statusLabel;
+    private System.Windows.Forms.ToolStripStatusLabel decoderStatusLabel;
+    private System.Windows.Forms.ToolStripButton _imagePresentationLockButton;
 }

@@ -16,28 +16,20 @@ public enum AuthorToolsCommand
 
 public static class AuthorToolsStartup
 {
-    public const string EnableArgument = "--enable-author-tools";
-    public const string DisableArgument = "--disable-author-tools";
+    public const string EnableArgument = StartupArgumentCatalog.EnableAuthorToolsName;
+    public const string DisableArgument = StartupArgumentCatalog.DisableAuthorToolsName;
 
     public static AuthorToolsCommand ParseArguments(IEnumerable<string> args)
-    {
-        bool enableRequested = args.Any(arg => string.Equals(arg, EnableArgument, StringComparison.OrdinalIgnoreCase));
-        bool disableRequested = args.Any(arg => string.Equals(arg, DisableArgument, StringComparison.OrdinalIgnoreCase));
-        return (enableRequested, disableRequested) switch
-        {
-            (true, true) => AuthorToolsCommand.Conflict,
-            (true, false) => AuthorToolsCommand.Enable,
-            (false, true) => AuthorToolsCommand.Disable,
-            _ => AuthorToolsCommand.None
-        };
-    }
+        => StartupArgumentParser.Parse(args).AuthorToolsCommand;
 
     public static AuthorToolsStartupResult Resolve(string[] args)
+        => Resolve(StartupArgumentParser.Parse(args).AuthorToolsCommand);
+
+    public static AuthorToolsStartupResult Resolve(AuthorToolsCommand command)
     {
         bool enabled = AuthorToolsStateStore.Load(out bool storedEnabled, out string? loadError)
             ? storedEnabled
             : false;
-        AuthorToolsCommand command = ParseArguments(args);
 
         if (command == AuthorToolsCommand.Conflict)
         {

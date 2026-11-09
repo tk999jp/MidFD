@@ -56,6 +56,20 @@ public static class BrowserCommandBindingResolver
             {
                 result.Remove(gesture);
             }
+
+            if (CommandIds.TryGetBrowserColumnCount(commandId, out _) &&
+                defaults.TryGetValue(commandId, out IReadOnlyList<string>? columnCountDefaults))
+            {
+                foreach (string gesture in columnCountDefaults.Select(InputSettings.NormalizeKeyGestureText))
+                {
+                    if (IsUsableKeyboardGesture(gesture))
+                    {
+                        // NumPad structural input is a default binding; an explicit per-command override
+                        // must suppress it unless an explicit gesture claim restores that key below.
+                        result[gesture] = InputSettings.MouseGestureUnassignedCommandId;
+                    }
+                }
+            }
         }
 
         // Empty-list and explicit none both consume the command's former default gestures.

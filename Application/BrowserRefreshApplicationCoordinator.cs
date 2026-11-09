@@ -155,26 +155,77 @@ internal sealed class BrowserRefreshApplicationCoordinator
         {
             return null;
         }
-        if (!_state.CountAuditGate.TryEnter())
+        lock (_state.CountAuditSyncRoot)
         {
-            return null;
-        }
+            Guid operationId = Guid.NewGuid();
+            if (!_state.CountAuditGate.TryEnter(operationId))
+            {
+                return null;
+            }
 
-        CancelCountAudit();
-        var cts = new CancellationTokenSource();
-        _state.CountAuditCancellation = cts;
-        return new BrowserCountAuditRequest(
-            currentPath,
-            showHiddenFiles,
-            _state.CurrentDirectoryWatcherGeneration,
-            _state.DirectoryNavigationGeneration,
-            _state.DirectoryContentGeneration,
-            cts.Token);
+            var cts = new CancellationTokenSource();
+            _state.CountAuditCancellation = cts;
+            _state.CountAuditOperationId = operationId;
+            return new BrowserCountAuditRequest(
+                operationId,
+                currentPath,
+                showHiddenFiles,
+                _state.CurrentDirectoryWatcherGeneration,
+                _state.DirectoryNavigationGeneration,
+                _state.DirectoryContentGeneration,
+                cts.Token);
+        }
     }
 
-    public void CompleteCountAudit()
+    public void CompleteCountAudit(Guid operationId)
     {
-        _state.CountAuditGate.Exit();
+        ReleaseCountAudit(operationId);
+    }
+
+    public BrowserCountAuditApplyResult CompleteCountAudit(
+        BrowserCountAuditRequest request,
+        int rawDirectoryEntryCount,
+        string? currentPath,
+        bool isExitPending,
+        bool isDisposed)
+    {
+        lock (_state.CountAuditSyncRoot)
+        {
+            if (_state.CountAuditOperationId != request.OperationId)
+            {
+                return BrowserCountAuditApplyResult.Stale;
+            }
+
+            try
+            {
+                bool stale = request.Token.IsCancellationRequested || isExitPending || isDisposed ||
+                    request.NavigationGeneration != _state.DirectoryNavigationGeneration ||
+                    request.ContentGeneration != _state.DirectoryContentGeneration ||
+                    request.WatcherGeneration != _state.CurrentDirectoryWatcherGeneration ||
+                    !string.Equals(
+                        NormalizeDirectoryWatchPath(request.CurrentPath),
+                        NormalizeDirectoryWatchPath(currentPath),
+                        StringComparison.OrdinalIgnoreCase);
+                if (stale)
+                {
+                    return BrowserCountAuditApplyResult.Stale;
+                }
+
+                BrowserCountAuditApplyTransition transition = ApplyCountAudit(
+                    request.CurrentPath,
+                    request.WatcherGeneration,
+                    rawDirectoryEntryCount);
+                return new BrowserCountAuditApplyResult(
+                    IsStale: false,
+                    transition.Changed,
+                    transition.NextIntervalMilliseconds,
+                    FilteredTotalItemCount);
+            }
+            finally
+            {
+                ReleaseCountAudit(request.OperationId);
+            }
+        }
     }
 
     public BrowserCountAuditApplyTransition ApplyCountAudit(
@@ -192,10 +243,32 @@ internal sealed class BrowserRefreshApplicationCoordinator
 
     public void CancelCountAudit()
     {
-        _state.CountAuditCancellation?.Cancel();
-        _state.CountAuditCancellation?.Dispose();
-        _state.CountAuditCancellation = null;
+        lock (_state.CountAuditSyncRoot)
+        {
+            _state.CountAuditCancellation?.Cancel();
+        }
     }
+
+    private void ReleaseCountAudit(Guid operationId)
+    {
+        lock (_state.CountAuditSyncRoot)
+        {
+            if (_state.CountAuditOperationId != operationId)
+            {
+                return;
+            }
+
+            _state.CountAuditCancellation?.Dispose();
+            _state.CountAuditCancellation = null;
+            _state.CountAuditOperationId = null;
+            _state.CountAuditGate.Exit(operationId);
+        }
+    }
+
+    private static string NormalizeDirectoryWatchPath(string? path) =>
+        string.IsNullOrWhiteSpace(path)
+            ? string.Empty
+            : NavigationService.NormalizeDirectoryForCompare(path);
 
     public BrowserWatcherPlan PrepareWatcher(
         string? currentPath,
@@ -268,6 +341,7 @@ internal readonly record struct BrowserRefreshCompletion(
     int QuietWindowMilliseconds);
 
 internal readonly record struct BrowserCountAuditRequest(
+    Guid OperationId,
     string CurrentPath,
     bool ShowHiddenFiles,
     long WatcherGeneration,

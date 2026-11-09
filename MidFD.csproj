@@ -6,12 +6,12 @@
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <ApplicationIcon>Assets\appicon\MidFD.ico</ApplicationIcon>
-
     <Version>0.0.0</Version>
     <AssemblyVersion>0.0.0.0</AssemblyVersion>
     <FileVersion>0.0.0.0</FileVersion>
     <InformationalVersion>dev</InformationalVersion>
     <IncludeSourceRevisionInInformationalVersion>true</IncludeSourceRevisionInInformationalVersion>
+    <MidPlayerIncludeLibVlc Condition="'$(MidPlayerIncludeLibVlc)' == ''">false</MidPlayerIncludeLibVlc>
   </PropertyGroup>
 
   <ItemGroup>
@@ -23,33 +23,69 @@
   <ItemGroup>
     <Content Include="third_party\ripgrep\win-x64\rg.exe" TargetPath="rg.exe" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
     <Content Include="third_party\ripgrep\LICENSE-MIT;third_party\ripgrep\UNLICENSE;third_party\ripgrep\COPYING;third_party\ripgrep\manifest.json" TargetPath="licenses\ripgrep\%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
-    <Content Include="Assets\appicon\MidFD.ico">
-      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-    </Content>
-    <ProjectReference Include="src\MidFD.FileOperationHelper\MidFD.FileOperationHelper.csproj"
-                      ReferenceOutputAssembly="false"
-                      BuildReference="true"
-                      PrivateAssets="all" />
+    <Content Include="Assets\appicon\MidFD.ico"><CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory></Content>
+    <ProjectReference Include="src\MidFD.FileOperationHelper\MidFD.FileOperationHelper.csproj" ReferenceOutputAssembly="false" BuildReference="true" PrivateAssets="all" />
+    <ProjectReference Include="src\MidPlayer\MidPlayer.Lite.csproj">
+      <Aliases>MidPlayerLite</Aliases>
+      <SkipGetTargetFrameworkProperties>true</SkipGetTargetFrameworkProperties>
+      <SetTargetFramework>TargetFramework=net10.0-windows</SetTargetFramework>
+    </ProjectReference>
+    <ProjectReference Include="src\MidPlayer\MidPlayer.Full.csproj"
+                      Condition="'$(MidPlayerIncludeLibVlc)' == 'true'">
+      <Aliases>MidPlayerFull</Aliases>
+      <SkipGetTargetFrameworkProperties>true</SkipGetTargetFrameworkProperties>
+      <SetTargetFramework>TargetFramework=net10.0-windows</SetTargetFramework>
+    </ProjectReference>
   </ItemGroup>
 
-  <Target Name="CopyFileOperationHelperOutput" AfterTargets="Build">
-    <ItemGroup>
-      <FileOperationHelperOutput Include="src\MidFD.FileOperationHelper\bin\$(Configuration)\net10.0-windows\*" />
-    </ItemGroup>
-    <Copy SourceFiles="@(FileOperationHelperOutput)" DestinationFolder="$(TargetDir)" SkipUnchangedFiles="true" />
-  </Target>
-
-  <Target Name="PublishFileOperationHelper" AfterTargets="Publish">
-    <MSBuild Projects="src\MidFD.FileOperationHelper\MidFD.FileOperationHelper.csproj"
-             Targets="Publish"
-             Properties="Configuration=$(Configuration);PublishDir=$(PublishDir);PublishReadyToRun=$(PublishReadyToRun);SelfContained=$(SelfContained)" />
-  </Target>
-
   <ItemGroup>
+    <Compile Remove="Services\ImageViewerProcessClient.cs" />
     <Compile Remove="artifacts\**\*;scratch\**\*;tests\**\*;src\**\*" />
+    <Compile Include="src\MidPlayer\ImageViewerSettings.cs" Link="ImageViewer\ImageViewerSettings.cs" />
+    <Compile Include="src\MidPlayer\ViewerIpcMessage.cs" Link="ViewerIpc\ViewerIpcMessage.cs" />
     <EmbeddedResource Remove="artifacts\**\*;scratch\**\*;tests\**\*;src\**\*" />
     <Content Remove="artifacts\**\*;scratch\**\*;tests\**\*;src\**\*" />
     <None Remove="artifacts\**\*;scratch\**\*;tests\**\*;src\**\*" />
   </ItemGroup>
 
+  <Target Name="CopyFileOperationHelperOutput" AfterTargets="Build">
+    <PropertyGroup>
+      <FileOperationHelperOutputDirectory Condition="'$(MidFDBuildRoot)' != '' and '$(RuntimeIdentifier)' != ''">$(MidFDBuildRoot)\MidFD.FileOperationHelper\$(Configuration)\net10.0-windows\$(RuntimeIdentifier)</FileOperationHelperOutputDirectory>
+      <FileOperationHelperOutputDirectory Condition="'$(MidFDBuildRoot)' != '' and '$(RuntimeIdentifier)' == ''">$(MidFDBuildRoot)\MidFD.FileOperationHelper\$(Configuration)\net10.0-windows</FileOperationHelperOutputDirectory>
+      <FileOperationHelperOutputDirectory Condition="'$(MidFDBuildRoot)' == ''">src\MidFD.FileOperationHelper\bin\$(Configuration)\net10.0-windows</FileOperationHelperOutputDirectory>
+    </PropertyGroup>
+    <ItemGroup><FileOperationHelperOutput Include="$(FileOperationHelperOutputDirectory)\*" /></ItemGroup>
+    <Copy SourceFiles="@(FileOperationHelperOutput)" DestinationFolder="$(TargetDir)" SkipUnchangedFiles="true" />
+  </Target>
+
+  <Target Name="PublishFileOperationHelper" AfterTargets="Publish">
+    <MSBuild Projects="src\MidFD.FileOperationHelper\MidFD.FileOperationHelper.csproj" Targets="Publish"
+             Properties="Configuration=$(Configuration);PublishDir=$(PublishDir);PublishReadyToRun=$(PublishReadyToRun);SelfContained=$(SelfContained)" />
+  </Target>
+
+  <Target Name="BuildAndCopySusieHosts" AfterTargets="Build">
+    <PropertyGroup>
+      <SusieHost32OutputPath Condition="'$(MidFDBuildRoot)' != ''">$(MidFDBuildRoot)\SusieHost32\$(Configuration)\net10.0-windows\win-x86\</SusieHost32OutputPath>
+      <SusieHost64OutputPath Condition="'$(MidFDBuildRoot)' != ''">$(MidFDBuildRoot)\SusieHost64\$(Configuration)\net10.0-windows\win-x64\</SusieHost64OutputPath>
+      <SusieHost32OutputPath Condition="'$(MidFDBuildRoot)' == ''">src\SusieHost\bin\$(Configuration)\net10.0-windows\win-x86\</SusieHost32OutputPath>
+      <SusieHost64OutputPath Condition="'$(MidFDBuildRoot)' == ''">src\SusieHost\bin\$(Configuration)\net10.0-windows\win-x64\</SusieHost64OutputPath>
+      <SusieHost32BuildProperties Condition="'$(MidFDBuildRoot)' != ''">Configuration=$(Configuration);PlatformTarget=x86;RuntimeIdentifier=win-x86;OutputPath=$(SusieHost32OutputPath);IntermediateOutputPath=$(MidFDBuildRoot)\obj\SusieHost32\$(Configuration)\net10.0-windows\win-x86\</SusieHost32BuildProperties>
+      <SusieHost64BuildProperties Condition="'$(MidFDBuildRoot)' != ''">Configuration=$(Configuration);PlatformTarget=x64;RuntimeIdentifier=win-x64;OutputPath=$(SusieHost64OutputPath);IntermediateOutputPath=$(MidFDBuildRoot)\obj\SusieHost64\$(Configuration)\net10.0-windows\win-x64\</SusieHost64BuildProperties>
+      <SusieHost32BuildProperties Condition="'$(MidFDBuildRoot)' == ''">Configuration=$(Configuration);PlatformTarget=x86;RuntimeIdentifier=win-x86</SusieHost32BuildProperties>
+      <SusieHost64BuildProperties Condition="'$(MidFDBuildRoot)' == ''">Configuration=$(Configuration);PlatformTarget=x64;RuntimeIdentifier=win-x64</SusieHost64BuildProperties>
+    </PropertyGroup>
+    <MSBuild Projects="src\SusieHost\SusieHost32.csproj" Targets="Restore;Build" Properties="$(SusieHost32BuildProperties)" />
+    <MSBuild Projects="src\SusieHost\SusieHost64.csproj" Targets="Restore;Build" Properties="$(SusieHost64BuildProperties)" />
+    <ItemGroup>
+      <SusieHost32Output Include="$(SusieHost32OutputPath)*" />
+      <SusieHost64Output Include="$(SusieHost64OutputPath)*" />
+    </ItemGroup>
+    <Copy SourceFiles="@(SusieHost32Output)" DestinationFolder="$(TargetDir)SusieHost32" SkipUnchangedFiles="true" />
+    <Copy SourceFiles="@(SusieHost64Output)" DestinationFolder="$(TargetDir)SusieHost64" SkipUnchangedFiles="true" />
+  </Target>
+
+  <Target Name="PublishSusieHosts" AfterTargets="Publish">
+    <MSBuild Projects="src\SusieHost\SusieHost32.csproj" Targets="Restore;Publish" Properties="Configuration=$(Configuration);PlatformTarget=x86;RuntimeIdentifier=win-x86;PublishDir=$(PublishDir)SusieHost32\;SelfContained=$(SelfContained)" />
+    <MSBuild Projects="src\SusieHost\SusieHost64.csproj" Targets="Restore;Publish" Properties="Configuration=$(Configuration);PlatformTarget=x64;RuntimeIdentifier=win-x64;PublishDir=$(PublishDir)SusieHost64\;SelfContained=$(SelfContained)" />
+  </Target>
 </Project>

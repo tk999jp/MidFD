@@ -1,4 +1,4 @@
-using System.Text.Json;
+﻿using System.Text.Json;
 using System.Diagnostics;
 using MidFD.Models;
 using MidFD.Services.TrashManifestStore;
@@ -435,6 +435,8 @@ public static class MidFdManagedTrashService
     }
 
     private static TrashManifest? _activeBatchManifest;
+    private static readonly List<TrashManifestRecord> UncommittedJsonMoves = [];
+    private static readonly List<TrashManifestRecord> UncommittedJsonRestores = [];
 
     public static void BeginManifestBatch()
     {
@@ -446,6 +448,8 @@ public static class MidFdManagedTrashService
         try
         {
             _activeBatchManifest = LoadManifest();
+            UncommittedJsonMoves.Clear();
+            UncommittedJsonRestores.Clear();
             _manifestRecordCountBefore = _activeBatchManifest.Records.Count;
             _manifestRecordCountAfter = _activeBatchManifest.Records.Count;
             _manifestAppendCount = 0;
@@ -476,6 +480,8 @@ public static class MidFdManagedTrashService
         finally
         {
             _activeBatchManifest = null;
+            UncommittedJsonMoves.Clear();
+            UncommittedJsonRestores.Clear();
             _activeMutationBatchId = null;
             MutationBatchContext.Value = null;
         }
@@ -547,7 +553,8 @@ public static class MidFdManagedTrashService
         out long fileMoveMs,
         out long recordUpsertMs,
         out long logMs,
-        bool suppressLogging = false)
+        bool suppressLogging = false,
+        Action<string>? afterPhysicalMove = null)
     {
         using IDisposable mutation = EnterMutation();
         if (string.IsNullOrWhiteSpace(originalPath))
@@ -562,6 +569,8 @@ public static class MidFdManagedTrashService
 
         var totalSw = Stopwatch.StartNew();
 
+        // Validate persistent metadata before moving anything, even for a single-item call.
+        if (_activeBatchManifest == null) _ = LoadManifest();
         bool isDirectory = ReparsePointHelper.IsDirectory(originalPath);
         string root = ResolveTrashRoot(originalPath);
         string itemId = itemIndex.ToString("D4");
@@ -569,81 +578,96 @@ public static class MidFdManagedTrashService
         _pathValidator.ValidatePath(trashPath);
         Directory.CreateDirectory(Path.GetDirectoryName(trashPath) ?? root);
 
-        var moveSw = Stopwatch.StartNew();
-        FileOperationService.Move(originalPath, trashPath, suppressLogging: suppressLogging);
-        moveSw.Stop();
-        fileMoveMs = moveSw.ElapsedMilliseconds;
-        _totalFileMoveMs += fileMoveMs;
-        if (suppressLogging) _suppressedSuccessCount++;
- 
-        // Placement metrics for investigation
-        string? originalRoot = Path.GetPathRoot(Path.GetFullPath(originalPath));
-        string? trashRoot = Path.GetPathRoot(root);
-        bool isSameVolume = string.Equals(originalRoot, trashRoot, StringComparison.OrdinalIgnoreCase);
-
-        if (isSameVolume)
-        {
-            _sameVolumeMoveCount++;
-        }
-        else
-        {
-            _crossVolumeMoveCount++;
-        }
-
-        string localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
-        if (root.Contains(localAppData, StringComparison.OrdinalIgnoreCase))
-        {
-            _appDataFallbackMoveCount++;
-        }
-
-        // Integrity Check
-        bool sourceExists = ReparsePointHelper.Exists(originalPath) || File.Exists(originalPath) || Directory.Exists(originalPath);
-        bool trashExists = ReparsePointHelper.Exists(trashPath) || File.Exists(trashPath) || Directory.Exists(trashPath);
-
-        if (sourceExists || !trashExists)
-        {
-            string sourceDetail = sourceExists
-                ? (ReparsePointHelper.IsReparsePoint(originalPath)
-                    ? "LINK"
-                    : Directory.Exists(originalPath) ? "DIR" : $"FILE({new FileInfo(originalPath).Length} bytes)")
-                : "NONE";
-            string trashDetail = trashExists
-                ? (ReparsePointHelper.IsReparsePoint(trashPath)
-                    ? "LINK"
-                    : Directory.Exists(trashPath) ? "DIR" : $"FILE({new FileInfo(trashPath).Length} bytes)")
-                : "NONE";
-
-            LogService.Error($"[MidFdTrashIntegrity] Move verification failed. original={originalPath}, trash={trashPath}, sourceExists={sourceExists}({sourceDetail}), trashExists={trashExists}({trashDetail})");
-            throw new IOException($"MidFD管理ゴミ箱への移動検証に失敗しました。ソースが残存しているか、移動先に実体がありません。 path={originalPath}");
-        }
-
-        if (!suppressLogging)
-        {
-            LogService.Info($"[MidFdTrashIntegrity] AfterMove verified. original={originalPath}, trash={trashPath}");
-        }
-
-        var recordSw = Stopwatch.StartNew();
+        // Establish recovery identity before moving; metadata access can fail afterwards.
         var record = new TrashManifestRecord
         {
-            BatchId = batchId,
-            ItemId = itemId,
-            OriginalPath = originalPath,
-            TrashPath = trashPath,
-            OriginalName = Path.GetFileName(originalPath),
-            IsDirectory = isDirectory,
-            Size = isDirectory || ReparsePointHelper.IsReparsePoint(trashPath) ? 0 : new FileInfo(trashPath).Length,
-            LastWriteTimeUtc = ReparsePointHelper.IsReparsePoint(trashPath)
-                ? DateTime.UtcNow
-                : isDirectory
-                ? Directory.GetLastWriteTimeUtc(trashPath)
-                : File.GetLastWriteTimeUtc(trashPath),
-            DeletedAtUtc = DateTime.UtcNow,
+            BatchId = batchId, ItemId = itemId, OriginalPath = originalPath,
+            TrashPath = trashPath, OriginalName = Path.GetFileName(originalPath),
+            IsDirectory = isDirectory, DeletedAtUtc = DateTime.UtcNow,
             Status = TrashRecordStatus.InTrash
         };
-
-        if (!skipRegistration)
+        bool journaled = false;
+        var recordSw = new Stopwatch();
+        var moveSw = Stopwatch.StartNew();
+        FileOperationService.Move(originalPath, trashPath, suppressLogging: suppressLogging);
+        try
         {
-            RegisterNewTrashRecord(record);
+            afterPhysicalMove?.Invoke(trashPath);
+            moveSw.Stop();
+            fileMoveMs = moveSw.ElapsedMilliseconds;
+            _totalFileMoveMs += fileMoveMs;
+            if (suppressLogging) _suppressedSuccessCount++;
+
+            // Placement metrics for investigation
+            string? originalRoot = Path.GetPathRoot(Path.GetFullPath(originalPath));
+            string? trashRoot = Path.GetPathRoot(root);
+            bool isSameVolume = string.Equals(originalRoot, trashRoot, StringComparison.OrdinalIgnoreCase);
+
+            if (isSameVolume)
+            {
+                _sameVolumeMoveCount++;
+            }
+            else
+            {
+                _crossVolumeMoveCount++;
+            }
+
+            string localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+            if (root.Contains(localAppData, StringComparison.OrdinalIgnoreCase))
+            {
+                _appDataFallbackMoveCount++;
+            }
+
+            // Integrity Check
+            bool sourceExists = ReparsePointHelper.Exists(originalPath) || File.Exists(originalPath) || Directory.Exists(originalPath);
+            bool trashExists = ReparsePointHelper.Exists(trashPath) || File.Exists(trashPath) || Directory.Exists(trashPath);
+
+            if (sourceExists || !trashExists)
+            {
+                string sourceDetail = sourceExists
+                    ? (ReparsePointHelper.IsReparsePoint(originalPath)
+                        ? "LINK"
+                        : Directory.Exists(originalPath) ? "DIR" : $"FILE({new FileInfo(originalPath).Length} bytes)")
+                    : "NONE";
+                string trashDetail = trashExists
+                    ? (ReparsePointHelper.IsReparsePoint(trashPath)
+                        ? "LINK"
+                        : Directory.Exists(trashPath) ? "DIR" : $"FILE({new FileInfo(trashPath).Length} bytes)")
+                    : "NONE";
+
+                LogService.Error($"[MidFdTrashIntegrity] Move verification failed. original={originalPath}, trash={trashPath}, sourceExists={sourceExists}({sourceDetail}), trashExists={trashExists}({trashDetail})");
+                throw new IOException($"MidFD管理ゴミ箱への移動検証に失敗しました。ソースが残存しているか、移動先に実体がありません。 path={originalPath}");
+            }
+
+            if (!suppressLogging)
+            {
+                LogService.Info($"[MidFdTrashIntegrity] AfterMove verified. original={originalPath}, trash={trashPath}");
+            }
+
+            recordSw.Start();
+            record.Size = isDirectory || ReparsePointHelper.IsReparsePoint(trashPath) ? 0 : new FileInfo(trashPath).Length;
+            record.LastWriteTimeUtc = ReparsePointHelper.IsReparsePoint(trashPath)
+                ? DateTime.UtcNow
+                : isDirectory ? Directory.GetLastWriteTimeUtc(trashPath) : File.GetLastWriteTimeUtc(trashPath);
+            if (_activeBatchManifest != null && RequireManifestStore() is JsonTrashManifestStore)
+            {
+                UncommittedJsonMoves.Add(record);
+                journaled = true;
+            }
+            if (!skipRegistration) RegisterNewTrashRecord(record);
+        }
+        catch (Exception saveError)
+        {
+            try
+            {
+                if (journaled) RollbackUncommittedJsonMoves();
+                else RollbackTrashMove(record);
+            }
+            catch (Exception rollbackError)
+            {
+                throw new AggregateException($"manifest確定前の移動・復旧に失敗しました。original={originalPath}, trash={trashPath}", saveError, rollbackError);
+            }
+            throw;
         }
         outRecord = record;
         recordSw.Stop();
@@ -877,6 +901,8 @@ public static class MidFdManagedTrashService
             _totalFileMoveMs += fileMoveMs; // Also accumulate to total investigation metric
             if (suppressLogging) _suppressedSuccessCount++;
 
+            if (_activeBatchManifest != null && RequireManifestStore() is JsonTrashManifestStore)
+                UncommittedJsonRestores.Add(record);
             if (!skipStatusUpdate)
             {
                 var statusSw = Stopwatch.StartNew();
@@ -888,6 +914,12 @@ public static class MidFdManagedTrashService
                         throw new IOException($"管理ゴミ箱recordのstatus永続化に失敗しました: {item.RecycleBinPath}");
                     }
                     statusUpdated = true;
+                }
+                catch (Exception statusError)
+                {
+                    try { RollbackTrashRestore(record); UncommittedJsonRestores.Remove(record); }
+                    catch (Exception rollbackError) { throw new AggregateException("復元status保存・物理復旧に失敗しました。", statusError, rollbackError); }
+                    throw;
                 }
                 finally
                 {
@@ -1745,7 +1777,65 @@ public static class MidFdManagedTrashService
 
     private static void SaveManifest(TrashManifest manifest)
     {
-        RequireManifestStore().Save(manifest);
+        try
+        {
+            RequireManifestStore().Save(manifest);
+            UncommittedJsonMoves.Clear();
+            UncommittedJsonRestores.Clear();
+        }
+        catch (Exception saveError)
+        {
+            try { RollbackUncommittedJsonMoves(); }
+            catch (Exception rollbackError) { throw new AggregateException("manifest保存・物理移動の復旧に失敗しました。", saveError, rollbackError); }
+            throw;
+        }
+    }
+
+    private static void RollbackTrashMove(TrashManifestRecord record)
+    {
+        string path = _pathValidator.ValidateRecord(record);
+        if (!PathExists(path))
+        {
+            if (!PathExists(record.OriginalPath)) throw new IOException($"復旧対象が両方のpathにありません。original={record.OriginalPath}, trash={path}");
+            return;
+        }
+        if (PathExists(record.OriginalPath))
+            throw new IOException($"復旧先が存在するため上書きしません。original={record.OriginalPath}, retainedTrash={path}");
+        FileOperationService.Move(path, record.OriginalPath);
+    }
+
+    private static void RollbackTrashRestore(TrashManifestRecord record)
+    {
+        string path = _pathValidator.ValidateRecord(record);
+        if (!PathExists(record.OriginalPath))
+        {
+            if (!PathExists(path)) throw new IOException($"復旧対象が両方のpathにありません。original={record.OriginalPath}, trash={path}");
+            return;
+        }
+        if (PathExists(path)) throw new IOException($"復旧先が存在するため上書きしません。retainedOriginal={record.OriginalPath}, trash={path}");
+        FileOperationService.Move(record.OriginalPath, path);
+        record.Status = TrashRecordStatus.InTrash;
+    }
+
+    private static void RollbackUncommittedJsonMoves()
+    {
+        List<Exception> errors = [];
+        foreach (var record in UncommittedJsonRestores.ToArray().Reverse())
+        {
+            try { RollbackTrashRestore(record); UncommittedJsonRestores.Remove(record); }
+            catch (Exception ex) { LogService.Error("Managed trash restore rollback failed; retained paths are in the exception.", ex); errors.Add(ex); }
+        }
+        foreach (var record in UncommittedJsonMoves.ToArray().Reverse())
+        {
+            try
+            {
+                RollbackTrashMove(record);
+                _activeBatchManifest?.Records.RemoveAll(x => x.TrashPath == record.TrashPath);
+                UncommittedJsonMoves.Remove(record);
+            }
+            catch (Exception ex) { LogService.Error("Managed trash rollback failed; retained file path is in the exception.", ex); errors.Add(ex); }
+        }
+        if (errors.Count > 0) throw new AggregateException("未確定の管理ゴミ箱移動を復旧できませんでした。", errors);
     }
 
     private static void RegisterNewTrashRecord(TrashManifestRecord record)

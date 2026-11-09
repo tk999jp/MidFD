@@ -1,5 +1,6 @@
 using System.Drawing;
 using System.Windows.Forms;
+using MidFD.Commands;
 using MidFD.Helpers;
 using MidFD.Models;
 using MidFD.Runtime;
@@ -77,6 +78,7 @@ public partial class MainForm
             new DirectoryPathCompletionOptions
             {
                 ShowOnTextChanged = true,
+                PopupEscapeAction = CancelBrowserPathEntry,
                 CustomCandidateProvider = (text, token) =>
                 {
                     return Task.Run(() =>
@@ -230,7 +232,7 @@ public partial class MainForm
             return;
         }
 
-        if (e.KeyCode == Keys.Escape)
+        if (e.KeyCode == Keys.Escape && e.Modifiers == Keys.None)
         {
             e.Handled = true;
             e.SuppressKeyPress = true;
@@ -294,11 +296,8 @@ public partial class MainForm
         BrowserPathEntryApplyResult result = BrowserPathEntryCoordinator.Apply(
             _browserPathEntryTextBox.Text,
             _browserApplicationCoordinator.NormalizeDestinationDirectory,
-            navigateDirectory: path =>
-            {
-                NavigateToLocationDirectory(path);
-            },
-            openFile: TryOpenBrowserPathEntryFile);
+            navigateDirectory: NavigateToLocationDirectory,
+            selectFile: NavigateToBrowserPathEntryFile);
 
         if (!string.IsNullOrWhiteSpace(result.StatusMessage))
         {
@@ -314,11 +313,17 @@ public partial class MainForm
         FocusBrowserPathEntryEditor(selectAll: true);
     }
 
-    private string? TryOpenBrowserPathEntryFile(string fullPath)
+    private string? NavigateToBrowserPathEntryFile(string fullPath)
     {
-        return ExternalToolService.OpenWithShellAssociation(
-            fullPath,
-            _browserApplicationCoordinator.CurrentPath);
+        bool selected = ExecuteCommandFromUi(CommandIds.BrowserNavigateToPath, new CommandExecutionContext
+        {
+            Scope = CommandScope.Browser,
+            Source = "Browser.PathEntry.SelectFile",
+            BrowserMarkedItemNavigation = new BrowserMarkedItemNavigationCommandContext(
+                fullPath,
+                RequireVisibleTarget: true)
+        });
+        return selected ? null : "指定したファイルを現在の表示条件で選択できませんでした。";
     }
 
     private void CancelBrowserPathEntry()
@@ -350,13 +355,27 @@ public partial class MainForm
             _suppressBrowserPathEntryLostFocus = false;
         }
 
-        fileListView.Focus();
+        // The rendered file browser receives keyboard input through browserPanel.
+        browserPanel.Focus();
+        BeginInvoke(new Action(() =>
+        {
+            if (!IsDisposed && !IsBrowserPathEntryActive() &&
+                _viewerApplicationCoordinator.Mode == ViewerApplicationMode.Browser)
+            {
+                browserPanel.Focus();
+            }
+        }));
     }
 
     private bool NavigateToLocationDirectory(string resolvedPath)
     {
-        return ExecuteConfirmedUserDirectoryNavigation(
-            resolvedPath,
-            recordDirectoryMoveHistory: true);
+        return ExecuteCommandFromUi(
+            CommandIds.BrowserNavigateToPath,
+            new CommandExecutionContext
+            {
+                Scope = CommandScope.Browser,
+                Source = "Browser.PathEntry.Navigate",
+                ContextTargetPath = resolvedPath
+            });
     }
 }

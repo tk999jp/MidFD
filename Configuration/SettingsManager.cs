@@ -174,8 +174,17 @@ public static class SettingsManager
 
     public static void Save(AppSettings settings)
     {
-        SettingsSqliteStore.SettingsSaveResult result = TrySave(settings);
+        _ = TrySaveAndReport(settings);
+    }
+
+    public static SettingsSqliteStore.SettingsSaveResult TrySaveAndReport(
+        AppSettings settings,
+        SettingsSaveIntent intent = SettingsSaveIntent.Automatic,
+        bool allowProtectedReplacement = false)
+    {
+        SettingsSqliteStore.SettingsSaveResult result = TrySave(settings, intent, allowProtectedReplacement);
         if (!result.SuppressedByPayloadProtection && (!result.Succeeded || !result.BackupSucceeded)) ReportSaveFailure(result);
+        return result;
     }
 
     private static void ReportSaveFailure(SettingsSqliteStore.SettingsSaveResult result)

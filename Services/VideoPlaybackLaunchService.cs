@@ -67,7 +67,6 @@ public static class VideoPlaybackLaunchService
                     "-loglevel",
                     "warning",
                     "-autoexit",
-                    "-nostdin",
                     "-volume",
                     clampedVolume.ToString()
                 ];

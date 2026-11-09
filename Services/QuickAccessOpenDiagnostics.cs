@@ -34,7 +34,7 @@ public sealed class QuickAccessOpenDiagnostics
         LogService.Detail(
             $"[QuickAccess.Open.Start] operationId={OperationId} elapsedMs={ElapsedMs} stepElapsedMs=0 " +
             $"bookmarkCount={store.Bookmarks.Count} aliasCount={store.Aliases.Count} recentCount={store.Recents.Count} " +
-            $"historyCount=0 commandCount={store.Commands.Count} pathKind={pathKind} pathRoot={pathRoot} success=start");
+            $"historyCount=0 pathKind={pathKind} pathRoot={pathRoot} success=start");
     }
 
     public void LogOpenEnd(string currentTab, int visibleItemCount)

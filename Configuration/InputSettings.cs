@@ -5,9 +5,33 @@ using System.Windows.Forms;
 
 namespace MidFD.Configuration;
 
+public sealed record LegacyBrowserColumnCountOverrideObservation(
+    string LegacyCommandId,
+    string Gesture,
+    int? TargetColumnCount,
+    string Status,
+    string Reason);
+
+public sealed class BrowserKeyCommandOverridesDictionary : Dictionary<string, List<string>>
+{
+    public BrowserKeyCommandOverridesDictionary()
+        : base(StringComparer.OrdinalIgnoreCase)
+    {
+    }
+
+    public IReadOnlyList<LegacyBrowserColumnCountOverrideObservation> LegacyColumnCountObservations { get; internal set; } = [];
+}
+
 public class InputSettings
 {
+    private static readonly IReadOnlyDictionary<string, string> RegisteredCommandIds =
+        new CommandRegistry().GetAll().ToDictionary(
+            static command => command.Id,
+            static command => command.Id,
+            StringComparer.OrdinalIgnoreCase);
+
     private const string LegacyBrowserCheckExecuteCommandId = "browser.check_execute";
+    private Dictionary<string, List<string>> _browserKeyCommandOverrides = new(StringComparer.OrdinalIgnoreCase);
     public const string StandardProfileValue = "Standard";
     public const string FdCompatibleProfileValue = "FDCompatible";
     public const string MouseGestureUnassignedCommandId = "none";
@@ -59,7 +83,24 @@ public class InputSettings
     public bool EnableMouseGestures { get; set; } = true;
     public Dictionary<string, string> MouseGestureCommandMap { get; set; } = new(StringComparer.OrdinalIgnoreCase);
     [JsonConverter(typeof(BrowserKeyOverridesConverter))]
-    public Dictionary<string, List<string>> BrowserKeyCommandOverrides { get; set; } = new(StringComparer.OrdinalIgnoreCase);
+    public Dictionary<string, List<string>> BrowserKeyCommandOverrides
+    {
+        get => _browserKeyCommandOverrides;
+        set
+        {
+            _browserKeyCommandOverrides = value ?? new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
+            if (value is BrowserKeyCommandOverridesDictionary normalized && normalized.LegacyColumnCountObservations.Count > 0)
+            {
+                LegacyColumnCountOverrideObservations = normalized.LegacyColumnCountObservations;
+            }
+            else if (value is not BrowserKeyCommandOverridesDictionary)
+            {
+                LegacyColumnCountOverrideObservations = [];
+            }
+        }
+    }
+    [JsonIgnore]
+    public IReadOnlyList<LegacyBrowserColumnCountOverrideObservation> LegacyColumnCountOverrideObservations { get; private set; } = [];
     public Dictionary<string, string?> FunctionBarCommandOverridesStandard { get; set; } = new(StringComparer.OrdinalIgnoreCase);
     public Dictionary<string, string?> FunctionBarCommandOverridesFdCompatible { get; set; } = new(StringComparer.OrdinalIgnoreCase);
     // Shift layer overrides
@@ -169,6 +210,18 @@ public class InputSettings
             }
 
             string normalizedCommandId = NormalizeCommandId(value ?? string.Empty);
+            if (string.Equals(normalizedCommandId, MouseGestureUnassignedCommandId, StringComparison.OrdinalIgnoreCase) ||
+                string.IsNullOrWhiteSpace(normalizedCommandId))
+            {
+                normalizedCommandId = string.Equals(normalizedCommandId, MouseGestureUnassignedCommandId, StringComparison.OrdinalIgnoreCase)
+                    ? MouseGestureUnassignedCommandId
+                    : string.Empty;
+            }
+            else if (!TryGetRegisteredCommandId(normalizedCommandId, out normalizedCommandId))
+            {
+                normalizedCommandId = MouseGestureUnassignedCommandId;
+            }
+
             if (!result.ContainsKey(normalizedKey) || string.Equals(result[normalizedKey], LegacyBrowserCheckExecuteCommandId, StringComparison.OrdinalIgnoreCase))
             {
                 result[normalizedKey] = normalizedCommandId;
@@ -199,31 +252,183 @@ public class InputSettings
         return new string(normalized);
     }
 
-    public static Dictionary<string, List<string>> NormalizeBrowserKeyCommandOverrides(Dictionary<string, List<string>>? source)
+    public static Dictionary<string, List<string>> NormalizeBrowserKeyCommandOverrides(Dictionary<string, List<string>>? source) =>
+        NormalizeBrowserKeyCommandOverridesDetailed(source);
+
+    public static BrowserKeyCommandOverridesDictionary NormalizeBrowserKeyCommandOverridesDetailed(
+        Dictionary<string, List<string>>? source)
     {
-        var result = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
+        var result = new BrowserKeyCommandOverridesDictionary();
         if (source == null)
         {
             return result;
         }
 
-        foreach ((string commandId, List<string> keyGestures) in source)
+        KeyValuePair<string, List<string>>[] entries = source
+            .Where(static pair => !string.IsNullOrWhiteSpace(pair.Key))
+            .OrderBy(pair => string.Equals(
+                pair.Key.Trim(),
+                NormalizeCommandId(pair.Key),
+                StringComparison.OrdinalIgnoreCase) ? 0 : 1)
+            .ThenBy(pair => NormalizeCommandId(pair.Key), StringComparer.OrdinalIgnoreCase)
+            .ThenBy(static pair => pair.Key, StringComparer.Ordinal)
+            .ToArray();
+
+        foreach ((string commandId, List<string> keyGestures) in entries)
         {
-            if (string.IsNullOrWhiteSpace(commandId))
+            if (string.Equals(commandId.Trim(), CommandIds.LegacyBrowserViewColumnCountSet, StringComparison.OrdinalIgnoreCase))
             {
                 continue;
             }
 
             string normalizedCommandId = NormalizeCommandId(commandId);
-            if ((!string.Equals(commandId.Trim(), normalizedCommandId, StringComparison.OrdinalIgnoreCase)) &&
-                source.Keys.Any(key => string.Equals(NormalizeCommandId(key), normalizedCommandId, StringComparison.OrdinalIgnoreCase) &&
-                    !string.Equals(key.Trim(), commandId.Trim(), StringComparison.OrdinalIgnoreCase)))
+            if (!TryGetRegisteredCommandId(normalizedCommandId, out normalizedCommandId) ||
+                result.ContainsKey(normalizedCommandId))
             {
                 continue;
             }
+
             result[normalizedCommandId] = NormalizeBrowserKeyGestures(keyGestures);
         }
 
+        KeyValuePair<string, List<string>>[] legacyEntries = entries
+            .Where(pair => string.Equals(
+                pair.Key.Trim(),
+                CommandIds.LegacyBrowserViewColumnCountSet,
+                StringComparison.OrdinalIgnoreCase))
+            .OrderBy(static pair => pair.Key, StringComparer.Ordinal)
+            .ToArray();
+        var migratedGestures = new Dictionary<int, List<string>>();
+        var observations = new List<LegacyBrowserColumnCountOverrideObservation>();
+
+        foreach ((string legacyId, List<string> sourceGestures) in legacyEntries)
+        {
+            string[] rawGestures = sourceGestures?.ToArray() ?? [];
+            if (rawGestures.Length == 0)
+            {
+                observations.Add(new LegacyBrowserColumnCountOverrideObservation(
+                    legacyId,
+                    string.Empty,
+                    null,
+                    "unresolved",
+                    "The legacy command had an empty override and carries no column-count target."));
+                continue;
+            }
+
+            bool hasTombstone = rawGestures.Any(rawGesture => string.Equals(
+                NormalizeKeyGestureText(rawGesture),
+                MouseGestureUnassignedCommandId,
+                StringComparison.OrdinalIgnoreCase));
+            if (hasTombstone)
+            {
+                foreach (string rawGesture in rawGestures)
+                {
+                    string normalizedGesture = NormalizeKeyGestureText(rawGesture);
+                    if (string.Equals(normalizedGesture, MouseGestureUnassignedCommandId, StringComparison.OrdinalIgnoreCase))
+                    {
+                        observations.Add(new LegacyBrowserColumnCountOverrideObservation(
+                            legacyId,
+                            normalizedGesture,
+                            null,
+                            "unresolved",
+                            "The legacy tombstone disables the old command without identifying a column-count target."));
+                    }
+                    else if (!TryGetLegacyBrowserColumnCount(normalizedGesture, out int suppressedColumnCount))
+                    {
+                        observations.Add(new LegacyBrowserColumnCountOverrideObservation(
+                            legacyId,
+                            rawGesture ?? string.Empty,
+                            null,
+                            "unresolved",
+                            "The legacy gesture is not a recognized target and the command is tombstoned."));
+                    }
+                    else
+                    {
+                        observations.Add(new LegacyBrowserColumnCountOverrideObservation(
+                            legacyId,
+                            normalizedGesture,
+                            suppressedColumnCount,
+                            "suppressed-by-tombstone",
+                            "The legacy command tombstone takes precedence over its numeric gestures."));
+                    }
+                }
+
+                continue;
+            }
+
+            foreach (string rawGesture in rawGestures)
+            {
+                string gesture = NormalizeKeyGestureText(rawGesture);
+                if (string.IsNullOrWhiteSpace(gesture))
+                {
+                    observations.Add(new LegacyBrowserColumnCountOverrideObservation(
+                        legacyId,
+                        rawGesture ?? string.Empty,
+                        null,
+                        "unresolved",
+                        "The legacy gesture is not a recognized key gesture."));
+                    continue;
+                }
+
+                if (string.Equals(gesture, MouseGestureUnassignedCommandId, StringComparison.OrdinalIgnoreCase))
+                {
+                    observations.Add(new LegacyBrowserColumnCountOverrideObservation(
+                        legacyId,
+                        gesture,
+                        null,
+                        "unresolved",
+                        "The legacy tombstone has no column-count target."));
+                    continue;
+                }
+
+                if (!TryGetLegacyBrowserColumnCount(gesture, out int columnCount))
+                {
+                    observations.Add(new LegacyBrowserColumnCountOverrideObservation(
+                        legacyId,
+                        gesture,
+                        null,
+                        "unresolved",
+                        "The legacy gesture does not identify a D1-D9 or NumPad1-NumPad9 target."));
+                    continue;
+                }
+
+                string targetCommandId = CommandIds.GetBrowserColumnCountCommandId(columnCount);
+                if (result.ContainsKey(targetCommandId))
+                {
+                    observations.Add(new LegacyBrowserColumnCountOverrideObservation(
+                        legacyId,
+                        gesture,
+                        columnCount,
+                        "canonical-override-retained",
+                        "An existing individual command override takes precedence."));
+                    continue;
+                }
+
+                if (!migratedGestures.TryGetValue(columnCount, out List<string>? targetGestures))
+                {
+                    targetGestures = [];
+                    migratedGestures.Add(columnCount, targetGestures);
+                }
+                targetGestures.Add(gesture);
+                observations.Add(new LegacyBrowserColumnCountOverrideObservation(
+                    legacyId,
+                    gesture,
+                    columnCount,
+                    "migrated",
+                    "The physical numeric key identifies the individual column-count command."));
+            }
+        }
+
+        foreach ((int columnCount, List<string> gestures) in migratedGestures.OrderBy(static pair => pair.Key))
+        {
+            string commandId = CommandIds.GetBrowserColumnCountCommandId(columnCount);
+            if (!result.ContainsKey(commandId))
+            {
+                result[commandId] = NormalizeBrowserKeyGestures(gestures);
+            }
+        }
+
+        result.LegacyColumnCountObservations = observations;
         return result;
     }
 
@@ -236,6 +441,31 @@ public class InputSettings
 
         Keys keyCode = keyData & Keys.KeyCode;
         return keyCode >= Keys.F1 && keyCode <= Keys.F12;
+    }
+
+    public static bool TryGetLegacyBrowserColumnCount(string? gesture, out int columnCount)
+    {
+        if (!TryParseKeyGesture(gesture, out Keys keyData))
+        {
+            columnCount = 0;
+            return false;
+        }
+
+        Keys keyCode = keyData & Keys.KeyCode;
+        if (keyCode >= Keys.D1 && keyCode <= Keys.D9)
+        {
+            columnCount = (int)(keyCode - Keys.D0);
+            return true;
+        }
+
+        if (keyCode >= Keys.NumPad1 && keyCode <= Keys.NumPad9)
+        {
+            columnCount = (int)(keyCode - Keys.NumPad0);
+            return true;
+        }
+
+        columnCount = 0;
+        return false;
     }
 
     public static bool IsBrowserStructuralReservedGesture(string? gesture)
@@ -254,11 +484,7 @@ public class InputSettings
         Keys keyCode = keyData & Keys.KeyCode;
 
         bool isPlainMainNumber = modifiers == Keys.None && keyCode >= Keys.D1 && keyCode <= Keys.D9;
-        bool isPlainNumPadNumber = modifiers == Keys.None && keyCode >= Keys.NumPad1 && keyCode <= Keys.NumPad9;
-        bool isCtrlMainDisplayMode = modifiers == Keys.Control && keyCode >= Keys.D1 && keyCode <= Keys.D3;
-        bool isCtrlNumPadDisplayMode = modifiers == Keys.Control && keyCode >= Keys.NumPad1 && keyCode <= Keys.NumPad3;
-
-        return isPlainMainNumber || isPlainNumPadNumber || isCtrlMainDisplayMode || isCtrlNumPadDisplayMode;
+        return isPlainMainNumber;
     }
 
     public static bool TryParseFunctionKeyChord(string? gesture, out string slotKey, out Keys modifiers)
@@ -289,7 +515,6 @@ public class InputSettings
     public static void NormalizeAndMigrateFunctionKeyChords(InputSettings settings)
     {
         ArgumentNullException.ThrowIfNull(settings);
-        MigrateLegacyBrowserCheckExecuteCommand(settings);
         if (settings.BrowserKeyCommandOverrides != null)
         {
             if (settings.BrowserKeyCommandOverrides.TryGetValue(CommandIds.FileCopy, out var copyGestures) && copyGestures != null)
@@ -301,31 +526,7 @@ public class InputSettings
                 moveGestures.RemoveAll(g => string.Equals(NormalizeKeyGestureText(g), "Ctrl+X", StringComparison.OrdinalIgnoreCase));
             }
         }
-        settings.BrowserKeyCommandOverrides = NormalizeBrowserKeyCommandOverrides(settings.BrowserKeyCommandOverrides);
-        settings.FunctionBarCommandOverridesStandard ??= new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
-        settings.FunctionBarCommandOverridesFdCompatible ??= new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
-        settings.FunctionBarCommandOverridesShiftStandard ??= new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
-        settings.FunctionBarCommandOverridesShiftFdCompatible ??= new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
-        settings.FunctionBarCommandOverridesCtrlStandard ??= new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
-        settings.FunctionBarCommandOverridesCtrlFdCompatible ??= new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
-        settings.FunctionBarCommandOverridesAltStandard ??= new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
-        settings.FunctionBarCommandOverridesAltFdCompatible ??= new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
-        MigrateLegacyCommandId(settings.FunctionBarCommandOverridesStandard);
-        MigrateLegacyCommandId(settings.FunctionBarCommandOverridesFdCompatible);
-        MigrateLegacyCommandId(settings.FunctionBarCommandOverridesShiftStandard);
-        MigrateLegacyCommandId(settings.FunctionBarCommandOverridesShiftFdCompatible);
-        MigrateLegacyCommandId(settings.FunctionBarCommandOverridesCtrlStandard);
-        MigrateLegacyCommandId(settings.FunctionBarCommandOverridesCtrlFdCompatible);
-        MigrateLegacyCommandId(settings.FunctionBarCommandOverridesAltStandard);
-        MigrateLegacyCommandId(settings.FunctionBarCommandOverridesAltFdCompatible);
-        MigrateLegacyCommandId(settings.FunctionBarLabelOverridesStandard);
-        MigrateLegacyCommandId(settings.FunctionBarLabelOverridesFdCompatible);
-        MigrateLegacyCommandId(settings.FunctionBarLabelOverridesShiftStandard);
-        MigrateLegacyCommandId(settings.FunctionBarLabelOverridesShiftFdCompatible);
-        MigrateLegacyCommandId(settings.FunctionBarLabelOverridesCtrlStandard);
-        MigrateLegacyCommandId(settings.FunctionBarLabelOverridesCtrlFdCompatible);
-        MigrateLegacyCommandId(settings.FunctionBarLabelOverridesAltStandard);
-        MigrateLegacyCommandId(settings.FunctionBarLabelOverridesAltFdCompatible);
+        settings.NormalizeCommandReferences();
 
         bool isFdCompatible = string.Equals(settings.FunctionKeyProfile, FdCompatibleProfileValue, StringComparison.OrdinalIgnoreCase);
         Dictionary<string, string?> normalMap = isFdCompatible ? settings.FunctionBarCommandOverridesFdCompatible : settings.FunctionBarCommandOverridesStandard;
@@ -334,7 +535,9 @@ public class InputSettings
         Dictionary<string, string?> altMap = isFdCompatible ? settings.FunctionBarCommandOverridesAltFdCompatible : settings.FunctionBarCommandOverridesAltStandard;
 
         var nextOverrides = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
-        foreach ((string commandId, List<string> gestures) in settings.BrowserKeyCommandOverrides)
+        Dictionary<string, List<string>> browserKeyOverrides = settings.BrowserKeyCommandOverrides
+            ?? new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
+        foreach ((string commandId, List<string> gestures) in browserKeyOverrides)
         {
             List<string> current = NormalizeBrowserKeyGestures(gestures);
             var remaining = new List<string>();
@@ -370,6 +573,164 @@ public class InputSettings
         }
 
         settings.BrowserKeyCommandOverrides = NormalizeBrowserKeyCommandOverrides(nextOverrides);
+        settings.NormalizeCommandReferences();
+    }
+
+    public void NormalizeCommandReferences()
+    {
+        MouseGestureCommandMap ??= new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        BrowserKeyCommandOverrides ??= new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
+        FunctionBarCommandOverridesStandard ??= new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
+        FunctionBarCommandOverridesFdCompatible ??= new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
+        FunctionBarCommandOverridesShiftStandard ??= new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
+        FunctionBarCommandOverridesShiftFdCompatible ??= new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
+        FunctionBarCommandOverridesCtrlStandard ??= new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
+        FunctionBarCommandOverridesCtrlFdCompatible ??= new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
+        FunctionBarCommandOverridesAltStandard ??= new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
+        FunctionBarCommandOverridesAltFdCompatible ??= new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
+        FunctionBarLabelOverridesStandard ??= new Dictionary<string, FunctionBarLabelOverride>(StringComparer.OrdinalIgnoreCase);
+        FunctionBarLabelOverridesFdCompatible ??= new Dictionary<string, FunctionBarLabelOverride>(StringComparer.OrdinalIgnoreCase);
+        FunctionBarLabelOverridesShiftStandard ??= new Dictionary<string, FunctionBarLabelOverride>(StringComparer.OrdinalIgnoreCase);
+        FunctionBarLabelOverridesShiftFdCompatible ??= new Dictionary<string, FunctionBarLabelOverride>(StringComparer.OrdinalIgnoreCase);
+        FunctionBarLabelOverridesCtrlStandard ??= new Dictionary<string, FunctionBarLabelOverride>(StringComparer.OrdinalIgnoreCase);
+        FunctionBarLabelOverridesCtrlFdCompatible ??= new Dictionary<string, FunctionBarLabelOverride>(StringComparer.OrdinalIgnoreCase);
+        FunctionBarLabelOverridesAltStandard ??= new Dictionary<string, FunctionBarLabelOverride>(StringComparer.OrdinalIgnoreCase);
+        FunctionBarLabelOverridesAltFdCompatible ??= new Dictionary<string, FunctionBarLabelOverride>(StringComparer.OrdinalIgnoreCase);
+
+        MigrateLegacyBrowserCheckExecuteCommand(this);
+        MouseGestureCommandMap = NormalizeMouseGestureCommandMap(MouseGestureCommandMap);
+        BrowserKeyCommandOverrides = NormalizeBrowserKeyCommandOverrides(BrowserKeyCommandOverrides);
+
+        NormalizeFunctionBarCommandOverrides(FunctionBarCommandOverridesStandard);
+        NormalizeFunctionBarCommandOverrides(FunctionBarCommandOverridesFdCompatible);
+        NormalizeFunctionBarCommandOverrides(FunctionBarCommandOverridesShiftStandard);
+        NormalizeFunctionBarCommandOverrides(FunctionBarCommandOverridesShiftFdCompatible);
+        NormalizeFunctionBarCommandOverrides(FunctionBarCommandOverridesCtrlStandard);
+        NormalizeFunctionBarCommandOverrides(FunctionBarCommandOverridesCtrlFdCompatible);
+        NormalizeFunctionBarCommandOverrides(FunctionBarCommandOverridesAltStandard);
+        NormalizeFunctionBarCommandOverrides(FunctionBarCommandOverridesAltFdCompatible);
+
+        NormalizeFunctionBarLabelOverrides(FunctionBarLabelOverridesStandard);
+        NormalizeFunctionBarLabelOverrides(FunctionBarLabelOverridesFdCompatible);
+        NormalizeFunctionBarLabelOverrides(FunctionBarLabelOverridesShiftStandard);
+        NormalizeFunctionBarLabelOverrides(FunctionBarLabelOverridesShiftFdCompatible);
+        NormalizeFunctionBarLabelOverrides(FunctionBarLabelOverridesCtrlStandard);
+        NormalizeFunctionBarLabelOverrides(FunctionBarLabelOverridesCtrlFdCompatible);
+        NormalizeFunctionBarLabelOverrides(FunctionBarLabelOverridesAltStandard);
+        NormalizeFunctionBarLabelOverrides(FunctionBarLabelOverridesAltFdCompatible);
+    }
+
+    private static void NormalizeFunctionBarCommandOverrides(Dictionary<string, string?> map)
+    {
+        MigrateLegacyCommandId(map);
+        foreach (string key in map.Keys.ToArray())
+        {
+            if (IsFunctionBarSlotKey(key))
+            {
+                string? commandId = map[key];
+                if (string.IsNullOrWhiteSpace(commandId) ||
+                    string.Equals(commandId, MouseGestureUnassignedCommandId, StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+
+                map[key] = TryGetRegisteredCommandId(commandId, out string canonicalCommandId)
+                    ? canonicalCommandId
+                    : MouseGestureUnassignedCommandId;
+                continue;
+            }
+
+            if (LooksLikeCommandId(key))
+            {
+                if (!TryGetRegisteredCommandId(key, out string canonicalCommandId))
+                {
+                    map.Remove(key);
+                }
+                else
+                {
+                    MoveCommandIdKeyToCanonical(map, key, canonicalCommandId);
+                }
+            }
+        }
+    }
+
+    private static void NormalizeFunctionBarLabelOverrides(Dictionary<string, FunctionBarLabelOverride> map)
+    {
+        MigrateLegacyCommandId(map);
+        foreach (string key in map.Keys.ToArray())
+        {
+            if (!IsFunctionBarSlotKey(key) && LooksLikeCommandId(key))
+            {
+                if (!TryGetRegisteredCommandId(key, out string canonicalCommandId))
+                {
+                    map.Remove(key);
+                    continue;
+                }
+
+                MoveCommandIdKeyToCanonical(map, key, canonicalCommandId);
+            }
+        }
+
+        foreach (string key in map.Keys.ToArray())
+        {
+            FunctionBarLabelOverride? labelOverride = map[key];
+            string? commandId = labelOverride?.CommandId;
+            if (labelOverride == null || string.IsNullOrWhiteSpace(commandId) ||
+                string.Equals(commandId, MouseGestureUnassignedCommandId, StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            if (TryGetRegisteredCommandId(commandId, out string canonicalCommandId))
+            {
+                labelOverride.CommandId = canonicalCommandId;
+            }
+            else
+            {
+                map.Remove(key);
+            }
+        }
+    }
+
+    private static void MoveCommandIdKeyToCanonical<T>(Dictionary<string, T> map, string key, string canonicalCommandId)
+    {
+        if (string.Equals(key, canonicalCommandId, StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        T value = map[key];
+        map.Remove(key);
+        if (!map.ContainsKey(canonicalCommandId))
+        {
+            map[canonicalCommandId] = value;
+        }
+    }
+
+    private static bool IsFunctionBarSlotKey(string key)
+    {
+        return key.Length >= 2 &&
+               (key[0] == 'F' || key[0] == 'f') &&
+               int.TryParse(key.AsSpan(1), out int slot) &&
+               slot is >= 1 and <= 12;
+    }
+
+    private static bool LooksLikeCommandId(string value)
+    {
+        return value.Contains('.', StringComparison.Ordinal);
+    }
+
+    private static bool TryGetRegisteredCommandId(string? commandId, out string canonicalCommandId)
+    {
+        string normalized = NormalizeCommandId(commandId ?? string.Empty);
+        if (RegisteredCommandIds.TryGetValue(normalized, out string? registeredCommandId))
+        {
+            canonicalCommandId = registeredCommandId;
+            return true;
+        }
+
+        canonicalCommandId = string.Empty;
+        return false;
     }
 
     private static void MigrateLegacyBrowserCheckExecuteCommand(InputSettings settings)
@@ -629,15 +990,30 @@ public class InputSettings
             [CommandIds.FileMove] = new[] { "M" },
             [CommandIds.FileRename] = new[] { "R" },
             [CommandIds.FileDelete] = new[] { "D", "Delete" },
+            [CommandIds.FileDeletePermanent] = new[] { "Shift+D", "Shift+Delete" },
+            [CommandIds.BrowserProperties] = new[] { "Alt+Enter" },
             [CommandIds.EditUndo] = new[] { "Ctrl+Z", "Alt+Z" },
             [CommandIds.EditRedo] = new[] { "Ctrl+Y", "Alt+Y" },
             [CommandIds.AppOpenManagedTrash] = Array.Empty<string>()
         };
 
+        for (int columnCount = 1; columnCount <= 9; columnCount++)
+        {
+            map[CommandIds.GetBrowserColumnCountCommandId(columnCount)] = [$"NumPad{columnCount}"];
+        }
+
         if (isFdCompatible)
         {
             map[CommandIds.BrowserOpenShell] = new[] { "H" };
             map[CommandIds.AppOpenSettings] = new[] { "O" };
+            for (int drive = 1; drive <= 9; drive++)
+            {
+                map[CommandIds.GetBrowserDriveCommandId(drive)] = new[]
+                {
+                    $"Ctrl+D{drive}",
+                    $"Ctrl+NumPad{drive}"
+                };
+            }
         }
 
         return map;
@@ -650,13 +1026,13 @@ public sealed class BrowserKeyOverridesConverter : JsonConverter<Dictionary<stri
     {
         if (reader.TokenType == JsonTokenType.Null)
         {
-            return new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
+            return InputSettings.NormalizeBrowserKeyCommandOverridesDetailed(null);
         }
 
         using JsonDocument document = JsonDocument.ParseValue(ref reader);
         if (document.RootElement.ValueKind != JsonValueKind.Object)
         {
-            return new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
+            return InputSettings.NormalizeBrowserKeyCommandOverridesDetailed(null);
         }
 
         var result = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
@@ -667,20 +1043,27 @@ public sealed class BrowserKeyOverridesConverter : JsonConverter<Dictionary<stri
                 continue;
             }
 
-            List<string> values = property.Value.ValueKind switch
+            bool isLegacyColumnCount = string.Equals(
+                property.Name.Trim(),
+                CommandIds.LegacyBrowserViewColumnCountSet,
+                StringComparison.OrdinalIgnoreCase);
+            IEnumerable<string> rawValues = property.Value.ValueKind switch
             {
-                JsonValueKind.String => InputSettings.NormalizeBrowserKeyGestures(new[] { property.Value.GetString() ?? string.Empty }),
-                JsonValueKind.Array => InputSettings.NormalizeBrowserKeyGestures(
+                JsonValueKind.String => new[] { property.Value.GetString() ?? string.Empty },
+                JsonValueKind.Array =>
                     property.Value.EnumerateArray()
                         .Where(static x => x.ValueKind == JsonValueKind.String)
-                        .Select(static x => x.GetString() ?? string.Empty)),
-                _ => new List<string>()
+                        .Select(static x => x.GetString() ?? string.Empty),
+                _ => Array.Empty<string>()
             };
 
+            List<string> values = isLegacyColumnCount
+                ? rawValues.ToList()
+                : InputSettings.NormalizeBrowserKeyGestures(rawValues);
             result[property.Name.Trim()] = values;
         }
 
-        return InputSettings.NormalizeBrowserKeyCommandOverrides(result);
+        return InputSettings.NormalizeBrowserKeyCommandOverridesDetailed(result);
     }
 
     public override void Write(Utf8JsonWriter writer, Dictionary<string, List<string>> value, JsonSerializerOptions options)

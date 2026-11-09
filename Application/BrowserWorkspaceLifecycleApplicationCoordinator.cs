@@ -96,10 +96,13 @@ internal sealed class BrowserWorkspaceLifecycleApplicationCoordinator
     }
 
     public string ResolveStartupPath(IReadOnlyList<string> commandLineArgs, string currentDirectory)
+        => ResolveStartupPath(StartupArgumentParser.ParseCommandLine(commandLineArgs).InitialDirectoryCandidate, currentDirectory);
+
+    public string ResolveStartupPath(string? initialDirectoryCandidate, string currentDirectory)
     {
-        if (commandLineArgs.Count > 1 && Directory.Exists(commandLineArgs[1]))
+        if (Directory.Exists(initialDirectoryCandidate))
         {
-            return commandLineArgs[1];
+            return initialDirectoryCandidate;
         }
 
         if (SessionRestorePolicy.ShouldRestoreStartupFolder(_settings.Value.Session) &&

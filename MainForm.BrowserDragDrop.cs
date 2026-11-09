@@ -1,4 +1,5 @@
 using MidFD.Helpers;
+using MidFD.Commands;
 using MidFD.Models;
 using MidFD.Presentation;
 using MidFD.Services;
@@ -73,12 +74,13 @@ public partial class MainForm
     private BrowserIncomingDragDecision ResolveIncomingBrowserDragDecision(DragEventArgs e)
     {
         IDataObject? data = e.Data;
+        bool isOutlookAttachmentDrop = OutlookAttachmentDropService.IsOutlookAttachmentDrop(data);
         return ResolveIncomingBrowserDragDecision(
             HasInternalDragArchiveMarker(data),
             data != null && data.GetDataPresent(DataFormats.FileDrop),
-            BrowserImageDropService.HasImageData(data),
+            !isOutlookAttachmentDrop && BrowserImageDropService.HasImageData(data),
             BrowserDropUrlResolverService.HasPotentialUrlData(data),
-            OutlookAttachmentDropService.IsOutlookAttachmentDrop(data),
+            isOutlookAttachmentDrop,
             e.KeyState);
     }
 
@@ -105,12 +107,13 @@ public partial class MainForm
     private BrowserIncomingDragDecision ResolveIncomingDropDecision(DragEventArgs e)
     {
         IDataObject? data = e.Data;
+        bool isOutlookAttachmentDrop = OutlookAttachmentDropService.IsOutlookAttachmentDrop(data);
         return ResolveIncomingDropDecision(
             HasInternalDragArchiveMarker(data),
             data != null && data.GetDataPresent(DataFormats.FileDrop),
-            BrowserImageDropService.HasImageData(data),
+            !isOutlookAttachmentDrop && BrowserImageDropService.HasImageData(data),
             BrowserDropUrlResolverService.HasPotentialUrlData(data),
-            OutlookAttachmentDropService.IsOutlookAttachmentDrop(data),
+            isOutlookAttachmentDrop,
             e.KeyState);
     }
 
@@ -179,42 +182,54 @@ public partial class MainForm
                 return;
             }
 
-            bool fileDropPresent = data.GetDataPresent(DataFormats.FileDrop);
-            bool outlookAttachmentDrop = OutlookAttachmentDropService.IsOutlookAttachmentDrop(data);
-            if (!fileDropPresent && !outlookAttachmentDrop)
+            int keyState = e.KeyState;
+            var dropPoint = new Point(e.X, e.Y);
+            BrowserAsyncDropPayload? payload = InvokeBrowserUi(() =>
+            {
+                // WinForms IDataObject may wrap an STA-owned OLE IDataObject. Read every
+                // format on the MainForm STA before the async route starts worker work.
+                bool fileDropPresent = data.GetDataPresent(DataFormats.FileDrop);
+                bool outlookAttachmentDrop = OutlookAttachmentDropService.IsOutlookAttachmentDrop(data);
+                bool hasImageData = !outlookAttachmentDrop && BrowserImageDropService.HasImageData(data);
+                bool hasPotentialUrlData = BrowserDropUrlResolverService.HasPotentialUrlData(data);
+                if (!fileDropPresent && !outlookAttachmentDrop && !hasImageData && !hasPotentialUrlData)
+                {
+                    return null;
+                }
+
+                string[] files = Array.Empty<string>();
+                string[] outlookAttachmentNames = Array.Empty<string>();
+                if (outlookAttachmentDrop)
+                {
+                    // FileContents stays valid until this async drop callback completes.
+                    outlookAttachmentNames = OutlookAttachmentDropService.GetAttachmentNames(data).ToArray();
+                }
+                else if (fileDropPresent)
+                {
+                    string[]? fileDropFiles = data.GetData(DataFormats.FileDrop) as string[];
+                    if (fileDropFiles == null || fileDropFiles.Length == 0)
+                    {
+                        return null;
+                    }
+
+                    files = fileDropFiles.ToArray();
+                }
+
+                return new BrowserAsyncDropPayload(
+                    files,
+                    outlookAttachmentNames,
+                    keyState,
+                    dropPoint,
+                    HasInternalDragArchiveMarker(data),
+                    FileDropPresent: fileDropPresent,
+                    hasImageData,
+                    hasPotentialUrlData,
+                    IsOutlookAttachmentDrop: outlookAttachmentDrop);
+            });
+            if (payload == null)
             {
                 return;
             }
-
-            string[] files = Array.Empty<string>();
-            string[] outlookAttachmentNames = Array.Empty<string>();
-            if (outlookAttachmentDrop)
-            {
-                // Virtual data is valid only during this callback. Snapshot descriptor names here;
-                // FileContents is consumed later in the same callback by ProcessDrop.
-                outlookAttachmentNames = OutlookAttachmentDropService.GetAttachmentNames(data).ToArray();
-            }
-            else if (fileDropPresent)
-            {
-                string[]? fileDropFiles = data.GetData(DataFormats.FileDrop) as string[];
-                if (fileDropFiles == null || fileDropFiles.Length == 0)
-                {
-                    return;
-                }
-
-                files = fileDropFiles.ToArray();
-            }
-
-            var payload = new BrowserAsyncDropPayload(
-                files,
-                outlookAttachmentNames,
-                e.KeyState,
-                new Point(e.X, e.Y),
-                HasInternalDragArchiveMarker(data),
-                FileDropPresent: fileDropPresent,
-                BrowserImageDropService.HasImageData(data),
-                BrowserDropUrlResolverService.HasPotentialUrlData(data),
-                IsOutlookAttachmentDrop: outlookAttachmentDrop);
             LogService.Info(
                 $"[ExternalDropAsync] nativeDataObject=True, asyncCapability=True, asyncMode=True, " +
                 $"getAsyncMode=WinForms, startOperation=WinForms, fileDropCount={payload.Files.Length}, " +
@@ -223,8 +238,15 @@ public partial class MainForm
 
             if (payload.IsOutlookAttachmentDrop)
             {
-                ProcessBrowserAsyncOutlookDrop(data, payload);
+                RunBrowserAsyncOutlookDrop(data, payload);
                 LogService.Info("[ExternalDropAsync] outlookRoute=completed, endOperation=WinForms");
+                return;
+            }
+
+            if (!payload.FileDropPresent && (payload.HasImageData || payload.HasPotentialUrlData))
+            {
+                RunBrowserAsyncImageDrop(data, payload);
+                LogService.Info("[ExternalDropAsync] imageRoute=completed, endOperation=WinForms");
                 return;
             }
 
@@ -254,108 +276,151 @@ public partial class MainForm
         }
     }
 
-    private sealed record BrowserAsyncOutlookPreparation(
-        string TargetDirectory);
+    private sealed record BrowserAsyncExternalDropPreparation(
+        BrowserExternalDropImportKind Kind,
+        Uri? ImageUri = null,
+        string? SuggestedFileName = null);
 
-    private void ProcessBrowserAsyncOutlookDrop(
+    private sealed record BrowserAsyncOutlookPreparation();
+
+    private void RunBrowserAsyncOutlookDrop(
         IDataObject data,
         BrowserAsyncDropPayload payload)
     {
-        BrowserAsyncOutlookPreparation? preparation = InvokeBrowserUi(
-            () => ResolveBrowserAsyncOutlookDropPreparation(payload));
-        if (preparation == null)
+        var completion = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        bool started = InvokeBrowserUi(() =>
         {
-            return;
-        }
-
-        OutlookAttachmentDropResult dropResult = OutlookAttachmentDropService.ProcessDrop(
-            data,
-            preparation.TargetDirectory,
-            fileName => InvokeBrowserUi(() =>
+            if (ResolveBrowserAsyncOutlookDropPreparation(payload) == null)
             {
-                string overwriteMessage = FileOperationPresentationHelper.GetOverwriteConfirmationMessage(fileName);
-                DialogResult overwriteResult = MessageBox.Show(
-                    overwriteMessage,
-                    "確認",
-                    MessageBoxButtons.YesNoCancel,
-                    MessageBoxIcon.Warning);
-                return overwriteResult == DialogResult.Yes
-                    ? OverwriteConfirmResult.Yes
-                    : overwriteResult == DialogResult.No
-                        ? OverwriteConfirmResult.No
-                        : OverwriteConfirmResult.Cancel;
-            }),
-            showTypeMismatch: destinationPath => InvokeBrowserUi(() =>
-                MessageBox.Show(
-                    $"型が異なるため上書きできません。\n宛先: {destinationPath}",
-                    "上書きエラー",
-                    MessageBoxButtons.OK,
-                    MessageBoxIcon.Error)),
-            showCopyFailure: (fileName, exception) => InvokeBrowserUi(() =>
-                MessageBox.Show(
-                    $"コピー失敗: {fileName}\n{exception?.Message ?? "添付データを保存できませんでした。"}",
-                    "エラー",
-                    MessageBoxButtons.OK,
-                    MessageBoxIcon.Error)));
-
-        LogService.Info(
-            $"[ExternalDropAsync] outlookRoute=processed, success={dropResult.AllSucceeded}, " +
-            $"attachmentCount={dropResult.AttachmentCount}, processedCount={dropResult.ProcessedCount}, " +
-            $"successCount={dropResult.SuccessCount}, failureCount={dropResult.FailureCount}, " +
-            $"canceled={dropResult.WasCanceled}, classification={dropResult.Classification}");
-        if (!dropResult.AnySucceeded)
-        {
-            return;
-        }
-
-        BeginBrowserUi(() =>
-        {
-            if (dropResult.AllSucceeded)
-            {
-                ShowStatusMessage("仮想ファイルのコピーが完了しました。");
+                return false;
             }
 
-            string? focusTarget = dropResult.SuccessfulFileNames.Count > 0
-                ? dropResult.SuccessfulFileNames[0]
-                : null;
-            LoadDirectory(preparation.TargetDirectory, focusTarget);
+            return ExecuteBrowserExternalDropImport(
+                BrowserExternalDropImportKind.OutlookAttachments,
+                data,
+                targetCount: payload.OutlookAttachmentNames.Length,
+                outlookAttachmentNames: payload.OutlookAttachmentNames,
+                confirmOverwrite: ConfirmOutlookDropOverwrite,
+                completionCallback: () => completion.TrySetResult(true),
+                processAsync: true);
         });
+        if (!started)
+        {
+            completion.TrySetResult(true);
+        }
+        // The async drop callback retains the IDataObject until the worker has released
+        // every FileContents IStream and STGMEDIUM.
+        completion.Task.GetAwaiter().GetResult();
+        LogService.Info("[ExternalDropAsync] outlookRoute=command-dispatch-completed, endOperation=WinForms");
+    }
+
+    private void RunBrowserAsyncImageDrop(
+        IDataObject data,
+        BrowserAsyncDropPayload payload)
+    {
+        var completion = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        bool started = InvokeBrowserUi(() =>
+        {
+            BrowserAsyncExternalDropPreparation? preparation =
+                ResolveBrowserAsyncImageDropPreparation(data, payload);
+            if (preparation == null)
+            {
+                return false;
+            }
+
+            return ExecuteBrowserExternalDropImport(
+                preparation.Kind,
+                data,
+                imageUri: preparation.ImageUri,
+                suggestedFileName: preparation.SuggestedFileName,
+                completionCallback: () => completion.TrySetResult(true),
+                processAsync: true);
+        });
+        if (!started)
+        {
+            completion.TrySetResult(true);
+        }
+        completion.Task.GetAwaiter().GetResult();
+    }
+
+    private bool ExecuteBrowserExternalDropImport(
+        BrowserExternalDropImportKind kind,
+        IDataObject? data,
+        Uri? imageUri = null,
+        string? suggestedFileName = null,
+        IReadOnlyList<string>? outlookAttachmentNames = null,
+        Func<string, OverwriteConfirmResult>? confirmOverwrite = null,
+        Action? completionCallback = null,
+        bool processAsync = false,
+        int targetCount = 1)
+    {
+        Func<string, OverwriteConfirmResult>? uiConfirmOverwrite = confirmOverwrite == null
+            ? null
+            : fileName => InvokeBrowserUi(() => confirmOverwrite(fileName));
+
+        Action? observedCompletionCallback = completionCallback;
+        if (observedCompletionCallback != null && _integrationSeam?.Observer is { } observer)
+        {
+            Action callback = observedCompletionCallback;
+            observedCompletionCallback = () =>
+            {
+                try
+                {
+                    observer.OnExternalDropCompletion();
+                }
+                finally
+                {
+                    callback();
+                }
+            };
+        }
+
+        return ExecuteCommandFromUi(
+            CommandIds.FileImportExternalDrop,
+            new CommandExecutionContext
+            {
+                Scope = CommandScope.Browser,
+                Source = "DragDrop",
+                BrowserExternalDropImport = new BrowserExternalDropImportCommandContext(
+                    kind,
+                    data,
+                    ImageUri: imageUri,
+                    SuggestedFileName: suggestedFileName,
+                    InvokeUi: InvokeBrowserUi,
+                    ConfirmOverwrite: uiConfirmOverwrite,
+                    ProcessAsync: processAsync,
+                    TargetCount: targetCount,
+                    OutlookAttachmentNames: outlookAttachmentNames),
+                FileOperation = new FileOperationCommandContext(
+                    CompletionCallback: observedCompletionCallback)
+            });
+    }
+
+    private OverwriteConfirmResult ConfirmOutlookDropOverwrite(string fileName)
+    {
+        string overwriteMessage = FileOperationPresentationHelper.GetOverwriteConfirmationMessage(fileName);
+        DialogResult overwriteResult = MessageBox.Show(
+            overwriteMessage,
+            "確認",
+            MessageBoxButtons.YesNoCancel,
+            MessageBoxIcon.Warning);
+        return overwriteResult == DialogResult.Yes
+            ? OverwriteConfirmResult.Yes
+            : overwriteResult == DialogResult.No
+                ? OverwriteConfirmResult.No
+                : OverwriteConfirmResult.Cancel;
     }
 
     private BrowserAsyncOutlookPreparation? ResolveBrowserAsyncOutlookDropPreparation(
         BrowserAsyncDropPayload payload)
     {
-        if (payload.InternalMarkerPresent)
+        if (payload.InternalMarkerPresent || !CanPrepareBrowserAsyncExternalDrop(payload))
         {
             return null;
         }
 
-        if (_viewerApplicationCoordinator.Mode != ViewerApplicationMode.Browser)
+        if (!payload.IsOutlookAttachmentDrop)
         {
-            return null;
-        }
-
-        if (GuardReadOnlyBrowserTab("ファイル取り込み"))
-        {
-            return null;
-        }
-
-        if (_fileOperationApplicationCoordinator.IsClipboardBusy
-            || string.IsNullOrEmpty(_browserApplicationCoordinator.CurrentPath))
-        {
-            return null;
-        }
-
-        BrowserIncomingDragDecision decision = ResolveIncomingBrowserDragDecision(
-            payload.InternalMarkerPresent,
-            payload.FileDropPresent,
-            payload.HasImageData,
-            payload.HasPotentialUrlData,
-            payload.IsOutlookAttachmentDrop,
-            payload.KeyState);
-        if (decision.Intent == BrowserDragDropIntent.None)
-        {
-            ShowStatusMessage("ドロップ不可な操作または状態です。");
             return null;
         }
 
@@ -366,8 +431,78 @@ public partial class MainForm
             return null;
         }
 
-        string targetDirectory = _browserApplicationCoordinator.CurrentPath!;
-        return new BrowserAsyncOutlookPreparation(targetDirectory);
+        return new BrowserAsyncOutlookPreparation();
+    }
+
+    private BrowserAsyncExternalDropPreparation? ResolveBrowserAsyncImageDropPreparation(
+        IDataObject data,
+        BrowserAsyncDropPayload payload)
+    {
+        if (payload.InternalMarkerPresent || payload.FileDropPresent || payload.IsOutlookAttachmentDrop ||
+            !CanPrepareBrowserAsyncExternalDrop(payload))
+        {
+            return null;
+        }
+
+        if (payload.HasImageData)
+        {
+            return new BrowserAsyncExternalDropPreparation(BrowserExternalDropImportKind.Image);
+        }
+
+        if (!payload.HasPotentialUrlData)
+        {
+            return null;
+        }
+
+        if (BrowserDropUrlResolverService.TryResolveImageUrl(
+                data,
+                out Uri? imageUri,
+                out string? suggestedFileName) &&
+            imageUri is Uri resolvedImageUri)
+        {
+            return new BrowserAsyncExternalDropPreparation(
+                BrowserExternalDropImportKind.ImageUrl,
+                resolvedImageUri,
+                suggestedFileName);
+        }
+
+        LogBrowserImageImportWarn(
+            $"Source=BrowserDropUrlUnresolved Data={BrowserImageDropService.DescribeDataObject(data)}");
+        ShowStatusMessage("画像URLを特定できませんでした。");
+        return null;
+    }
+
+    private bool CanPrepareBrowserAsyncExternalDrop(BrowserAsyncDropPayload payload)
+    {
+        if (_viewerApplicationCoordinator.Mode != ViewerApplicationMode.Browser)
+        {
+            return false;
+        }
+
+        if (GuardReadOnlyBrowserTab("ファイル取り込み"))
+        {
+            return false;
+        }
+
+        if (_fileOperationApplicationCoordinator.IsClipboardBusy)
+        {
+            return false;
+        }
+
+        BrowserIncomingDragDecision decision = ResolveIncomingBrowserDragDecision(
+            payload.InternalMarkerPresent,
+            payload.FileDropPresent,
+            payload.HasImageData,
+            payload.HasPotentialUrlData,
+            payload.IsOutlookAttachmentDrop,
+            payload.KeyState);
+        if (decision.Intent != BrowserDragDropIntent.None)
+        {
+            return true;
+        }
+
+        ShowStatusMessage("ドロップ不可な操作または状態です。");
+        return false;
     }
 
     private T InvokeBrowserUi<T>(Func<T> action)
@@ -556,7 +691,8 @@ public partial class MainForm
             return true;
         }
 
-        var selection = new SelectionResult(files, hasMarkedSelection: files.Length > 1);
+        // 外部FileDropの明示的なsource集合はBrowser内のmark選択ではない。
+        var selection = new SelectionResult(files, hasMarkedSelection: false);
         SyncExternalDropWait? syncWait = waitForCompletion ? new SyncExternalDropWait() : null;
         Action? effectiveCompletionCallback = completionCallback;
         if (syncWait != null)
@@ -580,15 +716,21 @@ public partial class MainForm
         bool started = false;
         try
         {
-            started = _fileOperationApplicationCoordinator.TryStart(
-                action == BrowserDropAction.Move
-                    ? FileOperationCommandKind.Move
-                    : FileOperationCommandKind.Copy,
-                this,
-                selection,
-                destinationDirectory: _browserApplicationCoordinator.CurrentPath,
-                completionCallback: effectiveCompletionCallback,
-                recordDragCopyUndo: action == BrowserDropAction.Copy);
+            string commandId = action == BrowserDropAction.Move
+                ? CommandIds.FileMove
+                : CommandIds.FileCopy;
+            started = ExecuteCommandFromUi(
+                commandId,
+                new CommandExecutionContext
+                {
+                    Scope = CommandScope.Browser,
+                    Source = "DragDrop",
+                    SelectionSnapshot = selection,
+                    FileOperation = new FileOperationCommandContext(
+                        DestinationDirectory: _browserApplicationCoordinator.CurrentPath,
+                        CompletionCallback: effectiveCompletionCallback,
+                        RecordDragCopyUndo: action == BrowserDropAction.Copy)
+                });
             operationCompletionPending = started;
             if (!started)
             {

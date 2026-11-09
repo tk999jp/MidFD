@@ -7,27 +7,27 @@ internal static class BrowserPathEntryCoordinator
     public static BrowserPathEntryApplyResult Apply(
         string? inputPath,
         Func<string, string> normalizeDestinationDirectory,
-        Action<string> navigateDirectory,
-        Func<string, string?> openFile)
+        Func<string, bool> navigateDirectory,
+        Func<string, string?> selectFile)
     {
         BrowserPathEntryNavigationResult result = BrowserPathEntryNavigationService.Resolve(inputPath, normalizeDestinationDirectory);
-        return ApplyResolved(result, navigateDirectory, openFile);
+        return ApplyResolved(result, navigateDirectory, selectFile);
     }
 
     public static BrowserPathEntryApplyResult Apply(
         string? inputPath,
         NavigationService navigationService,
-        Action<string> navigateDirectory,
-        Func<string, string?> openFile)
+        Func<string, bool> navigateDirectory,
+        Func<string, string?> selectFile)
     {
         BrowserPathEntryNavigationResult result = BrowserPathEntryNavigationService.Resolve(inputPath, navigationService);
-        return ApplyResolved(result, navigateDirectory, openFile);
+        return ApplyResolved(result, navigateDirectory, selectFile);
     }
 
     private static BrowserPathEntryApplyResult ApplyResolved(
         BrowserPathEntryNavigationResult result,
-        Action<string> navigateDirectory,
-        Func<string, string?> openFile)
+        Func<string, bool> navigateDirectory,
+        Func<string, string?> selectFile)
     {
         if (result.TargetKind == BrowserPathEntryTargetKind.None)
         {
@@ -41,7 +41,16 @@ internal static class BrowserPathEntryCoordinator
 
         if (result.TargetKind == BrowserPathEntryTargetKind.Directory)
         {
-            navigateDirectory(result.ResolvedPath);
+            if (!navigateDirectory(result.ResolvedPath))
+            {
+                return new BrowserPathEntryApplyResult
+                {
+                    Succeeded = false,
+                    ShouldCloseEditor = false,
+                    StatusMessage = "指定されたフォルダーへ移動できませんでした。"
+                };
+            }
+
             return new BrowserPathEntryApplyResult
             {
                 Succeeded = true,
@@ -49,13 +58,13 @@ internal static class BrowserPathEntryCoordinator
             };
         }
 
-        string? error = openFile(result.ResolvedPath);
+        string? error = selectFile(result.ResolvedPath);
         return new BrowserPathEntryApplyResult
         {
             Succeeded = string.IsNullOrWhiteSpace(error),
             ShouldCloseEditor = string.IsNullOrWhiteSpace(error),
             StatusMessage = string.IsNullOrWhiteSpace(error)
-                ? BrowserPathEntryNavigationService.BuildFileOpenSuccessMessage(result.ResolvedPath)
+                ? BrowserPathEntryNavigationService.BuildFileSelectionSuccessMessage(result.ResolvedPath)
                 : error ?? string.Empty
         };
     }

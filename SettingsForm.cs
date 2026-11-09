@@ -1,3 +1,4 @@
+extern alias MidPlayerLite;
 using System.Drawing.Text;
 using MidFD.Configuration;
 using MidFD.Services;
@@ -5,6 +6,9 @@ using MidFD.Dialogs;
 using MidFD.Commands;
 using MidFD.Models;
 using MidFD.Runtime;
+using MidPlayerRuntimeFeatures = MidPlayerLite::MidFD.MidPlayerRuntimeFeatures;
+using SusiePluginInspectionApi = MidPlayerLite::MidFD.SusiePluginInspectionApi;
+using SusiePluginInspectionResult = MidPlayerLite::MidFD.SusiePluginInspectionResult;
 
 namespace MidFD;
 
@@ -20,11 +24,22 @@ public class SettingsForm : Form
 
     private readonly AppSettings _settings;
     private readonly ISettingsApplicationPort _settingsApplication;
+    private readonly Func<string, CommandExecutionContext, bool>? _executeCommand;
+    private readonly Func<bool> _isFileOperationBusy;
+    private readonly System.Windows.Forms.Timer _busyAvailabilityTimer = new() { Interval = 200 };
+    private Button? _settingsSaveButton;
+    private Button? _settingsApplyButton;
+    private Button? _settingsExportButton;
+    private Button? _settingsImportButton;
+    private Configuration.SettingsSqliteStore.SettingsSaveResult? _lastSettingsSaveResult;
 
     private readonly TextBox _sevenZipPathBox;
     private readonly ComboBox _packDialogModeCombo;
     private readonly TextBox _diffPathBox;
     private readonly TextBox _editorPathBox;
+    private readonly TextBox _editorSearchHitArgumentTemplateBox;
+    private readonly Button _applyEditorArgumentPresetButton;
+    private readonly Label _editorArgumentPresetStatusLabel;
     private readonly Label _sevenZipStatusLabel;
     private readonly Label _diffStatusLabel;
     private readonly Label _editorStatusLabel;
@@ -57,14 +72,19 @@ public class SettingsForm : Form
     private readonly CheckBox _reuseImageViewerCheckBox;
     private readonly CheckBox _closeImageViewerOnNonImageCheckBox;
     private readonly CheckBox _rememberImageViewerBoundsCheckBox;
-    private readonly CheckBox _videoStillPreviewEnabledCheckBox;
-    private readonly CheckBox _videoEnterPlaysExternalCheckBox;
-    private readonly ComboBox _videoSkipSecondsCombo;
+    private readonly CheckBox _defaultMediaViewerPlaybackLockedCheckBox;
+    private readonly ComboBox _videoSeekStepSecondsCombo;
     private readonly ComboBox _videoPlaybackVolumeCombo;
+    private ComboBox _videoPlaybackBackendCombo = null!;
     private readonly CheckBox _useCustomColorsCheckBox;
     private readonly CheckBox _enableColorAssistCheckBox;
     private readonly TextBox _videoStillPreviewFfmpegPathBox;
     private readonly Label _videoStillPreviewFfmpegStatusLabel;
+    private readonly DataGridView _susiePluginsGrid;
+    private readonly DataGridView _decoderSelectionGrid;
+    private readonly TextBox _disabledStandardExtensionsBox;
+    private readonly Dictionary<string, SusiePluginInspection> _susiePluginMetadata = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, string> _susieDecoderRepairOriginals = new(StringComparer.OrdinalIgnoreCase);
     private readonly CheckBox _confirmDeleteCheckBox;
     private readonly CheckBox _confirmPermanentDeleteCheckBox;
     private readonly CheckBox _useMidFdManagedTrashCheckBox;
@@ -126,6 +146,9 @@ public class SettingsForm : Form
     private bool _suppressWorkspaceSnapshotSettingEvents;
     private bool _workspaceSnapshotOverrideEdited;
     private bool _fileListCustomColorsEnabledForSave;
+    private string? _lastPresetEditorPath;
+    private bool _editorArgumentTemplateWasManuallyEdited;
+    private bool _updatingEditorArgumentTemplate;
 
     public enum InitialTab
     {
@@ -138,7 +161,6 @@ public class SettingsForm : Form
     }
 
     public event EventHandler? SettingsApplied;
-    public event EventHandler? OpenManagedTrashDialogRequested;
     public bool ImportedSettingsApplied { get; private set; }
 
     public SettingsForm(
@@ -153,10 +175,14 @@ public class SettingsForm : Form
         AppSettings settings,
         FeatureProfile effectiveProfile,
         InitialTab initialTab,
-        ISettingsApplicationPort? settingsApplication = null)
+        ISettingsApplicationPort? settingsApplication = null,
+        Func<string, CommandExecutionContext, bool>? executeCommand = null,
+        Func<bool>? isFileOperationBusy = null)
     {
         ArgumentNullException.ThrowIfNull(settings);
         _settingsApplication = settingsApplication ?? new SettingsApplicationCoordinator();
+        _executeCommand = executeCommand;
+        _isFileOperationBusy = isFileOperationBusy ?? (() => false);
         _settings = _settingsApplication.CreateSettingsDraft(settings, effectiveProfile);
 
         _mouseGestureCommandMapDraft = new Dictionary<string, string>(_settings.Input.MouseGestureCommandMap, StringComparer.OrdinalIgnoreCase);
@@ -183,7 +209,8 @@ public class SettingsForm : Form
         MinimizeBox = false;
         StartPosition = FormStartPosition.CenterParent;
         Padding = new Padding(12);
-        AutoScaleMode = AutoScaleMode.Font;
+        AutoScaleDimensions = new SizeF(96F, 96F);
+        AutoScaleMode = AutoScaleMode.Dpi;
         ClientSize = new Size(1088, 820);
 
         var tabs = new TabControl
@@ -197,6 +224,7 @@ public class SettingsForm : Form
         var tabInputAssignment = CreateTab("入力割り当て");
         var tabExternal = CreateTab("外部連携");
         var tabStartupAndLog = CreateTab("起動・ログ");
+        var tabImageDecoders = CreateTab("画像デコーダー");
 
         tabs.TabPages.AddRange(new[]
         {
@@ -205,8 +233,20 @@ public class SettingsForm : Form
             tabOperation,
             tabInputAssignment,
             tabExternal,
+            tabImageDecoders,
             tabStartupAndLog
         });
+
+        TabPage initialPage = initialTab switch
+        {
+            InitialTab.Display => tabDisplay,
+            InitialTab.Color => tabColor,
+            InitialTab.Operation => tabOperation,
+            InitialTab.InputAssignment => tabInputAssignment,
+            InitialTab.External => tabExternal,
+            InitialTab.StartupAndLog => tabStartupAndLog,
+            _ => tabDisplay
+        };
 
         var bottomPanel = new Panel
         {
@@ -216,10 +256,10 @@ public class SettingsForm : Form
 
         Controls.Add(tabs);
         Controls.Add(bottomPanel);
-        tabs.SelectedIndex = Math.Clamp((int)initialTab, 0, tabs.TabPages.Count - 1);
+        tabs.SelectedTab = initialPage;
         Shown += (_, _) =>
         {
-            tabs.SelectedIndex = Math.Clamp((int)initialTab, 0, tabs.TabPages.Count - 1);
+            tabs.SelectedTab = initialPage;
         };
 
         string[] fonts = GetInstalledFontNames();
@@ -230,7 +270,7 @@ public class SettingsForm : Form
         tabColor.AutoScroll = false;
 
         (_filerFontCombo, _filerFontSizeBox, _browserTabFontSizeBox, _browserTabWidthBox, _showBrowserTabCategoryRowCheckBox, _showExtensionsCheckBox, _showDirectoryMarkerCheckBox, _showHiddenFilesCheckBox, _showItemIconsCheckBox, _useUnderlineCursorCheckBox, _showFunctionBarCheckBox, _showBrowserToolbarCheckBox, _showPathAsBreadcrumbCheckBox, _fileDisplayModeCombo, _dateFormatCombo, _sizeFormatCombo,
-         _viewerFontCombo, _viewerFontSizeBox, _viewerWordWrapCheckBox, _markdownViewerModeCombo, _reuseImageViewerCheckBox, _closeImageViewerOnNonImageCheckBox, _rememberImageViewerBoundsCheckBox)
+         _viewerFontCombo, _viewerFontSizeBox, _viewerWordWrapCheckBox, _markdownViewerModeCombo, _reuseImageViewerCheckBox, _closeImageViewerOnNonImageCheckBox, _rememberImageViewerBoundsCheckBox, _defaultMediaViewerPlaybackLockedCheckBox)
             = BuildDisplayAndPreviewTab(tabDisplay, fonts, dateFormats, sizeFormats);
         _workspaceSnapshotEnabledCheckBox.CheckedChanged += (_, _) =>
         {
@@ -256,7 +296,7 @@ public class SettingsForm : Form
         _functionBarPreviewPanel = colorTabResult.FunctionBarPreviewPanel;
 
         (_confirmDeleteCheckBox, _confirmPermanentDeleteCheckBox, _useMidFdManagedTrashCheckBox, _managedTrashAutoHandoffCheckBox, _managedTrashUndoRetentionDaysBox, _managedTrashRetentionPresetBox, _reloadAfterFileOperationCheckBox, _selectCreatedItemCheckBox, _clipboardPasteTextAsFileCheckBox,
-         _enableMouseGesturesCheckBox)
+         _enableMouseGesturesCheckBox, _videoSeekStepSecondsCombo, _videoPlaybackVolumeCombo)
             = BuildOperationAndInputTab(tabOperation);
 
         _embeddedInputAssignmentView = BuildInputAssignmentTab(tabInputAssignment);
@@ -266,8 +306,20 @@ public class SettingsForm : Form
         (_restoreStartupStateCheckBox, _restoreTabsOnStartupCheckBox, _restoreLastPathCheckBox, _restoreDisplayStateCheckBox, _restoreWindowBoundsCheckBox, _restoreColumnCountCheckBox, _restoreSortCheckBox)
             = BuildLaunchAndRestoreTab(tabStartupAndLog);
 
-        (_sevenZipPathBox, _packDialogModeCombo, _diffPathBox, _editorPathBox, _videoPlaybackVolumeCombo, _videoStillPreviewFfmpegPathBox, _videoEnterPlaysExternalCheckBox, _sevenZipStatusLabel, _diffStatusLabel, _editorStatusLabel, _videoStillPreviewFfmpegStatusLabel, _videoStillPreviewEnabledCheckBox, _videoSkipSecondsCombo)
+        (_sevenZipPathBox, _packDialogModeCombo, _diffPathBox, _editorPathBox, _editorSearchHitArgumentTemplateBox, _applyEditorArgumentPresetButton, _editorArgumentPresetStatusLabel, _videoStillPreviewFfmpegPathBox, _sevenZipStatusLabel, _diffStatusLabel, _editorStatusLabel, _videoStillPreviewFfmpegStatusLabel)
             = BuildExternalTab(tabExternal);
+        _lastPresetEditorPath = NullIfEmpty(_editorPathBox.Text);
+        _editorSearchHitArgumentTemplateBox.TextChanged += (_, _) =>
+        {
+            if (!_updatingEditorArgumentTemplate)
+            {
+                _editorArgumentTemplateWasManuallyEdited = true;
+            }
+        };
+        _editorPathBox.Leave += (_, _) => CommitExternalEditorPathSelection(force: false);
+        RefreshExternalEditorPresetStatus();
+
+        (_susiePluginsGrid, _decoderSelectionGrid, _disabledStandardExtensionsBox) = BuildImageDecoderTab(tabImageDecoders);
 
         (_enableLogCheckBox, _enableDetailedLogCheckBox) = BuildLogTab(tabStartupAndLog);
 
@@ -286,6 +338,7 @@ public class SettingsForm : Form
             Anchor = AnchorStyles.Top | AnchorStyles.Right,
         };
         btnOk.Click += BtnOk_Click;
+        _settingsSaveButton = btnOk;
 
         var btnCancel = new Button
         {
@@ -304,6 +357,7 @@ public class SettingsForm : Form
             Anchor = AnchorStyles.Top | AnchorStyles.Right,
         };
         btnApply.Click += BtnApply_Click;
+        _settingsApplyButton = btnApply;
 
         var btnExport = new Button
         {
@@ -313,6 +367,7 @@ public class SettingsForm : Form
             Anchor = AnchorStyles.Top | AnchorStyles.Left,
         };
         btnExport.Click += (_, _) => ExportSettings();
+        _settingsExportButton = btnExport;
 
         var btnImport = new Button
         {
@@ -322,6 +377,7 @@ public class SettingsForm : Form
             Anchor = AnchorStyles.Top | AnchorStyles.Left,
         };
         btnImport.Click += (_, _) => ImportSettings();
+        _settingsImportButton = btnImport;
 
         bottomPanel.Controls.Add(btnOk);
         bottomPanel.Controls.Add(btnCancel);
@@ -331,6 +387,30 @@ public class SettingsForm : Form
 
         AcceptButton = btnOk;
         CancelButton = btnCancel;
+
+        _busyAvailabilityTimer.Tick += (_, _) => UpdateBusyCommandAvailability();
+        Shown += (_, _) =>
+        {
+            UpdateBusyCommandAvailability();
+            _busyAvailabilityTimer.Start();
+        };
+        VisibleChanged += (_, _) =>
+        {
+            if (Visible && IsHandleCreated)
+            {
+                UpdateBusyCommandAvailability();
+                _busyAvailabilityTimer.Start();
+            }
+            else
+            {
+                _busyAvailabilityTimer.Stop();
+            }
+        };
+        FormClosed += (_, _) =>
+        {
+            _busyAvailabilityTimer.Stop();
+            _busyAvailabilityTimer.Dispose();
+        };
     }
 
     private void ExportSettings()
@@ -342,11 +422,9 @@ public class SettingsForm : Form
             AddExtension = true
         };
         if (dialog.ShowDialog(this) != DialogResult.OK) return;
-        SettingsSqliteStore.SettingsTransferResult result = _settingsApplication.ExportSettings(dialog.FileName, _settings);
-        if (!result.Succeeded)
-        {
-            MessageBox.Show(this, result.UserMessage, "設定エクスポート", MessageBoxButtons.OK, MessageBoxIcon.Error);
-        }
+        DispatchSettingsTransfer(
+            CommandIds.AppSettingsExport,
+            new SettingsTransferCommandContext(SettingsTransferAction.Export, dialog.FileName, _settings));
     }
 
     private void ImportSettings()
@@ -357,37 +435,90 @@ public class SettingsForm : Form
             CheckFileExists = true
         };
         if (dialog.ShowDialog(this) != DialogResult.OK) return;
-        SettingsSqliteStore.SettingsTransferResult result = _settingsApplication.ReadImportedSettings(dialog.FileName);
-        if (!result.Succeeded)
+        DispatchSettingsTransfer(
+            CommandIds.AppSettingsImport,
+            new SettingsTransferCommandContext(SettingsTransferAction.ReadImport, dialog.FileName));
+    }
+
+    internal void HandleSettingsTransferResult(
+        SettingsTransferCommandContext command,
+        SettingsSqliteStore.SettingsTransferResult result)
+    {
+        switch (command.Action)
         {
-            MessageBox.Show(this, result.UserMessage, "設定インポート", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            case SettingsTransferAction.Export:
+                if (!result.Succeeded)
+                {
+                    MessageBox.Show(this, result.UserMessage, "設定エクスポート", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                }
+                return;
+            case SettingsTransferAction.ReadImport:
+                if (!result.Succeeded || result.Settings == null)
+                {
+                    MessageBox.Show(this, result.UserMessage, "設定インポート", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    return;
+                }
+
+                DialogResult confirmation = MessageBox.Show(
+                    this,
+                    "選択した設定を現在の設定へ適用しますか？",
+                    "設定インポート",
+                    MessageBoxButtons.YesNo,
+                    MessageBoxIcon.Question);
+                if (confirmation != DialogResult.Yes || !ConfirmPayloadReplacement()) return;
+
+                DispatchSettingsTransfer(
+                    CommandIds.AppSettingsImport,
+                    new SettingsTransferCommandContext(SettingsTransferAction.ApplyImport, command.FilePath, result.Settings));
+                return;
+            case SettingsTransferAction.ApplyImport:
+                if (!result.Succeeded)
+                {
+                    MessageBox.Show(this, result.UserMessage, "設定インポート", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    return;
+                }
+                if (!result.BackupSucceeded)
+                {
+                    MessageBox.Show(this, "設定は保存されましたが、バックアップ更新に失敗しました。", "設定インポート", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                }
+
+                ImportedSettingsApplied = true;
+                DialogResult = DialogResult.OK;
+                Close();
+                return;
+        }
+    }
+
+    internal void HandleSettingsSaveResult(Configuration.SettingsSqliteStore.SettingsSaveResult result)
+    {
+        _lastSettingsSaveResult = result;
+    }
+
+    private void DispatchSettingsTransfer(string commandId, SettingsTransferCommandContext transfer)
+    {
+        if (_executeCommand == null)
+        {
+            MessageBox.Show(this, "設定の入出力Commandを実行できません。", "設定", MessageBoxButtons.OK, MessageBoxIcon.Error);
             return;
         }
 
-        DialogResult confirmation = MessageBox.Show(
-            this,
-            "選択した設定を現在の設定へ適用しますか？",
-            "設定インポート",
-            MessageBoxButtons.YesNo,
-            MessageBoxIcon.Question);
-        if (confirmation != DialogResult.Yes) return;
-
-        if (!ConfirmPayloadReplacement()) return;
-
-        SettingsSqliteStore.SettingsTransferResult applyResult = _settingsApplication.ApplyImportedSettings(result.Settings!);
-        if (!applyResult.Succeeded)
+        bool handled = _executeCommand(commandId, new CommandExecutionContext
         {
-            MessageBox.Show(this, applyResult.UserMessage, "設定インポート", MessageBoxButtons.OK, MessageBoxIcon.Error);
-            return;
-        }
-        if (!applyResult.BackupSucceeded)
+            Scope = CommandScope.Global,
+            Source = "SettingsForm." + transfer.Action,
+            SettingsTransfer = transfer
+        });
+        if (!handled)
         {
-            MessageBox.Show(this, "設定は保存されましたが、バックアップ更新に失敗しました。", "設定インポート", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            MessageBox.Show(
+                this,
+                _isFileOperationBusy()
+                    ? "ファイル操作中のため設定の読込・書出し・適用を実行できません。設定内容は変更されていません。"
+                    : "設定の読込・書出し・適用Commandを実行できませんでした。",
+                "設定",
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Warning);
         }
-
-        ImportedSettingsApplied = true;
-        DialogResult = DialogResult.OK;
-        Close();
     }
 
     private TabPage CreateTab(string title)
@@ -399,8 +530,476 @@ public class SettingsForm : Form
         };
     }
 
+    private (DataGridView Plugins, DataGridView DecoderSelections, TextBox DisabledStandardExtensions) BuildImageDecoderTab(TabPage tab)
+    {
+        var pluginGroup = new GroupBox
+        {
+            Text = "Susie 画像Import Plugin (.spi / .sph)",
+            Location = new Point(8, 8),
+            Size = new Size(1000, 300),
+            Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right
+        };
+        var plugins = new DataGridView
+        {
+            Location = new Point(16, 28),
+            Size = new Size(960, 205),
+            AllowUserToAddRows = false,
+            AllowUserToDeleteRows = false,
+            AutoGenerateColumns = false,
+            RowHeadersVisible = false,
+            SelectionMode = DataGridViewSelectionMode.FullRowSelect,
+            MultiSelect = true,
+            EditMode = DataGridViewEditMode.EditOnEnter,
+            BackgroundColor = SystemColors.Window
+        };
+        plugins.Columns.Add(new DataGridViewCheckBoxColumn { Name = "Enabled", HeaderText = "使用", Width = 58 });
+        plugins.Columns.Add(new DataGridViewTextBoxColumn { Name = "DisplayName", HeaderText = "Plugin / 名称", Width = 220, ReadOnly = true });
+        plugins.Columns.Add(new DataGridViewTextBoxColumn { Name = "Version", HeaderText = "版", Width = 76, ReadOnly = true });
+        plugins.Columns.Add(new DataGridViewTextBoxColumn { Name = "Extensions", HeaderText = "対応拡張子", Width = 190, ReadOnly = true });
+        plugins.Columns.Add(new DataGridViewTextBoxColumn { Name = "Status", HeaderText = "状態", Width = 132, ReadOnly = true });
+        plugins.Columns.Add(new DataGridViewTextBoxColumn { Name = "Path", HeaderText = "パス", Width = 250, ReadOnly = true });
+        foreach (SusiePluginRegistration plugin in _settings.Preview.SusiePlugins.Plugins)
+        {
+            string path = plugin.PluginPath;
+            bool exists;
+            try { path = Path.GetFullPath(path); exists = File.Exists(path); }
+            catch { exists = false; }
+            SusiePluginInspection? inspection = null;
+            bool restored = exists && TryRestoreSusiePluginInspection(plugin.InspectionMetadata, out inspection);
+            if (restored && inspection != null)
+            {
+                _susiePluginMetadata[path] = inspection;
+                string displayName = string.IsNullOrWhiteSpace(inspection.DisplayName)
+                    ? Path.GetFileNameWithoutExtension(path)
+                    : inspection.DisplayName;
+                int rowIndex = plugins.Rows.Add(plugin.IsEnabled, displayName, ValueOrDash(inspection.VersionInfo),
+                    JoinOrDash(inspection.Extensions), string.Empty, path);
+                plugins.Rows[rowIndex].Cells["Path"].ToolTipText = path;
+                plugins.Rows[rowIndex].Cells["Status"].Tag = "確認済";
+                RefreshSusiePluginRow(plugins.Rows[rowIndex]);
+            }
+            else
+            {
+                int rowIndex = plugins.Rows.Add(plugin.IsEnabled, Path.GetFileNameWithoutExtension(path), "-", "-", string.Empty, path);
+                plugins.Rows[rowIndex].Cells["Path"].ToolTipText = path;
+                plugins.Rows[rowIndex].Cells["Status"].Tag = exists ? "未検査" : "ファイルなし";
+                RefreshSusiePluginRow(plugins.Rows[rowIndex]);
+            }
+        }
+
+        var selectionGroup = new GroupBox
+        {
+            Text = "拡張子ごとのdecoder選択",
+            Location = new Point(8, 320),
+            Size = new Size(1000, 220),
+            Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right
+        };
+        var decoderSelections = new DataGridView
+        {
+            Location = new Point(16, 28),
+            Size = new Size(960, 140),
+            AllowUserToAddRows = false,
+            AllowUserToDeleteRows = false,
+            AutoGenerateColumns = false,
+            RowHeadersVisible = false,
+            SelectionMode = DataGridViewSelectionMode.FullRowSelect,
+            BackgroundColor = SystemColors.Window
+        };
+        decoderSelections.Columns.Add(new DataGridViewTextBoxColumn { Name = "Extension", HeaderText = "拡張子", Width = 140, ReadOnly = true });
+        decoderSelections.Columns.Add(new DataGridViewComboBoxColumn { Name = "Decoder", HeaderText = "使用decoder", AutoSizeMode = DataGridViewAutoSizeColumnMode.Fill, FlatStyle = FlatStyle.Flat });
+        decoderSelections.DataError += (_, e) => e.ThrowException = false;
+
+        var addPlugin = new Button { Text = "追加・検査...", Location = new Point(16, 244), Size = new Size(116, 28) };
+        addPlugin.Click += async (_, _) =>
+        {
+            using var dialog = new OpenFileDialog
+            {
+                Filter = "Susie画像Plugin (*.spi;*.sph)|*.spi;*.sph|すべてのファイル (*.*)|*.*",
+                CheckFileExists = true,
+                Multiselect = true,
+                Title = "Susie画像Pluginを登録"
+            };
+            if (dialog.ShowDialog(this) != DialogResult.OK) return;
+            var failures = new List<string>();
+            foreach (string fileName in dialog.FileNames)
+            {
+                try { await AddSusiePluginAsync(plugins, decoderSelections, fileName); }
+                catch (Exception ex) { failures.Add($"{fileName}: {ex.Message}"); }
+            }
+            if (failures.Count > 0)
+                MessageBox.Show(this, string.Join(Environment.NewLine, failures), "Plugin検査失敗", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+        };
+        var removePlugin = new Button { Text = "選択を解除", Location = new Point(140, 244), Size = new Size(100, 28) };
+        removePlugin.Click += (_, _) =>
+        {
+            foreach (DataGridViewRow row in plugins.SelectedRows.Cast<DataGridViewRow>().OrderByDescending(row => row.Index).ToArray())
+            {
+                if (row.Cells["Path"].Value is string path) _susiePluginMetadata.Remove(path);
+                plugins.Rows.Remove(row);
+            }
+            RefreshDecoderSelectionGrid(plugins, decoderSelections);
+        };
+        var inspectPlugins = new Button { Text = "登録済みを検査", Location = new Point(248, 244), Size = new Size(120, 28) };
+        inspectPlugins.Click += async (_, _) => await InspectRegisteredSusiePluginsAsync(plugins, decoderSelections);
+        plugins.CurrentCellDirtyStateChanged += (_, _) =>
+        {
+            if (plugins.IsCurrentCellDirty) plugins.CommitEdit(DataGridViewDataErrorContexts.Commit);
+        };
+        plugins.CellValueChanged += (_, e) =>
+        {
+            if (e.RowIndex >= 0 && e.ColumnIndex >= 0 && plugins.Columns[e.ColumnIndex].Name == "Enabled")
+            {
+                RefreshSusiePluginRow(plugins.Rows[e.RowIndex]);
+                RefreshDecoderSelectionGrid(plugins, decoderSelections);
+            }
+        };
+        decoderSelections.CurrentCellDirtyStateChanged += (_, _) =>
+        {
+            if (decoderSelections.IsCurrentCellDirty)
+                decoderSelections.CommitEdit(DataGridViewDataErrorContexts.Commit);
+        };
+        decoderSelections.CellValueChanged += (_, e) =>
+        {
+            if (e.RowIndex < 0 || e.ColumnIndex < 0 || decoderSelections.Columns[e.ColumnIndex].Name != "Decoder") return;
+            string extension = decoderSelections.Rows[e.RowIndex].Cells["Extension"].Value?.ToString() ?? string.Empty;
+            string? decoder = decoderSelections.Rows[e.RowIndex].Cells["Decoder"].Value?.ToString();
+            if (extension.Length > 1 && !string.IsNullOrWhiteSpace(decoder)
+                && !decoder.Equals("standard", StringComparison.OrdinalIgnoreCase))
+            {
+                _susieDecoderRepairOriginals.Remove(extension);
+                decoderSelections.Rows[e.RowIndex].Cells[e.ColumnIndex].ToolTipText = decoder;
+            }
+        };
+        var pluginHint = new Label
+        {
+            Text = "登録・検査はMidPlayer経由の制限Hostで行います。失敗した既存登録は保持し、標準decoderを選べます。",
+            Location = new Point(380, 248),
+            Size = new Size(596, 22),
+            AutoEllipsis = true
+        };
+        var pluginSummary = new Label
+        {
+            Name = "SusiePluginSummary",
+            Location = new Point(16, 276),
+            Size = new Size(960, 20),
+            ForeColor = SystemColors.ControlText,
+            TextAlign = ContentAlignment.MiddleLeft
+        };
+        pluginGroup.Controls.AddRange(new Control[] { plugins, addPlugin, removePlugin, inspectPlugins, pluginHint, pluginSummary });
+        tab.Controls.Add(pluginGroup);
+
+        var selectionHint = new Label
+        {
+            Text = "検査済Pluginが対応する拡張子を候補表示します。複数候補はここで選び、標準decoderも明示選択できます。",
+            Location = new Point(16, 174),
+            Size = new Size(960, 34)
+        };
+        selectionGroup.Controls.AddRange(new Control[] { decoderSelections, selectionHint });
+        tab.Controls.Add(selectionGroup);
+
+        var standardGroup = new GroupBox
+        {
+            Text = "標準decoderを無効にする拡張子",
+            Location = new Point(8, 548),
+            Size = new Size(1000, 150),
+            Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right
+        };
+        var disabledStandard = new TextBox
+        {
+            Location = new Point(16, 28),
+            Size = new Size(960, 70),
+            Multiline = true,
+            ScrollBars = ScrollBars.Vertical,
+            AcceptsReturn = true,
+            Text = string.Join(Environment.NewLine, _settings.Preview.SusiePlugins.DisabledStandardExtensions
+                .OrderBy(extension => extension, StringComparer.OrdinalIgnoreCase))
+        };
+        var standardHint = new Label
+        {
+            Text = "1行に拡張子を指定します。登録Pluginと標準decoderのどちらも利用できない場合、画像読込は失敗します。",
+            Location = new Point(16, 104),
+            Size = new Size(960, 22)
+        };
+        standardGroup.Controls.AddRange(new Control[] { disabledStandard, standardHint });
+        tab.Controls.Add(standardGroup);
+
+        RefreshDecoderSelectionGrid(plugins, decoderSelections);
+        return (plugins, decoderSelections, disabledStandard);
+    }
+
+    private async Task AddSusiePluginAsync(DataGridView plugins, DataGridView decoderSelections, string pluginPath)
+    {
+        string fullPath = Path.GetFullPath(pluginPath);
+        string extension = Path.GetExtension(fullPath);
+        if (!extension.Equals(".spi", StringComparison.OrdinalIgnoreCase)
+            && !extension.Equals(".sph", StringComparison.OrdinalIgnoreCase))
+            throw new InvalidDataException("登録できる拡張子は .spi または .sph です。");
+        if (plugins.Rows.Cast<DataGridViewRow>().Any(row =>
+                string.Equals(row.Cells["Path"].Value?.ToString(), fullPath, StringComparison.OrdinalIgnoreCase)))
+            return;
+
+        SusiePluginInspection inspection = await InspectSusiePluginAsync(fullPath);
+        _susiePluginMetadata[fullPath] = inspection;
+        string displayName = string.IsNullOrWhiteSpace(inspection.DisplayName)
+            ? Path.GetFileNameWithoutExtension(fullPath)
+            : inspection.DisplayName;
+        int rowIndex = plugins.Rows.Add(true, displayName, ValueOrDash(inspection.VersionInfo),
+            JoinOrDash(inspection.Extensions), string.Empty, fullPath);
+        plugins.Rows[rowIndex].Cells["Path"].ToolTipText = fullPath;
+        plugins.Rows[rowIndex].Cells["Status"].Tag = "確認済";
+        RefreshSusiePluginRow(plugins.Rows[rowIndex]);
+        RefreshDecoderSelectionGrid(plugins, decoderSelections);
+    }
+
+    private async Task InspectRegisteredSusiePluginsAsync(DataGridView plugins, DataGridView decoderSelections)
+    {
+        var failures = new List<string>();
+        foreach (DataGridViewRow row in plugins.Rows)
+        {
+            string path = row.Cells["Path"].Value?.ToString() ?? string.Empty;
+            if (string.IsNullOrWhiteSpace(path)) continue;
+            try
+            {
+                SusiePluginInspection inspection = await InspectSusiePluginAsync(path);
+                _susiePluginMetadata[Path.GetFullPath(path)] = inspection;
+                row.Cells["DisplayName"].Value = string.IsNullOrWhiteSpace(inspection.DisplayName)
+                    ? Path.GetFileNameWithoutExtension(path)
+                    : inspection.DisplayName;
+                row.Cells["Version"].Value = ValueOrDash(inspection.VersionInfo);
+                row.Cells["Extensions"].Value = JoinOrDash(inspection.Extensions);
+                row.Cells["Status"].Tag = "確認済";
+                RefreshSusiePluginRow(row);
+            }
+            catch (Exception ex)
+            {
+                row.Cells["Status"].Tag = File.Exists(path) ? "検査失敗" : "ファイルなし";
+                RefreshSusiePluginRow(row);
+                failures.Add($"{path}: {ex.Message}");
+            }
+        }
+        RefreshDecoderSelectionGrid(plugins, decoderSelections);
+        if (failures.Count > 0)
+            MessageBox.Show(this, string.Join(Environment.NewLine, failures), "Plugin検査結果", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+    }
+
+    private async Task<SusiePluginInspection> InspectSusiePluginAsync(string pluginPath)
+    {
+        SusiePluginInspectionResult result = await SusiePluginInspectionApi.InspectAsync(
+            Path.GetFullPath(pluginPath),
+            CancellationToken.None);
+        var inspection = new SusiePluginInspection
+        {
+            Success = true,
+            DisplayName = result.DisplayName,
+            VersionInfo = result.VersionInfo,
+            Extensions = result.Extensions,
+            FormatNames = result.FormatNames
+        };
+        if (inspection.Extensions.Length == 0 || inspection.Extensions.Any(value => SusiePluginSettings.NormalizeExtension(value).Length < 2))
+            throw new InvalidDataException("Pluginの対応拡張子が空または不正です。");
+        return inspection;
+    }
+
+    private static bool TryRestoreSusiePluginInspection(
+        SusiePluginInspectionMetadata? metadata,
+        out SusiePluginInspection? inspection)
+    {
+        inspection = null;
+        if (metadata == null) return false;
+
+        string[] extensions = (metadata.Extensions ?? Array.Empty<string>())
+            .Select(SusiePluginSettings.NormalizeExtension)
+            .Where(extension => extension.Length > 1)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+        if (extensions.Length == 0) return false;
+
+        inspection = new SusiePluginInspection
+        {
+            Success = true,
+            DisplayName = metadata.DisplayName ?? string.Empty,
+            VersionInfo = metadata.VersionInfo ?? string.Empty,
+            Extensions = extensions,
+            FormatNames = (metadata.FormatNames ?? Array.Empty<string>()).ToArray()
+        };
+        return true;
+    }
+
+    private static string? SafeGetFullPath(string path)
+    {
+        try { return Path.GetFullPath(path); }
+        catch { return null; }
+    }
+
+    private void RefreshDecoderSelectionGrid(DataGridView plugins, DataGridView decoderSelections)
+    {
+        foreach (DataGridViewRow pluginRow in plugins.Rows)
+        {
+            RefreshSusiePluginRow(pluginRow);
+        }
+        RefreshSusiePluginSummary(plugins);
+        var selections = new Dictionary<string, string>(_settings.Preview.SusiePlugins.DecoderByExtension, StringComparer.OrdinalIgnoreCase);
+        foreach (DataGridViewRow row in decoderSelections.Rows)
+        {
+            string extension = row.Cells["Extension"].Value?.ToString() ?? string.Empty;
+            string? decoder = row.Cells["Decoder"].Value?.ToString();
+            if (extension.Length > 1 && !string.IsNullOrWhiteSpace(decoder)) selections[extension] = decoder;
+        }
+
+        var registered = plugins.Rows.Cast<DataGridViewRow>()
+            .Select(row => new SusiePluginChoice(
+                row.Cells["Path"].Value?.ToString() ?? string.Empty,
+                Convert.ToBoolean(row.Cells["Enabled"].Value ?? false)))
+            .Where(plugin => plugin.Path.Length > 0)
+            .ToArray();
+        var registeredPaths = registered
+            .Select(plugin => (plugin.Path, FullPath: SafeGetFullPath(plugin.Path)))
+            .Where(item => item.FullPath != null)
+            .GroupBy(item => item.FullPath!, StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(group => group.Key, group => group.Last().Path, StringComparer.OrdinalIgnoreCase);
+        var confirmedExtensionsByPath = new Dictionary<string, HashSet<string>>(StringComparer.OrdinalIgnoreCase);
+        foreach (SusiePluginChoice plugin in registered)
+        {
+            string? fullPath = SafeGetFullPath(plugin.Path);
+            if (fullPath == null || !_susiePluginMetadata.TryGetValue(fullPath, out SusiePluginInspection? metadata)) continue;
+            confirmedExtensionsByPath[fullPath] = metadata.Extensions
+                .Select(SusiePluginSettings.NormalizeExtension)
+                .Where(extension => extension.Length > 1)
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        }
+        string[] extensions = confirmedExtensionsByPath.Values.SelectMany(supported => supported)
+            .Where(extension => extension.Length > 1)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .OrderBy(extension => extension, StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+        var visibleExtensions = extensions.ToHashSet(StringComparer.OrdinalIgnoreCase);
+        foreach (string staleExtension in _susieDecoderRepairOriginals.Keys
+                     .Where(extension => !visibleExtensions.Contains(extension))
+                     .ToArray())
+            _susieDecoderRepairOriginals.Remove(staleExtension);
+
+        decoderSelections.Rows.Clear();
+        foreach (string extension in extensions)
+        {
+            SusiePluginChoice[] candidates = registered
+                .Where(plugin => plugin.Enabled
+                    && File.Exists(plugin.Path)
+                    && SafeGetFullPath(plugin.Path) is string fullPath
+                    && confirmedExtensionsByPath.TryGetValue(fullPath, out HashSet<string>? supportedExtensions)
+                    && supportedExtensions.Contains(extension))
+                .ToArray();
+            string? selected = selections.GetValueOrDefault(extension);
+            if (!string.IsNullOrWhiteSpace(selected)
+                && !selected.Equals("standard", StringComparison.OrdinalIgnoreCase))
+            {
+                string? selectedPath = SafeGetFullPath(selected);
+                if (selectedPath == null || !registeredPaths.TryGetValue(selectedPath, out string? registeredPath))
+                {
+                    _susieDecoderRepairOriginals[extension] = selected;
+                    selected = "standard";
+                }
+                else
+                {
+                    selected = registeredPath;
+                    _susieDecoderRepairOriginals.Remove(extension);
+                }
+            }
+
+            var options = new List<DecoderChoice> { new("standard", "標準decoder") };
+            var candidateLabels = candidates
+                .Select(plugin => (Plugin: plugin, Name: _susiePluginMetadata[plugin.Path].DisplayName.Trim()))
+                .Select(item => (item.Plugin, Name: item.Name.Length == 0 ? Path.GetFileNameWithoutExtension(item.Plugin.Path) : item.Name))
+                .ToArray();
+            var duplicateNames = candidateLabels
+                .GroupBy(item => item.Name, StringComparer.OrdinalIgnoreCase)
+                .Where(group => group.Count() > 1)
+                .Select(group => group.Key)
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+            foreach ((SusiePluginChoice plugin, string name) in candidateLabels)
+            {
+                string label = duplicateNames.Contains(name)
+                    ? $"{name} ({Path.GetFileName(plugin.Path)})"
+                    : name;
+                options.Add(new(plugin.Path, label));
+            }
+
+            if (string.IsNullOrWhiteSpace(selected))
+                selected = candidates.Length switch { 0 => "standard", 1 => candidates[0].Path, _ => null };
+            if (!string.IsNullOrWhiteSpace(selected) && !options.Any(option => option.Value.Equals(selected, StringComparison.OrdinalIgnoreCase)))
+            {
+                string label = registered.Any(plugin => plugin.Path.Equals(selected, StringComparison.OrdinalIgnoreCase))
+                    ? $"未検査・無効の登録 ({Path.GetFileName(selected)})"
+                    : $"登録外 ({Path.GetFileName(selected)})";
+                options.Add(new(selected, label));
+            }
+
+            int rowIndex = decoderSelections.Rows.Add(extension);
+            var comboCell = new DataGridViewComboBoxCell
+            {
+                DataSource = options,
+                DisplayMember = nameof(DecoderChoice.Label),
+                ValueMember = nameof(DecoderChoice.Value),
+                FlatStyle = FlatStyle.Flat
+            };
+            decoderSelections.Rows[rowIndex].Cells["Decoder"] = comboCell;
+            comboCell.Value = selected;
+            comboCell.ToolTipText = _susieDecoderRepairOriginals.TryGetValue(extension, out string? orphanedPath)
+                ? $"未保存の修復: 登録一覧にないdecoder参照を標準decoderへ変更します: {orphanedPath}"
+                : string.Equals(selected, "standard", StringComparison.OrdinalIgnoreCase)
+                    ? "標準decoder"
+                    : selected ?? string.Empty;
+        }
+    }
+
+    private static void RefreshSusiePluginRow(DataGridViewRow row)
+    {
+        if (row.IsNewRow) return;
+        bool enabled = Convert.ToBoolean(row.Cells["Enabled"].Value ?? false);
+        string inspectionStatus = row.Cells["Status"].Tag?.ToString() ?? "未検査";
+        row.Cells["Status"].Value = string.Equals(inspectionStatus, "ファイルなし", StringComparison.Ordinal)
+            ? inspectionStatus
+            : $"{(enabled ? "有効" : "無効")} / {inspectionStatus}";
+        foreach (DataGridViewCell cell in row.Cells)
+        {
+            bool enabledCell = cell.OwningColumn?.Name == "Enabled";
+            cell.Style.BackColor = enabled || enabledCell ? SystemColors.Window : SystemColors.Control;
+            cell.Style.ForeColor = enabled || enabledCell ? SystemColors.ControlText : SystemColors.GrayText;
+        }
+    }
+
+    private static string ValueOrDash(string? value)
+        => string.IsNullOrWhiteSpace(value) ? "-" : value.Trim();
+
+    private static string JoinOrDash(IEnumerable<string> values)
+    {
+        string joined = string.Join("; ", values.Where(value => !string.IsNullOrWhiteSpace(value)));
+        return joined.Length == 0 ? "-" : joined;
+    }
+
+    private static void RefreshSusiePluginSummary(DataGridView plugins)
+    {
+        Label? summary = plugins.Parent?.Controls.Find("SusiePluginSummary", searchAllChildren: false).OfType<Label>().FirstOrDefault();
+        if (summary == null) return;
+        int registered = plugins.Rows.Cast<DataGridViewRow>().Count(row => !row.IsNewRow);
+        int enabled = plugins.Rows.Cast<DataGridViewRow>().Count(row => !row.IsNewRow && Convert.ToBoolean(row.Cells["Enabled"].Value ?? false));
+        int inspected = plugins.Rows.Cast<DataGridViewRow>().Count(row => !row.IsNewRow && string.Equals(row.Cells["Status"].Tag?.ToString(), "確認済", StringComparison.Ordinal));
+        summary.Text = $"登録 {registered} / 有効 {enabled} / 確認済 {inspected}";
+    }
+
+    private sealed record DecoderChoice(string Value, string Label);
+    private sealed record SusiePluginChoice(string Path, bool Enabled);
+    private sealed class SusiePluginInspection
+    {
+        public bool Success { get; set; }
+        public string DisplayName { get; set; } = string.Empty;
+        public string VersionInfo { get; set; } = string.Empty;
+        public string[] Extensions { get; set; } = Array.Empty<string>();
+        public string[] FormatNames { get; set; } = Array.Empty<string>();
+        public string? Error { get; set; }
+    }
+
     private (ComboBox filerFont, NumericUpDown filerSize, NumericUpDown browserTabFontSize, NumericUpDown browserTabWidth, CheckBox showBrowserTabCategoryRow, CheckBox showExtensions, CheckBox showDirectoryMarker, CheckBox showHiddenFiles, CheckBox showItemIcons, CheckBox useUnderlineCursor, CheckBox showFunctionBar, CheckBox showBrowserToolbar, CheckBox showPathAsBreadcrumb, ComboBox fileDisplayMode, ComboBox dateFormat, ComboBox sizeFormat,
-             ComboBox viewerFont, NumericUpDown viewerSize, CheckBox viewerWordWrap, ComboBox markdownViewerMode, CheckBox reuseImageViewer, CheckBox closeOnNonImage, CheckBox rememberBounds)
+             ComboBox viewerFont, NumericUpDown viewerSize, CheckBox viewerWordWrap, ComboBox markdownViewerMode, CheckBox reuseImageViewer, CheckBox closeOnNonImage, CheckBox rememberBounds, CheckBox defaultMediaViewerPlaybackLocked)
         BuildDisplayAndPreviewTab(TabPage tab, string[] fonts, string[] dateFormats, string[] sizeFormats)
     {
         // Layout Constants
@@ -600,8 +1199,22 @@ public class SettingsForm : Form
         top += rowH;
         var closeOnNonImage = AddCheckBox(groupViewer, "非画像時にビューアを閉じる", checkX, top, _settings.Preview.CloseImageViewerOnNonImageSelection);
         top += rowH;
-        var rememberBounds = AddCheckBox(groupViewer, "ビューアの位置/サイズを記憶する", checkX, top, _settings.Preview.RememberImageViewerBounds);
-        groupViewer.Height = rememberBounds.Bottom + 16;
+        var rememberBounds = AddCheckBox(groupViewer, "ビューアのサイズを記憶する", checkX, top, _settings.Preview.RememberImageViewerBounds);
+        top = rememberBounds.Bottom + 4;
+        var defaultMediaViewerPlaybackLocked = AddCheckBox(
+            groupViewer,
+            "通常のメディアOpenを再生モードで開く",
+            checkX,
+            top,
+            _settings.Preview.DefaultMediaViewerPresentationMode == MidFD.ViewerIpc.ViewerPresentationMode.PlaybackLocked);
+        top += rowH;
+        Label defaultModeHint = AddWrappedHintLabel(
+            groupViewer,
+            32,
+            top,
+            444,
+            "次回の通常Openから適用します。Viewer内の一時的な固定/解除では設定を変更しません。");
+        groupViewer.Height = defaultModeHint.Bottom + 16;
 
         var groupWorkspaceSnapshot = new GroupBox
         {
@@ -621,13 +1234,14 @@ public class SettingsForm : Form
         AddHintLabel(groupWorkspaceSnapshot, 260, 23, 220, "現在のWorkspace全体を保存", 24);
 
         return (filerFont, filerSize, browserTabFontSize, browserTabWidth, showBrowserTabCategoryRow, showExtensions, showDirectoryMarker, showHiddenFiles, showItemIcons, useUnderlineCursor, showFunctionBar, showBrowserToolbar, showPathAsBreadcrumb, fileDisplayMode, dateFormat, sizeFormat,
-                viewerFont, viewerSize, viewerWordWrap, markdownViewerMode, reuseImageViewer, closeOnNonImage, rememberBounds);
+                viewerFont, viewerSize, viewerWordWrap, markdownViewerMode, reuseImageViewer, closeOnNonImage, rememberBounds, defaultMediaViewerPlaybackLocked);
     }
 
     private (CheckBox confirmDelete, CheckBox confirmPermanentDelete, CheckBox useMidFdManagedTrash, CheckBox managedTrashAutoHandoff, NumericUpDown managedTrashUndoRetentionDays, ComboBox managedTrashRetentionPreset, CheckBox reloadAfterFileOperation, CheckBox selectCreatedItem, CheckBox clipboardPasteTextAsFile,
-             CheckBox enableMouseGestures)
+             CheckBox enableMouseGestures, ComboBox videoSeekStepSeconds, ComboBox videoPlaybackVolume)
         BuildOperationAndInputTab(TabPage tab)
     {
+        tab.AutoScroll = true;
         int rowH = 28;
 
         // --- Left: File Operation ---
@@ -637,8 +1251,15 @@ public class SettingsForm : Form
         int top = 28;
         var confirmDelete = AddCheckBox(groupFile, "削除前に確認する", 16, top, _settings.FileOperations.ConfirmDelete);
         top += rowH;
-        var confirmPermanentDelete = AddCheckBox(groupFile, "Shift+Delete 前に確認する", 16, top, _settings.FileOperations.ConfirmPermanentDelete);
+        var confirmPermanentDelete = AddCheckBox(groupFile, "完全削除前に確認する", 16, top, _settings.FileOperations.ConfirmPermanentDelete);
         top += rowH;
+        Label confirmPermanentDeleteHint = AddWrappedHintLabel(
+            groupFile,
+            32,
+            top,
+            430,
+            "OFFにすると、Shift+Dなどによる完全削除を確認なしで実行します。\nゴミ箱へ移動せず、通常の復元はできません。");
+        top = confirmPermanentDeleteHint.Bottom + 8;
         var useMidFdManagedTrash = AddCheckBox(groupFile, "削除時に MidFD管理ゴミ箱を使う", 16, top, _settings.FileOperations.UseMidFdManagedTrash);
         top += rowH;
         Label managedTrashHint = AddWrappedHintLabel(groupFile, 32, top, 430, "ON: Ctrl+Z による復元が可能になります。\n環境に応じ SQLite / JSON を自動選択します。");
@@ -726,7 +1347,11 @@ public class SettingsForm : Form
         };
         btnEmptyTrash.Click += (s, e) =>
         {
-            OpenManagedTrashDialogRequested?.Invoke(this, EventArgs.Empty);
+            _ = _executeCommand?.Invoke(CommandIds.AppOpenManagedTrash, new CommandExecutionContext
+            {
+                Scope = CommandScope.Global,
+                Source = "SettingsForm.ManagedTrash"
+            });
         };
         groupFile.Controls.Add(btnEmptyTrash);
         top += rowH + 6;
@@ -749,45 +1374,50 @@ public class SettingsForm : Form
         newFileExtensionsButton.Click += (_, _) => OpenNewFileExtensionsDialog();
         groupFile.Controls.Add(newFileExtensionsButton);
         top += rowH + 4;
-        top = AddWrappedHintLabel(groupFile, 32, top, 430, "右クリックの「新規作成」に表示する拡張子を管理します。\nファイル内容のtemplateは設定しません。").Bottom + 12;
-
-        var sectionDragZip = new Label
-        {
-            Text = "Drag ZIP",
-            Location = new Point(16, top),
-            Size = new Size(220, 20),
-            Font = new Font(Font, FontStyle.Bold)
-        };
-        groupFile.Controls.Add(sectionDragZip);
-        top += 24;
-
-        _enableDragArchiveHandoffCheckBox = AddCheckBox(groupFile, "Shift/Ctrl+ドラッグでマーク対象をZIP化して渡す", 16, top, _settings.FileOperations.EnableDragArchiveHandoff);
-        _enableDragArchiveHandoffCheckBox.CheckedChanged += (_, _) => UpdateDragArchiveManifestCheckboxEnabledState();
-        top += rowH - 4;
-        Label dragHint = AddWrappedHintLabel(
+        Label newFileExtensionsHint = AddWrappedHintLabel(
             groupFile,
             32,
             top,
             430,
-            "ChatGPT等へ複数ソースをまとめて渡す場合に便利です。\n通常のドラッグ操作と挙動が変わります。");
-        top = dragHint.Bottom + 8;
-
-        _includeDragZipManifestCheckBox = AddCheckBox(groupFile, "ZIPに内容一覧manifestを同梱する", 32, top, _settings.FileOperations.IncludeDragZipManifest);
-        top += rowH - 4;
-        AddWrappedHintLabel(
-            groupFile,
-            48,
-            top,
-            414,
-            "対象ファイル一覧を確認しやすくします。\nローカルパス情報を含む場合があります。");
-        UpdateDragArchiveManifestCheckboxEnabledState();
+            "右クリックの「新規作成」に表示する拡張子を管理します。\nファイル内容のtemplateは設定しません。");
+        groupFile.ClientSize = new Size(groupFile.ClientSize.Width, newFileExtensionsHint.Bottom + 16);
 
         // --- Right: Operation/Input Information Architecture ---
         int rightX = 506;
         int rightW = 490;
-        int rightTop = 6;
+        int rightTop = 206;
 
-        var groupAdvanced = new GroupBox { Text = "高度な使い方 / 詳細オプション", Location = new Point(rightX, rightTop), Size = new Size(rightW, 260) };
+        var groupVideoPlayback = new GroupBox { Text = "動画操作", Location = new Point(rightX, 6), Size = new Size(rightW, 192) };
+        tab.Controls.Add(groupVideoPlayback);
+        int videoTop = 26;
+        AddLabel(groupVideoPlayback, "送り/戻し秒数:", videoTop, 128);
+        var videoSeekStepSeconds = AddEditableComboBox(groupVideoPlayback, 148, videoTop, 100, new[] { "5", "10", "15", "30", "60" }, _settings.Preview.VideoSeekStepSeconds.ToString());
+        videoTop += 32;
+        AddLabel(groupVideoPlayback, "初期音量(%):", videoTop, 128);
+        var videoPlaybackVolume = AddEditableComboBox(groupVideoPlayback, 148, videoTop, 100, new[] { "0", "30", "50", "70", "100" }, _settings.Preview.VideoPlaybackVolumePercent.ToString());
+        videoTop += 32;
+        AddLabel(groupVideoPlayback, "動画再生エンジン:", videoTop, 128);
+        _videoPlaybackBackendCombo = new ComboBox { Location = new Point(148, videoTop), Width = 320, DropDownStyle = ComboBoxStyle.DropDownList };
+        if (MidPlayerRuntimeFeatures.HasFullVideoBackend)
+        {
+            _videoPlaybackBackendCombo.Items.AddRange(["自動選択（推奨）", "LibVLC", "Windows Media Foundation"]);
+            _videoPlaybackBackendCombo.SelectedIndex = _settings.Preview.VideoPlaybackBackend switch
+            {
+                VideoPlaybackBackendKind.LibVLC => 1,
+                VideoPlaybackBackendKind.MediaFoundation => 2,
+                _ => 0
+            };
+        }
+        else
+        {
+            _videoPlaybackBackendCombo.Items.Add("Windows Media Foundation");
+            _videoPlaybackBackendCombo.SelectedIndex = 0;
+        }
+        groupVideoPlayback.Controls.Add(_videoPlaybackBackendCombo);
+        videoTop += 32;
+        AddHintLabel(groupVideoPlayback, 16, videoTop, 454, "音量・エンジンは次回の動画Openから適用します。\nMedia Foundationの対応形式はWindowsの構成に依存します。", 36);
+
+        var groupAdvanced = new GroupBox { Text = "高度な使い方 / 詳細オプション", Location = new Point(rightX, rightTop), Width = rightW };
         tab.Controls.Add(groupAdvanced);
         int advancedTop = 24;
         var enableMouseGestures = AddCheckBox(groupAdvanced, "マウスジェスチャーを使う", 16, advancedTop, _settings.Input.EnableMouseGestures);
@@ -799,9 +1429,109 @@ public class SettingsForm : Form
         advancedTop = tooltipHint.Bottom + 8;
 
         var workspaceHint = AddWrappedHintLabel(groupAdvanced, 16, advancedTop, 444, "詳細な復元設定は起動・ログで調整できます。\nここでは管理導線だけを設定します。");
-        advancedTop = workspaceHint.Bottom + 8;
+        groupAdvanced.ClientSize = new Size(groupAdvanced.ClientSize.Width, workspaceHint.Bottom + 16);
 
-        return (confirmDelete, confirmPermanentDelete, useMidFdManagedTrash, managedTrashAutoHandoff, managedTrashUndoRetentionDays, managedTrashRetentionPreset, reloadAfterFileOperation, selectCreatedItem, clipboardPasteTextAsFile, enableMouseGestures);
+        var groupDragZip = new GroupBox
+        {
+            Text = "Drag ZIP",
+            Location = new Point(rightX, groupAdvanced.Bottom + 8),
+            Size = new Size(rightW, 180)
+        };
+        tab.Controls.Add(groupDragZip);
+        int dragZipTop = 24;
+        _enableDragArchiveHandoffCheckBox = AddCheckBox(
+            groupDragZip,
+            "Shift/Ctrl+ドラッグでマーク対象をZIP化して渡す",
+            16,
+            dragZipTop,
+            _settings.FileOperations.EnableDragArchiveHandoff);
+        _enableDragArchiveHandoffCheckBox.CheckedChanged += (_, _) => UpdateDragArchiveManifestCheckboxEnabledState();
+        dragZipTop = _enableDragArchiveHandoffCheckBox.Bottom + 4;
+        Label dragHint = AddWrappedHintLabel(
+            groupDragZip,
+            32,
+            dragZipTop,
+            444,
+            "ChatGPT等へ複数ソースをまとめて渡す場合に便利です。\n通常のドラッグ操作と挙動が変わります。");
+        dragZipTop = dragHint.Bottom + 6;
+        _includeDragZipManifestCheckBox = AddCheckBox(
+            groupDragZip,
+            "ZIPに内容一覧manifestを同梱する",
+            32,
+            dragZipTop,
+            _settings.FileOperations.IncludeDragZipManifest);
+        dragZipTop = _includeDragZipManifestCheckBox.Bottom + 4;
+        Label dragManifestHint = AddWrappedHintLabel(
+            groupDragZip,
+            48,
+            dragZipTop,
+            414,
+            "対象ファイル一覧を確認しやすくします。\nローカルパス情報を含む場合があります。");
+        groupDragZip.ClientSize = new Size(groupDragZip.ClientSize.Width, dragManifestHint.Bottom + 12);
+        UpdateDragArchiveManifestCheckboxEnabledState();
+
+        bool updatingOperationLayout = false;
+
+        int ScaleOperationSpacing(int logicalPixels)
+        {
+            double scale = groupAdvanced.Width / (double)rightW;
+            return (int)Math.Round(logicalPixels * scale, MidpointRounding.AwayFromZero);
+        }
+
+        void UpdateOperationScrollExtent()
+        {
+            int scrollOffset = tab.AutoScrollPosition.Y;
+            int contentBottom = Math.Max(
+                groupFile.Bottom - scrollOffset,
+                Math.Max(
+                    groupDragZip.Bottom - scrollOffset,
+                    Math.Max(groupAdvanced.Bottom - scrollOffset, groupVideoPlayback.Bottom - scrollOffset))) + 16;
+            if (tab.AutoScrollMinSize.Height != contentBottom)
+            {
+                tab.AutoScrollMinSize = new Size(tab.AutoScrollMinSize.Width, contentBottom);
+            }
+        }
+
+        void UpdateOperationLayout()
+        {
+            if (updatingOperationLayout)
+            {
+                return;
+            }
+
+            updatingOperationLayout = true;
+            try
+            {
+                int advancedClientHeight = workspaceHint.Bottom + ScaleOperationSpacing(16);
+                if (groupAdvanced.ClientSize.Height != advancedClientHeight)
+                {
+                    groupAdvanced.ClientSize = new Size(groupAdvanced.ClientSize.Width, advancedClientHeight);
+                }
+
+                int dragZipTop = groupAdvanced.Bottom + ScaleOperationSpacing(8);
+                if (groupDragZip.Top != dragZipTop)
+                {
+                    groupDragZip.Top = dragZipTop;
+                }
+
+                int dragZipClientHeight = dragManifestHint.Bottom + ScaleOperationSpacing(12);
+                if (groupDragZip.ClientSize.Height != dragZipClientHeight)
+                {
+                    groupDragZip.ClientSize = new Size(groupDragZip.ClientSize.Width, dragZipClientHeight);
+                }
+
+                UpdateOperationScrollExtent();
+            }
+            finally
+            {
+                updatingOperationLayout = false;
+            }
+        }
+
+        tab.Layout += (_, _) => UpdateOperationLayout();
+        UpdateOperationLayout();
+
+        return (confirmDelete, confirmPermanentDelete, useMidFdManagedTrash, managedTrashAutoHandoff, managedTrashUndoRetentionDays, managedTrashRetentionPreset, reloadAfterFileOperation, selectCreatedItem, clipboardPasteTextAsFile, enableMouseGestures, videoSeekStepSeconds, videoPlaybackVolume);
     }
 
     private (CheckBox restoreStartupState, CheckBox restoreTabsOnStartup, CheckBox restoreLastPath, CheckBox restoreDisplayState, CheckBox restoreWindowBounds, CheckBox restoreColumnCount, CheckBox restoreSort)
@@ -978,9 +1708,10 @@ public class SettingsForm : Form
         _functionBarLabelOverridesAltFdCompatibleDraft = _settings.Input.FunctionBarLabelOverridesAltFdCompatible.ToDictionary(kv => kv.Key, kv => kv.Value.Clone(), StringComparer.OrdinalIgnoreCase);
     }
 
-    private (TextBox sevenZip, ComboBox packDialogMode, TextBox diff, TextBox editor, ComboBox videoPlaybackVolume, TextBox videoStillPreviewFfmpegPath, CheckBox videoEnterPlaysExternal, Label sevenZipStatus, Label diffStatus, Label editorStatus, Label videoStillPreviewFfmpegStatus, CheckBox videoStillPreviewEnabled, ComboBox videoSkipSeconds)
+    private (TextBox sevenZip, ComboBox packDialogMode, TextBox diff, TextBox editor, TextBox editorSearchHitArgumentTemplate, Button applyEditorArgumentPresetButton, Label editorArgumentPresetStatus, TextBox videoStillPreviewFfmpegPath, Label sevenZipStatus, Label diffStatus, Label editorStatus, Label videoStillPreviewFfmpegStatus)
         BuildExternalTab(TabPage tab)
     {
+        tab.AutoScroll = true;
         int labelWidth = 124;
         int baseX = labelWidth + 12;
         int rowH = 82;
@@ -1040,11 +1771,54 @@ public class SettingsForm : Form
 
         AddLabel(groupArchive, "外部エディタ:", top, labelWidth);
         var editor = AddTextBox(groupArchive, baseX, top, textBoxWidth, _settings.ExternalTools.ExternalEditorPath ?? "");
-        AddBrowseButton(groupArchive, browseButtonX, top - 1, browseButtonWidth, editor);
+        AddBrowseButton(groupArchive, browseButtonX, top - 1, browseButtonWidth, editor, CommitExternalEditorPathSelectionFromBrowse);
         var editorStatus = AddStatusLabel(groupArchive, baseX, top + 26, 360);
         top += rowH + 8;
 
-        AddWrappedHintLabel(groupArchive, 16, top, 460, "E キーで選択ファイルをこのエディタで開きます。\n未設定時は notepad.exe を使用します。");
+        Label editorHint = AddWrappedHintLabel(groupArchive, 16, top, 460, "BrowserのEは選択ファイル、検索結果のEは選択中のfileまたはGrep hit、Text ViewerのEは表示中sourceを開きます。未設定時はnotepad.exeを使用します。");
+        top = editorHint.Bottom + 8;
+
+        AddLabel(groupArchive, "検索結果Editor引数:", top, labelWidth);
+        var editorSearchHitArgumentTemplate = AddTextBox(
+            groupArchive,
+            baseX,
+            top,
+            textBoxWidth + 64,
+            _settings.ExternalTools.ExternalEditorSearchHitArgumentTemplate ?? string.Empty);
+        editorSearchHitArgumentTemplate.Name = "externalEditorSearchHitArgumentTemplate";
+        editorSearchHitArgumentTemplate.PlaceholderText = "--open \"{file}\" --line {line} --column {column}";
+        top += 30;
+        var applyEditorArgumentPresetButton = new Button
+        {
+            Text = "推奨引数を適用",
+            Location = new Point(16, top),
+            Size = new Size(138, 26)
+        };
+        applyEditorArgumentPresetButton.Click += (_, _) => ApplyRecommendedEditorArgumentPreset();
+        groupArchive.Controls.Add(applyEditorArgumentPresetButton);
+        var editorArgumentPresetStatus = new Label
+        {
+            Location = new Point(162, top + 2),
+            Size = new Size(316, 24),
+            ForeColor = SystemColors.GrayText,
+            TextAlign = ContentAlignment.MiddleLeft
+        };
+        groupArchive.Controls.Add(editorArgumentPresetStatus);
+        top += 30;
+        AddWrappedHintLabel(
+            groupArchive,
+            16,
+            top,
+            460,
+            "対応Editorを選択するとGrep hit用の推奨引数を提案します。手動編集は優先されます。推奨引数の適用はこの画面で明示できます。");
+        top += 42;
+        Label editorSearchHitArgumentHint = AddWrappedHintLabel(
+            groupArchive,
+            16,
+            top,
+            460,
+            "検索結果から設定Editorを開く際だけに適用します。{file}=フルpath（必須）、{line}=1-based行、{column}=1-based UTF-16列です。未設定ならfileのみを開きます。例: --open \"{file}\" --line {line} --column {column}\n引用符は引数の区切りです。Editor側が引数に対応する必要があり、位置移動の成否はMidFDから確認できません。");
+        groupArchive.Height = Math.Max(groupArchive.Height, editorSearchHitArgumentHint.Bottom + 16);
 
         // --- Right: External Tools / Video ---
         var groupTools = new GroupBox { Text = "外部ツール管理", Location = new Point(516, 6), Size = new Size(500, 188) };
@@ -1059,7 +1833,7 @@ public class SettingsForm : Form
         };
         btnManageTools.Click += (_, _) =>
         {
-            using var dlg = new ExternalToolDefinitionEditorDialog();
+            using var dlg = new ExternalToolDefinitionEditorDialog(_executeCommand, _isFileOperationBusy);
             dlg.ShowDialog(this);
         };
         groupTools.Controls.Add(btnManageTools);
@@ -1067,43 +1841,40 @@ public class SettingsForm : Form
 
         AddWrappedHintLabel(groupTools, 16, top, 460, "コマンドパレット (Ctrl+Shift+P) や Alt+英数字の外部ツール namespace で起動するツールを管理します。Alt+F1〜F12 の Function layer とは別です。");
 
-        var groupVideoTools = new GroupBox { Text = "動画静止画プレビュー / 外部ツール", Location = new Point(516, 200), Size = new Size(500, 276) };
+        var groupVideoTools = new GroupBox { Text = "外部音声再生 / MidPlayer動画", Location = new Point(516, 200), Size = new Size(500, 196) };
         tab.Controls.Add(groupVideoTools);
         top = 28;
 
-        var videoStillPreviewEnabled = AddCheckBox(groupVideoTools, "静止画プレビューを有効にする", 16, top, _settings.Preview.VideoStillPreviewEnabled);
-        top += 28;
-        AddLabel(groupVideoTools, "初期位置(秒):", top, labelWidth);
-        var videoSkipSeconds = AddEditableComboBox(groupVideoTools, baseX, top, 100, new[] { "0", "5", "10", "30", "60" }, _settings.Preview.VideoSkipSeconds.ToString());
-        top += 34;
-
-        AddLabel(groupVideoTools, "動画ツールフォルダ:", top, labelWidth);
+        AddLabel(groupVideoTools, "ffplayフォルダ:", top, labelWidth);
         var videoStillPreviewFfmpegPath = AddTextBox(groupVideoTools, baseX, top, textBoxWidth, _settings.Preview.VideoToolDirectory ?? "");
         AddBrowseFolderButton(groupVideoTools, browseButtonX, top - 1, browseButtonWidth, videoStillPreviewFfmpegPath);
 
         var videoStillPreviewFfmpegStatus = new Label
         {
             Location = new Point(16, top + 32),
-            Size = new Size(460, 40),
+            Size = new Size(460, 28),
             ForeColor = SystemColors.GrayText,
             TextAlign = ContentAlignment.TopLeft
         };
         groupVideoTools.Controls.Add(videoStillPreviewFfmpegStatus);
 
-        top += 70;
-        AddLabel(groupVideoTools, "ffplay音量(%):", top, labelWidth);
-        var videoPlaybackVolume = AddEditableComboBox(groupVideoTools, baseX, top, 100, new[] { "0", "30", "50", "70", "100" }, _settings.Preview.VideoPlaybackVolumePercent.ToString());
-        top += 30;
-        var videoEnterPlaysExternal = AddCheckBox(groupVideoTools, "メディアファイル Enter で外部再生する", 16, top, _settings.Preview.VideoEnterPlaysExternal);
-        top += 26;
-        AddHintLabel(groupVideoTools, 16, top, 460, "※ 動画: OFF=Enterで静止画 / Ctrl+Enterで外部再生\n※ 動画: ON=Enterで外部再生 / Ctrl+Enterで静止画\n※ 音声: 設定ON/OFFに関係なく Enter / Ctrl+Enter で外部再生\n※ 静止画: ffmpeg / 再生: ffplay / 長さ: ffprobe", 54);
+        top += 42;
+        AddHintLabel(groupVideoTools, 16, top, 460,
+            "音声のEnter／Ctrl+Enterはffplayで外部再生します。ffplay未検出時はWindowsの関連付けを使います。\nBrowser動画はEnter／Ctrl+EnterでMidPlayer再生、Vは内容probe Preview（通常動画はBinary）です。ZはWindowsの関連付けで開きます。",
+            48);
+
+        tab.AutoScrollMinSize = new Size(0, Math.Max(groupArchive.Bottom, groupVideoTools.Bottom) + 16);
 
         sevenZip.TextChanged += (_, _) => RefreshExternalStatus();
         diff.TextChanged += (_, _) => RefreshExternalStatus();
-        editor.TextChanged += (_, _) => RefreshExternalStatus();
+        editor.TextChanged += (_, _) =>
+        {
+            RefreshExternalStatus();
+            RefreshExternalEditorPresetStatus();
+        };
         videoStillPreviewFfmpegPath.TextChanged += (_, _) => RefreshExternalStatus();
 
-        return (sevenZip, packDialogMode, diff, editor, videoPlaybackVolume, videoStillPreviewFfmpegPath, videoEnterPlaysExternal, sevenZipStatus, diffStatus, editorStatus, videoStillPreviewFfmpegStatus, videoStillPreviewEnabled, videoSkipSeconds);
+        return (sevenZip, packDialogMode, diff, editor, editorSearchHitArgumentTemplate, applyEditorArgumentPresetButton, editorArgumentPresetStatus, videoStillPreviewFfmpegPath, sevenZipStatus, diffStatus, editorStatus, videoStillPreviewFfmpegStatus);
     }
 
     private (CheckBox enableLog, CheckBox enableDetail) BuildLogTab(TabPage tab)
@@ -1134,6 +1905,86 @@ public class SettingsForm : Form
         ApplyStatus(_videoStillPreviewFfmpegStatusLabel, (videoToolStatus.Text, videoToolStatus.Color));
         _statusToolTip.SetToolTip(_videoStillPreviewFfmpegStatusLabel, videoToolStatus.ToolTipText);
         _statusToolTip.SetToolTip(_videoStillPreviewFfmpegPathBox, videoToolStatus.ToolTipText);
+    }
+
+    private void CommitExternalEditorPathSelectionFromBrowse()
+        => CommitExternalEditorPathSelection(force: true);
+
+    private void CommitExternalEditorPathSelection(bool force)
+    {
+        string? selectedPath = NullIfEmpty(_editorPathBox.Text);
+        if (!force && string.Equals(_lastPresetEditorPath, selectedPath, StringComparison.OrdinalIgnoreCase))
+        {
+            return;
+        }
+
+        string? currentTemplate = _editorSearchHitArgumentTemplateBox.Text;
+        string? selectedTemplate = KnownEditorSearchHitArgumentPresetService.GetTemplateAfterEditorSelection(
+            _lastPresetEditorPath,
+            selectedPath,
+            currentTemplate,
+            _editorArgumentTemplateWasManuallyEdited);
+        _lastPresetEditorPath = selectedPath;
+
+        if (!string.Equals(currentTemplate, selectedTemplate, StringComparison.Ordinal))
+        {
+            SetEditorSearchHitArgumentTemplate(selectedTemplate);
+        }
+
+        RefreshExternalEditorPresetStatus();
+    }
+
+    private void ApplyRecommendedEditorArgumentPreset()
+    {
+        if (!KnownEditorSearchHitArgumentPresetService.TryResolve(
+                _editorPathBox.Text,
+                out KnownEditorSearchHitArgumentPreset preset))
+        {
+            RefreshExternalEditorPresetStatus();
+            return;
+        }
+
+        SetEditorSearchHitArgumentTemplate(preset.ArgumentTemplate);
+        _editorArgumentTemplateWasManuallyEdited = false;
+        _lastPresetEditorPath = NullIfEmpty(_editorPathBox.Text);
+        RefreshExternalEditorPresetStatus();
+    }
+
+    private void SetEditorSearchHitArgumentTemplate(string? template)
+    {
+        _updatingEditorArgumentTemplate = true;
+        try
+        {
+            _editorSearchHitArgumentTemplateBox.Text = template ?? string.Empty;
+        }
+        finally
+        {
+            _updatingEditorArgumentTemplate = false;
+        }
+    }
+
+    private void RefreshExternalEditorPresetStatus()
+    {
+        if (KnownEditorSearchHitArgumentPresetService.TryResolve(
+                _editorPathBox.Text,
+                out KnownEditorSearchHitArgumentPreset preset))
+        {
+            _applyEditorArgumentPresetButton.Enabled = true;
+            _editorArgumentPresetStatusLabel.Text = $"{preset.EditorName}: 推奨引数あり";
+            _statusToolTip.SetToolTip(_applyEditorArgumentPresetButton, preset.ArgumentTemplate);
+            _statusToolTip.SetToolTip(_editorArgumentPresetStatusLabel, preset.ArgumentTemplate);
+        }
+        else
+        {
+            _applyEditorArgumentPresetButton.Enabled = false;
+            _editorArgumentPresetStatusLabel.Text = string.IsNullOrWhiteSpace(_editorPathBox.Text)
+                ? "Editorを選択すると候補を確認できます"
+                : string.IsNullOrWhiteSpace(_editorSearchHitArgumentTemplateBox.Text)
+                    ? "未対応Editor（推奨引数なし）"
+                    : "未対応Editor（入力済み引数を保持）";
+            _statusToolTip.SetToolTip(_applyEditorArgumentPresetButton, string.Empty);
+            _statusToolTip.SetToolTip(_editorArgumentPresetStatusLabel, string.Empty);
+        }
     }
 
     private static void ApplyStatus(Label label, (string Text, Color Color) status)
@@ -1247,7 +2098,7 @@ public class SettingsForm : Form
         return tb;
     }
 
-    private void AddBrowseButton(Control parent, int x, int top, int width, TextBox target)
+    private void AddBrowseButton(Control parent, int x, int top, int width, TextBox target, Action? onPathSelected = null)
     {
         var btn = new Button
         {
@@ -1272,6 +2123,7 @@ public class SettingsForm : Form
             if (dlg.ShowDialog(this) == DialogResult.OK)
             {
                 target.Text = dlg.FileName;
+                onPathSelected?.Invoke();
             }
         };
         parent.Controls.Add(btn);
@@ -1289,7 +2141,7 @@ public class SettingsForm : Form
         {
             using var dlg = new FolderBrowserDialog
             {
-                Description = "動画ツールフォルダを選択 (ffmpeg.exe などの配置先)",
+                Description = "音声外部再生用のffplayフォルダを選択",
                 UseDescriptionForTitle = true,
                 SelectedPath = Directory.Exists(target.Text.Trim()) ? target.Text.Trim() : string.Empty
             };
@@ -2219,6 +3071,27 @@ public class SettingsForm : Form
     {
         SyncInputAssignmentDraftFromEmbeddedView();
 
+        string? searchHitArgumentTemplate = NullIfEmpty(_editorSearchHitArgumentTemplateBox.Text);
+        if (searchHitArgumentTemplate != null &&
+            !ConfiguredEditorSearchHitArgumentTemplateService.TryValidate(searchHitArgumentTemplate, out string? templateError))
+        {
+            MessageBox.Show(
+                this,
+                $"Grep用外部Editor引数テンプレートを確認してください。\n{templateError}",
+                "設定値エラー",
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Warning);
+            _editorSearchHitArgumentTemplateBox.Focus();
+            return false;
+        }
+
+        if (!TryParseVideoSeekStepSeconds(_videoSeekStepSecondsCombo.Text, out int videoSeekStepSeconds))
+        {
+            MessageBox.Show(this, "動画の移動幅は1～600秒で入力してください。", "設定値エラー", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            _videoSeekStepSecondsCombo.Focus();
+            return false;
+        }
+
         if (_workspaceSnapshotOverrideEdited)
         {
             _settings.WorkspaceSnapshotEnabledOverride = _workspaceSnapshotEnabledCheckBox.Checked;
@@ -2249,6 +3122,7 @@ public class SettingsForm : Form
         _settings.SevenZip.PackDialogMode = (PackDialogMode)Math.Clamp(_packDialogModeCombo.SelectedIndex, 0, 2);
         _settings.ExternalTools.ExternalDiffPath = NullIfEmpty(_diffPathBox.Text);
         _settings.ExternalTools.ExternalEditorPath = NullIfEmpty(_editorPathBox.Text);
+        _settings.ExternalTools.ExternalEditorSearchHitArgumentTemplate = searchHitArgumentTemplate;
 
         string? cliPath = SevenZipService.ResolveCliExecutable(_settings.SevenZip.ExePath);
         if (!string.IsNullOrWhiteSpace(cliPath) && File.Exists(cliPath))
@@ -2316,20 +3190,124 @@ public class SettingsForm : Form
         _settings.Preview.ReuseImageViewer = _reuseImageViewerCheckBox.Checked;
         _settings.Preview.CloseImageViewerOnNonImageSelection = _closeImageViewerOnNonImageCheckBox.Checked;
         _settings.Preview.RememberImageViewerBounds = _rememberImageViewerBoundsCheckBox.Checked;
-        _settings.Preview.VideoStillPreviewEnabled = _videoStillPreviewEnabledCheckBox.Checked;
+        _settings.Preview.DefaultMediaViewerPresentationMode = _defaultMediaViewerPlaybackLockedCheckBox.Checked
+            ? MidFD.ViewerIpc.ViewerPresentationMode.PlaybackLocked
+            : MidFD.ViewerIpc.ViewerPresentationMode.PreviewFollow;
         _settings.Preview.VideoToolDirectory = NullIfEmpty(_videoStillPreviewFfmpegPathBox.Text);
         _settings.Preview.VideoStillPreviewFfmpegPath = null;
-        if (!int.TryParse(_videoSkipSecondsCombo.Text, out int videoSkipSeconds))
-        {
-            videoSkipSeconds = 10;
-        }
-        _settings.Preview.VideoSkipSeconds = Math.Max(0, videoSkipSeconds);
+        _settings.Preview.VideoSeekStepSeconds = videoSeekStepSeconds;
         if (!int.TryParse(_videoPlaybackVolumeCombo.Text, out int videoPlaybackVolume))
         {
             videoPlaybackVolume = 100;
         }
         _settings.Preview.VideoPlaybackVolumePercent = Math.Clamp(videoPlaybackVolume, 0, 100);
-        _settings.Preview.VideoEnterPlaysExternal = _videoEnterPlaysExternalCheckBox.Checked;
+        if (MidPlayerRuntimeFeatures.HasFullVideoBackend)
+        {
+            _settings.Preview.VideoPlaybackBackend = _videoPlaybackBackendCombo.SelectedIndex switch
+            {
+                1 => VideoPlaybackBackendKind.LibVLC,
+                2 => VideoPlaybackBackendKind.MediaFoundation,
+                _ => VideoPlaybackBackendKind.Auto
+            };
+        }
+        _susiePluginsGrid.EndEdit();
+        _decoderSelectionGrid.EndEdit();
+        var existingRegistrations = _settings.Preview.SusiePlugins.Plugins
+            .Where(plugin => !string.IsNullOrWhiteSpace(plugin.PluginPath))
+            .Select(plugin => (Path: SafeGetFullPath(plugin.PluginPath), Registration: plugin))
+            .Where(item => item.Path != null)
+            .GroupBy(item => item.Path!, StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(group => group.Key, group => group.Last().Registration, StringComparer.OrdinalIgnoreCase);
+        var pluginRegistrations = new List<SusiePluginRegistration>();
+        var registeredPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (DataGridViewRow row in _susiePluginsGrid.Rows)
+        {
+            string line = row.Cells["Path"].Value?.ToString()?.Trim() ?? string.Empty;
+            if (line.Length == 0) continue;
+            string fullPath;
+            try { fullPath = Path.GetFullPath(line); }
+            catch (Exception ex)
+            {
+                MessageBox.Show(this, $"Plugin pathが不正です: {line}\n{ex.Message}", "画像デコーダー設定", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                return false;
+            }
+
+            if (!registeredPaths.Add(fullPath)) continue;
+            string extension = Path.GetExtension(fullPath);
+            if (!extension.Equals(".spi", StringComparison.OrdinalIgnoreCase)
+                && !extension.Equals(".sph", StringComparison.OrdinalIgnoreCase))
+            {
+                MessageBox.Show(this, $"登録できる拡張子は .spi または .sph です: {line}", "画像デコーダー設定", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                return false;
+            }
+
+            pluginRegistrations.Add(new SusiePluginRegistration
+            {
+                PluginPath = fullPath,
+                IsEnabled = Convert.ToBoolean(row.Cells["Enabled"].Value ?? false),
+                InspectionMetadata = _susiePluginMetadata.TryGetValue(fullPath, out SusiePluginInspection? inspection)
+                    ? new SusiePluginInspectionMetadata
+                    {
+                        DisplayName = inspection.DisplayName,
+                        VersionInfo = inspection.VersionInfo,
+                        Extensions = inspection.Extensions.ToArray(),
+                        FormatNames = inspection.FormatNames.ToArray()
+                    }
+                    : existingRegistrations.TryGetValue(fullPath, out SusiePluginRegistration? existing)
+                        ? existing.InspectionMetadata?.Clone()
+                        : null
+            });
+        }
+
+        var decoderSelections = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        var registeredDecoderExtensions = pluginRegistrations
+            .Where(plugin => plugin.InspectionMetadata != null)
+            .SelectMany(plugin => plugin.InspectionMetadata!.Extensions)
+            .Select(SusiePluginSettings.NormalizeExtension)
+            .Where(extension => extension.Length > 1)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        foreach (DataGridViewRow row in _decoderSelectionGrid.Rows)
+        {
+            string extension = SusiePluginSettings.NormalizeExtension(row.Cells["Extension"].Value?.ToString());
+            if (!registeredDecoderExtensions.Contains(extension)) continue;
+            string? decoder = row.Cells["Decoder"].Value?.ToString();
+            if (extension.Length < 2)
+            {
+                MessageBox.Show(this, "拡張子decoder一覧に不正な行があります。", "画像デコーダー設定", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                return false;
+            }
+            if (string.IsNullOrWhiteSpace(decoder))
+            {
+                MessageBox.Show(this, $"{extension} に複数のPlugin候補があります。使用するdecoderを選択してください。", "画像デコーダー設定", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                return false;
+            }
+            if (!decoder.Equals("standard", StringComparison.OrdinalIgnoreCase))
+            {
+                try { decoder = Path.GetFullPath(decoder); }
+                catch (Exception ex)
+                {
+                    MessageBox.Show(this, $"decoder Plugin pathが不正です: {decoder}\n{ex.Message}", "画像デコーダー設定", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    return false;
+                }
+                if (!pluginRegistrations.Any(plugin => string.Equals(plugin.PluginPath, decoder, StringComparison.OrdinalIgnoreCase)))
+                {
+                    MessageBox.Show(this, $"decoder候補Pluginが登録一覧にありません: {decoder}", "画像デコーダー設定", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    return false;
+                }
+            }
+            decoderSelections[extension] = decoder;
+        }
+
+        _settings.Preview.SusiePlugins = new SusiePluginSettings
+        {
+            Plugins = pluginRegistrations,
+            DecoderByExtension = decoderSelections,
+            DisabledStandardExtensions = _disabledStandardExtensionsBox.Lines
+                .Select(SusiePluginSettings.NormalizeExtension)
+                .Where(extension => extension.Length > 1)
+                .ToHashSet(StringComparer.OrdinalIgnoreCase)
+        };
+        _settings.Preview.SusiePlugins.Normalize();
 
         _settings.FileOperations.ConfirmDelete = _confirmDeleteCheckBox.Checked;
         _settings.FileOperations.ConfirmPermanentDelete = _confirmPermanentDeleteCheckBox.Checked;
@@ -2379,17 +3357,56 @@ public class SettingsForm : Form
             return false;
         }
 
-        SettingsSqliteStore.SettingsSaveResult saveResult = _settingsApplication.TrySaveExplicit(_settings);
-        if (saveResult.Succeeded)
+        _lastSettingsSaveResult = null;
+        bool handled = _executeCommand?.Invoke(
+            CommandIds.AppSettingsSave,
+            new CommandExecutionContext
+            {
+                Scope = CommandScope.Global,
+                Source = "SettingsForm.Save",
+                SettingsSave = new SettingsSaveCommandContext(_settings)
+            }) == true;
+        Configuration.SettingsSqliteStore.SettingsSaveResult? saveResult = _lastSettingsSaveResult;
+        if (handled && saveResult?.PrimarySaved == true)
         {
+            ClearSusieDecoderRepairNotes();
             if (!saveResult.BackupSucceeded)
             {
                 MessageBox.Show(this, saveResult.UserMessage, "設定バックアップ警告", MessageBoxButtons.OK, MessageBoxIcon.Warning);
             }
             return true;
         }
-        MessageBox.Show(this, saveResult.UserMessage, "設定保存エラー", MessageBoxButtons.OK, MessageBoxIcon.Error);
+        MessageBox.Show(
+            this,
+            saveResult?.UserMessage
+                ?? (_isFileOperationBusy()
+                    ? "ファイル操作中のため設定を保存できません。設定画面を開いたまま、操作の完了後に再度保存してください。"
+                    : "設定保存Commandを実行できませんでした。設定は保存されていません。"),
+            "設定保存エラー",
+            MessageBoxButtons.OK,
+            MessageBoxIcon.Error);
         return false;
+    }
+
+    private void ClearSusieDecoderRepairNotes()
+    {
+        foreach (DataGridViewRow row in _decoderSelectionGrid.Rows)
+        {
+            string? decoder = row.Cells["Decoder"].Value?.ToString();
+            row.Cells["Decoder"].ToolTipText = string.Equals(decoder, "standard", StringComparison.OrdinalIgnoreCase)
+                ? "標準decoder"
+                : decoder ?? string.Empty;
+        }
+        _susieDecoderRepairOriginals.Clear();
+    }
+
+    private void UpdateBusyCommandAvailability()
+    {
+        bool busy = _isFileOperationBusy();
+        if (_settingsSaveButton != null) _settingsSaveButton.Enabled = !busy;
+        if (_settingsApplyButton != null) _settingsApplyButton.Enabled = !busy;
+        if (_settingsExportButton != null) _settingsExportButton.Enabled = !busy;
+        if (_settingsImportButton != null) _settingsImportButton.Enabled = true;
     }
 
     private static string GetPackDialogModeDescription(int selectedIndex)
@@ -2568,6 +3585,9 @@ public class SettingsForm : Form
         return true;
     }
 
+    internal static bool TryParseVideoSeekStepSeconds(string? text, out int seconds)
+        => int.TryParse(text, out seconds) && seconds is >= 1 and <= 600;
+
     private void BtnOk_Click(object? sender, EventArgs e)
     {
         if (!ValidateFontSettings())
@@ -2595,7 +3615,6 @@ public class SettingsForm : Form
     {
         var setupSettings = _settings.Clone();
         setupSettings.Input.FunctionKeyProfile = _embeddedInputAssignmentView.SelectedProfileValue;
-        setupSettings.Preview.VideoEnterPlaysExternal = _videoEnterPlaysExternalCheckBox.Checked;
         setupSettings.Appearance.ShowPathAsBreadcrumb = _showPathAsBreadcrumbCheckBox.Checked;
         setupSettings.Appearance.ColorTheme = FileListColorResolver.CanonicalizePresetKey(_colorThemeCombo.Text);
         setupSettings.FileOperations.UseMidFdManagedTrash = _useMidFdManagedTrashCheckBox.Checked;
@@ -2605,6 +3624,7 @@ public class SettingsForm : Form
         setupSettings.SevenZip.ExePath = NullIfEmpty(_sevenZipPathBox.Text);
         setupSettings.Preview.VideoToolDirectory = NullIfEmpty(_videoStillPreviewFfmpegPathBox.Text);
         setupSettings.ExternalTools.ExternalEditorPath = NullIfEmpty(_editorPathBox.Text);
+        setupSettings.ExternalTools.ExternalEditorSearchHitArgumentTemplate = NullIfEmpty(_editorSearchHitArgumentTemplateBox.Text);
         setupSettings.Session.RestoreStartupState = _restoreStartupStateCheckBox.Checked;
         setupSettings.Session.RestoreTabsOnStartup = _restoreTabsOnStartupCheckBox.Checked;
         setupSettings.Session.RestoreLastPath = _restoreLastPathCheckBox.Checked;
@@ -2616,7 +3636,10 @@ public class SettingsForm : Form
             ? _workspaceSnapshotEnabledCheckBox.Checked
             : _settings.WorkspaceSnapshotEnabledOverride;
 
-        using var dialog = new FeatureProfileSelectionDialog(setupSettings, isFirstLaunch: false);
+        using var dialog = new FeatureProfileSelectionDialog(
+            setupSettings,
+            isFirstLaunch: false,
+            externalEditorSearchHitArgumentTemplateManuallyEdited: _editorArgumentTemplateWasManuallyEdited);
         if (dialog.ShowDialog(this) != DialogResult.OK)
         {
             return;
@@ -2629,7 +3652,6 @@ public class SettingsForm : Form
         _suppressWorkspaceSnapshotSettingEvents = false;
         _workspaceSnapshotOverrideEdited = false;
         _embeddedInputAssignmentView.SelectedProfileValue = dialog.UseFdCompatibleFunctionKeys ? InputSettings.FdCompatibleProfileValue : InputSettings.StandardProfileValue;
-        _videoEnterPlaysExternalCheckBox.Checked = dialog.VideoEnterPlaysExternal;
         _showPathAsBreadcrumbCheckBox.Checked = dialog.ShowPathAsBreadcrumb;
         int setupThemeIndex = _colorThemeCombo.FindStringExact(FileListColorResolver.GetPresetDisplayName(dialog.ColorTheme));
         if (setupThemeIndex >= 0)
@@ -2647,7 +3669,10 @@ public class SettingsForm : Form
         _sevenZipPathBox.Text = dialog.SevenZipPath ?? string.Empty;
         _videoStillPreviewFfmpegPathBox.Text = dialog.VideoToolDirectory ?? string.Empty;
         _editorPathBox.Text = dialog.ExternalEditorPath ?? string.Empty;
+        _lastPresetEditorPath = NullIfEmpty(_editorPathBox.Text);
+        SetEditorSearchHitArgumentTemplate(dialog.ExternalEditorSearchHitArgumentTemplate);
         RefreshExternalStatus();
+        RefreshExternalEditorPresetStatus();
     }
 
     private string[] GetInstalledFontNames()
@@ -2668,50 +3693,21 @@ public class SettingsForm : Form
     {
         string? path = NullIfEmpty(pathText);
         VideoToolResolutionResult resolution = VideoToolResolutionService.Resolve(path);
-
-        string ffmpegSummary = resolution.FfmpegFound ? "ffmpeg OK" : "ffmpeg 未検出";
-        string ffplaySummary = resolution.FfplayFound ? "ffplay OK" : "ffplay 未検出";
-        string ffprobeSummary = resolution.FfprobeFound ? "ffprobe OK" : "ffprobe 未検出";
-        string text;
-        Color color;
-
-        text = $"状態: {ffmpegSummary} {ffplaySummary} {ffprobeSummary}";
-        if (resolution.FfmpegFound && resolution.FfplayFound && resolution.FfprobeFound)
-        {
-            color = Color.DarkGreen;
-        }
-        else if (resolution.FfmpegFound)
-        {
-            color = Color.DarkOrange;
-        }
-        else
-        {
-            color = Color.Firebrick;
-        }
-
-        string tooltipText = BuildVideoToolStatusToolTip(path, resolution);
-        return (text, color, tooltipText);
+        string text = resolution.FfplayFound
+            ? $"音声再生: ffplay OK ({Path.GetFileName(resolution.FfplayPath)})"
+            : "音声再生: ffplay未検出（Windowsの関連付けを使用）";
+        Color color = resolution.FfplayFound ? Color.DarkGreen : Color.DarkOrange;
+        return (text, color, BuildVideoToolStatusToolTip(path, resolution));
     }
 
     private static string BuildVideoToolStatusToolTip(string? configuredPath, VideoToolResolutionResult resolution)
     {
         var lines = new List<string>();
         lines.Add($"設定値: {(string.IsNullOrWhiteSpace(configuredPath) ? "(未設定)" : configuredPath)}");
-        lines.Add($"ffmpeg: {(resolution.FfmpegFound ? resolution.FfmpegPath : "(未検出)")}");
         lines.Add($"ffplay: {(resolution.FfplayFound ? resolution.FfplayPath : "(未検出)")}");
-        lines.Add($"ffprobe: {(resolution.FfprobeFound ? resolution.FfprobePath : "(未検出)")}");
-        if (!string.IsNullOrWhiteSpace(resolution.FfmpegSource))
-        {
-            lines.Add($"ffmpeg解決元: {resolution.FfmpegSource}");
-        }
-
         if (!string.IsNullOrWhiteSpace(resolution.FfplaySource))
         {
             lines.Add($"ffplay解決元: {resolution.FfplaySource}");
-        }
-        if (!string.IsNullOrWhiteSpace(resolution.FfprobeSource))
-        {
-            lines.Add($"ffprobe解決元: {resolution.FfprobeSource}");
         }
 
         if (!resolution.FfplayFound && resolution.FfplayCandidates.Count > 0)
@@ -2722,15 +3718,6 @@ public class SettingsForm : Form
                 lines.Add($"- {candidate}");
             }
         }
-        if (!resolution.FfprobeFound && resolution.FfprobeCandidates.Count > 0)
-        {
-            lines.Add("ffprobe探索候補:");
-            foreach (string candidate in resolution.FfprobeCandidates.Take(4))
-            {
-                lines.Add($"- {candidate}");
-            }
-        }
-
         return string.Join(Environment.NewLine, lines);
     }
 
@@ -2917,6 +3904,12 @@ public class SettingsForm : Form
             Font = new Font(tab.Font, FontStyle.Bold)
         };
         groupCustom.Controls.Add(warningLabelLocal);
+
+        int colorGroupBottomPadding = 16;
+        groupCustom.ClientSize = new Size(
+            groupCustom.ClientSize.Width,
+            warningLabelLocal.Bottom + colorGroupBottomPadding);
+        groupPreview.Height = groupCustom.Height;
 
         var fileListColorPreviewPanel = new ListView
         {

@@ -24,17 +24,92 @@ namespace MidFD;
 
 public partial class MainForm : Form
 {
+    private BrowserTabInputTraceFilter? _browserTabInputTraceFilter;
+
+    protected override void OnHandleCreated(EventArgs e)
+    {
+        base.OnHandleCreated(e);
+        if (_browserTabInputTraceFilter == null)
+        {
+            _browserTabInputTraceFilter = new BrowserTabInputTraceFilter(this);
+            System.Windows.Forms.Application.AddMessageFilter(_browserTabInputTraceFilter);
+        }
+    }
+
+    protected override void OnHandleDestroyed(EventArgs e)
+    {
+        if (_browserTabInputTraceFilter != null)
+        {
+            System.Windows.Forms.Application.RemoveMessageFilter(_browserTabInputTraceFilter);
+            _browserTabInputTraceFilter = null;
+        }
+        base.OnHandleDestroyed(e);
+    }
+
+    internal static bool IsBrowserTabInputTraceMessage(int message, Keys keyCode) =>
+        message is 0x0100 or 0x0101 or 0x0104 or 0x0105
+        && keyCode is Keys.ControlKey or Keys.LControlKey or Keys.RControlKey or Keys.Left or Keys.Right;
+
+    private bool CanTraceBrowserTabInput =>
+        LogService.IsEnabled && !IsDisposed && !Disposing && IsHandleCreated
+        && ReferenceEquals(Form.ActiveForm, this)
+        && _viewerApplicationCoordinator?.Mode == ViewerApplicationMode.Browser
+        && GetBrowserTabTraceForegroundWindow() == Handle;
+
+    private void TraceBrowserTabInput(string stage, ref Message message, Keys keyData)
+    {
+        if (!CanTraceBrowserTabInput) return;
+        Control? source = Control.FromChildHandle(message.HWnd);
+        if (!ReferenceEquals(source?.FindForm(), this)) return;
+        IntPtr focusHandle = GetBrowserTabTraceFocus();
+        Control? focus = Control.FromChildHandle(focusHandle);
+        short ctrlState = GetBrowserTabTraceKeyState((int)Keys.ControlKey);
+        LogService.Info(
+            $"[BrowserTabInputTrace] stage={stage} pid={Environment.ProcessId} " +
+            $"message=0x{message.Msg:X4} vk=0x{((int)keyData & (int)Keys.KeyCode):X2} " +
+            $"keyData={InputSettings.ToKeyGestureText(keyData)} keyDataValue=0x{(int)keyData:X} " +
+            $"ctrlState=0x{(ushort)ctrlState:X4} ctrlDown={(ctrlState & 0x8000) != 0} " +
+            $"modifierKeys=0x{(int)Control.ModifierKeys:X} modifiers=0x{((int)keyData & (int)Keys.Modifiers):X} " +
+            $"sourceHwnd=0x{message.HWnd.ToInt64():X} focusHwnd=0x{focusHandle.ToInt64():X} " +
+            $"focusedControl={focus?.GetType().Name ?? "-"}/{focus?.Name ?? "-"} " +
+            $"activeMain={ReferenceEquals(Form.ActiveForm, this)} mainFocused={Focused || ContainsFocus} " +
+            $"browserFocused={BrowserInputRouter.IsBrowserInputFocused(browserPanel)} pathEntry={IsBrowserPathEntryActive()}");
+    }
+
+    private sealed class BrowserTabInputTraceFilter(MainForm owner) : IMessageFilter
+    {
+        public bool PreFilterMessage(ref Message message)
+        {
+            Keys keyCode = (Keys)(nint)message.WParam & Keys.KeyCode;
+            if (IsBrowserTabInputTraceMessage(message.Msg, keyCode))
+                owner.TraceBrowserTabInput("raw-message", ref message, keyCode);
+            return false;
+        }
+    }
+
+    [DllImport("user32.dll", EntryPoint = "GetFocus")]
+    private static extern IntPtr GetBrowserTabTraceFocus();
+    [DllImport("user32.dll", EntryPoint = "GetKeyState")]
+    private static extern short GetBrowserTabTraceKeyState(int virtualKey);
+    [DllImport("user32.dll", EntryPoint = "GetForegroundWindow")]
+    private static extern IntPtr GetBrowserTabTraceForegroundWindow();
 
     private bool TryHandleViewerKeyDown(KeyEventArgs e)
     {
         if (_viewerApplicationCoordinator.Mode != ViewerApplicationMode.Viewer) return false;
+        if (e.KeyCode == Keys.Escape && e.Modifiers == Keys.None && TryRouteActiveFileOperationCancel("Viewer.KeyDown"))
+        {
+            e.Handled = true;
+            e.SuppressKeyPress = true;
+            return true;
+        }
         if (_viewerApplicationCoordinator.CurrentKind == PreviewKind.CsvTsv && _delimitedGrid?.Visible == true
-            && e.KeyCode != Keys.Enter && e.KeyCode != Keys.Escape)
+            && e.KeyCode != Keys.Enter && !(e.KeyCode == Keys.Escape && e.Modifiers == Keys.None))
         {
             return false;
         }
         // Ctrl+C: 表示中行または選択範囲コピー
-        if (e.Control && e.KeyCode == Keys.C)
+        if (e.Modifiers == Keys.Control && e.KeyCode == Keys.C)
         {
             if (TryCopyLargeFileVisibleText())
             {
@@ -44,8 +119,7 @@ public partial class MainForm : Form
             }
             if (viewerTextBox.Visible && viewerTextBox.SelectionLength > 0)
             {
-                viewerTextBox.Copy();
-                ShowStatusMessage("選択範囲をコピーしました。");
+                DispatchTextViewerCopy("Viewer.KeyDown.CtrlC", TextViewerCopyOrigin.EmbeddedViewer);
                 e.Handled = true;
                 e.SuppressKeyPress = true;
                 return true;
@@ -58,7 +132,7 @@ public partial class MainForm : Form
             return true;
         }
         // Enter / Esc で Browser 復帰
-        if (e.KeyCode == Keys.Enter || e.KeyCode == Keys.Escape)
+        if (e.Modifiers == Keys.None && (e.KeyCode == Keys.Enter || e.KeyCode == Keys.Escape))
         {
             if (TryExitViewerToBrowser())
             {
@@ -68,19 +142,25 @@ public partial class MainForm : Form
             }
         }
         // L: エンコーディング切替
-        if (e.KeyCode == Keys.L)
+        if (e.KeyCode == Keys.L && e.Modifiers == Keys.None)
         {
-            _viewerModeApplicationCoordinator.CycleEncodingAndRefresh(this);
+            ExecuteCommandFromUi(CommandIds.TextViewerEncodingCycle, new CommandExecutionContext
+            {
+                Scope = CommandScope.TextViewer,
+                Source = "Viewer.KeyDown.L"
+            });
             e.Handled = true;
             e.SuppressKeyPress = true;
             return true;
         }
         // W: 折り返し切替
-        if (e.KeyCode == Keys.W)
+        if (e.KeyCode == Keys.W && e.Modifiers == Keys.None)
         {
-            viewerTextBox.WordWrap = _viewerWorkflowApplicationCoordinator.ToggleWordWrap();
-            viewerTextBox.ScrollBars = viewerTextBox.WordWrap ? ScrollBars.Vertical : ScrollBars.Both;
-            ApplyViewerStatusLine();
+            ExecuteCommandFromUi(CommandIds.TextViewerWordWrapToggle, new CommandExecutionContext
+            {
+                Scope = CommandScope.TextViewer,
+                Source = "Viewer.KeyDown.W"
+            });
             e.Handled = true;
             e.SuppressKeyPress = true;
             return true;
@@ -91,19 +171,22 @@ public partial class MainForm : Form
             var state = _viewerApplicationCoordinator.LargeFileState;
             if (TryMapViewerNavigationKey(e.KeyCode, out ViewerInputKey navigationKey))
             {
-                ViewerNavigationDecision decision = _viewerWorkflowApplicationCoordinator.ResolveLargeFileNavigation(
-                    state,
-                    navigationKey,
-                    _largeFileControl.VisibleLineCount,
-                    _largeFileControl.GetMaxFirstVisibleLine());
-                if (decision.PendingEndAfterIndex)
+                TextViewerNavigationTarget target = navigationKey switch
                 {
-                    ShowStatusMessage("インデックス完了後に末尾へ移動します...");
-                }
-                else if (decision.Handled)
+                    ViewerInputKey.Home => TextViewerNavigationTarget.Home,
+                    ViewerInputKey.End => TextViewerNavigationTarget.End,
+                    ViewerInputKey.PageUp => TextViewerNavigationTarget.PageUp,
+                    _ => TextViewerNavigationTarget.PageDown
+                };
+                ExecuteCommandFromUi(CommandIds.TextViewerNavigate, new CommandExecutionContext
                 {
-                    _ = NavigateLargeFilePreviewAsync(decision.TargetFirstVisibleLine, e.KeyCode.ToString());
-                }
+                    Scope = CommandScope.TextViewer,
+                    Source = "Viewer.KeyDown.LargeTextNavigation",
+                    TextViewerNavigation = new TextViewerNavigationCommandContext(
+                        target,
+                        _largeFileControl.VisibleLineCount,
+                        _largeFileControl.GetMaxFirstVisibleLine())
+                });
                 e.Handled = true;
                 e.SuppressKeyPress = true;
                 return true;
@@ -123,6 +206,11 @@ public partial class MainForm : Form
     private bool TryHandleViewerCmdKey(Keys keyData)
     {
         if (_viewerApplicationCoordinator.Mode != ViewerApplicationMode.Viewer) return false;
+        if (keyData == Keys.E)
+        {
+            DispatchTextViewerExternalEditor("Viewer.ProcessCmdKey.E");
+            return true;
+        }
         // Ctrl+F / F3 / Shift+F3: Viewer 検索ロジックへのルーティング
         if (keyData == (Keys.Control | Keys.F))
         {
@@ -159,14 +247,17 @@ public partial class MainForm : Form
             {
                 if (viewerTextBox.SelectionLength > 0)
                 {
-                    viewerTextBox.Copy();
-                    ShowStatusMessage("選択範囲をコピーしました。");
+                    DispatchTextViewerCopy("Viewer.ProcessCmdKey.CtrlC", TextViewerCopyOrigin.EmbeddedViewer);
+                }
+                else
+                {
+                    DispatchTextViewerCopy("Viewer.ProcessCmdKey.CtrlC", TextViewerCopyOrigin.EmbeddedViewer);
                 }
                 return true;
             }
             if (_viewerApplicationCoordinator.CurrentKind == PreviewKind.LargeText)
             {
-                _ = TryCopyLargeFileVisibleTextAsync();
+                DispatchTextViewerCopy("Viewer.ProcessCmdKey.CtrlC", TextViewerCopyOrigin.EmbeddedViewer, largeFile: true);
                 return true;
             }
         }
@@ -181,27 +272,59 @@ public partial class MainForm : Form
         return false;
     }
 
+    private bool DispatchTextViewerCopy(
+        string source,
+        TextViewerCopyOrigin origin,
+        bool largeFile = false,
+        bool renderedSelection = false,
+        string? selectedText = null,
+        string? statusMessage = null)
+        => ExecuteCommandFromUi(CommandIds.TextViewerCopy, new CommandExecutionContext
+        {
+            Scope = CommandScope.TextViewer,
+            Source = source,
+            TextViewerCopyOrigin = origin,
+            TextViewerLargeFileCopy = largeFile,
+            TextViewerSelectedText = origin == TextViewerCopyOrigin.ArchivePreview
+                ? selectedText
+                : selectedText ?? (!largeFile && viewerTextBox.SelectionLength > 0
+                    ? viewerTextBox.SelectedText
+                    : null),
+            TextViewerRenderedSelectionCopy = renderedSelection,
+            TextViewerCopyStatusMessage = statusMessage
+        });
+
+    private bool DispatchTextViewerExternalEditor(string source)
+        => ExecuteCommandFromUi(CommandIds.TextViewerOpenExternalEditor, new CommandExecutionContext
+        {
+            Scope = CommandScope.TextViewer,
+            Source = source,
+            TextViewerExternalEditor = new TextViewerExternalEditorCommandContext(
+                _viewerApplicationCoordinator.DisplayedPreviewTarget ?? string.Empty,
+                _viewerApplicationCoordinator.DisplayedPreviewKind)
+        });
+
     private bool TryHandleBrowserCmdKeyMarking(Keys keyData)
     {
         // Tab を横取りし、コントロール間フォーカス移動を防ぐ (ToggleMark)
         if (keyData == Keys.Tab)
         {
             if (!CommandBusyPolicy.CanMutateBrowserState(_fileOperationApplicationCoordinator.IsBusy)) return true;
-            ToggleMark(moveNext: false);
+            _ = ExecuteBrowserMarkToggleCommand(moveNext: false, "Browser.CmdKey.Tab");
             return true;
         }
         // Shift+Home: ファイルのみ反転
         if (keyData == (Keys.Shift | Keys.Home))
         {
             if (!CommandBusyPolicy.CanMutateBrowserState(_fileOperationApplicationCoordinator.IsBusy)) return true;
-            InvertBulkMarks(includeDirectories: false);
+            _ = ExecuteBrowserMarkInvertCommand(includeDirectories: false, "Browser.CmdKey.ShiftHome");
             return true;
         }
         // Shift+End: ファイル + ディレクトリを反転
         if (keyData == (Keys.Shift | Keys.End))
         {
             if (!CommandBusyPolicy.CanMutateBrowserState(_fileOperationApplicationCoordinator.IsBusy)) return true;
-            InvertBulkMarks(includeDirectories: true);
+            _ = ExecuteBrowserMarkInvertCommand(includeDirectories: true, "Browser.CmdKey.ShiftEnd");
             return true;
         }
 
@@ -222,9 +345,19 @@ public partial class MainForm : Form
 
         Dictionary<string, string> keyMap = ResolveBrowserKeyCommandMap();
         string keyGesture = InputSettings.ToKeyGestureText(keyData);
+        bool isBrowserTabShortcut = keyData is (Keys.Control | Keys.Left) or (Keys.Control | Keys.Right);
         if (!keyMap.TryGetValue(keyGesture, out string? commandId))
         {
+            if (isBrowserTabShortcut)
+            {
+                LogService.Info($"[BrowserTabShortcut] stage=binding-result key={keyGesture} command=unbound");
+            }
             return BrowserCommandBindingResolver.Resolution.NotMatched;
+        }
+
+        if (isBrowserTabShortcut)
+        {
+            LogService.Info($"[BrowserTabShortcut] stage=binding-result key={keyGesture} command={commandId}");
         }
 
         if (string.Equals(commandId, InputSettings.MouseGestureUnassignedCommandId, StringComparison.OrdinalIgnoreCase))
@@ -241,12 +374,32 @@ public partial class MainForm : Form
             selectionSnapshot = cursorSnapshot;
         }
 
-        bool executed = _integrationSeam?.BrowserKeyCommandOverride is { } commandOverride
-            ? commandOverride(commandId)
-            : ExecuteCommandFromUi(commandId, _commandRegistry.Find(commandId)?.Scope ?? CommandScope.Browser, "Browser.CmdKey.Custom:" + keyGesture, selectionSnapshot);
-        return executed
+        bool executed;
+        int activeTabBefore = _browserApplicationCoordinator.Workspace.ActiveTabIndex;
+        if (CommandIds.TryGetBrowserColumnCount(commandId, out int columnCount))
+        {
+            int numericGestureColumnCount = ResolveBrowserColumnCountShortcut(keyData);
+            executed = numericGestureColumnCount == columnCount
+                ? ExecuteBrowserColumnCountCommand(columnCount, "Browser.CmdKey.Custom:" + keyGesture)
+                : DispatchBrowserColumnCountCommandIdentity(commandId, columnCount, "Browser.CmdKey.Custom:" + keyGesture);
+        }
+        else
+        {
+            executed = _integrationSeam?.BrowserKeyCommandOverride is { } commandOverride
+                ? commandOverride(commandId)
+                : ExecuteCommandFromUi(commandId, _commandRegistry.Find(commandId)?.Scope ?? CommandScope.Browser, "Browser.CmdKey.Custom:" + keyGesture, selectionSnapshot);
+        }
+
+        BrowserCommandBindingResolver.Resolution resolution = executed
             ? BrowserCommandBindingResolver.Resolution.MatchedExecuted
             : BrowserCommandBindingResolver.Resolution.MatchedRejected;
+        if (isBrowserTabShortcut)
+        {
+            LogService.Info($"[BrowserTabShortcut] stage=command-result key={keyGesture} command={commandId} executed={executed} " +
+                $"tabBefore={activeTabBefore} tabAfter={_browserApplicationCoordinator.Workspace.ActiveTabIndex} " +
+                $"tabCount={_browserApplicationCoordinator.Workspace.TabStates.Count}");
+        }
+        return resolution;
     }
 
     private Dictionary<string, string> ResolveBrowserKeyCommandMap()
@@ -267,37 +420,29 @@ public partial class MainForm : Form
         bool moved = false;
         if (keyData == Keys.Up)
         {
-            SetBrowserGlobalCursorIndex((_browserApplicationCoordinator.CursorIndex - 1 + total) % total);
+            _ = ExecuteBrowserCursorMoveCommand((_browserApplicationCoordinator.CursorIndex - 1 + total) % total, "Browser.CmdKey.Up");
             moved = true;
         }
         else if (keyData == Keys.Down)
         {
-            SetBrowserGlobalCursorIndex((_browserApplicationCoordinator.CursorIndex + 1) % total);
+            _ = ExecuteBrowserCursorMoveCommand((_browserApplicationCoordinator.CursorIndex + 1) % total, "Browser.CmdKey.Down");
             moved = true;
         }
         else if (keyData == Keys.Left)
         {
-            SetBrowserGlobalCursorIndex(Math.Max(0, _browserApplicationCoordinator.CursorIndex - rowsPerColumn));
+            _ = ExecuteBrowserCursorMoveCommand(Math.Max(0, _browserApplicationCoordinator.CursorIndex - rowsPerColumn), "Browser.CmdKey.Left");
             moved = true;
         }
         else if (keyData == Keys.Right)
         {
-            SetBrowserGlobalCursorIndex(Math.Min(total - 1, _browserApplicationCoordinator.CursorIndex + rowsPerColumn));
+            _ = ExecuteBrowserCursorMoveCommand(Math.Min(total - 1, _browserApplicationCoordinator.CursorIndex + rowsPerColumn), "Browser.CmdKey.Right");
             moved = true;
-        }
-        else if (keyData == Keys.F11)
-        {
-            return ExecuteFunctionKey(11);
-        }
-        else if (keyData == Keys.F12)
-        {
-            return ExecuteFunctionKey(12);
         }
         else if (keyData == Keys.PageUp)
         {
             if (_browserApplicationCoordinator.CursorIndex - itemsPerPage >= 0)
             {
-                SetBrowserGlobalCursorIndex(_browserApplicationCoordinator.CursorIndex - itemsPerPage);
+                _ = ExecuteBrowserCursorMoveCommand(_browserApplicationCoordinator.CursorIndex - itemsPerPage, "Browser.CmdKey.PageUp");
                 moved = true;
             }
         }
@@ -305,7 +450,7 @@ public partial class MainForm : Form
         {
             if (_browserApplicationCoordinator.CursorIndex + itemsPerPage < total)
             {
-                SetBrowserGlobalCursorIndex(_browserApplicationCoordinator.CursorIndex + itemsPerPage);
+                _ = ExecuteBrowserCursorMoveCommand(_browserApplicationCoordinator.CursorIndex + itemsPerPage, "Browser.CmdKey.PageDown");
                 moved = true;
             }
         }
@@ -315,6 +460,74 @@ public partial class MainForm : Form
             return true;
         }
         return false;
+    }
+
+    private bool ExecuteBrowserCursorMoveCommand(int targetIndex, string source) =>
+        ExecuteCommandFromUi(CommandIds.BrowserCursorMove, new CommandExecutionContext
+        {
+            Scope = CommandScope.Browser,
+            Source = source,
+            BrowserCursorNavigation = new BrowserCursorNavigationCommandContext(targetIndex)
+        });
+
+    private bool ExecuteBrowserMarkToggleCommand(bool moveNext, string source) =>
+        ExecuteCommandFromUi(CommandIds.BrowserMarkToggle, new CommandExecutionContext
+        {
+            Scope = CommandScope.Browser,
+            Source = source,
+            BrowserMarkToggle = new BrowserMarkToggleCommandContext(moveNext)
+        });
+
+    private bool ExecuteBrowserMarkInvertCommand(bool includeDirectories, string source) =>
+        ExecuteCommandFromUi(CommandIds.BrowserMarkInvert, new CommandExecutionContext
+        {
+            Scope = CommandScope.Browser,
+            Source = source,
+            BrowserBulkMark = new BrowserBulkMarkCommandContext(includeDirectories)
+        });
+
+    private bool ExecuteBrowserCursorMoveFromImageViewer(Keys keyData)
+    {
+        int total = _browserApplicationCoordinator.TotalItemCount > 0
+            ? _browserApplicationCoordinator.TotalItemCount
+            : fileListView.Items.Count;
+        if (total <= 0)
+        {
+            return false;
+        }
+
+        int itemsPerPage = GetBrowserItemsPerPage(out _, out int rowsPerColumn);
+        int currentIndex = _browserApplicationCoordinator.CursorIndex;
+        int? targetIndex = keyData switch
+        {
+            Keys.Up => (currentIndex - 1 + total) % total,
+            Keys.Down => (currentIndex + 1) % total,
+            Keys.Left => Math.Max(0, currentIndex - rowsPerColumn),
+            Keys.Right => Math.Min(total - 1, currentIndex + rowsPerColumn),
+            Keys.PageUp when currentIndex - itemsPerPage >= 0 => currentIndex - itemsPerPage,
+            Keys.PageDown when currentIndex + itemsPerPage < total => currentIndex + itemsPerPage,
+            _ => null
+        };
+        return targetIndex is int target && ExecuteCommandFromUi(
+            CommandIds.BrowserCursorMove,
+            new CommandExecutionContext
+            {
+                Scope = CommandScope.Browser,
+                Source = "ImageViewer.Navigation",
+                BrowserCursorNavigation = new BrowserCursorNavigationCommandContext(target)
+            });
+    }
+
+    private void ExecuteBrowserMarkToggleFromImageViewer()
+    {
+        ExecuteCommandFromUi(
+            CommandIds.BrowserMarkToggle,
+            new CommandExecutionContext
+            {
+                Scope = CommandScope.Browser,
+                Source = "ImageViewer.Mark",
+                BrowserMarkToggle = new BrowserMarkToggleCommandContext(MoveNext: true)
+            });
     }
 
     private bool TryHandleBrowserCmdKeyAliases(Keys keyData)
@@ -365,6 +578,8 @@ public partial class MainForm : Form
         if (keyData == Keys.F8) return ExecuteFunctionKey(8);
         if (keyData == Keys.F9) return ExecuteFunctionKey(9);
         if (keyData == Keys.F10) return ExecuteFunctionKey(10);
+        if (keyData == Keys.F11) return ExecuteFunctionKey(11);
+        if (keyData == Keys.F12) return ExecuteFunctionKey(12);
         return false;
     }
 
@@ -378,18 +593,25 @@ public partial class MainForm : Form
                 string? fullPath = item.Tag as string;
                 if (!string.IsNullOrEmpty(fullPath) && File.Exists(fullPath))
                 {
-                    ViewerCtrlEnterDecision decision = _viewerWorkflowApplicationCoordinator.ResolveCtrlEnter(fullPath);
-                    if (decision.Handled)
+                    BrowserCtrlEnterRoute route = _viewerWorkflowApplicationCoordinator.ResolveBrowserCtrlEnter(fullPath);
+                    if (route == BrowserCtrlEnterRoute.OpenVideoPlaybackLocked)
                     {
-                        if (decision.UseExternalMediaPlayback)
+                        return ExecuteCommandFromUi(CommandIds.BrowserOpenPlaybackLocked, new CommandExecutionContext
                         {
-                            LaunchMediaPlayback(fullPath, decision.IsAudio);
-                        }
-                        else
+                            Scope = CommandScope.Browser,
+                            Source = "Browser.CmdKey.CtrlEnter.PlaybackLocked",
+                            ContextTargetPath = fullPath,
+                            SelectionSnapshot = new SelectionResult([fullPath], hasMarkedSelection: false)
+                        });
+                    }
+                    if (route == BrowserCtrlEnterRoute.PlayAudioExternally)
+                    {
+                        return ExecuteCommandFromUi(CommandIds.BrowserAudioCtrlEnter, new CommandExecutionContext
                         {
-                            ExecuteBrowserOpenRequest(decision.OpenRequest);
-                        }
-                        return true;
+                            Scope = CommandScope.Browser,
+                            Source = "Browser.CmdKey.CtrlEnter.Audio",
+                            ContextTargetPath = fullPath
+                        });
                     }
                 }
             }
@@ -418,64 +640,92 @@ public partial class MainForm : Form
 
     private bool TryHandleBrowserCmdKeyColumnCount(Keys keyData)
     {
-        // Ctrl+1/2/3/4 および Ctrl+NumPad1/2/3/4 による明示的な表示モード切替
-        if (TryGetBrowserFileDisplayModeShortcut(keyData, out BrowserFileDisplayMode shortcutMode))
+        // FDCompatibleではCtrl+1-9とCtrl+NumPad1-9をDrive A-I commandへ渡す。
+        if (ShouldHandleBrowserFileDisplayModeShortcut(CurrentFunctionKeyProfileValue, keyData) &&
+            TryGetBrowserFileDisplayModeShortcut(keyData, out BrowserFileDisplayMode shortcutMode))
         {
-            SetBrowserFileDetailDisplayMode(shortcutMode);
-            return true;
+            return ExecuteBrowserDisplayModeFromUi(shortcutMode, "Browser.CmdKey.DisplayMode");
         }
 
         // 通常の数字キー / NumPadキーによる列数選択
-        int val = 0;
-        if (keyData >= Keys.D1 && keyData <= Keys.D9) val = (int)(keyData - Keys.D0);
-        else if (keyData >= Keys.NumPad1 && keyData <= Keys.NumPad9) val = (int)(keyData - Keys.NumPad0);
+        int val = ResolveBrowserColumnCountShortcut(keyData);
 
         if (val > 0)
         {
-            bool isWinFD = FunctionKeyProfileService.ResolveProfile(CurrentFunctionKeyProfileValue) == FunctionKeyProfile.FDCompatible;
-            bool isRepeat = (val == _lastColumnCountKey);
-            _lastColumnCountKey = val;
-            bool columnChanged = _browserApplicationCoordinator.ColumnCount != val;
-
-            if (columnChanged)
-            {
-                int previousItemsPerPage = GetBrowserItemsPerPage();
-                SetBrowserFileDetailDisplayMode(
-                    BrowserFileDisplayMode.NameOnly,
-                    persistTabState: false,
-                    rematerialize: false);
-                int nextItemsPerPage = GetBrowserItemsPerPageForColumn(val);
-                BrowserColumnCountExecution execution = _browserNavigationWorkflowApplicationCoordinator.ExecuteColumnCountChange(
-                    val,
-                    nextItemsPerPage != previousItemsPerPage,
-                    BuildBrowserTabStateFromCurrentUi(),
-                    CreateDirectoryLoadOptions(itemsPerPage: nextItemsPerPage),
-                    val,
-                    CaptureBrowserRefreshShellState());
-                if (execution.Load is { Succeeded: true } load)
-                {
-                    ApplyDirectoryLoadUi(load);
-                    ApplyDirectoryPostLoadEffects(execution.PostLoadEffects);
-                }
-            }
-            else if (isRepeat && isWinFD)
-            {
-                BrowserFileDisplayMode currentMode = GetBrowserFileDisplayMode();
-                BrowserFileDisplayMode nextMode = GetNextBrowserFileDisplayModeInCycle(currentMode);
-                SetBrowserFileDetailDisplayMode(nextMode);
-            }
-
-            if (!columnChanged)
-            {
-                _browserNavigationWorkflowApplicationCoordinator.PersistCurrentListState();
-                RematerializeBrowserPageIfCapacityChanged();
-                CaptureActiveBrowserTabState();
-            }
-            UpdateInfoPanel();
-            browserPanel.Invalidate();
-            return true;
+            return ExecuteBrowserColumnCountCommand(val, "Browser.CmdKey.ColumnCount");
         }
         return false;
+    }
+
+    private bool ExecuteBrowserColumnCountCommand(int columnCount, string source)
+    {
+        (string commandId, BrowserViewCommandContext viewContext) = ResolveBrowserColumnCountInputCommand(
+            CurrentFunctionKeyProfileValue,
+            columnCount,
+            _browserApplicationCoordinator.ColumnCount,
+            _lastColumnCountKey,
+            GetBrowserFileDisplayMode());
+        string commandSource = commandId == CommandIds.BrowserViewDisplayModeSet
+            ? source + ".DisplayModeCycle"
+            : source;
+        bool executed = ExecuteCommandFromUi(commandId, new CommandExecutionContext
+        {
+            Scope = CommandScope.Browser,
+            Source = commandSource,
+            BrowserView = viewContext
+        });
+        if (executed)
+        {
+            _lastColumnCountKey = columnCount;
+        }
+
+        return executed;
+    }
+
+    private bool DispatchBrowserColumnCountCommandIdentity(string commandId, int columnCount, string source)
+    {
+        return ExecuteCommandFromUi(commandId, new CommandExecutionContext
+        {
+            Scope = CommandScope.Browser,
+            Source = source,
+            BrowserView = new BrowserViewCommandContext(ColumnCount: columnCount)
+        });
+    }
+
+    internal static (string CommandId, BrowserViewCommandContext Context) ResolveBrowserColumnCountInputCommand(
+        string? profileValue,
+        int requestedColumnCount,
+        int currentColumnCount,
+        int previousColumnCountKey,
+        BrowserFileDisplayMode currentDisplayMode)
+    {
+        bool isRepeatedFdColumnInput =
+            FunctionKeyProfileService.ResolveProfile(profileValue) == FunctionKeyProfile.FDCompatible &&
+            requestedColumnCount == previousColumnCountKey &&
+            requestedColumnCount == currentColumnCount;
+        if (isRepeatedFdColumnInput)
+        {
+            return (
+                CommandIds.BrowserViewDisplayModeSet,
+                new BrowserViewCommandContext(DisplayMode: GetNextBrowserFileDisplayModeInCycle(currentDisplayMode)));
+        }
+
+        return (
+            CommandIds.GetBrowserColumnCountCommandId(requestedColumnCount),
+            new BrowserViewCommandContext(ColumnCount: requestedColumnCount));
+    }
+
+    internal static int ResolveBrowserColumnCountShortcut(Keys keyData)
+    {
+        if (keyData >= Keys.D1 && keyData <= Keys.D9)
+        {
+            return (int)(keyData - Keys.D0);
+        }
+        if (keyData >= Keys.NumPad1 && keyData <= Keys.NumPad9)
+        {
+            return (int)(keyData - Keys.NumPad0);
+        }
+        return 0;
     }
 
     internal static bool TryGetBrowserFileDisplayModeShortcut(
@@ -493,6 +743,59 @@ public partial class MainForm : Form
         return Enum.IsDefined(mode);
     }
 
+    internal static string ResolveBrowserFileDisplayModeShortcutHint(
+        string? profileValue,
+        BrowserFileDisplayMode mode,
+        IReadOnlyDictionary<string, string> effectiveBindings)
+    {
+        int digit = mode switch
+        {
+            BrowserFileDisplayMode.NameOnly => 1,
+            BrowserFileDisplayMode.NameSize => 2,
+            BrowserFileDisplayMode.NameSizeDate => 3,
+            BrowserFileDisplayMode.NameExtensionAligned => 4,
+            _ => 0
+        };
+        if (digit == 0)
+        {
+            return string.Empty;
+        }
+
+        (Keys Key, string Label)[] candidates =
+        [
+            (Keys.Control | (Keys)((int)Keys.D1 + digit - 1), $"Ctrl+{digit}"),
+            (Keys.Control | (Keys)((int)Keys.NumPad1 + digit - 1), $"Ctrl+NumPad{digit}")
+        ];
+        foreach ((Keys key, string label) in candidates)
+        {
+            if (!ShouldHandleBrowserFileDisplayModeShortcut(profileValue, key) ||
+                !TryGetBrowserFileDisplayModeShortcut(key, out BrowserFileDisplayMode resolvedMode) ||
+                resolvedMode != mode)
+            {
+                continue;
+            }
+
+            string gesture = InputSettings.ToKeyGestureText(key);
+            if (!effectiveBindings.ContainsKey(gesture))
+            {
+                return label;
+            }
+        }
+
+        return string.Empty;
+    }
+
+    internal static bool ShouldHandleBrowserFileDisplayModeShortcut(string? profileValue, Keys keyData)
+    {
+        Keys modifiers = keyData & Keys.Modifiers;
+        Keys keyCode = keyData & Keys.KeyCode;
+        bool isFdCompatible = FunctionKeyProfileService.ResolveProfile(profileValue) == FunctionKeyProfile.FDCompatible;
+        bool isCtrlDriveDigit = modifiers == Keys.Control &&
+            ((keyCode >= Keys.D1 && keyCode <= Keys.D9) ||
+             (keyCode >= Keys.NumPad1 && keyCode <= Keys.NumPad9));
+        return !isFdCompatible || !isCtrlDriveDigit;
+    }
+
     internal static BrowserFileDisplayMode GetNextBrowserFileDisplayModeInCycle(BrowserFileDisplayMode mode) => mode switch
     {
         BrowserFileDisplayMode.NameOnly => BrowserFileDisplayMode.NameSize,
@@ -505,6 +808,23 @@ public partial class MainForm : Form
     {
         Keys modifiers = keyData & Keys.Modifiers;
         Keys keyCode = keyData & Keys.KeyCode;
+        if (keyCode is Keys.Left or Keys.Right)
+            TraceBrowserTabInput("process-cmd-key", ref msg, keyData);
+        bool isBrowserTabShortcut = keyData is (Keys.Control | Keys.Left) or (Keys.Control | Keys.Right);
+        if (isBrowserTabShortcut)
+        {
+            Control? focused = ActiveControl;
+            while (focused?.Controls.Cast<Control>().FirstOrDefault(control => control.Focused || control.ContainsFocus) is { } child)
+            {
+                focused = child;
+            }
+            LogService.Info(
+                $"[BrowserTabShortcut] stage=cmdkey-received key={InputSettings.ToKeyGestureText(keyData)} " +
+                $"mode={_viewerApplicationCoordinator.Mode} browserFocused={BrowserInputRouter.IsBrowserInputFocused(browserPanel)} " +
+                $"pathEntry={IsBrowserPathEntryActive()} focusedControl={focused?.GetType().Name ?? "-"}/{focused?.Name ?? "-"} " +
+                $"activeMain={ReferenceEquals(Form.ActiveForm, this)} sourceHwnd=0x{msg.HWnd.ToInt64():X} " +
+                $"profile={CurrentFunctionKeyProfileValue}");
+        }
         bool isPlainNumberKey = (modifiers == Keys.None) &&
                                 ((keyCode >= Keys.D1 && keyCode <= Keys.D9) ||
                                  (keyCode >= Keys.NumPad1 && keyCode <= Keys.NumPad9));
@@ -515,17 +835,36 @@ public partial class MainForm : Form
 
         if (IsBrowserPathEntryActive())
         {
+            if (isBrowserTabShortcut)
+            {
+                LogService.Info("[BrowserTabShortcut] stage=router-bypass reason=path-entry");
+            }
             ClearBrowserNamePrefixJump();
             return base.ProcessCmdKey(ref msg, keyData);
         }
 
+        if (_viewerApplicationCoordinator.Mode == ViewerApplicationMode.Viewer && keyData == Keys.E)
+        {
+            DispatchTextViewerExternalEditor("Viewer.ProcessCmdKey.E");
+            return true;
+        }
+
+        if (keyData == Keys.Escape && TryRouteActiveFileOperationCancel("MainForm.ProcessCmdKey"))
+        {
+            return true;
+        }
+
         if (_browserNamePrefixJumpSession.IsActive)
         {
-            if (keyCode == Keys.Escape)
+            if (keyCode == Keys.Escape && modifiers == Keys.None)
             {
                 ClearBrowserNamePrefixJump();
                 ShowStatusMessage("頭文字ジャンプを終了しました。");
                 return true;
+            }
+            if (keyCode == Keys.Escape)
+            {
+                return base.ProcessCmdKey(ref msg, keyData);
             }
             if (keyCode == Keys.Back)
             {
@@ -559,22 +898,11 @@ public partial class MainForm : Form
             }
         }
 
-        if (keyCode == Keys.Escape)
-        {
-            LogService.Info(
-                $"[CancelRuntime] MainForm.ProcessCmdKey Escape. busy={_fileOperationApplicationCoordinator.IsClipboardBusy}, " +
-                $"hasCts={_fileOperationApplicationCoordinator.CancellationTokenSource != null}, requested={_fileOperationApplicationCoordinator.CancellationTokenSource?.IsCancellationRequested ?? false}, " +
-                $"activeControl={DescribeControl(ActiveControl)}, thread={Environment.CurrentManagedThreadId}");
-        }
-        if (keyCode == Keys.Escape && TryRouteActiveFileOperationCancel("MainForm.ProcessCmdKey"))
+        if (keyData == Keys.Escape && TryCloseImageViewersFromMainEsc("MainForm.ProcessCmdKey"))
         {
             return true;
         }
-        if (keyCode == Keys.Escape && TryCloseImageViewersFromMainEsc("MainForm.ProcessCmdKey"))
-        {
-            return true;
-        }
-        if (keyCode == Keys.Escape && TryReturnToNameSearchResultsAfterInspection())
+        if (keyData == Keys.Escape && ApplyNameSearchInspectionReturn())
         {
             return true;
         }
@@ -586,26 +914,31 @@ public partial class MainForm : Form
         }
         if (_unifiedSearchSession is { IsActive: true } search)
         {
+            if (keyData == (Keys.Control | Keys.Shift | Keys.O))
+            {
+                search.View.ExportResults();
+                return true;
+            }
             if (keyData == (Keys.Control | Keys.Enter))
             {
-                search.View.ActivateSelected(inNewTab: true);
+                search.View.ActivateSelected(UnifiedSearchResultActivationOrigin.CtrlEnter);
                 return true;
             }
             if (keyData == Keys.F7)
             {
-                ReopenUnifiedSearchDialog(search);
+                ReopenUnifiedSearchDialog(search, "Browser.SearchResults.F7");
                 return true;
             }
             if (keyData == (Keys.Control | Keys.F))
             {
                 if (search.View.HasResults) search.View.FocusResultFilter();
-                else if (search.IsFinished) ReopenUnifiedSearchDialog(search);
+                else if (search.IsFinished) ReopenUnifiedSearchDialog(search, "Browser.SearchResults.CtrlF");
                 return true;
             }
             if (modifiers == Keys.None && keyCode >= Keys.F1 && keyCode <= Keys.F12)
             {
                 int slot = (int)keyCode - (int)Keys.F1;
-                if (slot <= 2) HandleFuncKeyClick(slot);
+                if (slot <= 3) HandleFuncKeyClick(slot);
                 return true;
             }
             if (search.View.ResultFilterFocused)
@@ -621,7 +954,12 @@ public partial class MainForm : Form
         }
         if (_viewerApplicationCoordinator.Mode == ViewerApplicationMode.Viewer
             && TryHandleViewerCmdKey(keyData)) return true;
-        if (_browserInputRouter.TryHandleCmdKey(CreateBrowserCmdKeyContext(), keyData)) return true;
+        bool browserInputHandled = _browserInputRouter.TryHandleCmdKey(CreateBrowserCmdKeyContext(), keyData);
+        if (isBrowserTabShortcut)
+        {
+            LogService.Info($"[BrowserTabShortcut] stage=router-result key={InputSettings.ToKeyGestureText(keyData)} handled={browserInputHandled}");
+        }
+        if (browserInputHandled) return true;
         return base.ProcessCmdKey(ref msg, keyData);
     }
 
@@ -674,24 +1012,24 @@ public partial class MainForm : Form
             // KeyPreview must leave the filter's input with its focused control.
             return;
         }
+        if (e.KeyData == Keys.Escape && TryRouteActiveFileOperationCancel("MainForm.KeyDown"))
+        {
+            e.Handled = true;
+            e.SuppressKeyPress = true;
+            return;
+        }
         if (_browserNamePrefixJumpSession.IsActive && TryHandleBrowserNamePrefixJumpKeyDown(e))
         {
             return;
         }
-        if (e.KeyCode == Keys.Escape && _browserRightInteractionState != BrowserRightInteractionState.Idle)
+        if (e.KeyData == Keys.Escape && _browserRightInteractionState != BrowserRightInteractionState.Idle)
         {
             CleanupBrowserRightInteraction(clearContextMenuSuppression: true);
             e.Handled = true;
             e.SuppressKeyPress = true;
             return;
         }
-        if (e.KeyCode == Keys.Escape && TryRouteActiveFileOperationCancel("MainForm.KeyDown"))
-        {
-            e.Handled = true;
-            e.SuppressKeyPress = true;
-            return;
-        }
-        if (e.KeyCode == Keys.Escape && TryCloseImageViewersFromMainEsc("MainForm.KeyDown"))
+        if (e.KeyData == Keys.Escape && TryCloseImageViewersFromMainEsc("MainForm.KeyDown"))
         {
             e.Handled = true;
             e.SuppressKeyPress = true;
@@ -762,7 +1100,7 @@ public partial class MainForm : Form
 
     private bool TryHandleBrowserNamePrefixJumpKeyDown(KeyEventArgs e)
     {
-        if (e.KeyCode == Keys.Escape)
+        if (e.KeyCode == Keys.Escape && e.Modifiers == Keys.None)
         {
             ClearBrowserNamePrefixJump();
             ShowStatusMessage("頭文字ジャンプを終了しました。");
@@ -841,7 +1179,6 @@ public partial class MainForm : Form
             IsBrowserFocused = BrowserInputRouter.IsBrowserInputFocused(browserPanel),
             IsAuxPreviewActive = false,
             CanUseCommandLauncherCommands = CanUseCommandLauncherCommands(),
-            TryHandleTabs = TryHandleBrowserCmdKeyTabs,
             TryHandleCustomBindings = ResolveBrowserCmdKeyCustomBinding,
             OpenMenuStripFromKeyboard = OpenMenuStripFromKeyboard,
             TryHandleNavigation = TryHandleBrowserCmdKeyNavigation,
@@ -860,6 +1197,7 @@ public partial class MainForm : Form
         return new BrowserInputRouter.KeyDownContext
         {
             IsBrowserMode = _viewerApplicationCoordinator.Mode == ViewerApplicationMode.Browser,
+            IsBrowserFocused = BrowserInputRouter.IsBrowserInputFocused(browserPanel),
             TryHandleCore = TryHandleBrowserKeyDown
         };
     }
@@ -935,12 +1273,4 @@ public partial class MainForm : Form
         return false;
     }
 
-    private bool TryHandleBrowserCmdKeyTabs(Keys keyData)
-    {
-        if (_viewerApplicationCoordinator.Mode != ViewerApplicationMode.Browser)
-        {
-            return false;
-        }
-        return false;
-    }
 }

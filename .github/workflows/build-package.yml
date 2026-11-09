@@ -1,0 +1,115 @@
+name: Build Windows package
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  build-package:
+    name: Build and validate Windows package
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - name: Check out pushed commit
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up .NET 10 SDK
+        uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Resolve source commit and planned ReleaseTag
+        id: release
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $sourceSha = (& git rev-parse HEAD).Trim()
+          if ($LASTEXITCODE -ne 0 -or $sourceSha -ne $env:GITHUB_SHA) {
+            throw "Checked-out source SHA '$sourceSha' does not match push SHA '$env:GITHUB_SHA'."
+          }
+
+          $heading = Get-Content -LiteralPath CHANGELOG.md |
+            Where-Object { $_ -match '^##\s+v\d{4}\.\d{2}\.\d{2}(?:\.\d+)?\s*[—-]' } |
+            Select-Object -First 1
+          if ([string]::IsNullOrWhiteSpace($heading)) {
+            throw 'CHANGELOG.md has no release heading accepted by the package preflight.'
+          }
+
+          $match = [regex]::Match($heading, '^##\s+(v\d{4}\.\d{2}\.\d{2}(?:\.\d+)?)\s*[—-]')
+          if (-not $match.Success) {
+            throw 'Could not resolve a ReleaseTag from the first public CHANGELOG heading.'
+          }
+          $releaseTag = $match.Groups[1].Value
+          $output = "source_sha=$sourceSha" + [Environment]::NewLine + "release_tag=$releaseTag" + [Environment]::NewLine
+          [System.IO.File]::AppendAllText($env:GITHUB_OUTPUT, $output, [System.Text.UTF8Encoding]::new($false))
+
+      - name: Build and validate package with the release script
+        id: package
+        shell: pwsh
+        env:
+          RELEASE_TAG: ${{ steps.release.outputs.release_tag }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $sourceSha = (& git rev-parse HEAD).Trim()
+          if ($LASTEXITCODE -ne 0 -or $sourceSha -ne $env:GITHUB_SHA) {
+            throw "Source SHA changed before packaging: '$sourceSha'."
+          }
+
+          $artifactsRoot = 'artifacts/actions-build'
+          & .\scripts\publish-release.ps1 -ReleaseTag $env:RELEASE_TAG -ArtifactsRoot $artifactsRoot
+          if ($LASTEXITCODE -ne 0) {
+            exit $LASTEXITCODE
+          }
+
+          $releaseDir = Join-Path $artifactsRoot 'release'
+          $zipPath = Join-Path $releaseDir 'MidFD-win-x64.zip'
+          $shaPath = "$zipPath.sha256"
+          if (-not (Test-Path -LiteralPath $zipPath -PathType Leaf) -or
+              -not (Test-Path -LiteralPath $shaPath -PathType Leaf)) {
+            throw 'The validated package ZIP or SHA-256 file was not produced.'
+          }
+
+          $packageHash = (Get-FileHash -LiteralPath $zipPath -Algorithm SHA256).Hash.ToLowerInvariant()
+          $recordedHash = (Get-Content -LiteralPath $shaPath -Raw).Trim().ToLowerInvariant()
+          if ($recordedHash -ne $packageHash) {
+            throw "ZIP SHA-256 mismatch: recorded '$recordedHash', calculated '$packageHash'."
+          }
+
+          $artifactName = "MidFD-win-x64-$sourceSha"
+          $output = "package_sha256=$packageHash" + [Environment]::NewLine + "artifact_name=$artifactName" + [Environment]::NewLine
+          [System.IO.File]::AppendAllText($env:GITHUB_OUTPUT, $output, [System.Text.UTF8Encoding]::new($false))
+
+      - name: Upload validated package
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ steps.package.outputs.artifact_name }}
+          path: |
+            artifacts/actions-build/release/MidFD-win-x64.zip
+            artifacts/actions-build/release/MidFD-win-x64.zip.sha256
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 0
+
+      - name: Record package identity
+        shell: pwsh
+        env:
+          SOURCE_SHA: ${{ steps.release.outputs.source_sha }}
+          RELEASE_TAG: ${{ steps.release.outputs.release_tag }}
+          PACKAGE_SHA256: ${{ steps.package.outputs.package_sha256 }}
+          ARTIFACT_NAME: ${{ steps.package.outputs.artifact_name }}
+        run: |
+          $summary = @(
+            "SourceSHA: $env:SOURCE_SHA",
+            "ReleaseTag: $env:RELEASE_TAG",
+            "PackageSHA256: $env:PACKAGE_SHA256",
+            "Artifact: $env:ARTIFACT_NAME"
+          )
+          $summary | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8

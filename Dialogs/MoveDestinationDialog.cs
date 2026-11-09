@@ -204,6 +204,23 @@ public static class MoveDestinationDialog
 
             inputBox.KeyDown += (_, e) =>
             {
+                if (MoveDestinationHistoryKeyPolicy.ShouldOpenHistoryDropDown(
+                        e.KeyData,
+                        hasHistory: normalizedHistory.Count > 0,
+                        completionPopupVisible: completionController?.IsCompletionPopupVisible == true,
+                        dropDownOpen: inputBox.DroppedDown,
+                        selectionStart: inputBox.SelectionStart,
+                        selectionLength: inputBox.SelectionLength,
+                        textLength: inputBox.Text.Length,
+                        handled: e.Handled,
+                        suppressKeyPress: e.SuppressKeyPress))
+                {
+                    inputBox.DroppedDown = true;
+                    e.Handled = true;
+                    e.SuppressKeyPress = true;
+                    return;
+                }
+
                 if (e.Handled || e.SuppressKeyPress)
                 {
                     return;
@@ -271,5 +288,30 @@ public static class MoveDestinationDialog
         {
             completionController?.Dispose();
         }
+    }
+}
+
+internal static class MoveDestinationHistoryKeyPolicy
+{
+    internal static bool ShouldOpenHistoryDropDown(
+        Keys keyData,
+        bool hasHistory,
+        bool completionPopupVisible,
+        bool dropDownOpen,
+        int selectionStart,
+        int selectionLength,
+        int textLength,
+        bool handled = false,
+        bool suppressKeyPress = false)
+    {
+        return keyData == Keys.Right
+            && hasHistory
+            && !completionPopupVisible
+            && !dropDownOpen
+            && !handled
+            && !suppressKeyPress
+            && textLength > 0
+            && selectionStart == 0
+            && selectionLength == textLength;
     }
 }

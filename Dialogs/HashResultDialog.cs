@@ -1,5 +1,5 @@
 using System.Drawing;
-using System.Text;
+using MidFD.Commands;
 using System.Windows.Forms;
 using MidFD.Models;
 
@@ -24,12 +24,15 @@ public sealed class HashResultDialog : Form
     private readonly ToolStripMenuItem _copyHashMenuItem;
     private readonly Control? _bottomActionRow;
     private readonly int _logTop;
+    private readonly Func<string, CommandExecutionContext, bool>? _executeCommand;
 
-    public HashResultDialog(string targetSummary, SevenZipHashAlgorithm algorithm, string output)
+    public HashResultDialog(string targetSummary, SevenZipHashAlgorithm algorithm, string output,
+        Func<string, CommandExecutionContext, bool>? executeCommand = null)
     {
         _targetSummary = targetSummary;
         _algorithm = algorithm;
         _output = output;
+        _executeCommand = executeCommand;
         _hashItems = HashResultParser.Parse(output, algorithm);
 
         Text = "CRC/SHA 計算結果";
@@ -178,7 +181,7 @@ public sealed class HashResultDialog : Form
         {
             if (!string.IsNullOrEmpty(_outputTextBox.Text))
             {
-                Clipboard.SetText(_outputTextBox.Text);
+                DispatchCopy(HashResultCopyFormat.Log);
             }
         };
 
@@ -299,7 +302,7 @@ public sealed class HashResultDialog : Form
         HashResultItem? item = GetSelectedHashItem();
         if (item != null)
         {
-            Clipboard.SetText(item.HashValue);
+            DispatchCopy(HashResultCopyFormat.SelectedHash);
             return;
         }
 
@@ -314,21 +317,20 @@ public sealed class HashResultDialog : Form
             return;
         }
 
-        var sb = new StringBuilder();
-        sb.AppendLine("\"対象\",\"アルゴリズム\",\"ハッシュ値\"");
-        foreach (var item in _hashItems)
-        {
-            sb.Append('"').Append(EscapeCsv(item.Target)).Append("\",")
-                .Append('"').Append(EscapeCsv(item.Algorithm)).Append("\",")
-                .Append('"').Append(EscapeCsv(item.HashValue)).AppendLine("\"");
-        }
-
-        Clipboard.SetText(sb.ToString());
+        DispatchCopy(HashResultCopyFormat.Csv);
     }
 
-    private static string EscapeCsv(string value)
+    private bool DispatchCopy(HashResultCopyFormat format)
     {
-        return (value ?? string.Empty).Replace("\"", "\"\"");
+        return _executeCommand?.Invoke(CommandIds.ArchiveHashResultCopy, new CommandExecutionContext
+        {
+            Scope = CommandScope.Global,
+            Source = "HashResultDialog.Copy",
+            HashResultCopy = new HashResultCopyContext(format,
+                _hashItems.Select(item => new HashResultCopyItem(item.Target, item.Algorithm, item.HashValue)).ToArray(),
+                _hashListView.SelectedIndices.Count > 0 ? _hashListView.SelectedIndices[0] : -1,
+                _outputTextBox.Text)
+        }) == true;
     }
 
     private HashResultItem? GetSelectedHashItem()

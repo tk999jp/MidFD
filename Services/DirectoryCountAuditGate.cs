@@ -1,12 +1,71 @@
-using System.Threading;
-
 namespace MidFD.Services;
 
 public sealed class DirectoryCountAuditGate
 {
-    private int _active;
+    private readonly object _sync = new();
+    private Guid? _owner;
+    private Guid? _legacyOwner;
 
-    public bool TryEnter() => Interlocked.Exchange(ref _active, 1) == 0;
+    public bool TryEnter()
+    {
+        lock (_sync)
+        {
+            if (_owner.HasValue)
+            {
+                return false;
+            }
 
-    public void Exit() => Volatile.Write(ref _active, 0);
+            Guid owner = Guid.NewGuid();
+            _owner = owner;
+            _legacyOwner = owner;
+            return true;
+        }
+    }
+
+    public bool TryEnter(Guid owner)
+    {
+        if (owner == Guid.Empty)
+        {
+            return false;
+        }
+
+        lock (_sync)
+        {
+            if (_owner.HasValue)
+            {
+                return false;
+            }
+
+            _owner = owner;
+            _legacyOwner = null;
+            return true;
+        }
+    }
+
+    public void Exit()
+    {
+        lock (_sync)
+        {
+            if (_legacyOwner.HasValue && _owner == _legacyOwner)
+            {
+                _owner = null;
+                _legacyOwner = null;
+            }
+        }
+    }
+
+    public bool Exit(Guid owner)
+    {
+        lock (_sync)
+        {
+            if (_owner != owner)
+            {
+                return false;
+            }
+
+            _owner = null;
+            _legacyOwner = null;
+            return true;
+        }
+    }
 }

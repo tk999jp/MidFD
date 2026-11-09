@@ -2,6 +2,7 @@
 
 internal sealed class TrashManifest
 {
+    [System.Text.Json.Serialization.JsonRequired]
     public List<TrashManifestRecord> Records { get; set; } = new();
 }
 

@@ -18,11 +18,13 @@ public static class QuickAccessStorage
         QuickAccessFilePath = Path.Combine(exeDir, "quickaccess.json");
     }
 
-    public static bool Exists()
+    public static bool Exists() => Exists(QuickAccessFilePath);
+
+    internal static bool Exists(string filePath)
     {
         try
         {
-            using FileStream _ = File.Open(QuickAccessFilePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+            using FileStream _ = File.Open(filePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
             return true;
         }
         catch (FileNotFoundException) { return false; }
@@ -36,9 +38,7 @@ public static class QuickAccessStorage
     {
         try
         {
-            using FileStream stream = File.Open(filePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
-            using var reader = new StreamReader(stream);
-            string json = reader.ReadToEnd();
+            string json = JsonResourceSafety.ReadValidatedJsonFile(filePath, FileShare.ReadWrite | FileShare.Delete);
             var store = JsonSerializer.Deserialize<QuickAccessStore>(json, JsonOptions);
             if (store == null) throw new JsonException("Quick access payload is empty.");
             return QuickAccessService.SanitizeStore(store);
@@ -64,8 +64,7 @@ public static class QuickAccessStorage
 
         try
         {
-            string json = JsonSerializer.Serialize(store, JsonOptions);
-            File.WriteAllText(filePath, json);
+            JsonResourceSafety.WriteJsonAtomically(filePath, stream => JsonSerializer.Serialize(stream, store, JsonOptions));
             return true;
         }
         catch (Exception ex)

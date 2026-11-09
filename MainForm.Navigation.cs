@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Forms;
+using MidFD.Commands;
 using MidFD.Configuration;
 using MidFD.Helpers;
 using MidFD.Models;
@@ -61,72 +62,18 @@ public partial class MainForm
         bool recordDirectoryMoveHistory = false,
         bool clearPreview = false)
     {
-        BrowserNavigationCoordinator.DirectoryNavigationRequest request =
-            _browserApplicationCoordinator.CreateNavigationRequest(
+        return ExecuteCommandFromUi(CommandIds.BrowserNavigateToPath, new CommandExecutionContext
+        {
+            Scope = CommandScope.Browser,
+            Source = "Browser.DirectoryNavigation",
+            BrowserDirectoryNavigation = new BrowserDirectoryNavigationCommandContext(
                 targetPath,
                 focusTargetName,
                 isHistoryNavigation,
-                suppressRecent);
-        BrowserNavigationPreparation preparation = _browserNavigationWorkflowApplicationCoordinator.PrepareDirectoryNavigation(
-            request,
-            _browserTabWorkflowApplicationCoordinator.MaxTabCount,
-            BuildBrowserTabStateFromCurrentUi());
-        if (preparation.Kind == BrowserNavigationWorkflowDecisionKind.NotRequested)
-        {
-            return false;
-        }
-        if (preparation.Kind == BrowserNavigationWorkflowDecisionKind.DirectoryMissing)
-        {
-            MessageBox.Show(
-                $"指定されたパスが見つかりません: {targetPath}",
-                "エラー",
-                MessageBoxButtons.OK,
-                MessageBoxIcon.Error);
-            return false;
-        }
-        if (preparation.Kind == BrowserNavigationWorkflowDecisionKind.Blocked)
-        {
-            return true;
-        }
-        if (preparation.RequiresDerivedTabConfirmation && !ShowBrowserDerivedTabNavigationConfirmation())
-        {
-            return true;
-        }
-
-        HideBrowserFileNameToolTip();
-        if (clearPreview)
-        {
-            ClearPreview();
-        }
-        BrowserDirectoryNavigationExecution execution = _browserNavigationWorkflowApplicationCoordinator.ExecutePreparedDirectoryNavigation(
-            preparation,
-            _browserTabWorkflowApplicationCoordinator.MaxTabCount,
-            BuildBrowserTabStateFromCurrentUi(),
-            CreateDirectoryLoadOptions(),
-            _browserApplicationCoordinator.ColumnCount,
-            CaptureBrowserRefreshShellState(),
-            confirmedDerivedTabCreation: true,
-            recordDirectoryMoveHistory: recordDirectoryMoveHistory);
-        if (execution.Kind is BrowserDirectoryNavigationExecutionKind.TabCreationUnavailable or
-            BrowserDirectoryNavigationExecutionKind.ConfirmationRequired)
-        {
-            return true;
-        }
-        if (!execution.Succeeded || execution.Load is not { Succeeded: true, Result: not null } load)
-        {
-            if (execution.Error != null)
-            {
-                NotifyDirectoryLoadFailure(execution.Error);
-            }
-            return false;
-        }
-
-        PrepareDerivedBrowserTabPresentation(execution.DerivedTabIndex);
-        ApplyDirectoryLoadUi(
-            load,
-            CreateDerivedBrowserTabSelectionCallback(execution.DerivedTabIndex));
-        ApplyDirectoryPostLoadEffects(execution.PostLoadEffects);
-        return true;
+                suppressRecent,
+                recordDirectoryMoveHistory,
+                clearPreview)
+        });
     }
 
     private bool ShowBrowserDerivedTabNavigationConfirmation()
@@ -377,6 +324,7 @@ public partial class MainForm
             {
                 browserPanel.Invalidate();
             }
+            NotifyQuickAccessPersistenceResult(transition);
         }
         finally
         {
@@ -463,10 +411,19 @@ public partial class MainForm
             {
                 browserPanel.Invalidate();
             }
+            NotifyQuickAccessPersistenceResult(transition);
         }
         finally
         {
             fileListView.EndUpdate();
+        }
+    }
+
+    private void NotifyQuickAccessPersistenceResult(BrowserDirectoryApplicationTransition transition)
+    {
+        if (transition.QuickAccessPersistenceSucceeded == false)
+        {
+            ShowStatusMessage("フォルダ移動は完了しましたが、QuickAccess履歴を保存できませんでした。");
         }
     }
 
@@ -514,24 +471,7 @@ public partial class MainForm
 
     private void SetBrowserGlobalCursorIndex(int globalIndex)
     {
-        BrowserCursorNavigationExecution execution = _browserNavigationWorkflowApplicationCoordinator.ExecuteCursorNavigation(
-            globalIndex,
-            GetBrowserItemsPerPage(),
-            IsCurrentDirectoryBusy(),
-            CreateDirectoryLoadOptions(),
-            _browserApplicationCoordinator.ColumnCount,
-            CaptureBrowserRefreshShellState());
-        if (!execution.Cursor.Applied)
-        {
-            return;
-        }
-        if (execution.Load is { Succeeded: true } load)
-        {
-            ApplyDirectoryLoadUi(load);
-            ApplyDirectoryPostLoadEffects(execution.PostLoadEffects);
-            return;
-        }
-        SyncBrowserSelection();
+        _ = ExecuteBrowserCursorMoveCommand(globalIndex, "Browser.CursorMove");
     }
 
     private void UpdateBrowserNamePrefixJumpCharacter(char value)
@@ -654,41 +594,6 @@ public partial class MainForm
             }
         });
     }
-    private bool ExecuteCurrentDirectoryReloadCommand()
-    {
-        BrowserManualRefreshExecution execution = _browserRefreshWorkflowApplicationCoordinator.ExecuteManualRefresh(
-            _viewerApplicationCoordinator.Mode == ViewerApplicationMode.Browser,
-            IsCurrentDirectoryBusy(),
-            "現在ディレクトリを再読込しました。",
-            CreateDirectoryLoadOptions(),
-            _browserApplicationCoordinator.ColumnCount,
-            CaptureBrowserRefreshShellState());
-        return ApplyManualRefreshExecution(execution, "現在ディレクトリを再読込しました。");
-    }
-
-    private bool ApplyManualRefreshExecution(BrowserManualRefreshExecution execution, string statusMessage)
-    {
-        if (!execution.Decision.ShouldRun)
-        {
-            if (execution.Decision.Kind == BrowserManualRefreshDecisionKind.Busy)
-            {
-                ShowStatusMessage("処理中のため再読込できません。");
-                return true;
-            }
-            return false;
-        }
-
-        if (execution.Reload.DirectoryLoad is { Succeeded: true } load)
-        {
-            ApplyDirectoryLoadUi(load);
-            ApplyDirectoryPostLoadEffects(execution.PostLoadEffects);
-            ShowStatusMessage(statusMessage);
-            return true;
-        }
-
-        return ApplyReloadExecution(execution.Reload, statusMessage);
-    }
-
     private bool ApplyManualRefreshExecutionForCommandResult(
         BrowserManualRefreshExecution execution,
         string statusMessage)

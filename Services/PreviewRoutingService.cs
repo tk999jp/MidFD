@@ -9,28 +9,17 @@ public sealed class PreviewRoutingResult
 
 public static class PreviewRoutingService
 {
-    public static PreviewRoutingResult Route(string path, string? videoToolDirectory)
+    public static PreviewRoutingResult Route(string path)
     {
         PreviewKind rawKind = PreviewService.GetPreviewKind(path);
-        return Route(path, rawKind, videoToolDirectory);
+        return Route(path, rawKind);
     }
 
-    public static PreviewRoutingResult Route(string path, PreviewKind rawKind, string? videoToolDirectory)
-    {
-        if (rawKind == PreviewKind.Video)
-        {
-            var res = VideoToolResolutionService.Resolve(videoToolDirectory);
-            if (!res.FfmpegFound)
-            {
-                return new PreviewRoutingResult
-                {
-                    RawKind = rawKind,
-                    EffectiveKind = PreviewKind.Binary,
-                    Reason = "ffmpeg-unavailable-video-binary-fallback"
-                };
-            }
-        }
+    public static PreviewRoutingResult Route(string path, string? videoToolDirectory)
+        => Route(path);
 
+    public static PreviewRoutingResult Route(string path, PreviewKind rawKind)
+    {
         return new PreviewRoutingResult
         {
             RawKind = rawKind,
@@ -38,4 +27,7 @@ public static class PreviewRoutingService
             Reason = "default-mapping"
         };
     }
+
+    public static PreviewRoutingResult Route(string path, PreviewKind rawKind, string? videoToolDirectory)
+        => Route(path, rawKind);
 }

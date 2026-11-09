@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Drawing;
 using System.Linq;
 using System.Windows.Forms;
+using MidFD.Commands;
 using MidFD.Models;
 using MidFD.Services;
 
@@ -13,9 +14,17 @@ public class ExternalToolDefinitionEditorDialog : Form
     private readonly ListView _listView;
     private readonly List<ExternalToolCommandDefinition> _workingTools;
     private readonly ExternalToolCommandStore _store;
+    private readonly Func<string, CommandExecutionContext, bool>? _executeCommand;
+    private readonly Func<bool> _isFileOperationBusy;
+    private readonly System.Windows.Forms.Timer _busyAvailabilityTimer = new() { Interval = 200 };
+    private Button? _saveButton;
 
-    public ExternalToolDefinitionEditorDialog()
+    public ExternalToolDefinitionEditorDialog(
+        Func<string, CommandExecutionContext, bool>? executeCommand = null,
+        Func<bool>? isFileOperationBusy = null)
     {
+        _executeCommand = executeCommand;
+        _isFileOperationBusy = isFileOperationBusy ?? (() => false);
         _store = ExternalToolCommandStorage.Load();
         _workingTools = _store.Tools.Select(t => CloneDefinition(t)).ToList();
 
@@ -80,6 +89,7 @@ public class ExternalToolDefinitionEditorDialog : Form
 
         var btnOk = new Button { Text = "OK", DialogResult = DialogResult.OK, Location = new Point(630, 10), Width = 90, Height = 30, Anchor = AnchorStyles.Bottom | AnchorStyles.Right };
         btnOk.Click += BtnOk_Click;
+        _saveButton = btnOk;
         var btnCancel = new Button { Text = "キャンセル", DialogResult = DialogResult.Cancel, Location = new Point(730, 10), Width = 90, Height = 30, Anchor = AnchorStyles.Bottom | AnchorStyles.Right };
 
         bottomPanel.Controls.Add(btnOk);
@@ -87,6 +97,30 @@ public class ExternalToolDefinitionEditorDialog : Form
 
         AcceptButton = btnOk;
         CancelButton = btnCancel;
+
+        _busyAvailabilityTimer.Tick += (_, _) => UpdateBusyAvailability();
+        Shown += (_, _) =>
+        {
+            UpdateBusyAvailability();
+            _busyAvailabilityTimer.Start();
+        };
+        VisibleChanged += (_, _) =>
+        {
+            if (Visible && IsHandleCreated)
+            {
+                UpdateBusyAvailability();
+                _busyAvailabilityTimer.Start();
+            }
+            else
+            {
+                _busyAvailabilityTimer.Stop();
+            }
+        };
+        FormClosed += (_, _) =>
+        {
+            _busyAvailabilityTimer.Stop();
+            _busyAvailabilityTimer.Dispose();
+        };
 
         RefreshList();
     }
@@ -131,6 +165,14 @@ public class ExternalToolDefinitionEditorDialog : Form
         {
             tool.Enabled = e.Item.Checked;
             e.Item.ForeColor = tool.Enabled ? Color.Empty : Color.Gray;
+        }
+    }
+
+    private void UpdateBusyAvailability()
+    {
+        if (_saveButton != null)
+        {
+            _saveButton.Enabled = !_isFileOperationBusy();
         }
     }
 
@@ -247,11 +289,22 @@ public class ExternalToolDefinitionEditorDialog : Form
 
         try
         {
-            List<ExternalToolCommandDefinition> previousTools = _store.Tools;
-            _store.Tools = _workingTools;
-            if (!ExternalToolCommandStorage.Save(_store))
+            var candidateStore = new ExternalToolCommandStore
             {
-                _store.Tools = previousTools;
+                SchemaVersion = _store.SchemaVersion,
+                LoadFailed = _store.LoadFailed,
+                Tools = _workingTools.Select(CloneDefinition).ToList()
+            };
+            bool saved = _executeCommand?.Invoke(
+                CommandIds.AppExternalToolDefinitionsSave,
+                new CommandExecutionContext
+                {
+                    Scope = CommandScope.Global,
+                    Source = "ExternalToolDefinitionEditorDialog.Save",
+                    ExternalToolDefinitionsSave = new ExternalToolDefinitionsSaveCommandContext(candidateStore)
+                }) == true;
+            if (!saved)
+            {
                 MessageBox.Show(this, "外部ツール定義を保存できませんでした。", "保存エラー", MessageBoxButtons.OK, MessageBoxIcon.Error);
                 DialogResult = DialogResult.None;
                 return;

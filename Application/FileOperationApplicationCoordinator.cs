@@ -29,8 +29,21 @@ internal enum FileOperationCommandKind
     ChangeAttributes,
     ClipboardCopy,
     ArchiveHash,
-    EmptyManagedTrash
+    EmptyManagedTrash,
+    ExternalDropImport
 }
+
+internal enum FileOperationCancellationRequestStatus
+{
+    Inactive,
+    Requested,
+    AlreadyRequested,
+    NotCancelable
+}
+
+internal readonly record struct FileOperationCancellationRequest(
+    FileOperationCancellationRequestStatus Status,
+    string OperationName);
 
 internal enum FileOperationMultiMarkSelectionAction
 {
@@ -50,7 +63,8 @@ internal readonly record struct FileOperationCommandRequest(
     Action? CompletionCallback = null,
     bool RecordDragCopyUndo = false,
     string? CreateFileExtension = null,
-    FileOperationOriginSnapshot? Origin = null);
+    FileOperationOriginSnapshot? Origin = null,
+    BrowserExternalDropImportCommandContext? ExternalDropImport = null);
 
 internal enum FileOperationCollisionPolicy
 {
@@ -372,6 +386,31 @@ internal interface IFileOperationPackExecutionPort
 internal sealed class FileOperationApplicationCoordinator : IDisposable
 {
     private const int ManagedTrashManifestCheckpointRecordCount = 1000;
+
+    private sealed class OperationStartReservation
+    {
+        private readonly object _originSync = new();
+        private FileOperationOriginSnapshot? _origin;
+
+        public FileOperationOriginSnapshot? Origin
+        {
+            get
+            {
+                lock (_originSync)
+                {
+                    return _origin;
+                }
+            }
+            set
+            {
+                lock (_originSync)
+                {
+                    _origin = value;
+                }
+            }
+        }
+    }
+
     private readonly FileOperationState _fileState;
     private readonly BrowserSelectionApplicationCoordinator _selection;
     private readonly SettingsApplicationCoordinator _settings;
@@ -386,8 +425,11 @@ internal sealed class FileOperationApplicationCoordinator : IDisposable
     private readonly ManagedTrashRestoreDiagnostics? _managedTrashRestoreDiagnostics;
     private readonly ILinkOperationCopyPort _linkCopyPort;
     private readonly IFileOperationPackExecutionPort _packExecutionPort;
+    private readonly IExternalDropImportExecutionPort _externalDropImportExecutionPort;
     private ManagedTrashDeleteCancellationDiagnostics? _activeManagedTrashDeleteDiagnostics;
-    private FileOperationOriginSnapshot? _activeOperationOrigin;
+    private OperationStartReservation? _operationStartReservation;
+    private FileOperationOriginSnapshot? _activeOperationOrigin
+        => Volatile.Read(ref _operationStartReservation)?.Origin;
 
     private readonly record struct ManagedTrashDeleteCancellationSnapshot(
         int SuccessCount,
@@ -473,7 +515,8 @@ internal sealed class FileOperationApplicationCoordinator : IDisposable
         ManagedTrashRestoreDiagnostics? managedTrashRestoreDiagnostics = null,
         IFileOperationExecutionProbe? executionProbe = null,
         ILinkOperationCopyPort? linkCopyPort = null,
-        IFileOperationPackExecutionPort? packExecutionPort = null)
+        IFileOperationPackExecutionPort? packExecutionPort = null,
+        IExternalDropImportExecutionPort? externalDropImportExecutionPort = null)
     {
         _fileState = fileState;
         _selection = selection;
@@ -488,9 +531,10 @@ internal sealed class FileOperationApplicationCoordinator : IDisposable
         _executionProbe = executionProbe;
         _linkCopyPort = linkCopyPort ?? new ElevatedLinkCopyClient();
         _packExecutionPort = packExecutionPort ?? new DefaultPackExecutionPort();
+        _externalDropImportExecutionPort = externalDropImportExecutionPort ?? new DefaultExternalDropImportExecutionPort();
     }
 
-    public bool IsBusy => _fileState.IsBusy;
+    public bool IsBusy => _fileState.IsBusy || Volatile.Read(ref _operationStartReservation) != null;
     public bool IsClipboardBusy => _fileState.IsClipboardBusy;
     public CancellationTokenSource? CancellationTokenSource => _fileState.Ui.Cts;
     public bool CanCancel => _fileState.Ui.CanCancel;
@@ -525,25 +569,100 @@ internal sealed class FileOperationApplicationCoordinator : IDisposable
         return true;
     }
 
+    public FileOperationCancellationRequest RequestActiveCancellation()
+    {
+        string operationName = _fileState.Ui.ActiveOperationName ?? "ファイル操作";
+        if (!_fileState.IsClipboardBusy && !_fileState.IsUndoRedoBusy)
+        {
+            return new FileOperationCancellationRequest(
+                FileOperationCancellationRequestStatus.Inactive,
+                operationName);
+        }
+
+        if (!_fileState.IsClipboardBusy)
+        {
+            return new FileOperationCancellationRequest(
+                FileOperationCancellationRequestStatus.NotCancelable,
+                operationName);
+        }
+
+        CancellationTokenSource? cts = _fileState.Ui.Cts;
+        if (cts is null || !_fileState.Ui.CanCancel)
+        {
+            return new FileOperationCancellationRequest(
+                FileOperationCancellationRequestStatus.NotCancelable,
+                operationName);
+        }
+
+        if (cts.IsCancellationRequested)
+        {
+            return new FileOperationCancellationRequest(
+                FileOperationCancellationRequestStatus.AlreadyRequested,
+                operationName);
+        }
+
+        if (RequestCancellation())
+        {
+            return new FileOperationCancellationRequest(
+                FileOperationCancellationRequestStatus.Requested,
+                operationName);
+        }
+
+        if (!_fileState.IsClipboardBusy && !_fileState.IsUndoRedoBusy)
+        {
+            return new FileOperationCancellationRequest(
+                FileOperationCancellationRequestStatus.Inactive,
+                operationName);
+        }
+
+        return new FileOperationCancellationRequest(
+            _fileState.Ui.Cts?.IsCancellationRequested == true
+                ? FileOperationCancellationRequestStatus.AlreadyRequested
+                : FileOperationCancellationRequestStatus.NotCancelable,
+            operationName);
+    }
+
     public void Dispose() => _fileState.Dispose();
 
     public bool TryStart(FileOperationCommandRequest request, IFileOperationUiPort ui)
     {
-        if (_viewerState.Mode != ViewerApplicationMode.Browser || !CommandBusyPolicy.CanStartFileOperation(_fileState.IsBusy))
+        if (_viewerState.Mode != ViewerApplicationMode.Browser || !CommandBusyPolicy.CanStartFileOperation(IsBusy))
         {
             return false;
         }
 
-        if (IsReadOnlyBlocked(request.Kind))
+        OperationStartReservation? reservation = TryReserveOperationStart();
+        if (reservation == null)
         {
-            ui.ShowStatus(BuildReadOnlyBlockedMessage(request.Kind));
             return false;
         }
 
-        request = CaptureOperationOrigin(request, ui);
-        _activeOperationOrigin = request.Origin;
-        _ = ExecuteAsync(request, ui);
-        return true;
+        bool executionOwnsReservation = false;
+        try
+        {
+            request = CaptureExternalDropImportDestination(CaptureOperationOrigin(request, ui));
+            reservation.Origin = request.Origin;
+            if (IsReadOnlyBlocked(request.Kind))
+            {
+                ui.ShowStatus(BuildReadOnlyBlockedMessage(request.Kind));
+                return false;
+            }
+
+            if (request.Kind != FileOperationCommandKind.ExternalDropImport)
+            {
+                ui.RefreshOperationUi();
+            }
+            _ = ExecuteAsync(request, ui, reservation);
+            executionOwnsReservation = true;
+            return true;
+        }
+        finally
+        {
+            if (!executionOwnsReservation)
+            {
+                ReleaseOperationStartReservation(reservation, ui);
+            }
+        }
     }
 
     internal static bool IsBlockedByReadOnly(FileOperationCommandKind kind)
@@ -560,7 +679,8 @@ internal sealed class FileOperationApplicationCoordinator : IDisposable
             FileOperationCommandKind.Redo or
             FileOperationCommandKind.CreateDirectory or
             FileOperationCommandKind.CreateFile or
-            FileOperationCommandKind.ChangeAttributes;
+            FileOperationCommandKind.ChangeAttributes or
+            FileOperationCommandKind.ExternalDropImport;
 
     internal bool IsReadOnlyBlocked(FileOperationCommandKind kind)
         => (_activeOperationOrigin?.IsReadOnly ?? _browser.Workspace.ActiveTabSnapshot?.IsReadOnly == true) && IsBlockedByReadOnly(kind);
@@ -582,6 +702,7 @@ internal sealed class FileOperationApplicationCoordinator : IDisposable
             FileOperationCommandKind.CreateDirectory => "フォルダ作成",
             FileOperationCommandKind.CreateFile => "ファイル作成",
             FileOperationCommandKind.ChangeAttributes => "属性変更",
+            FileOperationCommandKind.ExternalDropImport => "ファイル取り込み",
             _ => kind.ToString()
         };
         return $"このタブは ReadOnly のため、{operation}は実行できません。";
@@ -1157,7 +1278,10 @@ internal sealed class FileOperationApplicationCoordinator : IDisposable
         return new ManagedTrashOperationResult(status, successCount, totalCount, failures);
     }
 
-    private async Task ExecuteAsync(FileOperationCommandRequest request, IFileOperationUiPort ui)
+    private async Task ExecuteAsync(
+        FileOperationCommandRequest request,
+        IFileOperationUiPort ui,
+        OperationStartReservation reservation)
     {
         try
         {
@@ -1219,6 +1343,9 @@ internal sealed class FileOperationApplicationCoordinator : IDisposable
                 case FileOperationCommandKind.EmptyManagedTrash:
                     await ExecuteEmptyManagedTrashAsync(ui).ConfigureAwait(true);
                     break;
+                case FileOperationCommandKind.ExternalDropImport:
+                    await ExecuteExternalDropImportAsync(request.ExternalDropImport, ui).ConfigureAwait(true);
+                    break;
                 default:
                     ui.ShowStatus($"未対応のFileOperation commandです: {request.Kind}");
                     break;
@@ -1235,28 +1362,52 @@ internal sealed class FileOperationApplicationCoordinator : IDisposable
         }
         finally
         {
-            NotifyCompletion(request.CompletionCallback);
-            _activeOperationOrigin = null;
+            try
+            {
+                ReleaseOperationStartReservation(reservation, ui);
+            }
+            finally
+            {
+                NotifyCompletion(request.CompletionCallback);
+            }
         }
     }
 
     public bool TryStartArchiveExtract(ArchiveExtractRequest request, IFileOperationUiPort ui)
     {
-        if (_viewerState.Mode != ViewerApplicationMode.Browser || !CommandBusyPolicy.CanStartFileOperation(_fileState.IsBusy))
+        if (_viewerState.Mode != ViewerApplicationMode.Browser || !CommandBusyPolicy.CanStartFileOperation(IsBusy))
         {
             return false;
         }
 
-        if (IsReadOnlyBlocked(FileOperationCommandKind.Unpack))
+        OperationStartReservation? reservation = TryReserveOperationStart();
+        if (reservation == null)
         {
-            ui.ShowStatus(BuildReadOnlyBlockedMessage(FileOperationCommandKind.Unpack));
             return false;
         }
 
-        _activeOperationOrigin = CaptureOperationOrigin(new FileOperationCommandRequest(
-            FileOperationCommandKind.Unpack), ui).Origin;
-        _ = ExecuteArchiveExtractAsync(request, ui);
-        return true;
+        bool executionOwnsReservation = false;
+        try
+        {
+            reservation.Origin = CaptureOperationOrigin(new FileOperationCommandRequest(
+                FileOperationCommandKind.Unpack), ui).Origin;
+            if (IsReadOnlyBlocked(FileOperationCommandKind.Unpack))
+            {
+                ui.ShowStatus(BuildReadOnlyBlockedMessage(FileOperationCommandKind.Unpack));
+                return false;
+            }
+
+            _ = ExecuteArchiveExtractAsync(request, ui, reservation);
+            executionOwnsReservation = true;
+            return true;
+        }
+        finally
+        {
+            if (!executionOwnsReservation)
+            {
+                ReleaseOperationStartReservation(reservation, ui);
+            }
+        }
     }
 
     public bool TryStartArchiveExtract(
@@ -1309,12 +1460,17 @@ internal sealed class FileOperationApplicationCoordinator : IDisposable
             ui);
     }
 
-    private async Task ExecuteArchiveExtractAsync(ArchiveExtractRequest request, IFileOperationUiPort ui)
+    private async Task ExecuteArchiveExtractAsync(
+        ArchiveExtractRequest request,
+        IFileOperationUiPort ui,
+        OperationStartReservation reservation)
     {
-        CancellationToken token = BeginOperation("archive 解凍");
-        ui.BeginOperation("archive 解凍", 1);
+        bool operationStarted = false;
         try
         {
+            CancellationToken token = BeginOperation("archive 解凍");
+            operationStarted = true;
+            ui.BeginOperation("archive 解凍", 1);
             AppSettings settings = _settings.Value;
             ArchiveExtractResult result = await Task.Run(
                 () => ArchiveExtractService.ExtractSelection(settings.SevenZip?.ExePath, request, token),
@@ -1338,11 +1494,14 @@ internal sealed class FileOperationApplicationCoordinator : IDisposable
         {
             try
             {
-                EndOperation(ui, "解凍完了");
+                if (operationStarted)
+                {
+                    EndOperation(ui, "解凍完了");
+                }
             }
             finally
             {
-                _activeOperationOrigin = null;
+                ReleaseOperationStartReservation(reservation, ui);
             }
         }
     }
@@ -1900,13 +2059,20 @@ internal sealed class FileOperationApplicationCoordinator : IDisposable
         string target = Path.Combine(CurrentOperationPath, name);
         try
         {
+            if (File.Exists(target) || Directory.Exists(target))
+            {
+                ui.ShowStatus($"同名のファイルまたはフォルダが既に存在します: {name}");
+                return;
+            }
+
             if (directory)
             {
                 FileOperationService.CreateDirectoryForUserMutation(target);
             }
-            else if (!File.Exists(target))
+            else
             {
-                File.Create(target).Dispose();
+                // Do not overwrite a file created after the preflight check.
+                using var created = new FileStream(target, FileMode.CreateNew, FileAccess.Write, FileShare.None);
             }
             bool selectCreated = _settings.Value.FileOperations?.SelectCreatedItemAfterCreate ?? true;
             string? focusTarget = selectCreated ? name : null;
@@ -2036,11 +2202,34 @@ internal sealed class FileOperationApplicationCoordinator : IDisposable
         next = ApplyAttributeAction(next, FileAttributes.Hidden, options.HiddenAction);
         next = ApplyAttributeAction(next, FileAttributes.System, options.SystemAction);
         next = ApplyAttributeAction(next, FileAttributes.Archive, options.ArchiveAction);
-        if (next != current) File.SetAttributes(path, next);
-        bool directory = Directory.Exists(path);
-        if (options.ChangeLastWriteTime) { if (directory) Directory.SetLastWriteTime(path, options.LastWriteTime); else File.SetLastWriteTime(path, options.LastWriteTime); }
-        if (options.ChangeCreationTime) { if (directory) Directory.SetCreationTime(path, options.CreationTime); else File.SetCreationTime(path, options.CreationTime); }
-        if (options.ChangeLastAccessTime) { if (directory) Directory.SetLastAccessTime(path, options.LastAccessTime); else File.SetLastAccessTime(path, options.LastAccessTime); }
+
+        bool changeTimestamps = options.ChangeLastWriteTime || options.ChangeCreationTime || options.ChangeLastAccessTime;
+        bool clearedReadOnly = changeTimestamps && (current & FileAttributes.ReadOnly) != 0;
+        if (clearedReadOnly)
+        {
+            File.SetAttributes(path, current & ~FileAttributes.ReadOnly);
+        }
+
+        try
+        {
+            bool directory = Directory.Exists(path);
+            if (options.ChangeLastWriteTime) { if (directory) Directory.SetLastWriteTime(path, options.LastWriteTime); else File.SetLastWriteTime(path, options.LastWriteTime); }
+            if (options.ChangeCreationTime) { if (directory) Directory.SetCreationTime(path, options.CreationTime); else File.SetCreationTime(path, options.CreationTime); }
+            if (options.ChangeLastAccessTime) { if (directory) Directory.SetLastAccessTime(path, options.LastAccessTime); else File.SetLastAccessTime(path, options.LastAccessTime); }
+            if (next != current || clearedReadOnly) File.SetAttributes(path, next);
+        }
+        catch
+        {
+            if (clearedReadOnly)
+            {
+                try { File.SetAttributes(path, current); }
+                catch (Exception restoreError)
+                {
+                    LogService.Warn($"Failed to restore original attributes after timestamp error: {path}; {restoreError.Message}");
+                }
+            }
+            throw;
+        }
     }
 
     private static FileAttributes ApplyAttributeAction(FileAttributes current, FileAttributes bit, FileOperationAttributeChangeAction action)
@@ -2853,9 +3042,23 @@ internal sealed class FileOperationApplicationCoordinator : IDisposable
                 return;
             }
 
-            MidFdManagedTrashService.RegisterNewTrashRecordsPublic(pendingTrashRecords);
-            MidFdManagedTrashService.SaveActiveBatch();
-            pendingTrashRecords.Clear();
+            try
+            {
+                MidFdManagedTrashService.RegisterNewTrashRecordsPublic(pendingTrashRecords);
+                MidFdManagedTrashService.SaveActiveBatch();
+            }
+            catch
+            {
+                // JSON rollback can undo earlier physical moves in this checkpoint.
+                // They are failures, not successful deletes/Undo candidates.
+                var uncommitted = pendingTrashRecords.Select(record => record.OriginalPath).ToHashSet(StringComparer.OrdinalIgnoreCase);
+                int reverted = deletedPaths.RemoveAll(uncommitted.Contains);
+                undoItems.RemoveAll(item => uncommitted.Contains(item.BeforePath));
+                successCount -= reverted;
+                failCount += reverted;
+                throw;
+            }
+            finally { pendingTrashRecords.Clear(); }
         }
         try
         {
@@ -2890,9 +3093,7 @@ internal sealed class FileOperationApplicationCoordinator : IDisposable
                                     pendingTrashRecords.Add(record);
                                     if (pendingTrashRecords.Count >= ManagedTrashManifestCheckpointRecordCount)
                                     {
-                                        MidFdManagedTrashService.RegisterNewTrashRecordsPublic(pendingTrashRecords);
-                                        MidFdManagedTrashService.SaveActiveBatch();
-                                        pendingTrashRecords.Clear();
+                                        FlushPendingTrashRecords();
                                     }
                                 }
                             }
@@ -3037,6 +3238,8 @@ internal sealed class FileOperationApplicationCoordinator : IDisposable
                                 updated = MidFdManagedTrashService.UpdateRecordStatuses(
                                     restoredTrashPaths,
                                     TrashRecordStatus.Restored);
+                                // Confirm JSON persistence before reporting RestoreNow success.
+                                MidFdManagedTrashService.SaveActiveBatch();
                                 if (updated != restoredTrashPaths.Count)
                                 {
                                     restoreAllSuccess = false;
@@ -3137,7 +3340,8 @@ internal sealed class FileOperationApplicationCoordinator : IDisposable
         {
             if (!deleteMarksApplied)
             {
-                RemoveMarksAfterFileOperation(deletedPaths);
+                // A failed manifest checkpoint may have rolled physical moves back.
+                RemoveMarksAfterFileOperation(deletedPaths.Where(path => !MidFdManagedTrashService.PathExists(path)).ToList());
             }
             try
             {
@@ -3324,6 +3528,408 @@ internal sealed class FileOperationApplicationCoordinator : IDisposable
             {
                 ui.ShowUnexpectedError("画像貼り付け", ex);
             }
+        }
+    }
+
+    private async Task ExecuteExternalDropImportAsync(
+        BrowserExternalDropImportCommandContext? import,
+        IFileOperationUiPort ui)
+    {
+        if (import == null || string.IsNullOrWhiteSpace(import.DestinationDirectory))
+        {
+            ui.ShowStatus("ドロップ内容を取り込めませんでした。");
+            return;
+        }
+
+        string destinationDirectory = import.DestinationDirectory;
+        const string operationName = "ファイル取り込み";
+        int totalCount = Math.Max(1, import.TargetCount);
+        bool canCancel = import.Kind != BrowserExternalDropImportKind.Image;
+        CancellationToken token = BeginOperation(operationName, canCancel);
+        string completionMessage = $"{operationName}終了";
+        try
+        {
+            ui.BeginOperation(operationName, totalCount);
+            token.ThrowIfCancellationRequested();
+
+            switch (import.Kind)
+            {
+                case BrowserExternalDropImportKind.OutlookAttachments:
+                {
+                    if (import.DataObject == null)
+                    {
+                        completionMessage = $"{operationName}失敗";
+                        ui.ShowStatus("仮想ファイルのドロップ内容を読み取れませんでした。");
+                        return;
+                    }
+
+                    OutlookAttachmentDropResult result = await _externalDropImportExecutionPort.ProcessOutlookAttachmentsAsync(
+                        import.DataObject,
+                        destinationDirectory,
+                        import.ConfirmOverwrite ?? (_ => OverwriteConfirmResult.Cancel),
+                        path => InvokeExternalDropUi(import, () => ui.ShowTypeMismatchConflict(path)),
+                        (name, exception) => InvokeExternalDropUi(
+                            import,
+                            () => ui.ShowError("コピー", name, exception?.Message ?? "添付データを保存できませんでした。")),
+                        token,
+                        import.OutlookAttachmentNames,
+                        import.InvokeUi).ConfigureAwait(true);
+
+                    if (result.WasCanceled)
+                    {
+                        completionMessage = $"{operationName}キャンセル";
+                    }
+                    else if (result.FailureCount > 0)
+                    {
+                        completionMessage = $"{operationName}失敗";
+                    }
+                    else
+                    {
+                        completionMessage = $"{operationName}完了";
+                    }
+
+                    FileOperationResult? operationResult = CreateOutlookDropOperationResult(result, destinationDirectory);
+                    if (operationResult != null)
+                    {
+                        ApplyOperationResult(operationResult, ui);
+                    }
+                    else if (result.WasCanceled)
+                    {
+                        ui.ShowStatus($"仮想ファイルのコピーをキャンセルしました: 0件成功、{result.FailureCount}件失敗、{result.SkippedCount}件スキップ。");
+                    }
+                    else if (result.FailureCount > 0)
+                    {
+                        ui.ShowStatus($"仮想ファイルのコピーに失敗しました: {result.FailureCount}件");
+                    }
+                    break;
+                }
+                case BrowserExternalDropImportKind.Image:
+                {
+                    if (import.DataObject == null)
+                    {
+                        completionMessage = $"{operationName}失敗";
+                        ui.ShowStatus("画像ドロップ内容を読み取れませんでした。");
+                        return;
+                    }
+
+                    try
+                    {
+                        string savedPath = await _externalDropImportExecutionPort.SaveImagePngAsync(
+                            import.DataObject,
+                            destinationDirectory,
+                            import.InvokeUi).ConfigureAwait(true);
+                        string fileName = Path.GetFileName(savedPath);
+                        ApplyOperationResult(new FileOperationResult(
+                            "Copy",
+                            FileOpExitStatus.Success,
+                            1,
+                            1,
+                            fileName,
+                            destinationDirectory,
+                            shouldClearMarks: false,
+                            customMessage: $"画像を PNG として取り込みました: {fileName}"), ui);
+                        completionMessage = $"{operationName}完了";
+                        LogService.Info($"Source=BrowserDragImage Saved={savedPath}");
+                    }
+                    catch (Exception ex)
+                    {
+                        completionMessage = $"{operationName}失敗";
+                        LogService.Error("Browser 画像ドロップ取り込みに失敗しました", ex);
+                        ui.ShowStatus($"画像ドロップ取り込み失敗: {ex.Message}");
+                    }
+                    break;
+                }
+                case BrowserExternalDropImportKind.ImageUrl:
+                {
+                    if (import.ImageUri is not { } imageUri)
+                    {
+                        completionMessage = $"{operationName}失敗";
+                        ui.ShowStatus("画像URLを特定できませんでした。");
+                        return;
+                    }
+
+                    try
+                    {
+                        string savedPath = await _externalDropImportExecutionPort.DownloadImageAsync(
+                            imageUri,
+                            destinationDirectory,
+                            import.SuggestedFileName,
+                            token).ConfigureAwait(true);
+                        string fileName = Path.GetFileName(savedPath);
+                        ApplyOperationResult(new FileOperationResult(
+                            "Copy",
+                            FileOpExitStatus.Success,
+                            1,
+                            1,
+                            fileName,
+                            destinationDirectory,
+                            shouldClearMarks: false,
+                            customMessage: $"画像URLを保存しました: {fileName}"), ui);
+                        completionMessage = $"{operationName}完了";
+                        LogService.Info($"Source=BrowserDropUrl Url={imageUri} Saved={savedPath}");
+                    }
+                    catch (OperationCanceledException) when (token.IsCancellationRequested)
+                    {
+                        completionMessage = $"{operationName}キャンセル";
+                        throw;
+                    }
+                    catch (System.Net.Http.HttpRequestException ex) when (ex.StatusCode == System.Net.HttpStatusCode.Forbidden
+                        || ex.StatusCode == System.Net.HttpStatusCode.Unauthorized)
+                    {
+                        completionMessage = $"{operationName}失敗";
+                        LogService.Warn($"Source=BrowserDropUrlUnauthorized Url={imageUri}");
+                        ui.ShowStatus("画像URL取り込み失敗: この画像は認証付きのため現方式では保存できません。");
+                    }
+                    catch (InvalidOperationException ex) when (ex.Message.StartsWith("画像レスポンスではありません", StringComparison.Ordinal))
+                    {
+                        completionMessage = $"{operationName}失敗";
+                        LogService.Warn($"Source=BrowserDropUrlNonImage Url={imageUri} Detail={ex.Message}");
+                        ui.ShowStatus("画像URL取り込み失敗: 画像レスポンスではありません。");
+                    }
+                    catch (Exception ex)
+                    {
+                        completionMessage = $"{operationName}失敗";
+                        LogService.Error($"Browser URLドロップ画像取り込み失敗: {imageUri}", ex);
+                        ui.ShowStatus($"画像URL取り込み失敗: {ex.Message}");
+                    }
+                    break;
+                }
+                default:
+                    completionMessage = $"{operationName}失敗";
+                    ui.ShowStatus("ドロップ内容を取り込めませんでした。");
+                    break;
+            }
+        }
+        catch (OperationCanceledException) when (token.IsCancellationRequested)
+        {
+            completionMessage = $"{operationName}キャンセル";
+            throw;
+        }
+        catch
+        {
+            completionMessage = $"{operationName}失敗";
+            throw;
+        }
+        finally
+        {
+            EndOperation(ui, completionMessage);
+        }
+    }
+
+    public bool TryProcessExternalDropInline(
+        BrowserExternalDropImportCommandContext import,
+        IFileOperationUiPort ui)
+    {
+        if (_viewerState.Mode != ViewerApplicationMode.Browser)
+        {
+            return false;
+        }
+        if (!CommandBusyPolicy.CanStartFileOperation(IsBusy))
+        {
+            ui.ShowStatus("現在、別のファイル操作を実行中です。");
+            return true;
+        }
+
+        OperationStartReservation? reservation = TryReserveOperationStart();
+        if (reservation == null)
+        {
+            ui.ShowStatus("現在、別のファイル操作を実行中です。");
+            return true;
+        }
+
+        try
+        {
+            FileOperationCommandRequest request = CaptureOperationOrigin(
+                new FileOperationCommandRequest(
+                    FileOperationCommandKind.ExternalDropImport,
+                    ExternalDropImport: import),
+                ui);
+            reservation.Origin = request.Origin;
+            if (IsReadOnlyBlocked(FileOperationCommandKind.ExternalDropImport))
+            {
+                ui.ShowStatus(BuildReadOnlyBlockedMessage(FileOperationCommandKind.ExternalDropImport));
+                return true;
+            }
+
+            request = CaptureExternalDropImportDestination(request);
+            import = request.ExternalDropImport ?? import;
+            if (string.IsNullOrWhiteSpace(import.DestinationDirectory))
+            {
+                ui.ShowStatus("ドロップ先のフォルダを利用できません。");
+                return true;
+            }
+
+            ui.RefreshOperationUi();
+            string destinationDirectory = import.DestinationDirectory;
+            switch (import.Kind)
+            {
+                case BrowserExternalDropImportKind.OutlookAttachments:
+                {
+                    if (import.DataObject == null)
+                    {
+                        ui.ShowStatus("仮想ファイルのドロップ内容を読み取れませんでした。");
+                        return true;
+                    }
+                    OutlookAttachmentDropResult result = OutlookAttachmentDropService.ProcessDrop(
+                        import.DataObject,
+                        destinationDirectory,
+                        import.ConfirmOverwrite ?? (_ => OverwriteConfirmResult.Cancel),
+                        path => ui.ShowTypeMismatchConflict(path),
+                        (name, exception) => ui.ShowError("コピー", name, exception?.Message ?? "添付データを保存できませんでした。"));
+                    ApplyOutlookDropResult(result, destinationDirectory, ui);
+                    return true;
+                }
+                case BrowserExternalDropImportKind.Image:
+                {
+                    if (import.DataObject == null || !BrowserImageDropService.TryGetImage(import.DataObject, out System.Drawing.Image? image) || image == null)
+                    {
+                        ui.ShowStatus("画像ドロップ取り込み失敗: このブラウザの画像ドロップ形式には未対応です。");
+                        return true;
+                    }
+                    using (image)
+                    {
+                        string savedPath = BrowserImageDropService.SavePngToDirectory(image, destinationDirectory);
+                        string fileName = Path.GetFileName(savedPath);
+                        ApplyCreatedExternalDropFile(savedPath, destinationDirectory, $"画像を PNG として取り込みました: {fileName}", ui);
+                        LogService.Info($"Source=BrowserDragImage Saved={savedPath}");
+                    }
+                    return true;
+                }
+                case BrowserExternalDropImportKind.ImageUrl:
+                {
+                    if (import.ImageUri is not { } imageUri)
+                    {
+                        ui.ShowStatus("画像URLを特定できませんでした。");
+                        return true;
+                    }
+                    try
+                    {
+                        string savedPath = BrowserDroppedImageDownloadService.DownloadToDirectory(
+                            imageUri,
+                            destinationDirectory,
+                            import.SuggestedFileName);
+                        string fileName = Path.GetFileName(savedPath);
+                        ApplyCreatedExternalDropFile(savedPath, destinationDirectory, $"画像URLを保存しました: {fileName}", ui);
+                        LogService.Info($"Source=BrowserDropUrl Url={imageUri} Saved={savedPath}");
+                    }
+                    catch (System.Net.Http.HttpRequestException ex) when (ex.StatusCode == System.Net.HttpStatusCode.Forbidden
+                        || ex.StatusCode == System.Net.HttpStatusCode.Unauthorized)
+                    {
+                        LogService.Warn($"Source=BrowserDropUrlUnauthorized Url={imageUri}");
+                        ui.ShowStatus("画像URL取り込み失敗: この画像は認証付きのため現方式では保存できません。");
+                    }
+                    catch (InvalidOperationException ex) when (ex.Message.StartsWith("画像レスポンスではありません", StringComparison.Ordinal))
+                    {
+                        LogService.Warn($"Source=BrowserDropUrlNonImage Url={imageUri} Detail={ex.Message}");
+                        ui.ShowStatus("画像URL取り込み失敗: 画像レスポンスではありません。");
+                    }
+                    catch (Exception ex)
+                    {
+                        LogService.Error($"Browser URLドロップ画像取り込み失敗: {imageUri}", ex);
+                        ui.ShowStatus($"画像URL取り込み失敗: {ex.Message}");
+                    }
+                    return true;
+                }
+                default:
+                    return false;
+            }
+        }
+        catch (Exception ex)
+        {
+            LogService.Error($"Browser external drop import failed: {import.Kind}", ex);
+            ui.ShowStatus(import.Kind == BrowserExternalDropImportKind.Image
+                ? $"画像ドロップ取り込み失敗: {ex.Message}"
+                : $"ドロップ内容の取り込みに失敗しました: {ex.Message}");
+            return true;
+        }
+        finally
+        {
+            ReleaseOperationStartReservation(reservation, ui);
+        }
+    }
+
+    private void ApplyOutlookDropResult(
+        OutlookAttachmentDropResult result,
+        string destinationDirectory,
+        IFileOperationUiPort ui)
+    {
+        FileOperationResult? operationResult = CreateOutlookDropOperationResult(result, destinationDirectory);
+        if (operationResult == null)
+        {
+            if (result.WasCanceled)
+            {
+                ui.ShowStatus($"仮想ファイルのコピーをキャンセルしました: 0件成功、{result.FailureCount}件失敗、{result.SkippedCount}件スキップ。");
+            }
+            else if (result.FailureCount > 0)
+            {
+                ui.ShowStatus($"仮想ファイルのコピーに失敗しました: {result.FailureCount}件");
+            }
+            return;
+        }
+
+        ApplyOperationResult(operationResult, ui);
+    }
+
+    internal static FileOperationResult? CreateOutlookDropOperationResult(
+        OutlookAttachmentDropResult result,
+        string destinationDirectory)
+    {
+        if (!result.AnySucceeded)
+        {
+            return null;
+        }
+
+        FileOpExitStatus status = result.WasCanceled
+            ? FileOpExitStatus.Canceled
+            : result.FailureCount > 0
+                ? FileOpExitStatus.PartialSuccess
+                : FileOpExitStatus.Success;
+        string message = result.WasCanceled
+            ? $"仮想ファイルのコピーをキャンセルしました: {result.SuccessCount}件成功、{result.FailureCount}件失敗、{result.SkippedCount}件スキップ。"
+            : result.AllSucceeded
+                ? "仮想ファイルのコピーが完了しました。"
+                : $"仮想ファイルのコピー: {result.SuccessCount}件成功、{result.FailureCount}件失敗、{result.SkippedCount}件スキップ。";
+        return new FileOperationResult(
+            "Copy",
+            status,
+            result.SuccessCount,
+            result.AttachmentCount,
+            result.SuccessfulFileNames.FirstOrDefault(),
+            destinationDirectory,
+            shouldClearMarks: false,
+            customMessage: message,
+            skipCount: result.SkippedCount,
+            failCount: result.FailureCount);
+    }
+
+    private void ApplyCreatedExternalDropFile(
+        string savedPath,
+        string destinationDirectory,
+        string message,
+        IFileOperationUiPort ui)
+    {
+        ApplyOperationResult(new FileOperationResult(
+            "Copy",
+            FileOpExitStatus.Success,
+            1,
+            1,
+            Path.GetFileName(savedPath),
+            destinationDirectory,
+            shouldClearMarks: false,
+            customMessage: message), ui);
+    }
+
+    private static void InvokeExternalDropUi(
+        BrowserExternalDropImportCommandContext import,
+        Action action)
+    {
+        if (import.InvokeUi is { } invokeUi)
+        {
+            invokeUi(action);
+        }
+        else
+        {
+            action();
         }
     }
 
@@ -4322,6 +4928,42 @@ internal sealed class FileOperationApplicationCoordinator : IDisposable
         }
     }
 
+    private OperationStartReservation? TryReserveOperationStart()
+    {
+        if (_fileState.IsBusy)
+        {
+            return null;
+        }
+
+        var reservation = new OperationStartReservation();
+        if (Interlocked.CompareExchange(ref _operationStartReservation, reservation, null) != null)
+        {
+            return null;
+        }
+
+        if (_fileState.IsBusy)
+        {
+            Interlocked.CompareExchange(ref _operationStartReservation, null, reservation);
+            return null;
+        }
+
+        return reservation;
+    }
+
+    private void ReleaseOperationStartReservation(
+        OperationStartReservation reservation,
+        IFileOperationUiPort ui)
+    {
+        if (!ReferenceEquals(
+            Interlocked.CompareExchange(ref _operationStartReservation, null, reservation),
+            reservation))
+        {
+            return;
+        }
+
+        ui.RefreshOperationUi();
+    }
+
     private CancellationToken BeginOperation(string operationName, bool canCancel = true)
     {
         _fileState.Ui.Reset();
@@ -4402,6 +5044,22 @@ internal sealed class FileOperationApplicationCoordinator : IDisposable
         {
             SelectionSnapshot = selectionSnapshot,
             Origin = origin
+        };
+    }
+
+    private static FileOperationCommandRequest CaptureExternalDropImportDestination(
+        FileOperationCommandRequest request)
+    {
+        if (request.Kind != FileOperationCommandKind.ExternalDropImport || request.ExternalDropImport is not { } import)
+        {
+            return request;
+        }
+
+        string? destinationDirectory = request.Origin?.CurrentPath;
+        return request with
+        {
+            DestinationDirectory = destinationDirectory,
+            ExternalDropImport = import with { DestinationDirectory = destinationDirectory }
         };
     }
 

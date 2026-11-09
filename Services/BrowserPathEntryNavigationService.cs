@@ -72,9 +72,9 @@ internal static class BrowserPathEntryNavigationService
         return $"指定されたパスが見つかりません: {path}";
     }
 
-    public static string BuildFileOpenSuccessMessage(string path)
+    public static string BuildFileSelectionSuccessMessage(string path)
     {
-        return $"既定アプリで開きました: {Path.GetFileName(path)}";
+        return $"ファイルを選択しました: {Path.GetFileName(path)}";
     }
 
     private static BrowserPathEntryNavigationResult Invalid(string message)

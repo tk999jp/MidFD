@@ -16,6 +16,5 @@ public sealed record AppStoragePaths(
     string TrashManifestDbPath,
     string LogDirectory,
     string StartupLogFallbackDirectory,
-    string VideoStillPreviewCacheDirectory,
     string TempRoot,
     string BackupDirectory);

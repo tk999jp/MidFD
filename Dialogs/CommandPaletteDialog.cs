@@ -49,7 +49,7 @@ public sealed class CommandPaletteDialog : Form
 
     private readonly Func<string, IReadOnlySet<string>?, CommandPalettePresentation> _presentationProvider;
     private readonly CommandPaletteUsageState _usageState;
-    private readonly Func<CommandPaletteUsageState, bool> _usageStateChanged;
+    private readonly Func<string, bool> _toggleFavorite;
     private readonly TextBox _searchBox;
     private readonly ListBox _commandListBox;
     private readonly HashSet<string> _expandedSections = new(StringComparer.OrdinalIgnoreCase);
@@ -94,11 +94,11 @@ public sealed class CommandPaletteDialog : Form
     public CommandPaletteDialog(
         Func<string, IReadOnlySet<string>?, CommandPalettePresentation> presentationProvider,
         CommandPaletteUsageState usageState,
-        Func<CommandPaletteUsageState, bool> usageStateChanged)
+        Func<string, bool> toggleFavorite)
     {
         _presentationProvider = presentationProvider;
         _usageState = usageState;
-        _usageStateChanged = usageStateChanged;
+        _toggleFavorite = toggleFavorite;
 
         Text = "Command Palette";
         Size = new Size(1080, 760);
@@ -1046,25 +1046,8 @@ public sealed class CommandPaletteDialog : Form
             return;
         }
 
-        List<string> previousFavorites = _usageState.FavoriteCommandIds.ToList();
-        if (IsFavorite(command.Id))
+        if (!_toggleFavorite(command.Id))
         {
-            _usageState.FavoriteCommandIds = _usageState.FavoriteCommandIds
-                .Where(id => !string.Equals(id, command.Id, StringComparison.OrdinalIgnoreCase))
-                .ToList();
-        }
-        else
-        {
-            _usageState.FavoriteCommandIds.Add(command.Id);
-            _usageState.FavoriteCommandIds = _usageState.FavoriteCommandIds
-                .Where(static id => !string.IsNullOrWhiteSpace(id))
-                .Distinct(StringComparer.OrdinalIgnoreCase)
-                .ToList();
-        }
-
-        if (!_usageStateChanged(_usageState))
-        {
-            _usageState.FavoriteCommandIds = previousFavorites;
             MessageBox.Show(
                 this,
                 "お気に入りを保存できませんでした。ストレージを確認してください。",

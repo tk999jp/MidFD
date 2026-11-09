@@ -19,16 +19,19 @@ internal sealed class BrowserWorkspacePersistenceApplicationCoordinator
     private readonly BrowserApplicationCoordinator _browser;
     private readonly SettingsApplicationCoordinator _settings;
     private readonly BrowserTabGroupRuntimeState? _tabGroups;
+    private readonly string? _markSlotFilePath;
     private readonly MarkPersistenceBoundaryCoordinator _markPersistence = new();
 
     public BrowserWorkspacePersistenceApplicationCoordinator(
         BrowserApplicationCoordinator browser,
         SettingsApplicationCoordinator settings,
-        BrowserTabGroupRuntimeState? tabGroups = null)
+        BrowserTabGroupRuntimeState? tabGroups = null,
+        string? markSlotFilePath = null)
     {
         _browser = browser;
         _settings = settings;
         _tabGroups = tabGroups;
+        _markSlotFilePath = markSlotFilePath;
     }
 
     public void InitializeStores()
@@ -39,11 +42,15 @@ internal sealed class BrowserWorkspacePersistenceApplicationCoordinator
         _settings.InitializeManagedTrash();
     }
 
-    public void InitializeWorkspaceSettings()
+    public bool? InitializeWorkspaceSettings()
     {
         EnsureConfiguration();
         SyncActiveCategory();
-        _browser.Workspace.SetQuickAccess(QuickAccessService.LoadOrMigrate(_settings.Value.QuickAccess));
+        QuickAccessStore quickAccess = QuickAccessService.LoadOrMigrate(
+            _settings.Value.QuickAccess,
+            out bool? migrationPersistenceSucceeded);
+        _browser.Workspace.SetQuickAccess(quickAccess);
+        return migrationPersistenceSucceeded;
     }
 
     public void SaveSettings() => _settings.Save();
@@ -100,6 +107,71 @@ internal sealed class BrowserWorkspacePersistenceApplicationCoordinator
         snapshot.UserTabGroups = BrowserTabGroupPersistenceMapper.Capture(_tabGroups.Groups);
     }
 
+    public bool SetBrowserTabGroupExpanded(Guid groupId, bool expanded)
+    {
+        if (_tabGroups == null || !_tabGroups.SetExpanded(groupId, expanded))
+        {
+            return false;
+        }
+
+        CaptureBrowserTabGroupsToRestoreSnapshot();
+        return true;
+    }
+
+    public IReadOnlyList<BrowserTabGroup> GetBrowserTabGroups(string categoryId) =>
+        _tabGroups?.GetGroups(categoryId) ?? Array.Empty<BrowserTabGroup>();
+
+    public BrowserTabGroup? FindBrowserTabGroup(Guid groupId) =>
+        _tabGroups?.Find(groupId);
+
+    public BrowserTabGroup? FindBrowserTabGroupByMember(string categoryId, Guid tabId) =>
+        _tabGroups?.FindByMember(categoryId, tabId);
+
+    public bool TryCreateBrowserTabGroup(
+        string categoryId,
+        string displayName,
+        Guid tabId,
+        IReadOnlySet<Guid> blockedTabIds,
+        out BrowserTabGroup? created)
+    {
+        created = _tabGroups?.Create(categoryId, displayName, tabId, blockedTabIds);
+        if (created == null) return false;
+        CaptureBrowserTabGroupsToRestoreSnapshot();
+        return true;
+    }
+
+    public bool TryAddBrowserTabGroupMember(
+        Guid groupId,
+        string categoryId,
+        Guid tabId,
+        IReadOnlySet<Guid> blockedTabIds)
+    {
+        if (_tabGroups == null || !_tabGroups.AddMember(groupId, categoryId, tabId, blockedTabIds)) return false;
+        CaptureBrowserTabGroupsToRestoreSnapshot();
+        return true;
+    }
+
+    public bool TryRemoveBrowserTabGroupMember(string categoryId, Guid tabId)
+    {
+        if (_tabGroups == null || !_tabGroups.RemoveMember(categoryId, tabId)) return false;
+        CaptureBrowserTabGroupsToRestoreSnapshot();
+        return true;
+    }
+
+    public bool TryRenameBrowserTabGroup(Guid groupId, string displayName)
+    {
+        if (_tabGroups == null || !_tabGroups.Rename(groupId, displayName)) return false;
+        CaptureBrowserTabGroupsToRestoreSnapshot();
+        return true;
+    }
+
+    public bool PruneBrowserTabGroupsToLiveTabs(IReadOnlyDictionary<Guid, string> liveTabCategories)
+    {
+        if (_tabGroups == null || !_tabGroups.PruneToLiveTabs(liveTabCategories)) return false;
+        CaptureBrowserTabGroupsToRestoreSnapshot();
+        return true;
+    }
+
     public WorkspaceState CaptureCurrentWorkspaceState()
     {
         CaptureBrowserTabGroupsToRestoreSnapshot();
@@ -139,19 +211,45 @@ internal sealed class BrowserWorkspacePersistenceApplicationCoordinator
 
     public bool ReplaceMarkSlots(MarkSlotStore store, int slotCount)
     {
-        _browser.Workspace.SetMarkSlots(store);
-        return MarkSlotStorage.Save(_browser.Workspace.MarkSlotsSnapshot, slotCount);
+        MarkSlotStore candidate = store.Clone();
+        if (!SaveMarkSlotStore(candidate, slotCount))
+        {
+            return false;
+        }
+
+        _browser.Workspace.SetMarkSlots(candidate);
+        return true;
     }
 
     public bool SaveMarkSlots(MarkSlotEntry? changedSlot, int slotCount)
     {
+        MarkSlotStore candidate = _browser.Workspace.MarkSlotsSnapshot;
         if (changedSlot != null)
         {
-            _browser.Workspace.UpdateMarkSlot(changedSlot);
+            int existingIndex = candidate.Slots.FindIndex(slot => slot.SlotNumber == changedSlot.SlotNumber);
+            if (existingIndex >= 0)
+            {
+                candidate.Slots[existingIndex] = changedSlot.Clone();
+            }
+            else
+            {
+                candidate.Slots.Add(changedSlot.Clone());
+            }
         }
 
-        return MarkSlotStorage.Save(_browser.Workspace.MarkSlotsSnapshot, slotCount);
+        if (!SaveMarkSlotStore(candidate, slotCount))
+        {
+            return false;
+        }
+
+        _browser.Workspace.SetMarkSlots(candidate);
+        return true;
     }
+
+    private bool SaveMarkSlotStore(MarkSlotStore store, int slotCount) =>
+        _markSlotFilePath is { } filePath
+            ? MarkSlotStorage.Save(store, slotCount, filePath)
+            : MarkSlotStorage.Save(store, slotCount);
 
     public BrowserMarkPersistenceTransition ClearCategoryMarks(string categoryId)
     {

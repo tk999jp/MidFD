@@ -56,6 +56,15 @@ public static class ExternalToolService
     }
 
     /// <summary>
+    /// 外部 Editor を、呼び出し元が個別に構築した引数で起動する。
+    /// 引数はシェルを経由せず ProcessStartInfo.ArgumentList で渡す。
+    /// </summary>
+    public static string? OpenWithEditorArguments(string exePath, IReadOnlyList<string> arguments)
+    {
+        return LaunchProcess(exePath, arguments);
+    }
+
+    /// <summary>
     /// 外部 Diff ツールを使用して 2 件のファイル比較を開始する。
     /// </summary>
     public static string? OpenWithDiff(string exePath, string leftPath, string rightPath)
@@ -118,11 +127,29 @@ public static class ExternalToolService
     }
 
     private static string? LaunchProcess(string exePath, params string[] arguments)
+        => LaunchProcess(exePath, (IReadOnlyList<string>)arguments);
+
+    private static string? LaunchProcess(string exePath, IReadOnlyList<string> arguments)
     {
-        if (!TryNormalizeExecutablePath(exePath, out string normalizedExePath, out string error))
+        if (!TryCreateEditorProcessStartInfo(exePath, arguments, out ProcessStartInfo? psi, out string error))
         {
             LogService.Warn($"ExternalTool exe validation failed: {exePath} reason={error}");
             return error;
+        }
+
+        return StartProcess(psi!);
+    }
+
+    internal static bool TryCreateEditorProcessStartInfo(
+        string? exePath,
+        IReadOnlyList<string> arguments,
+        out ProcessStartInfo? startInfo,
+        out string error)
+    {
+        startInfo = null;
+        if (!TryNormalizeExecutablePath(exePath, out string normalizedExePath, out error))
+        {
+            return false;
         }
 
         try
@@ -138,12 +165,27 @@ public static class ExternalToolService
                 psi.ArgumentList.Add(argument ?? string.Empty);
             }
 
+            startInfo = psi;
+            error = string.Empty;
+            return true;
+        }
+        catch (Exception ex) when (ex is ArgumentException or InvalidOperationException or NotSupportedException)
+        {
+            error = $"外部Editor引数が不正です: {ex.Message}";
+            return false;
+        }
+    }
+
+    private static string? StartProcess(ProcessStartInfo psi)
+    {
+        try
+        {
             Process.Start(psi);
             return null;
         }
         catch (Exception ex)
         {
-            LogService.Error($"LaunchProcess failed. Exe: {normalizedExePath}", ex);
+            LogService.Error($"LaunchProcess failed. Exe: {psi.FileName}", ex);
             return $"起動に失敗しました: {ex.Message}";
         }
     }

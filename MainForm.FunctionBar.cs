@@ -33,6 +33,12 @@ public partial class MainForm : Form
     private const int FunctionBarLayerBadgeReserveWidth = 48;
     private const int FunctionBarLayerBadgeLeftPadding = 4;
 
+    private FunctionBarSlotViewModel[]? _lastFunctionBarProjection;
+    private FunctionKeyProfile _lastFunctionBarProfile;
+    private (bool IsShift, bool IsCtrl, bool IsAlt) _lastFunctionBarLayer;
+    private bool _lastFunctionBarVisibility;
+    private bool _hasLastFunctionBarVisualState;
+
     private static float GetFunctionBarEffectiveScale(Font layoutFont, int panelWidth)
     {
         float fontScale = layoutFont.Size / 10.0F;
@@ -70,10 +76,6 @@ public partial class MainForm : Form
         {
             _isFunctionBarCtrlLayerActive = isCtrlPressed;
             UpdateFunctionBar();
-            if (functionBarPanel.Visible)
-            {
-                functionBarPanel.Invalidate();
-            }
         }
     }
 
@@ -83,10 +85,6 @@ public partial class MainForm : Form
         {
             _isFunctionBarAltLayerActive = isAltPressed;
             UpdateFunctionBar();
-            if (functionBarPanel.Visible)
-            {
-                functionBarPanel.Invalidate();
-            }
         }
     }
 
@@ -96,10 +94,6 @@ public partial class MainForm : Form
         {
             _isFunctionBarShiftLayerActive = isShiftPressed;
             UpdateFunctionBar();
-            if (functionBarPanel.Visible)
-            {
-                functionBarPanel.Invalidate();
-            }
         }
     }
 
@@ -124,12 +118,19 @@ public partial class MainForm : Form
     {
         if (_unifiedSearchSession is { IsActive: true } search)
         {
-            string[] labels = ["Open", "Expo", "Close"];
-            string[] keys = ["Enter", "E", "Esc"];
+            string[] labels = ["Open", "Editor", "Output", "Close"];
+            string[] keys = ["Enter", "E", "Ctrl+Shift+O", "Esc"];
             return Enumerable.Range(1, 12).Select(slot =>
             {
                 int index = slot - 1;
-                bool enabled = index < labels.Length && (index == 2 || (index == 1 ? search.View.CanExport : search.View.HasResults));
+                bool enabled = index < labels.Length && (index switch
+                {
+                    0 => search.View.HasResults,
+                    1 => search.View.CanOpenSelectedInExternalEditor,
+                    2 => search.View.CanExport,
+                    3 => true,
+                    _ => false
+                });
                 string label = index < labels.Length ? labels[index] : string.Empty;
                 string key = index < keys.Length ? keys[index] : string.Empty;
                 return new FunctionBarSlotViewModel(slot, false, index < labels.Length ? $"search.{index}" : null,
@@ -218,6 +219,14 @@ public partial class MainForm : Form
         return !compactViewer;
     }
 
+    private bool CanInteractWithFunctionBarInCurrentContext()
+    {
+        if (!ShouldShowFunctionBarForCurrentContext()) return false;
+        if (_unifiedSearchSession is { IsActive: true }) return true;
+        return _viewerApplicationCoordinator.Mode == ViewerApplicationMode.Browser
+            && ShouldShowBrowserFunctionBarForCurrentProfile();
+    }
+
     private void ApplyFunctionBarVisibilityForCurrentContext()
     {
         bool shouldShow = ShouldShowFunctionBarForCurrentContext();
@@ -238,30 +247,32 @@ public partial class MainForm : Form
     private void UpdateFunctionBar()
     {
         ApplyFunctionBarVisibilityForCurrentContext();
-        IReadOnlyList<FunctionBarSlotViewModel> models;
-        if (_unifiedSearchSession is { IsActive: true })
-        {
-            models = BuildFunctionBarProjection();
-        }
-        else
-        {
-            var snapshot = BuildCommandUiSnapshot();
-            var (isShift, isCtrl, isAlt) = GetActiveFunctionBarLayer();
-            var profile = FunctionKeyProfileService.ResolveProfile(CurrentFunctionKeyProfileValue);
-            models = FunctionBarProjection.Build(
-                profile,
-                _commandStateCoordinator.UsesBrowserFunctionBar(snapshot),
-                isShift,
-                isCtrl,
-                isAlt,
-                _settingsCoordinator.Value.Input,
-                _commandRegistry,
-                snapshot);
-        }
+        IReadOnlyList<FunctionBarSlotViewModel> models = BuildFunctionBarProjection();
         for (int i = 1; i <= 12; i++)
         {
             FunctionBarSlotViewModel model = models[i - 1];
             SetFuncKeyText(i, model.DisplayLabel, model.IsEnabled);
+        }
+
+        var layer = GetActiveFunctionBarLayer();
+        FunctionKeyProfile profile = FunctionKeyProfileService.ResolveProfile(CurrentFunctionKeyProfileValue);
+        bool isVisible = functionBarPanel.Visible;
+        bool projectionChanged = !_hasLastFunctionBarVisualState
+            || _lastFunctionBarProjection is null
+            || !_lastFunctionBarProjection.SequenceEqual(models)
+            || _lastFunctionBarProfile != profile
+            || _lastFunctionBarLayer != layer
+            || _lastFunctionBarVisibility != isVisible;
+        _lastFunctionBarProjection = models.ToArray();
+        _lastFunctionBarProfile = profile;
+        _lastFunctionBarLayer = layer;
+        _lastFunctionBarVisibility = isVisible;
+        _hasLastFunctionBarVisualState = true;
+
+        if (projectionChanged && isVisible && functionBarPanel.IsHandleCreated)
+        {
+            // Queue normal WinForms painting only when the visible projection changes.
+            functionBarPanel.Invalidate();
         }
     }
 
@@ -301,7 +312,7 @@ public partial class MainForm : Form
 
     private void FunctionBarPanel_MouseMove(object? sender, MouseEventArgs e)
     {
-        if (_viewerApplicationCoordinator.Mode != ViewerApplicationMode.Browser || !ShouldShowBrowserFunctionBarForCurrentProfile()) return;
+        if (!CanInteractWithFunctionBarInCurrentContext()) return;
         using var layoutFont = _headerPaintFont != null
             ? new Font(_headerPaintFont.FontFamily, _headerPaintFont.Size, _headerPaintFont.Style)
             : new Font("Consolas", 10F);
@@ -322,7 +333,7 @@ public partial class MainForm : Form
 
     private void FunctionBarPanel_MouseDown(object? sender, MouseEventArgs e)
     {
-        if (_viewerApplicationCoordinator.Mode != ViewerApplicationMode.Browser || !ShouldShowBrowserFunctionBarForCurrentProfile()) return;
+        if (!CanInteractWithFunctionBarInCurrentContext()) return;
         if (e.Button != MouseButtons.Left) return;
 
         using var layoutFont = _headerPaintFont != null
@@ -384,7 +395,7 @@ public partial class MainForm : Form
 
     private void FunctionBarPanel_MouseClick(object? sender, MouseEventArgs e)
     {
-        if (_viewerApplicationCoordinator.Mode != ViewerApplicationMode.Browser || !ShouldShowBrowserFunctionBarForCurrentProfile()) return;
+        if (!CanInteractWithFunctionBarInCurrentContext()) return;
         if (e.Button != MouseButtons.Left) return;
 
         using var layoutFont = _headerPaintFont != null
@@ -412,7 +423,7 @@ public partial class MainForm : Form
     {
         var panel = sender as Panel;
         if (panel == null) return;
-        if (_viewerApplicationCoordinator.Mode == ViewerApplicationMode.Browser && !ShouldShowBrowserFunctionBarForCurrentProfile()) return;
+        if (!CanInteractWithFunctionBarInCurrentContext()) return;
         int totalW = panel.ClientSize.Width;
         int totalH = panel.ClientSize.Height;
         if (totalW <= 0 || totalH <= 0) return;

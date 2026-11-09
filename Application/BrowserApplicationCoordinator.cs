@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using MidFD.Commands;
 using MidFD.Helpers;
 using MidFD.Models;
 using MidFD.Presentation;
@@ -41,6 +42,80 @@ internal sealed class BrowserApplicationCoordinator : IDisposable
 
     public IReadOnlyList<string> GetQuickAccessCategoryNames() =>
         QuickAccessService.GetKnownCategoryNames(Workspace.QuickAccessSnapshot);
+
+    public BrowserQuickAccessDraftMutationResult AddQuickAccessDraftEntry(
+        BrowserQuickAccessDraftCommandContext request)
+    {
+        QuickAccessStore candidate = request.Store.Clone();
+        bool succeeded = QuickAccessService.TrySaveManagedLocationEntry(
+            candidate,
+            existingEntry: null,
+            request.DisplayName ?? string.Empty,
+            request.Path ?? string.Empty,
+            request.CategoryName,
+            request.UseAlias,
+            request.CurrentPath,
+            out string normalizedPath,
+            out string message);
+        return new BrowserQuickAccessDraftMutationResult(
+            succeeded,
+            candidate,
+            succeeded ? normalizedPath : null,
+            message);
+    }
+
+    public BrowserQuickAccessDraftMutationResult UpdateQuickAccessDraftEntry(
+        BrowserQuickAccessDraftCommandContext request)
+    {
+        QuickAccessStore candidate = request.Store.Clone();
+        if (request.Entry == null)
+        {
+            return new BrowserQuickAccessDraftMutationResult(
+                false,
+                candidate,
+                Message: "編集対象が指定されていません。");
+        }
+
+        bool succeeded = QuickAccessService.TrySaveManagedLocationEntry(
+            candidate,
+            request.Entry,
+            request.DisplayName ?? string.Empty,
+            request.Path ?? string.Empty,
+            request.CategoryName,
+            request.UseAlias,
+            request.CurrentPath,
+            out string normalizedPath,
+            out string message);
+        return new BrowserQuickAccessDraftMutationResult(
+            succeeded,
+            candidate,
+            succeeded ? normalizedPath : null,
+            message);
+    }
+
+    public BrowserQuickAccessDraftMutationResult DeleteQuickAccessDraftEntry(
+        BrowserQuickAccessDraftCommandContext request)
+    {
+        QuickAccessStore candidate = request.Store.Clone();
+        bool succeeded = request.Entry is { Kind: QuickAccessEntryKind.Bookmark or QuickAccessEntryKind.Alias } entry &&
+            QuickAccessService.RemoveManagedEntry(candidate, entry);
+        return new BrowserQuickAccessDraftMutationResult(succeeded, candidate);
+    }
+
+    public BrowserQuickAccessDraftMutationResult ReorderQuickAccessDraft(
+        BrowserQuickAccessDraftCommandContext request)
+    {
+        QuickAccessStore candidate = request.Store.Clone();
+        bool succeeded = request.OrderTarget switch
+        {
+            BrowserQuickAccessEntryOrderTarget { Entry.Kind: QuickAccessEntryKind.Bookmark or QuickAccessEntryKind.Alias } target =>
+                QuickAccessService.TryMoveManagedEntry(candidate, target.Entry, request.MoveUp),
+            BrowserQuickAccessCategoryOrderTarget { CategoryName.Length: > 0 } target =>
+                QuickAccessService.TryMoveRegisteredCategory(candidate, target.CategoryName, request.MoveUp),
+            _ => false
+        };
+        return new BrowserQuickAccessDraftMutationResult(succeeded, candidate);
+    }
 
     public bool IsAuxiliaryResolutionDeferred(string? path) =>
         NetworkPathResolutionPolicy.IsAuxiliaryResolutionDeferred(path);
@@ -106,8 +181,12 @@ internal sealed class BrowserApplicationCoordinator : IDisposable
 
         if (updatedStore != null)
         {
-            Workspace.SetQuickAccess(updatedStore);
-            bool persisted = QuickAccessService.Save(updatedStore);
+            QuickAccessStore candidate = updatedStore.Clone();
+            bool persisted = QuickAccessService.Save(candidate);
+            if (persisted)
+            {
+                Workspace.SetQuickAccess(candidate);
+            }
             transition = transition with { PersistenceSucceeded = persisted };
         }
 
@@ -151,13 +230,15 @@ internal sealed class BrowserApplicationCoordinator : IDisposable
         string targetPath,
         string? focusTargetName = null,
         bool isHistoryNavigation = false,
-        bool suppressRecent = false)
+        bool suppressRecent = false,
+        bool requireFocusTarget = false)
     {
         return _navigation.CreateDirectoryNavigationRequest(
             targetPath,
             focusTargetName,
             isHistoryNavigation,
-            suppressRecent);
+            suppressRecent,
+            requireFocusTarget);
     }
 
     internal string? PeekBack() => _state.NavigationState.Navigation.PeekBack();

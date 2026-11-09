@@ -37,9 +37,9 @@ MidFDの初回／基本セットアップでは、次の5領域をまとめて�
 - 起動時に前回の状態を復元
 - マウスジェスチャー
 - Functionバーの詳細説明
-- メディアファイルのEnter外部再生
 - パスのパンくず表示
 
+通常動画のEnter／Ctrl+Enterはprofileにかかわらず内蔵MidPlayerで再生します。BrowserのVは内容probeによる明示Previewで、通常動画はBinary表示です。ZはWindowsの関連付けで開きます。対応音声のEnter／Ctrl+Enterはffplayで外部再生し、未検出時はWindowsの関連付けを使います。保存済みの旧動画外部再生値は設定の読込・再保存時の互換用に保持されます。
 
 フォルダ変更の自動検知（FileSystemWatcher）は、現在すべての機能範囲で有効です。
 
@@ -106,7 +106,7 @@ Fキー、Shift+F、数字キーの一部をFD／WinFD寄りにします。
 セットアップ画面から次を指定できます。
 
 - 7-Zip
-- 動画tool folder
+- 音声外部再生用ffplay folder
 - 外部editor
 
 ### 7-Zip
@@ -119,19 +119,29 @@ Fキー、Shift+F、数字キーの一部をFD／WinFD寄りにします。
 
 「自動」は `7zG.exe` の標準Dialogを優先し、利用できない場合にMidFD簡易Dialogへfallbackします。
 
-### 動画tool folder
+### 音声外部再生用ffplay folder
 
 同じfolder内の次の実行fileを役割別に使用します。
 
-- `ffmpeg.exe`: 動画静止画preview
-- `ffprobe.exe`: 動画情報・再生時間
-- `ffplay.exe`: 動画・音声の外部再生
+- `ffplay.exe`: 対応音声の外部再生
 
-`ffplay.exe` が見つからない場合はWindowsの関連付けで開きます。静止画previewには `ffmpeg.exe` が必要です。
+`ffplay.exe` が見つからない場合はWindowsの関連付けで開きます。動画はBrowserのEnter／Ctrl+Enterから内蔵MidPlayerで再生します。Vは内容probeによるPreviewで、通常動画はBinary表示です。ZはWindowsの関連付けを使います。
 
 ### 外部editor
 
 任意のeditorを指定できます。未設定時でも内蔵Viewerなどの基本操作は利用できます。
+
+対応する実行fileを初回／基本セットアップまたは設定画面で選ぶと、Grep hitのfile／行／列を渡す推奨引数を設定します。既存のcustom引数は保持します。設定画面の「外部連携」では「推奨引数を適用」から明示的に再適用でき、手動で空欄にするとfileだけを開きます。この引数はGrep hitの外部Editor起動だけで使い、通常のBrowser／Viewer操作には適用しません。
+
+対応file名とCLI形式は[USER_GUIDE.md](USER_GUIDE.md)の「検索結果の確認」を参照してください。Notepad++の推奨形式は現行CLI資料を基準とし、旧版互換性は保証しません。実際の位置移動はEditor側で確認してください。
+
+### Susie画像decoder
+
+設定の「画像デコーダー」で `.spi`／`.sph` pluginを追加・検査し、登録後に有効化できます。「拡張子ごとのdecoder選択」では、検査済みpluginが示す形式ごとに使用decoderを選びます。登録・検査に失敗したpluginや無効化したpluginはBrowserの画像判定に使いません。
+
+`.spi` はx86 Susie Host、`.sph` はx64 Susie Hostで動きます。32-bit pluginの利用には.NET 10 Desktop Runtime x86が追加で必要です。MidFD本体とMidPlayerにはx64 runtimeを使います。runtimeの導入は配布folderの `README_FIRST.txt` を参照してください。
+
+BrowserのEnterは有効な登録と検査済みmetadataで拡張子が一致した場合にMidPlayerで開きます。Vの明示PreviewはSusie decodeを行わず、file内容からText／LargeText／Binaryを選びます。読み込める画像形式はpluginの対応範囲によります。Susie Hostから受け取るDIBは8bpp BI_RGB palette、24bpp、32bppを扱い、RLE8は非対応です。
 
 ## 初回起動時と設定画面からの再表示
 

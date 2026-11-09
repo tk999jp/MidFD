@@ -158,10 +158,17 @@ internal sealed class SettingsApplicationCoordinator : ISettingsApplicationPort
         Save();
     }
 
-    public void SaveShowBrowserToolbar(bool value)
+    public SettingsSqliteStore.SettingsSaveResult TrySaveShowBrowserToolbar(bool value)
     {
-        SetShowBrowserToolbar(value);
-        Save();
+        AppSettings draft = Value.Clone();
+        draft.Appearance ??= new AppearanceSettings();
+        draft.Appearance.ShowBrowserToolbar = value;
+        SettingsSqliteStore.SettingsSaveResult result = SettingsManager.TrySaveAndReport(draft);
+        if (result.PrimarySaved)
+        {
+            SetShowBrowserToolbar(value);
+        }
+        return result;
     }
 
     public void SetMarkdownViewerMode(MarkdownViewerMode value)
@@ -528,6 +535,7 @@ internal interface ISettingsApplicationPort
     AppSettings CreateSettingsDraft(AppSettings source, FeatureProfile effectiveProfile);
     void NormalizeSettingsDraft(AppSettings settings);
     SettingsSqliteStore.SettingsSaveResult TrySaveExplicit(AppSettings settings);
+    SettingsSqliteStore.SettingsSaveResult TrySaveShowBrowserToolbar(bool value);
     SettingsSqliteStore.SettingsTransferResult ExportSettings(string targetPath, AppSettings settings);
     SettingsSqliteStore.SettingsTransferResult ReadImportedSettings(string sourcePath);
     SettingsSqliteStore.SettingsTransferResult ApplyImportedSettings(AppSettings settings);
@@ -570,7 +578,9 @@ internal sealed class BrowserNavigationSessionState
     public NavigationRefreshCoordinator RefreshCoordinator { get; } = new();
     public DirectoryCountAuditGate CountAuditGate { get; } = new();
     public DirectoryCountAuditSchedule CountAuditSchedule { get; } = new();
+    public object CountAuditSyncRoot { get; } = new();
     public CancellationTokenSource? CountAuditCancellation { get; set; }
+    public Guid? CountAuditOperationId { get; set; }
     public SortKind CurrentSort { get; set; } = SortKind.Name;
     public bool SortAscending { get; set; } = true;
     public string FilterPattern { get; set; } = string.Empty;
@@ -590,9 +600,10 @@ internal sealed class BrowserNavigationSessionState
 
     public void Dispose()
     {
-        CountAuditCancellation?.Cancel();
-        CountAuditCancellation?.Dispose();
-        CountAuditCancellation = null;
+        lock (CountAuditSyncRoot)
+        {
+            CountAuditCancellation?.Cancel();
+        }
     }
 }
 
@@ -631,6 +642,8 @@ internal sealed class ViewerSessionState : IDisposable
     public int TextLineCount { get; set; } = 1;
     public LargeFilePreviewState? LargeFileState { get; set; }
     public string? CurrentPreviewTarget { get; set; }
+    public string? DisplayedPreviewTarget { get; set; }
+    public PreviewKind DisplayedPreviewKind { get; set; } = PreviewKind.None;
     public string? LastRequestedPath { get; set; }
     public int ActiveRequestId;
     public bool AutoPreviewSuppressed { get; set; }
@@ -674,6 +687,8 @@ internal sealed class ViewerApplicationCoordinator
     public int TextLineCount => _state.TextLineCount;
     public LargeFilePreviewState? LargeFileState => _state.LargeFileState;
     public string? CurrentPreviewTarget => _state.CurrentPreviewTarget;
+    public string? DisplayedPreviewTarget => _state.DisplayedPreviewTarget;
+    public PreviewKind DisplayedPreviewKind => _state.DisplayedPreviewKind;
     public string? LastRequestedPath => _state.LastRequestedPath;
     public bool AutoPreviewSuppressed => _state.AutoPreviewSuppressed;
     public string? LastAutoPreviewSuppressedMessage => _state.LastAutoPreviewSuppressedMessage;
@@ -687,6 +702,11 @@ internal sealed class ViewerApplicationCoordinator
     public void SetTextLineCount(int value) => _state.TextLineCount = Math.Max(1, value);
     public void SetLargeFileState(LargeFilePreviewState? value) => _state.LargeFileState = value;
     public void SetCurrentPreviewTarget(string? value) => _state.CurrentPreviewTarget = value;
+    public void SetDisplayedPreview(string? path, PreviewKind kind)
+    {
+        _state.DisplayedPreviewTarget = path;
+        _state.DisplayedPreviewKind = path == null ? PreviewKind.None : kind;
+    }
     public void SetAutoPreviewSuppressed(bool value) => _state.AutoPreviewSuppressed = value;
     public void SetLastAutoPreviewSuppressedMessage(string? value) => _state.LastAutoPreviewSuppressedMessage = value;
     public void SetLastRequestedPath(string? value) => _state.LastRequestedPath = value;
@@ -813,10 +833,7 @@ internal sealed class FileOperationState : IDisposable
     public bool IsClipboardBusy { get; set; }
     public bool IsUndoRedoBusy { get; set; }
 
-    public bool IsBusy => IsClipboardBusy
-        || Ui.Cts != null
-        || !string.IsNullOrWhiteSpace(Ui.ActiveOperationName)
-        || IsUndoRedoBusy;
+    public bool IsBusy => IsClipboardBusy || IsUndoRedoBusy;
 
     public void Dispose()
     {

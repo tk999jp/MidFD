@@ -189,15 +189,23 @@ internal sealed class BrowserWorkspaceSnapshotApplicationCoordinator
         WorkspaceState state,
         BrowserTabState? currentState = null)
     {
+        if (_pendingRestore != null)
+        {
+            return new BrowserWorkspaceSnapshotRestoreStart(
+                Guid.NewGuid(),
+                null,
+                new InvalidOperationException("A Workspace snapshot restore is already in progress."));
+        }
+
         ApplyActiveState(currentState);
         BrowserWorkspaceSnapshotRestoreTransaction transaction = new(
             BrowserWorkspaceApplicationCoordinator.CreateRuntimeSnapshot(state),
             _persistence.CaptureRuntimeState());
         Guid operationId = Guid.NewGuid();
+        _pendingRestore = new BrowserWorkspaceSnapshotRestoreOperation(operationId, transaction);
         try
         {
             _persistence.ApplyRuntimeState(transaction.TargetRuntimeState);
-            _pendingRestore = new BrowserWorkspaceSnapshotRestoreOperation(operationId, transaction);
             return new BrowserWorkspaceSnapshotRestoreStart(
                 operationId,
                 transaction.TargetRuntimeState,
@@ -205,10 +213,30 @@ internal sealed class BrowserWorkspaceSnapshotApplicationCoordinator
         }
         catch (Exception ex)
         {
+            Exception error = ex;
+            try
+            {
+                _persistence.ApplyRuntimeState(transaction.RollbackRuntimeState);
+            }
+            catch (Exception rollbackException)
+            {
+                error = new AggregateException(
+                    "Workspace snapshot target preparation and state rollback both failed.",
+                    ex,
+                    rollbackException);
+            }
+            finally
+            {
+                if (_pendingRestore?.OperationId == operationId)
+                {
+                    _pendingRestore = null;
+                }
+            }
+
             return new BrowserWorkspaceSnapshotRestoreStart(
                 operationId,
                 null,
-                ex);
+                error);
         }
     }
 

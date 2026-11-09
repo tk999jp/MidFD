@@ -1,0 +1,20 @@
+<Project>
+  <PropertyGroup Condition="'$(MidPlayerBuildRoot)' != '' and '$(MSBuildProjectName)' == 'MidPlayer.Lite'">
+    <MSBuildProjectExtensionsPath>$(MidPlayerBuildRoot)\obj\Lite\</MSBuildProjectExtensionsPath>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(MidPlayerBuildRoot)' != '' and '$(MSBuildProjectName)' == 'MidPlayer.Full'">
+    <MSBuildProjectExtensionsPath>$(MidPlayerBuildRoot)\obj\Full\</MSBuildProjectExtensionsPath>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(MidPlayerBuildRoot)' != '' and '$(MSBuildProjectName)' == 'MidPlayer'">
+    <MSBuildProjectExtensionsPath>$(MidPlayerBuildRoot)\obj\Standalone\</MSBuildProjectExtensionsPath>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(MidPlayerBuildRoot)' == '' and '$(MSBuildProjectName)' == 'MidPlayer.Lite'">
+    <MSBuildProjectExtensionsPath>$(MSBuildThisFileDirectory)obj\Lite\</MSBuildProjectExtensionsPath>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(MidPlayerBuildRoot)' == '' and '$(MSBuildProjectName)' == 'MidPlayer.Full'">
+    <MSBuildProjectExtensionsPath>$(MSBuildThisFileDirectory)obj\Full\</MSBuildProjectExtensionsPath>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(MidPlayerBuildRoot)' == '' and '$(MSBuildProjectName)' == 'MidPlayer'">
+    <MSBuildProjectExtensionsPath>$(MSBuildThisFileDirectory)obj\Standalone\</MSBuildProjectExtensionsPath>
+  </PropertyGroup>
+</Project>

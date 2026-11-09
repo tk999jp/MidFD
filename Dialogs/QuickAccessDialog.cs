@@ -1,5 +1,6 @@
 ﻿using MidFD.Models;
 using MidFD.Services;
+using MidFD.Commands;
 
 namespace MidFD.Dialogs;
 
@@ -26,8 +27,9 @@ public class QuickAccessDialog : Form
     private readonly Label _summaryLabel;
     private readonly Label _hintLabel;
     private readonly string _currentPath;
-    private readonly QuickAccessStore _workingStore;
+    private QuickAccessStore _workingStore;
     private readonly IReadOnlyList<QuickAccessEntry> _historyEntries;
+    private readonly Func<string, CommandExecutionContext, BrowserQuickAccessDraftMutationResult?> _executeDraftCommand;
     private readonly QuickAccessOpenDiagnostics? _diagnostics;
     private readonly Font _registeredHeaderFont;
     private readonly HashSet<string> _collapsedRegisteredCategories = new(StringComparer.OrdinalIgnoreCase);
@@ -43,15 +45,17 @@ public class QuickAccessDialog : Form
         QuickAccessStore store,
         string currentPath,
         IReadOnlyList<QuickAccessEntry> historyEntries,
+        Func<string, CommandExecutionContext, BrowserQuickAccessDraftMutationResult?> executeDraftCommand,
         QuickAccessOpenDiagnostics? diagnostics = null)
     {
         const int sideMargin = 16;
         const int topMargin = 8;
         _diagnostics = diagnostics;
+        _executeDraftCommand = executeDraftCommand ?? throw new ArgumentNullException(nameof(executeDraftCommand));
         _workingStore = _diagnostics?.MeasureStep(
             "QuickAccess.LoadConfig",
             store.Clone,
-            cloned => $"itemCount={cloned.Bookmarks.Count + cloned.Aliases.Count + cloned.Commands.Count + cloned.Recents.Count} source=in-memory-store success=success")
+            cloned => $"itemCount={cloned.Bookmarks.Count + cloned.Aliases.Count + cloned.Recents.Count} source=in-memory-store success=success")
             ?? store.Clone();
         _registeredHeaderFont = new Font(Font, FontStyle.Bold);
         _currentPath = currentPath;
@@ -1251,24 +1255,33 @@ public class QuickAccessDialog : Form
             return;
         }
 
-        if (QuickAccessService.TrySaveManagedLocationEntry(
-            _workingStore,
-            null,
-            dialogResult.DisplayName,
-            dialogResult.Path,
-            dialogResult.CategoryName,
-            dialogResult.UseForTabTitle,
-            _currentPath,
-            out string normalizedPath,
-            out string message))
+        BrowserQuickAccessDraftMutationResult? mutation = _executeDraftCommand(
+            CommandIds.BrowserQuickAccessEntryAdd,
+            new CommandExecutionContext
+            {
+                Scope = CommandScope.Browser,
+                Source = "QuickAccessDialog.AddEntry",
+                BrowserQuickAccessDraft = new BrowserQuickAccessDraftCommandContext(
+                    _workingStore.Clone(),
+                    _currentPath,
+                    DisplayName: dialogResult.DisplayName,
+                    Path: dialogResult.Path,
+                    CategoryName: dialogResult.CategoryName,
+                    UseAlias: dialogResult.UseForTabTitle)
+            });
+        if (mutation is { Succeeded: true })
         {
+            _workingStore = mutation.UpdatedStore;
             RefreshItems("AddEntry");
             _tabControl.SelectedIndex = 0;
-            SelectPath(_registeredListView, normalizedPath);
+            SelectPath(_registeredListView, mutation.NormalizedPath ?? dialogResult.Path);
         }
         else
         {
-            MessageBox.Show(this, message, "QuickAccess", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            if (!string.IsNullOrWhiteSpace(mutation?.Message))
+            {
+                MessageBox.Show(this, mutation.Message, "QuickAccess", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            }
         }
     }
 
@@ -1300,24 +1313,34 @@ public class QuickAccessDialog : Form
             return;
         }
 
-        if (QuickAccessService.TrySaveManagedLocationEntry(
-            _workingStore,
-            entry,
-            dialogResult.DisplayName,
-            dialogResult.Path,
-            dialogResult.CategoryName,
-            dialogResult.UseForTabTitle,
-            _currentPath,
-            out string normalizedPath,
-            out string message))
+        BrowserQuickAccessDraftMutationResult? mutation = _executeDraftCommand(
+            CommandIds.BrowserQuickAccessEntryUpdate,
+            new CommandExecutionContext
+            {
+                Scope = CommandScope.Browser,
+                Source = "QuickAccessDialog.EditEntry",
+                BrowserQuickAccessDraft = new BrowserQuickAccessDraftCommandContext(
+                    _workingStore.Clone(),
+                    _currentPath,
+                    Entry: entry.Clone(),
+                    DisplayName: dialogResult.DisplayName,
+                    Path: dialogResult.Path,
+                    CategoryName: dialogResult.CategoryName,
+                    UseAlias: dialogResult.UseForTabTitle)
+            });
+        if (mutation is { Succeeded: true })
         {
+            _workingStore = mutation.UpdatedStore;
             RefreshItems("EditSelected");
             _tabControl.SelectedIndex = 0;
-            SelectPath(_registeredListView, normalizedPath);
+            SelectPath(_registeredListView, mutation.NormalizedPath ?? dialogResult.Path);
         }
         else
         {
-            MessageBox.Show(this, message, "QuickAccess", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            if (!string.IsNullOrWhiteSpace(mutation?.Message))
+            {
+                MessageBox.Show(this, mutation.Message, "QuickAccess", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            }
         }
     }
 
@@ -1335,8 +1358,19 @@ public class QuickAccessDialog : Form
             return;
         }
 
-        if (QuickAccessService.RemoveManagedEntry(_workingStore, entry))
+        BrowserQuickAccessDraftMutationResult? mutation = _executeDraftCommand(
+            CommandIds.BrowserQuickAccessEntryDelete,
+            new CommandExecutionContext
+            {
+                Scope = CommandScope.Browser,
+                Source = "QuickAccessDialog.DeleteEntry",
+                BrowserQuickAccessDraft = new BrowserQuickAccessDraftCommandContext(
+                    _workingStore.Clone(),
+                    Entry: entry.Clone())
+            });
+        if (mutation is { Succeeded: true })
         {
+            _workingStore = mutation.UpdatedStore;
             RefreshItems("DeleteSelected");
             _tabControl.SelectedIndex = 0;
             EnsureSelection(_registeredListView);
@@ -1362,33 +1396,50 @@ public class QuickAccessDialog : Form
         }
 
         string? selectedHeaderCategory = GetSelectedRegisteredHeaderCategory();
+        BrowserQuickAccessDraftOrderTarget? orderTarget;
         if (!string.IsNullOrWhiteSpace(selectedHeaderCategory))
         {
-            if (!QuickAccessService.TryMoveRegisteredCategory(_workingStore, selectedHeaderCategory, moveUp))
+            orderTarget = new BrowserQuickAccessCategoryOrderTarget(selectedHeaderCategory);
+        }
+        else
+        {
+            QuickAccessEntry? entry = GetSelectedEntry();
+            if (entry == null)
             {
                 return;
             }
+            orderTarget = new BrowserQuickAccessEntryOrderTarget(entry.Clone());
+        }
 
+        BrowserQuickAccessDraftMutationResult? mutation = _executeDraftCommand(
+            CommandIds.BrowserQuickAccessReorder,
+            new CommandExecutionContext
+            {
+                Scope = CommandScope.Browser,
+                Source = "QuickAccessDialog.Reorder",
+                BrowserQuickAccessDraft = new BrowserQuickAccessDraftCommandContext(
+                    _workingStore.Clone(),
+                    MoveUp: moveUp,
+                    OrderTarget: orderTarget)
+            });
+        if (mutation is not { Succeeded: true })
+        {
+            return;
+        }
+
+        _workingStore = mutation.UpdatedStore;
+        if (orderTarget is BrowserQuickAccessCategoryOrderTarget categoryTarget)
+        {
             RefreshItems(moveUp ? "MoveCategoryUp" : "MoveCategoryDown");
             _tabControl.SelectedIndex = 0;
-            RestoreRegisteredHeaderFocus(selectedHeaderCategory);
+            RestoreRegisteredHeaderFocus(categoryTarget.CategoryName);
             return;
         }
 
-        QuickAccessEntry? entry = GetSelectedEntry();
-        if (entry == null)
-        {
-            return;
-        }
-
-        if (!QuickAccessService.TryMoveManagedEntry(_workingStore, entry, moveUp))
-        {
-            return;
-        }
-
+        QuickAccessEntry movedEntry = ((BrowserQuickAccessEntryOrderTarget)orderTarget).Entry;
         RefreshItems(moveUp ? "MoveUp" : "MoveDown");
         _tabControl.SelectedIndex = 0;
-        SelectPath(_registeredListView, entry.Path);
+        SelectPath(_registeredListView, movedEntry.Path);
     }
 
     private void SelectPath(ListView listView, string path)
@@ -1452,9 +1503,10 @@ public class QuickAccessDialog : Form
         QuickAccessStore store,
         string currentPath,
         IReadOnlyList<QuickAccessEntry> historyEntries,
+        Func<string, CommandExecutionContext, BrowserQuickAccessDraftMutationResult?> executeDraftCommand,
         QuickAccessOpenDiagnostics? diagnostics = null)
     {
-        using var dialog = new QuickAccessDialog(store, currentPath, historyEntries, diagnostics);
+        using var dialog = new QuickAccessDialog(store, currentPath, historyEntries, executeDraftCommand, diagnostics);
         if (dialog.ShowDialog(owner) == DialogResult.OK)
         {
             diagnostics?.LogDialogClose(dialog.CloseAction.ToString(), dialog.SelectedEntry?.Path);

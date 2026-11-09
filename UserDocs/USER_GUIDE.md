@@ -15,10 +15,12 @@ MidFDは、FDライクな操作感を参考にしつつ、現在のWindows環境
 | 選択 | 主な内容 |
 |---|---|
 | 基本機能のみ | 閲覧、コピー、移動、名前変更、Mark、標準キー操作、内蔵Viewer |
-| 便利機能まで使う（推奨） | 基本機能＋前回状態復元、mouse gesture、Functionバー説明、メディアEnter外部再生、パンくず表示 |
+| 便利機能まで使う（推奨） | 基本機能＋前回状態復元、mouse gesture、Functionバー説明、パンくず表示 |
 | すべての機能を使う | 便利機能＋Workspace Snapshot（Fullで既定有効、個別override可）、MarkSlot集合演算／Backup Transfer、Image Quantization、SVG Clipboard、Command PaletteのFavorite／Recent利用情報保存、MidFD管理ゴミ箱、Drag ZIP／manifest、clipboard text貼り付け |
 
 各項目は個別に変更できます。既知の組み合わせと一致しない場合は「個別設定」と表示されます。
+
+Browserの動画Enter／Ctrl+Enterは機能範囲presetにかかわらず内蔵MidPlayerで再生します。Vは内容probeによる明示Previewで、通常動画はBinary表示です。ZはWindowsの関連付けで開きます。対応音声のEnter／Ctrl+Enterはffplayで外部再生し、未検出時はWindowsの関連付けを使います。
 
 Command Paletteの基本検索・実行はどの機能範囲でも利用できます。機能範囲で切り替わるのはFavorite／Recent利用情報の保存です。
 
@@ -30,7 +32,7 @@ Command Paletteの基本検索・実行はどの機能範囲でも利用でき�
 
 ### 外部アプリ
 
-7-Zip、動画tool folder、外部editorを指定できます。未設定でも基本操作は可能で、自動探索または既存fallbackを使用します。
+7-Zip、音声外部再生用ffplay folder、外部editorを指定できます。未設定でも基本操作は可能で、自動探索または既存fallbackを使用します。
 
 ### 後から開き直す
 
@@ -68,7 +70,9 @@ Browser画面では、ファイルやフォルダを選択し、Mark、コピー
 | 設定 | O |
 | Command Palette | Ctrl+Shift+P |
 
-Enterは`..`で親directoryへ移動し、directoryはMidFD内で開き、fileは対象別openを行います。Vは明示Preview、XはCommand・Arguments・Working Directoryを指定するコマンド実行Dialogです。Working Directoryを空欄にすると現在のBrowser directoryを使います。ZはfileをOSの関連付けで、directoryをExplorerで開きます。ファイル一覧のdouble-clickはfileをOS既定openしますが、directoryはMidFD内で開くため、Zとはdirectoryの結果が異なります。
+Enterは`..`で親directoryへ移動し、directoryはMidFD内で開き、fileは対象別openを行います。有効登録かつ検査済みSusie plugin metadataが拡張子を示す画像は、内蔵MidPlayerで開きます。Ctrl+Enterなら固定ONで開き、PreviewFollow中はBrowserの画像選択に追従します。Vは明示Preview、XはCommand・Arguments・Working Directoryを指定するコマンド実行Dialogです。Working Directoryを空欄にすると現在のBrowser directoryを使います。ZはfileをOSの関連付けで、directoryをExplorerで開きます。ファイル一覧のdouble-clickはfileをOS既定openしますが、directoryはMidFD内で開くため、Zとはdirectoryの結果が異なります。
+
+Susie pluginの登録、bitness別runtime、拡張子ごとのdecoder選択は[PROFILES.md](PROFILES.md)の「Susie画像decoder」を参照してください。
 
 単一fileのContextMenuから「プログラムから開く...」を選ぶと、Windowsのアプリ選択画面で起動先を選べます。
 
@@ -103,7 +107,7 @@ UNC pathではUsed／Free情報を同期取得せず、操作が落ち着いて�
 
 設定の「表示」では、一覧表示mode、date形式、size形式、fontなどを変更できます。
 
-一覧表示modeは「ファイル名のみ」「サイズ」「サイズ・更新日時」「拡張子整列」から選べます。「拡張子整列」は同じ表示列のfileで拡張子の開始位置を揃える表示専用modeです。file名、sort、selection、Mark、file operationの対象は変わりません。Ctrl+4またはCtrl+NumPad4でも切り替えられます。「拡張子を表示」をOFFにすると拡張子は表示されません。
+一覧表示modeは「ファイル名のみ」「サイズ」「サイズ・更新日時」「拡張子整列」から選べます。「拡張子整列」は同じ表示列のfileで拡張子の開始位置を揃える表示専用modeです。file名、sort、selection、Mark、file operationの対象は変わりません。Standard profileではCtrl+4またはCtrl+NumPad4でも切り替えられます。FDCompatible profileではこれらのキーでDrive Dへ移動します。「拡張子を表示」をOFFにすると拡張子は表示されません。
 
 ### size形式
 
@@ -205,9 +209,24 @@ Search pageはfilenameに初期focusし、`Tab`でcontentへ移動します。`A
 - 内容検索のEnter「プレビュー」は再利用する確認tab、Ctrl+Enterは新しい通常tabをbacking BrowserとしてPreviewを開き、該当行へ移動します。LargeTextはfull line indexとscroll rangeを反映してからexact hit行へ移動します。ViewerのEnter／Escで検索結果childへ戻り、選択file・hit・filterを維持します。通常TextとLargeTextは検索位置を示し、MarkdownはRaw source表示へ切り替えて行を示します。binary／行Preview非対応形式は既存のPreview表示を維持します。検索sessionを閉じても確認tabと追加tabは通常Browser tabとして残ります。
 - 通常BrowserからVでPreviewした場合、ViewerのEnter／Escは従来どおりBrowserへ戻ります。対象消失や起動失敗は検索結果surfaceのstatusへ表示します。
 - 内容検索は←/→で同じfile内のhitを移動します。行・列・内容とhit位置を確認でき、別fileへ移動すると先頭hitに戻ります。
+- Grep結果で`E`を実行すると選択中hitを設定外部Editorで開き、設定済みtemplateへfile／行／列を渡します。templateが空欄、Editorが未設定または見つからない場合は既存どおりfileだけを開きます。名前検索、通常Browser／Viewerの`E`、一覧出力にはhit用templateを適用しません。
+- 外部Editor設定で対応する実行fileを選ぶと、次のGrep用templateを提案します。手動templateは保持され、空欄のままにすることもできます。「推奨引数を適用」は明示的に適用します。
+
+| 実行file名 | 推奨引数 |
+|---|---|
+| `MidEditor.exe` | `--open "{file}" --line {line} --column {column}` |
+| `Code.exe` | `--goto "{file}:{line}:{column}"` |
+| `notepad++.exe` | `-n{line} -c{column} "{file}"` |
+| `subl.exe` | `"{file}:{line}:{column}"` |
+| `sakura.exe` | `-Y={line} -X={column} "{file}"` |
+| `Mery.exe` | `/l {line} /cl {column} "{file}"` |
+| `Hidemaru.exe` | `/jw{line},{column} "{file}"` |
+| `xyzzy.exe`／`xyzzycli.exe` | `"{file}" -g {line} -c {column}` |
+
+対応する8 Editor／9 executable名の候補です（xyzzyは`xyzzy.exe`と`xyzzycli.exe`）。秀丸はMidFDの1-based UTF-16列に合わせて`/jw`を使います。Notepad++の表記は現行CLI資料に基づき、旧版互換性は保証しません。Editorごとに列の扱い・対応versionが異なる場合があります。MidFDから確認できるのは引数を渡したことまでで、実際のcaret移動は各Editorで確認してください。
 - 非0件の完了後はCtrl+Fで結果filterへfocusします。0件ならCtrl+FでSearch dialogを再表示します。F7はいつでもSearch dialogをcriteria引継ぎで再表示します。名前検索はrelative path/name、内容検索はrelative path/nameまたはhit行の文字列をcase-insensitive部分一致で絞ります。path一致fileはそのfileの全hitを表示し、hit行一致では一致hitだけを表示します。filterは完了snapshot内だけで処理し、filesystemを再検索しません。clearすると選択位置を可能な範囲で復元し、filter中も表示件数と選択位置を示します。filter欄のEnterは一覧へ戻り、Escはfilterをclearして一覧へ戻ります。結果一覧のEscは検索tabを閉じます。
-- MainForm Function Barの**Expo**または**E 一覧出力**を実行した時だけfilter前の全結果をUTF-8 BOMなしの一時fileへ出力し、設定済み外部Editorで開きます。未設定時は既存方針でnotepadを使用します。名前検索はfull path、内容検索は `fullPath:line:column:lineText` 形式です。
-- 内容検索中も到着済みhitをEnter／Ctrl+EnterでPreviewでき、検索は継続します。ViewerのEnter／Escで選択fileとhitを保った結果一覧へ戻ります。結果FilterとExpo／Eによる一覧出力は検索完了後だけ利用できます。
+- MainForm Function Barの**Output**または`Ctrl+Shift+O`を実行すると、通常完了後はfilter前の全snapshotをUTF-8 BOMなしの一時fileへ出力し、設定済み外部Editorで開きます。partial終端snapshotでは受理済みhitと不完全理由を出力し、record除外がある場合は除外件数も出力します。record除外による0件のpartial snapshotも除外情報を書き出せます。Editor未設定時は既存方針でnotepadを使用します。名前検索はfull path、内容検索は `fullPath:line:column:lineText` 形式です。
+- 内容検索中も到着済みhitをEnter／Ctrl+EnterでPreviewでき、検索は継続します。ViewerのEnter／Escで選択fileとhitを保った結果一覧へ戻ります。結果Filterと一覧出力は通常完了またはpartial終端snapshot確定後に利用できます。
 - 大量結果はvirtual一覧で表示します。結果件数の打切りやpaginationはありません。
 
 ## 一括リネーム (Batch Rename)
@@ -313,13 +332,19 @@ folderを含む場合は配下のfileを再帰的に収集し、同じfileが重
 
 ## Viewer
 
+Enterは拡張子やfile内容に応じた通常の対象別Viewerを開き、Vは専用Viewerへの拡張子分岐を行わず、file内容を判定してText／LargeText／Binaryを選びます。
+
 ### text
 
 - `Esc`: 閉じる
+- `L`: Text表示中の文字コードをAuto→UTF-8→Shift_JISへ切り替えます。TextのStatusStripに案内を表示します。
+- `W`: Text表示の折り返しを切り替える。StatusStripに案内を表示します。
 - `Ctrl+A`: 全選択
 - `Ctrl+C`: copy
 
 LargeText Viewerでは大容量file向けの表示経路を使用します。通常選択、Shift+click範囲選択、Ctrl+A、Ctrl+Cに対応します。
+LargeTextのStatusStripには検出文字コード、行、検索hitを表示します。
+Browserでの`L`はLogdsk、`Ctrl+L`はパス入力です。Viewerの`L`とは操作文脈が異なります。
 
 ### 画像
 
@@ -331,6 +356,10 @@ LargeText Viewerでは大容量file向けの表示経路を使用します。通
 
 変換は表示用であり、元fileを書き換えません。
 
+### Susie画像decoder
+
+Susie形式の画像は、設定の「画像デコーダー」で登録・検査して有効化したpluginが拡張子metadataで対応を示す場合にBrowserのEnterから開けます。形式と実際のdecode可否はpluginに依存します。Vの明示PreviewではSusie pluginを使いません。Susie decoderのbitness、登録手順、DIB形式の制約は[PROFILES.md](PROFILES.md)を参照してください。
+
 ### Markdown・CSV／TSV・SQLite
 
 Markdown、CSV／TSV、SQLiteはread-only previewです。Markdownは設定の「表示」→「ビューア」とViewer下部StatusStrip右端の`Rendered`／`Raw`から表示を切り替えられます。編集する場合は外部editorまたはMidEditor等を使用してください。
@@ -341,23 +370,16 @@ Rendered表示の右クリックmenuはMidFDの項目だけを表示します。
 
 ## 動画・音声
 
-動画静止画previewには `ffmpeg.exe` が必要です。`ffprobe.exe` が利用できる場合は動画長やcodec情報を取得します。
+動画の静止画previewはありません。Browserの動画Enter／Ctrl+Enterは内蔵MidPlayerで再生します。Vは内容probeによる明示Previewで、通常動画はBinary表示となり、MidPlayerは起動しません。ZはWindowsの関連付けで開きます。
 
-メディアEnter外部再生がOFFの場合:
-
-| キー | 動作 |
+| Browserキー | 動作 |
 |---|---|
-| Enter | 動画静止画preview |
-| Ctrl+Enter | 外部再生 |
+| Enter（動画） | 内蔵MidPlayerで再生します。PreviewFollowから始まり、再生中／一時停止中は自動で表示を固定します。 |
+| Ctrl+Enter（動画） | 既存の動画再生routeで内蔵MidPlayerを開きます。動画はPreviewFollowから始まります。 |
+| Enter／Ctrl+Enter（対応音声） | ffplayで外部再生します。ffplay未検出時はWindowsの関連付けを使います。 |
+| Z | Windowsの関連付けで開きます。 |
 
-ONの場合:
-
-| キー | 動作 |
-|---|---|
-| Enter | 外部再生 |
-| Ctrl+Enter | 動画静止画preview |
-
-音声は設定に関係なく外部再生します。`ffplay.exe` が見つからない場合はWindowsの関連付けで開きます。
+旧`VideoEnterPlaysExternal`設定は保存済み設定の互換用に読み書きされますが、動画Enterの動作は切り替えません。
 
 ## タブ・カテゴリ
 
@@ -394,6 +416,8 @@ Browser一覧focus時に`@`を押してから1文字入力すると、その文�
   - 現在のWorkspaceの新規保存
 - **タブ右クリックからの保存**: タブの右クリックメニューに「現在のWorkspaceをスナップショット保存...」が表示されます。
   - 選ぶと、右クリックしたタブへアクティブを切り替えることなく、現在のWorkspace全体（全カテゴリ・全タブ）をそのまま保存します。右クリックしたタブ単体を保存する機能ではありません。
+
+1件のsnapshot payloadは16MiBまでです。以前のデータに上限を超えるsnapshotがある場合、そのsnapshotの復元やBackup setのJSON出力は失敗することがあります。MidFDは上限超過を理由に既存snapshotを自動削除しません。
 
 前回状態復元を有効にすると、category、tab、path、cursor位置等を起動時に復元します。詳細は設定の「起動・ログ」で変更できます。
 

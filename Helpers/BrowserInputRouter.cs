@@ -1,5 +1,6 @@
 ﻿using System;
 using System.Windows.Forms;
+using MidFD.Configuration;
 
 namespace MidFD.Helpers;
 
@@ -14,6 +15,25 @@ public sealed class BrowserInputRouter
         return browserPanel != null && (browserPanel.Focused || browserPanel.ContainsFocus);
     }
 
+    public static bool IsFocusedBrowserGestureOwned(
+        bool browserFocused,
+        Keys keyData,
+        IReadOnlyDictionary<string, string> effectiveBindings)
+    {
+        if (!browserFocused)
+        {
+            return false;
+        }
+
+        string gesture = InputSettings.ToKeyGestureText(keyData);
+        // A tombstone still owns the gesture: let the Browser resolver consume it
+        // instead of allowing the hint overlay to reinterpret it.
+        return effectiveBindings.ContainsKey(gesture);
+    }
+
+    public static bool IsAltHintGesture(Keys keyData, Keys keyCode) =>
+        keyData == (Keys.Alt | keyCode);
+
     public sealed class CmdKeyContext
     {
         public bool IsBrowserMode { get; init; }
@@ -21,7 +41,6 @@ public sealed class BrowserInputRouter
         public bool IsAuxPreviewActive { get; init; }
         public bool CanUseCommandLauncherCommands { get; init; }
 
-        public required Func<Keys, bool> TryHandleTabs { get; init; }
         public required Func<Keys, BrowserCommandBindingResolver.Resolution> TryHandleCustomBindings { get; init; }
         public required Action OpenMenuStripFromKeyboard { get; init; }
         public required Func<Keys, bool> TryHandleNavigation { get; init; }
@@ -37,6 +56,7 @@ public sealed class BrowserInputRouter
     public sealed class KeyDownContext
     {
         public bool IsBrowserMode { get; init; }
+        public bool IsBrowserFocused { get; init; }
         public required Func<KeyEventArgs, bool> TryHandleCore { get; init; }
     }
 
@@ -61,11 +81,6 @@ public sealed class BrowserInputRouter
             {
                 return true;
             }
-        }
-
-        if (context.TryHandleTabs(keyData))
-        {
-            return true;
         }
 
         if (acceptsBrowserShortcut || context.IsAuxPreviewActive)
@@ -96,7 +111,7 @@ public sealed class BrowserInputRouter
 
     public bool TryHandleKeyDown(KeyDownContext context, KeyEventArgs e)
     {
-        if (!context.IsBrowserMode)
+        if (!context.IsBrowserMode || (!context.IsBrowserFocused && !e.Control))
         {
             return false;
         }

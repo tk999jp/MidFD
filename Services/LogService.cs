@@ -24,6 +24,7 @@ namespace MidFD.Services
 
         internal static string CurrentLogDirectory => LogDirectory;
         internal static string CurrentLogFilePath => LogFilePath;
+        internal static bool IsEnabled => _isEnabled;
 
         public static void ApplySettings(LoggingSettings? settings)
         {

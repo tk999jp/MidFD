@@ -1,6 +1,7 @@
 using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.ComponentModel;
+using System.Runtime.InteropServices;
 using System.Windows.Forms;
 using MidFD.Models;
 using MidFD.Presentation;
@@ -84,11 +85,20 @@ public sealed class BrowserTabNavigation : UserControl
                 ? _categories[_selectedCategoryIndex].Tabs.Count
                 : 0;
             int normalized = value >= 0 && value < tabCount ? value : -1;
-            if (_selectedIndex == normalized) return;
+            int previousIndex = _selectedIndex;
+            Guid? previousSearchSessionId = _selectedSearchSessionId;
+            if (previousIndex == normalized && previousSearchSessionId == null) return;
             _selectedIndex = normalized;
             _selectedSearchSessionId = null;
-            if (!_syncing) SelectedIndexChanged?.Invoke(this, EventArgs.Empty);
+            if (!_syncing && (previousIndex != normalized || previousSearchSessionId != null))
+            {
+                SelectedIndexChanged?.Invoke(this, EventArgs.Empty);
+            }
             SelectCurrentNode();
+            if (previousIndex != _selectedIndex || previousSearchSessionId != _selectedSearchSessionId)
+            {
+                InvalidateTree();
+            }
         }
     }
 
@@ -240,14 +250,20 @@ public sealed class BrowserTabNavigation : UserControl
                     .SequenceEqual(pair.Second.SearchDerivedTabs ?? Array.Empty<BrowserTabNavigationSearchDerivedTab>())
                 && UserGroupsEqual(pair.First.UserTabGroups, pair.Second.UserTabGroups));
         _categories = categories;
-        _selectedCategoryIndex = selectedCategoryIndex;
-        _selectedSearchSessionId = selectedSearchSessionId;
-        if (sameStructure) UpdateSelection(selectedCategoryIndex, selectedTabIndex >= 0 ? selectedTabIndex : _selectedIndex, selectedSearchSessionId);
+        if (sameStructure)
+        {
+            UpdateSelection(
+                selectedCategoryIndex,
+                selectedTabIndex >= 0 ? selectedTabIndex : _selectedIndex,
+                selectedSearchSessionId);
+        }
         else
         {
             int tabCount = selectedCategoryIndex >= 0 && selectedCategoryIndex < categories.Count
                 ? categories[selectedCategoryIndex].Tabs.Count
                 : 0;
+            _selectedCategoryIndex = selectedCategoryIndex;
+            _selectedSearchSessionId = selectedSearchSessionId;
             _selectedIndex = selectedSearchSessionId == null && selectedTabIndex >= 0 && selectedTabIndex < tabCount
                 ? selectedTabIndex
                 : -1;
@@ -257,6 +273,9 @@ public sealed class BrowserTabNavigation : UserControl
 
     public void UpdateSelection(int selectedCategoryIndex, int selectedIndex, Guid? selectedSearchSessionId = null)
     {
+        int previousCategoryIndex = _selectedCategoryIndex;
+        int previousIndex = _selectedIndex;
+        Guid? previousSearchSessionId = _selectedSearchSessionId;
         _selectedCategoryIndex = selectedCategoryIndex;
         _selectedSearchSessionId = null;
         if (selectedSearchSessionId is { } sessionId
@@ -266,16 +285,23 @@ public sealed class BrowserTabNavigation : UserControl
         {
             _selectedSearchSessionId = sessionId;
             _selectedIndex = -1;
-            SelectCurrentNode();
-            return;
+        }
+        else
+        {
+            _selectedIndex = -1;
+            int tabCount = selectedCategoryIndex >= 0 && selectedCategoryIndex < _categories.Count
+                ? _categories[selectedCategoryIndex].Tabs.Count
+                : 0;
+            if (selectedIndex >= 0 && selectedIndex < tabCount) _selectedIndex = selectedIndex;
         }
 
-        _selectedIndex = -1;
-        int tabCount = selectedCategoryIndex >= 0 && selectedCategoryIndex < _categories.Count
-            ? _categories[selectedCategoryIndex].Tabs.Count
-            : 0;
-        if (selectedIndex >= 0 && selectedIndex < tabCount) _selectedIndex = selectedIndex;
         SelectCurrentNode();
+        if (previousCategoryIndex != _selectedCategoryIndex
+            || previousIndex != _selectedIndex
+            || previousSearchSessionId != _selectedSearchSessionId)
+        {
+            InvalidateTree();
+        }
     }
 
     internal IReadOnlyList<Guid> GetTreeGroupMemberTabIds(Guid groupId)
@@ -943,10 +969,19 @@ public sealed class BrowserTabNavigation : UserControl
             return;
         }
 
+        int previousCategoryIndex = _selectedCategoryIndex;
+        int previousIndex = _selectedIndex;
+        Guid? previousSearchSessionId = _selectedSearchSessionId;
         _selectedCategoryIndex = tag.CategoryIndex;
         _selectedIndex = -1;
         _selectedSearchSessionId = tag.SessionId;
         if (!_syncing) SelectedIndexChanged?.Invoke(this, EventArgs.Empty);
+        if (previousCategoryIndex != _selectedCategoryIndex
+            || previousIndex != _selectedIndex
+            || previousSearchSessionId != _selectedSearchSessionId)
+        {
+            InvalidateTree();
+        }
     }
 
     private void Tree_DrawNode(object? sender, DrawTreeNodeEventArgs e)
@@ -1204,14 +1239,14 @@ public sealed class BrowserTabNavigation : UserControl
     {
         if (e.Button != MouseButtons.Left) return;
         _draggingSplitter = true;
-        _splitterStartX = Control.MousePosition.X;
+        _splitterStartX = _splitter.PointToScreen(e.Location).X;
         _splitterStartWidth = Width;
     }
 
     private void Splitter_MouseMove(object? sender, MouseEventArgs e)
     {
         if (!_draggingSplitter) return;
-        int currentX = Control.MousePosition.X;
+        int currentX = _splitter.PointToScreen(e.Location).X;
         int newWidth = Math.Clamp(_splitterStartWidth + currentX - _splitterStartX, 120, 600);
         RequestSplitterWidth(newWidth);
     }
@@ -1278,7 +1313,7 @@ public sealed class BrowserTabNavigation : UserControl
     private void Splitter_MouseUp(object? sender, MouseEventArgs e)
     {
         if (!_draggingSplitter) return;
-        int finalWidth = Math.Clamp(_splitterStartWidth + Control.MousePosition.X - _splitterStartX, 120, 600);
+        int finalWidth = Math.Clamp(_splitterStartWidth + _splitter.PointToScreen(e.Location).X - _splitterStartX, 120, 600);
         RequestSplitterWidth(finalWidth);
         _splitterWidthThrottleTimer.Stop();
         ApplyPendingSplitterWidth();
@@ -1635,8 +1670,67 @@ public sealed class BrowserTabNavigation : UserControl
     {
         private const int TreeViewStyleNoHorizontalScroll = 0x00008000; // CommCtrl.h: TVS_NOHSCROLL
         private const int WmPaint = 0x000F;
+        private const int DarkBackgroundLuminanceThreshold = 128000;
+        private IntPtr _lastThemedHandle;
+        private bool? _lastThemedDark;
+
+        [DllImport("uxtheme.dll", CharSet = CharSet.Unicode, ExactSpelling = true)]
+        private static extern int SetWindowTheme(IntPtr windowHandle, string? subAppName, string? subIdList);
 
         public event Action<Graphics>? AfterNativePaint;
+
+        protected override void OnHandleCreated(EventArgs e)
+        {
+            base.OnHandleCreated(e);
+            ApplyNativeScrollBarTheme();
+        }
+
+        protected override void OnHandleDestroyed(EventArgs e)
+        {
+            _lastThemedHandle = IntPtr.Zero;
+            _lastThemedDark = null;
+            base.OnHandleDestroyed(e);
+        }
+
+        protected override void OnBackColorChanged(EventArgs e)
+        {
+            base.OnBackColorChanged(e);
+            ApplyNativeScrollBarTheme();
+        }
+
+        protected override void OnSystemColorsChanged(EventArgs e)
+        {
+            base.OnSystemColorsChanged(e);
+            ApplyNativeScrollBarTheme();
+        }
+
+        private void ApplyNativeScrollBarTheme()
+        {
+            if (!IsHandleCreated || IsDisposed) return;
+
+            // Scope the Windows theme change to this TreeView's native scrollbar.
+            // DarkMode_Explorer is OS-dependent; unsupported systems retain native rendering.
+            // Preserve High Contrast colors and restore the default theme for light palettes.
+            bool useDark = !SystemInformation.HighContrast
+                && (BackColor.R * 299 + BackColor.G * 587 + BackColor.B * 114)
+                    < DarkBackgroundLuminanceThreshold;
+            IntPtr handle = Handle;
+            if (_lastThemedHandle == handle && _lastThemedDark == useDark) return;
+
+            // SetWindowTheme synchronously sends WM_THEMECHANGED. Cache before calling
+            // so any reentrant WinForms theme notification cannot apply it again.
+            _lastThemedHandle = handle;
+            _lastThemedDark = useDark;
+            int result = SetWindowTheme(
+                handle,
+                useDark ? "DarkMode_Explorer" : null,
+                useDark ? "ScrollBar" : null);
+            if (result < 0)
+            {
+                _lastThemedHandle = IntPtr.Zero;
+                _lastThemedDark = null;
+            }
+        }
 
         protected override CreateParams CreateParams
         {

@@ -49,14 +49,17 @@ namespace MidFD.Helpers
                 bool fileContentsPresent = false;
                 try { fileContentsPresent = data.GetDataPresent("FileContents"); } catch {}
 
+                bool isOutlookAttachmentDrop = false;
+                try { isOutlookAttachmentDrop = OutlookAttachmentDropService.IsOutlookAttachmentDrop(data); } catch {}
+
                 bool hasImageData = false;
-                try { hasImageData = BrowserImageDropService.HasImageData(data); } catch {}
+                if (!isOutlookAttachmentDrop)
+                {
+                    try { hasImageData = BrowserImageDropService.HasImageData(data); } catch {}
+                }
 
                 bool hasPotentialUrlData = false;
                 try { hasPotentialUrlData = BrowserDropUrlResolverService.HasPotentialUrlData(data); } catch {}
-
-                bool isOutlookAttachmentDrop = false;
-                try { isOutlookAttachmentDrop = OutlookAttachmentDropService.IsOutlookAttachmentDrop(data); } catch {}
 
                 string formatsFalseStr = "[]";
                 try

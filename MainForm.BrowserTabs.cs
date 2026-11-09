@@ -91,26 +91,14 @@ private void InitializeBrowserTabControl()
         return _settingsCoordinator.Value.Appearance?.ShowBrowserTabCategoryRow ?? true;
     }
     private bool IsVerticalBrowserTabLayout() => _settingsCoordinator.Value.BrowserTabs?.LayoutMode == BrowserTabLayoutMode.Vertical;
-    private bool SetBrowserTabLayout(BrowserTabLayoutMode mode)
-    {
-        if (!_browserWorkspacePersistenceApplicationCoordinator.SetBrowserTabLayout(mode))
-        {
-            return false;
-        }
-        ApplyBrowserTabStripDisplaySettings();
-        RefreshBrowserTabHeaders();
-        return true;
-    }
     private void SetBrowserTabLayoutFromMenu(BrowserTabLayoutMode mode)
     {
-        SetBrowserTabLayout(mode);
-    }
-    private bool ToggleBrowserTabLayout()
-    {
-        BrowserTabLayoutMode current = _settingsCoordinator.Value.BrowserTabs?.LayoutMode ?? BrowserTabLayoutMode.Horizontal;
-        return SetBrowserTabLayout(current == BrowserTabLayoutMode.Horizontal
-            ? BrowserTabLayoutMode.Vertical
-            : BrowserTabLayoutMode.Horizontal);
+        _ = ExecuteCommandFromUi(CommandIds.BrowserTabLayoutSet, new CommandExecutionContext
+        {
+            Scope = CommandScope.Browser,
+            Source = "Menu.TabLayout.Set",
+            BrowserTabLayout = mode
+        });
     }
     private int GetBrowserTabNavigationWidth() => Math.Clamp(_settingsCoordinator.Value.BrowserTabs?.NavigationWidth ?? BrowserTabSettings.DefaultNavigationWidth, 120, 600);
     private float GetBrowserTabFontSize()
@@ -225,8 +213,7 @@ private void InitializeBrowserTabControl()
     }
     private bool SwitchBrowserTabCategory(
         string categoryId,
-        int? requestedTabIndex = null,
-        BrowserCategorySwitchWorkflowResult? prepared = null)
+        int? requestedTabIndex = null)
     {
         if (!string.Equals(_browserApplicationCoordinator.Workspace.ActiveCategoryId, categoryId, StringComparison.OrdinalIgnoreCase))
             ClearNameSearchInspectionReturnContext();
@@ -236,81 +223,41 @@ private void InitializeBrowserTabControl()
             DeactivateUnifiedSearchSurface();
         }
         int previousActiveTabIndex = _browserApplicationCoordinator.Workspace.ActiveTabIndex;
-        BrowserCategorySwitchWorkflowResult completion = prepared ?? _browserCategoryWorkflowApplicationCoordinator.ExecuteSwitch(
-            categoryId,
-            requestedTabIndex,
-            _browserApplicationCoordinator.CurrentPath,
-            BuildBrowserTabStateFromCurrentUi(),
-            CreateDirectoryLoadOptions(),
-            _browserApplicationCoordinator.ColumnCount,
-            CaptureBrowserRefreshShellState(),
-            recordVisitHistory: prepared == null);
-        if (completion.Kind == BrowserCategorySwitchWorkflowResultKind.NotAvailable)
-        {
-            RestoreBrowserTabSelectionAfterFailedSwitch(previousActiveTabIndex);
-            return false;
-        }
-
-        string targetCategoryId = completion.TargetCategoryId;
-        LogService.Info(
-            $"[BrowserTabCategory] Switch Requested={categoryId} Resolved={targetCategoryId} ActiveBefore={_browserApplicationCoordinator.Workspace.ActiveCategoryId} " +
-            $"TabsBefore={_browserApplicationCoordinator.Workspace.TabCount} ActiveIndexBefore={_browserApplicationCoordinator.Workspace.ActiveTabIndex}");
-        if (completion.Kind == BrowserCategorySwitchWorkflowResultKind.NoOp)
-        {
-            ClearBrowserTabCategoryContextState();
-            RefreshBrowserTabHeaders();
-            UpdateMenuStripState();
-            _browserTabStrip?.Invalidate();
-            _browserTabHostPanel?.Invalidate();
-            FocusBrowserFileList();
-            LogService.Info($"[BrowserTabCategory] Switch skipped because target category was already active: {targetCategoryId}");
-            return true;
-        }
-        int targetIndex = completion.TargetTabIndex;
-        BrowserDirectoryLoadApplicationResult? directoryLoad = completion.DirectoryLoad;
-        if (directoryLoad is not { Succeeded: true, Result: not null })
-        {
-            if (directoryLoad?.Error != null)
+        string source = requestedTabIndex.HasValue
+            ? "BrowserTab.CategorySwitch.TabTarget"
+            : "BrowserTab.CategorySwitch";
+        bool switched = requestedTabIndex is { } tabIndex
+            ? ExecuteBrowserTabActivation(categoryId, tabIndex, source)
+            : ExecuteCommandFromUi(CommandIds.BrowserTabCategoryActivate, new CommandExecutionContext
             {
-                NotifyDirectoryLoadFailure(directoryLoad.Value.Error);
-            }
+                Scope = CommandScope.Browser,
+                Source = source,
+                CategoryId = categoryId
+            });
+        if (!switched)
+        {
             RestoreBrowserTabSelectionAfterFailedSwitch(previousActiveTabIndex);
+            RefreshBrowserTabHeaders();
+        }
+        return switched;
+    }
+
+    private bool ExecuteBrowserTabActivation(string categoryId, int tabIndex, string source)
+    {
+        IReadOnlyList<BrowserTabState> targetTabs = GetBrowserTabContextStates(categoryId);
+        if (tabIndex < 0 || tabIndex >= targetTabs.Count)
+        {
             return false;
         }
 
-        LogService.Info($"[BrowserTabCategory] Switch loaded Category={targetCategoryId} TargetIndex={targetIndex}");
-        if (!completion.Committed)
+        return ExecuteCommandFromUi(CommandIds.BrowserTabActivate, new CommandExecutionContext
         {
-            RestoreBrowserTabSelectionAfterFailedSwitch(previousActiveTabIndex);
-            return false;
-        }
-
-        ClearBrowserNamePrefixJump();
-        ApplyCompletedBrowserTabMarkState(completion.State!, completion.SkippedMarkCount);
-        ClearBrowserTabContextState();
-        ClearBrowserTabCategoryContextState();
-        _isSwitchingBrowserTab = true;
-        try
-        {
-            ApplyPreparedBrowserTabSwitchDirectoryLoad(
-                directoryLoad.Value,
-                () =>
-                {
-                    ApplyBrowserTabCategoryPresentation(targetIndex);
-                    FocusBrowserFileList();
-                });
-        }
-        finally
-        {
-            _isSwitchingBrowserTab = false;
-        }
-        ApplyDirectoryPostLoadEffects(completion.PostLoadEffects);
-        UpdateMenuStripState();
-        LogService.Info(
-            $"[BrowserTabCategory] Switch applied ActiveAfter={_browserApplicationCoordinator.Workspace.ActiveCategoryId} TabsAfter={_browserApplicationCoordinator.Workspace.TabCount} " +
-            $"ActiveIndexAfter={_browserApplicationCoordinator.Workspace.ActiveTabIndex}");
-            ShowStatusMessage($"カテゴリを切り替えました: {_browserApplicationCoordinator.Workspace.CategoryStates[_browserApplicationCoordinator.Workspace.GetActiveCategoryIndex()].DisplayName}");
-        return true;
+            Scope = CommandScope.Browser,
+            Source = source,
+            CategoryId = categoryId,
+            ContextTabIndex = tabIndex,
+            ContextBrowserTabId = targetTabs[tabIndex].Id
+        });
     }
 
     private void ApplyBrowserTabCategoryPresentation(int targetIndex)
@@ -352,7 +299,7 @@ private void InitializeBrowserTabControl()
             ShouldShowBrowserTabCategoryRow(),
             BuildBrowserTabPresentation,
             CreateUnifiedSearchNavigationChildItem(),
-            _searchDerivedBrowserTabLineages,
+            _commandApplicationCoordinator.GetUnifiedSearchDerivedTabs(),
             _browserTabGroupRuntimeState.Groups);
         return projected;
     }
@@ -372,23 +319,10 @@ private void InitializeBrowserTabControl()
         {
             return;
         }
-        BrowserCategorySwitchWorkflowResult completion = _browserCategoryWorkflowApplicationCoordinator.ExecuteAdjacentSwitch(
-            delta,
-            _browserApplicationCoordinator.CurrentPath,
-            BuildBrowserTabStateFromCurrentUi(),
-            CreateDirectoryLoadOptions(),
-            _browserApplicationCoordinator.ColumnCount,
-            CaptureBrowserRefreshShellState(),
-            recordVisitHistory: true);
-        if (completion.Kind == BrowserCategorySwitchWorkflowResultKind.NotAvailable)
-        {
-            return;
-        }
-        string nextCategoryId = completion.TargetCategoryId;
-        LogService.Info(
-            $"[BrowserTabCategory] SelectAdjacent Delta={delta} CurrentIndex={_browserApplicationCoordinator.Workspace.GetActiveCategoryIndex()} NextCategory={nextCategoryId} " +
-            $"CategoryCount={_browserApplicationCoordinator.Workspace.CategoryCount} ActiveCategory={_browserApplicationCoordinator.Workspace.ActiveCategoryId}");
-        SwitchBrowserTabCategory(nextCategoryId, prepared: completion);
+        _ = ExecuteCommandFromUi(
+            delta < 0 ? CommandIds.BrowserTabCategoryPrevious : CommandIds.BrowserTabCategoryNext,
+            CommandScope.Browser,
+            delta < 0 ? "BrowserTab.CategoryPrevious" : "BrowserTab.CategoryNext");
     }
     private void BrowserTabStrip_SelectedIndexChanged(object? sender, EventArgs e)
     {
@@ -423,6 +357,8 @@ private void InitializeBrowserTabControl()
         Guid? tabId = selectedItem?.BrowserTabId;
         if (tabId is { } browserTabId)
         {
+            HideBrowserFileNameToolTip();
+            int previousActiveTabIndex = _browserApplicationCoordinator.Workspace.ActiveTabIndex;
             if (sender is BrowserTabNavigation tabNavigation)
             {
                 string categoryId = tabNavigation.SelectedCategoryIndex >= 0
@@ -435,7 +371,18 @@ private void InitializeBrowserTabControl()
                     && !string.Equals(categoryId, _browserApplicationCoordinator.Workspace.ActiveCategoryId, StringComparison.OrdinalIgnoreCase))
                 {
                     ClearNameSearchInspectionReturnContext();
-                    SwitchBrowserTabCategory(categoryId, categoryTabIndex);
+                    bool activated = ExecuteCommandFromUi(CommandIds.BrowserTabActivate, new CommandExecutionContext
+                    {
+                        Scope = CommandScope.Browser,
+                        Source = "BrowserTab.SelectedIndexChanged.CategoryTab",
+                        CategoryId = categoryId,
+                        ContextTabIndex = categoryTabIndex,
+                        ContextBrowserTabId = browserTabId
+                    });
+                    if (!activated)
+                    {
+                        RestoreBrowserTabSelectionAfterFailedSwitch(previousActiveTabIndex);
+                    }
                     return;
                 }
             }
@@ -443,7 +390,18 @@ private void InitializeBrowserTabControl()
             if (activeTabIndex >= 0)
             {
                 ClearNameSearchInspectionReturnContextUnlessSource(browserTabId, _browserApplicationCoordinator.Workspace.ActiveCategoryId);
-                SwitchBrowserTab(activeTabIndex);
+                bool activated = ExecuteCommandFromUi(CommandIds.BrowserTabActivate, new CommandExecutionContext
+                {
+                    Scope = CommandScope.Browser,
+                    Source = "BrowserTab.SelectedIndexChanged",
+                    ContextTabIndex = activeTabIndex,
+                    ContextBrowserTabId = browserTabId,
+                    CategoryId = _browserApplicationCoordinator.Workspace.ActiveCategoryId
+                });
+                if (!activated)
+                {
+                    RestoreBrowserTabSelectionAfterFailedSwitch(previousActiveTabIndex);
+                }
             }
         }
     }
@@ -475,7 +433,25 @@ private void InitializeBrowserTabControl()
             if (targetIndex >= 0)
             {
                 ClearNameSearchInspectionReturnContext();
-                SwitchBrowserTabCategory(e.CategoryId, targetIndex);
+                if (_unifiedSearchSession is { IsActive: true } activeSearch &&
+                    !string.Equals(activeSearch.SourceCategoryId, e.CategoryId, StringComparison.OrdinalIgnoreCase))
+                {
+                    DeactivateUnifiedSearchSurface();
+                }
+                int previousActiveTabIndex = _browserApplicationCoordinator.Workspace.ActiveTabIndex;
+                bool activated = ExecuteCommandFromUi(CommandIds.BrowserTabActivate, new CommandExecutionContext
+                {
+                    Scope = CommandScope.Browser,
+                    Source = "BrowserTab.CategoryClicked.Tab",
+                    CategoryId = e.CategoryId,
+                    ContextTabIndex = targetIndex,
+                    ContextBrowserTabId = clickedItem?.BrowserTabId
+                });
+                if (!activated)
+                {
+                    RestoreBrowserTabSelectionAfterFailedSwitch(previousActiveTabIndex);
+                    RefreshBrowserTabHeaders();
+                }
             }
             return;
         }
@@ -493,7 +469,17 @@ private void InitializeBrowserTabControl()
             _ = ExecuteCommandFromUi(CommandIds.BrowserTabCategoryAdd, CommandScope.Browser, "BrowserTab.CategoryManageEntry");
             return;
         }
-        SwitchBrowserTabCategory(e.CategoryId);
+        bool categoryActivated = ExecuteCommandFromUi(CommandIds.BrowserTabCategoryActivate, new CommandExecutionContext
+        {
+            Scope = CommandScope.Browser,
+            Source = "BrowserTab.CategoryClicked",
+            CategoryId = e.CategoryId
+        });
+        if (!categoryActivated)
+        {
+            RefreshBrowserTabHeaders();
+            UpdateMenuStripState();
+        }
     }
     private void BrowserTabStrip_AddTabClicked(object? sender, EventArgs e)
     {
@@ -502,7 +488,12 @@ private void InitializeBrowserTabControl()
     private void BrowserTabNavigation_AddTabForCategoryClicked(object? sender, BrowserTabStripCategoryEventArgs e)
     {
         TryRunAfterSuccessfulBrowserTabCategorySwitch(
-            () => SwitchBrowserTabCategory(e.CategoryId),
+            () => ExecuteCommandFromUi(CommandIds.BrowserTabCategoryActivate, new CommandExecutionContext
+            {
+                Scope = CommandScope.Browser,
+                Source = "BrowserTab.CategoryPlus.Activate",
+                CategoryId = e.CategoryId
+            }),
             () => _ = ExecuteCommandFromUi(CommandIds.BrowserTabNew, CommandScope.Browser, "BrowserTab.CategoryPlus"));
     }
 
@@ -517,7 +508,12 @@ private void InitializeBrowserTabControl()
     private void BrowserTabNavigation_NavigationWidthChanged(object? sender, EventArgs e)
     {
         int actualWidth = sender is BrowserTabNavigation navigation ? navigation.Width : GetBrowserTabNavigationWidth();
-        _browserWorkspacePersistenceApplicationCoordinator.SetBrowserTabNavigationWidth(actualWidth);
+        _ = ExecuteCommandFromUi(CommandIds.BrowserTabNavigationWidthSet, new CommandExecutionContext
+        {
+            Scope = CommandScope.Browser,
+            Source = "BrowserTab.NavigationWidthChanged",
+            BrowserTabNavigationWidth = new BrowserTabNavigationWidthCommandContext(actualWidth)
+        });
     }
     private IReadOnlyList<BrowserTabCategoryDefinition> GetBrowserTabCategoryDefinitionsForDialog()
     {
@@ -554,21 +550,13 @@ private void InitializeBrowserTabControl()
     private string? AddBrowserTabCategoryCore(string displayName)
     {
         string trimmedName = displayName.Trim();
-        BrowserCategoryAddSwitchExecution execution = _browserCategoryWorkflowApplicationCoordinator.ExecuteAddAndSwitch(
-            trimmedName,
-            _browserApplicationCoordinator.CurrentPath,
-            BuildBrowserTabStateFromCurrentUi(),
-            CreateDirectoryLoadOptions(),
-            _browserApplicationCoordinator.ColumnCount,
-            CaptureBrowserRefreshShellState());
-        if (!execution.Added)
+        bool added = ExecuteCommandFromUi(CommandIds.BrowserTabCategoryAdd, new CommandExecutionContext
         {
-            MessageBox.Show("同じ表示名のカテゴリがすでにあります。", "カテゴリ追加", MessageBoxButtons.OK, MessageBoxIcon.Information);
-            return null;
-        }
-        SwitchBrowserTabCategory(execution.CategoryId!, prepared: execution.Switch);
-        ShowStatusMessage($"カテゴリを追加しました: {trimmedName}");
-        return trimmedName;
+            Scope = CommandScope.Browser,
+            Source = "BrowserTab.CategoryAdd",
+            CategoryDisplayName = trimmedName
+        });
+        return added ? trimmedName : null;
     }
     private BrowserTabCategoryDefinition? FindBrowserTabCategoryDefinition(string? categoryId)
         => string.IsNullOrWhiteSpace(categoryId)
@@ -576,19 +564,19 @@ private void InitializeBrowserTabControl()
             : _browserApplicationCoordinator.Workspace.FindCategorySnapshot(categoryId);
     private string? MoveBrowserTabCategory(string categoryId, int delta)
     {
-        BrowserCategoryReorderTransition reorder = _browserCategoryWorkflowApplicationCoordinator.Reorder(
-            categoryId,
-            delta,
-            BuildBrowserTabStateFromCurrentUi());
-        if (!reorder.Applied)
+        bool moved = ExecuteCommandFromUi(
+            delta < 0 ? CommandIds.BrowserTabCategoryMoveLeft : CommandIds.BrowserTabCategoryMoveRight,
+            new CommandExecutionContext
+            {
+                Scope = CommandScope.Browser,
+                Source = "BrowserTab.CategoryReorder",
+                CategoryId = categoryId
+            });
+        if (!moved)
         {
             return null;
         }
-        RefreshBrowserTabHeaders();
-        string direction = delta < 0 ? "左" : "右";
-        ShowStatusMessage($"カテゴリを{direction}へ移動しました: {reorder.DisplayName}");
-        FocusBrowserFileList();
-        return reorder.DisplayName;
+        return FindBrowserTabCategoryDefinition(categoryId)?.DisplayName;
     }
     private bool MoveActiveBrowserTabCategory(int delta)
     {
@@ -608,26 +596,13 @@ private void InitializeBrowserTabControl()
         {
             return null;
         }
-        string? renamed = SimpleInputDialog.ShowNullable("カテゴリ名を入力してください。", "カテゴリ名変更", target.DisplayName);
-        if (string.IsNullOrWhiteSpace(renamed))
+        bool renamed = ExecuteCommandFromUi(CommandIds.BrowserTabCategoryRename, new CommandExecutionContext
         {
-            return null;
-        }
-        string trimmedName = renamed.Trim();
-        if (!_browserCategoryWorkflowApplicationCoordinator.Rename(
-            target.Id,
-            trimmedName,
-            out bool duplicateName))
-        {
-            if (duplicateName)
-            {
-                MessageBox.Show("同じ表示名のカテゴリがすでにあります。", "カテゴリ名変更", MessageBoxButtons.OK, MessageBoxIcon.Information);
-            }
-            return null;
-        }
-        RefreshBrowserTabHeaders();
-        ShowStatusMessage($"カテゴリ名を更新しました: {trimmedName}");
-        return trimmedName;
+            Scope = CommandScope.Browser,
+            Source = "BrowserTab.CategoryRename",
+            CategoryId = target.Id
+        });
+        return renamed ? FindBrowserTabCategoryDefinition(target.Id)?.DisplayName : null;
     }
     private bool RenameActiveBrowserTabCategory()
     {
@@ -643,22 +618,13 @@ private void InitializeBrowserTabControl()
         {
             return null;
         }
-        if (!_browserCategoryWorkflowApplicationCoordinator.CanRemove(target.Id))
+        bool deleted = ExecuteCommandFromUi(CommandIds.BrowserTabCategoryDelete, new CommandExecutionContext
         {
-            ShowStatusMessage("既定カテゴリは削除できません。");
-            return null;
-        }
-        DialogResult confirm = MessageBox.Show(
-            $"カテゴリ '{target.DisplayName}' を削除します。よろしいですか？",
-            "カテゴリ削除",
-            MessageBoxButtons.OKCancel,
-            MessageBoxIcon.Warning,
-            MessageBoxDefaultButton.Button2);
-        if (confirm != DialogResult.OK)
-        {
-            return null;
-        }
-        return DeleteBrowserTabCategoriesCore([target], $"カテゴリを削除しました: {target.DisplayName}");
+            Scope = CommandScope.Browser,
+            Source = "BrowserTab.CategoryDelete",
+            CategoryId = target.Id
+        });
+        return deleted ? target.DisplayName : null;
     }
     private bool DeleteActiveBrowserTabCategory()
     {
@@ -700,25 +666,15 @@ private void InitializeBrowserTabControl()
     }
     private string? DeleteBrowserTabCategoriesCore(IReadOnlyList<BrowserTabCategoryDefinition> targets, string successMessage)
     {
-        BrowserCategoryRemovalExecution execution = _browserCategoryWorkflowApplicationCoordinator.ExecuteRemoveAndSwitch(
-            targets.Select(static target => target.Id),
-            _browserApplicationCoordinator.CurrentPath,
-            BuildBrowserTabStateFromCurrentUi(),
-            CreateDirectoryLoadOptions(),
-            _browserApplicationCoordinator.ColumnCount,
-            CaptureBrowserRefreshShellState());
-        BrowserCategoryRemovalWorkflowResult workflow = execution.Removal;
-        if (execution.Switch is { } switchResult)
+        bool deleted = ExecuteCommandFromUi(CommandIds.BrowserTabCategoryDelete, new CommandExecutionContext
         {
-            RefreshBrowserTabHeaders();
-            ApplyBrowserTabSwitchResult(switchResult);
-        }
-        else
-        {
-            RefreshBrowserTabHeaders();
-        }
-        ShowStatusMessage(successMessage);
-        return successMessage;
+            Scope = CommandScope.Browser,
+            Source = "BrowserTab.CategoryDelete.Batch",
+            CategoryIds = targets.Select(static target => target.Id).ToArray(),
+            CategoryDeleteConfirmed = true,
+            CategoryResultMessage = successMessage
+        });
+        return deleted ? successMessage : null;
     }
     private void LayoutBrowserTabControlWithinHost()
     {
@@ -744,6 +700,7 @@ private void InitializeBrowserTabControl()
         bool isLocked = activeState?.IsLocked ?? false;
         return new BrowserTabState
         {
+            Id = activeState?.Id ?? Guid.NewGuid(),
             Title = GetBrowserTabTitle(currentPath),
             CurrentPath = currentPath,
             IsLocked = isLocked,
@@ -806,28 +763,6 @@ private void InitializeBrowserTabControl()
             ShowStatusMessage("検索元のBrowserタブが閉じられたため、検索結果を閉じました。");
             UpdateFunctionBar();
         }
-        if (_searchDerivedBrowserTabLineages.Count > 0)
-        {
-            HashSet<string> categoryIds = _browserApplicationCoordinator.Workspace.CategoryStates
-                .Select(item => item.Id)
-                .ToHashSet(StringComparer.OrdinalIgnoreCase);
-            for (int index = _searchDerivedBrowserTabLineages.Count - 1; index >= 0; index--)
-            {
-                BrowserTabNavigationSearchDerivedTab lineage = _searchDerivedBrowserTabLineages[index];
-                if (!categoryIds.Contains(lineage.SourceCategoryId))
-                {
-                    _searchDerivedBrowserTabLineages.RemoveAt(index);
-                    continue;
-                }
-                IReadOnlyList<BrowserTabState> tabs = GetBrowserTabContextStates(lineage.SourceCategoryId);
-                bool resultExists = tabs.Any(item => item.Id == lineage.ResultTabId);
-                if (!resultExists || !tabs.Any(item => item.Id == lineage.SourceTabId))
-                {
-                    // Drop metadata only; surviving result tabs keep their normal BrowserTab lifecycle.
-                    _searchDerivedBrowserTabLineages.RemoveAt(index);
-                }
-            }
-        }
         UpdateBrowserTabGroupsForLiveTabs();
         bool vertical = IsVerticalBrowserTabLayout();
         _suppressBrowserTabSelectionChanged = true;
@@ -858,7 +793,7 @@ private void InitializeBrowserTabControl()
                         items,
                         _browserApplicationCoordinator.Workspace.ActiveCategoryId,
                         CreateUnifiedSearchNavigationChildItem(),
-                        _searchDerivedBrowserTabLineages,
+                        _commandApplicationCoordinator.GetUnifiedSearchDerivedTabs(),
                         _browserTabGroupRuntimeState.Groups);
                     Guid? activeTabId = _browserApplicationCoordinator.Workspace.ActiveTabSnapshot?.Id;
                     int selectedIndex = _unifiedSearchSession is { IsActive: true } activeSearch
@@ -915,7 +850,7 @@ private void InitializeBrowserTabControl()
             activeCategoryId,
             _browserApplicationCoordinator.Workspace.TabStates,
             snapshot,
-            _searchDerivedBrowserTabLineages,
+            _commandApplicationCoordinator.GetUnifiedSearchDerivedTabs(),
             _browserTabGroupRuntimeState.Groups);
         if (_unifiedSearchSession is { } search)
         {
@@ -936,10 +871,7 @@ private void InitializeBrowserTabControl()
                 : BuildStoredBrowserTabPresentationStates(category.Id);
             foreach (BrowserTabState tab in tabs) liveTabCategories[tab.Id] = category.Id;
         }
-        if (_browserTabGroupRuntimeState.PruneToLiveTabs(liveTabCategories))
-        {
-            _browserWorkspacePersistenceApplicationCoordinator.CaptureBrowserTabGroupsToRestoreSnapshot();
-        }
+        _browserWorkspacePersistenceApplicationCoordinator.PruneBrowserTabGroupsToLiveTabs(liveTabCategories);
     }
 
     private string GetBrowserTabTitle(string? path)
@@ -1085,39 +1017,6 @@ private void InitializeBrowserTabControl()
             }
         }));
     }
-    private bool CreateNewBrowserTab(string? initialPath = null, bool showStatusMessage = true, bool useConfiguredInsertion = false)
-    {
-        if (GuardClipboardBusy())
-        {
-            return false;
-        }
-        BrowserTabCreationExecution execution = _browserTabWorkflowApplicationCoordinator.ExecuteCreateTab(
-            BuildBrowserTabStateFromCurrentUi(),
-            _browserApplicationCoordinator.CurrentPath,
-            initialPath,
-            useConfiguredInsertion,
-            CreateDirectoryLoadOptions(),
-            _browserApplicationCoordinator.ColumnCount,
-            CaptureBrowserRefreshShellState());
-        if (!execution.Created)
-        {
-            ShowStatusMessage($"タブは最大{_browserTabWorkflowApplicationCoordinator.MaxTabCount}個までです。");
-            _browserTabStrip?.FlashLimitReached();
-            TryPlayBrowserTabLimitBeep();
-            return false;
-        }
-        if (!execution.Activated || execution.Activation is not { } activation)
-        {
-            return false;
-        }
-        RefreshBrowserTabHeaders();
-        ApplyBrowserTabSwitchResult(activation);
-        if (showStatusMessage)
-        {
-            ShowStatusMessage("新しいタブを作成しました。");
-        }
-        return true;
-    }
     private void RefreshAllBrowserTabTitles()
     {
         IReadOnlyList<BrowserTabState> states = _browserApplicationCoordinator.Workspace.TabStates;
@@ -1151,14 +1050,6 @@ private void InitializeBrowserTabControl()
         ShowStatusMessage(message, 2000);
         return true;
     }
-    private void ToggleActiveBrowserTabLock()
-    {
-        ToggleBrowserTabLock(_browserApplicationCoordinator.Workspace.ActiveTabIndex);
-    }
-    private void ToggleActiveBrowserTabReadOnly()
-    {
-        ToggleBrowserTabReadOnly(_browserApplicationCoordinator.Workspace.ActiveTabIndex);
-    }
     private TabFilterLockState GetActiveTabFilterLock()
     {
         if (_browserApplicationCoordinator.Workspace.ActiveTabIndex < 0 || _browserApplicationCoordinator.Workspace.ActiveTabIndex >= _browserApplicationCoordinator.Workspace.TabCount)
@@ -1166,64 +1057,6 @@ private void InitializeBrowserTabControl()
             return TabFilterLockState.Disabled();
         }
         return _browserApplicationCoordinator.Workspace.TabStates[_browserApplicationCoordinator.Workspace.ActiveTabIndex].FilterLock;
-    }
-    private void ToggleBrowserTabLock(int tabIndex, bool showStatusMessage = true)
-    {
-        if (tabIndex < 0 || tabIndex >= _browserApplicationCoordinator.Workspace.TabCount)
-        {
-            return;
-        }
-        BrowserTabToggleLockExecution execution = _browserTabWorkflowApplicationCoordinator.ExecuteToggleLock(
-            tabIndex,
-            _browserApplicationCoordinator.CurrentPath,
-            BuildBrowserTabStateFromCurrentUi(validateMarks: true),
-            CreateDirectoryLoadOptions(),
-            _browserApplicationCoordinator.ColumnCount,
-            CaptureBrowserRefreshShellState());
-        if (execution.Switch is { } switchResult && !ApplyBrowserTabSwitchResult(switchResult))
-        {
-            return;
-        }
-        if (!execution.Applied)
-        {
-            return;
-        }
-        RefreshBrowserTabHeaders();
-        if (showStatusMessage)
-        {
-            ShowStatusMessage(execution.Transition.IsLocked
-                ? "現在のタブを固定しました。"
-                : "現在のタブ固定を解除しました。");
-        }
-    }
-    private void ToggleBrowserTabReadOnly(int tabIndex, bool showStatusMessage = true)
-    {
-        if (tabIndex < 0 || tabIndex >= _browserApplicationCoordinator.Workspace.TabCount)
-        {
-            return;
-        }
-        BrowserTabToggleReadOnlyExecution execution = _browserTabWorkflowApplicationCoordinator.ExecuteToggleReadOnly(
-            tabIndex,
-            _browserApplicationCoordinator.CurrentPath,
-            BuildBrowserTabStateFromCurrentUi(validateMarks: true),
-            CreateDirectoryLoadOptions(),
-            _browserApplicationCoordinator.ColumnCount,
-            CaptureBrowserRefreshShellState());
-        if (execution.Switch is { } switchResult && !ApplyBrowserTabSwitchResult(switchResult))
-        {
-            return;
-        }
-        if (!execution.Applied)
-        {
-            return;
-        }
-        RefreshBrowserTabHeaders();
-        if (showStatusMessage)
-        {
-            ShowStatusMessage(execution.Transition.IsReadOnly
-                ? "現在のタブを ReadOnly にしました。"
-                : "現在のタブの ReadOnly を解除しました。");
-        }
     }
     private void TryPlayBrowserTabLimitBeep()
     {
@@ -1242,7 +1075,7 @@ private void InitializeBrowserTabControl()
             // 既定音が使えない環境では無音で続行する
         }
     }
-    private bool TryCloseBrowserTab(int tabIndex, bool showStatusMessage = true)
+    private bool TryCloseBrowserTab(int tabIndex)
     {
         if (GuardClipboardBusy())
         {
@@ -1252,89 +1085,21 @@ private void InitializeBrowserTabControl()
         {
             return false;
         }
-        BrowserTabCloseExecution execution = _browserCategoryWorkflowApplicationCoordinator.ExecuteTabClose(
-            tabIndex,
-            _browserApplicationCoordinator.CurrentPath,
-            BuildBrowserTabStateFromCurrentUi(validateMarks: true),
-            CreateDirectoryLoadOptions(),
-            _browserApplicationCoordinator.ColumnCount,
-            CaptureBrowserRefreshShellState());
-        BrowserTabCloseDecision closeDecision = execution.Decision;
-        if (closeDecision.Kind == BrowserTabCloseDecisionKind.Locked)
+        BrowserTabState target = _browserApplicationCoordinator.Workspace.TabStates[tabIndex];
+        bool closed = ExecuteCommandFromUi(CommandIds.BrowserTabClose, new CommandExecutionContext
         {
-            if (showStatusMessage)
-            {
-                ShowStatusMessage("固定タブは閉じられません。先に固定を解除してください。");
-            }
-            return false;
-        }
-        if (closeDecision.Kind == BrowserTabCloseDecisionKind.RequiresCategoryRemoval && closeDecision.CategoryId != null)
-        {
-            BrowserTabCategoryDefinition? activeCategory = FindBrowserTabCategoryDefinition(closeDecision.CategoryId);
-            if (activeCategory != null)
-            {
-                DialogResult confirm = MessageBox.Show(
-                    $"このタブを閉じると、カテゴリ「{activeCategory.DisplayName}」も削除されます。\nカテゴリごと削除しますか？",
-                    "タブを閉じる",
-                    MessageBoxButtons.OKCancel,
-                    MessageBoxIcon.Warning,
-                    MessageBoxDefaultButton.Button2);
-                if (confirm != DialogResult.OK)
-                {
-                    return false;
-                }
-                BrowserTabCloseConfirmationExecution continuation =
-                    _browserCategoryWorkflowApplicationCoordinator.ContinueTabCloseAfterCategoryConfirmation(
-                        tabIndex,
-                        removeCategory: true,
-                        currentPath: _browserApplicationCoordinator.CurrentPath,
-                        currentState: BuildBrowserTabStateFromCurrentUi(validateMarks: true),
-                        options: CreateDirectoryLoadOptions(),
-                        columnCount: _browserApplicationCoordinator.ColumnCount,
-                        shellState: CaptureBrowserRefreshShellState());
-                if (!continuation.Applied)
-                {
-                    return false;
-                }
-
-                RefreshBrowserTabHeaders();
-                if (continuation.Switch is { } switchResult)
-                {
-                    ApplyBrowserTabSwitchResult(switchResult);
-                }
-                if (showStatusMessage)
-                {
-                    ShowStatusMessage($"カテゴリを削除しました: {activeCategory.DisplayName}");
-                }
-                return true;
-            }
-        }
-        if (closeDecision.Kind == BrowserTabCloseDecisionKind.LastTab ||
-            closeDecision.Kind == BrowserTabCloseDecisionKind.RequiresCategoryRemoval)
-        {
-            if (showStatusMessage)
-            {
-                ShowStatusMessage("最後のタブは閉じられません。");
-            }
-            return false;
-        }
-        if (!execution.Closed || execution.Completion is not { } completion)
-        {
-            return false;
-        }
-        RefreshBrowserTabHeaders();
-        ApplyBrowserTabSwitchResult(completion.Switch);
-        if (showStatusMessage)
-        {
-            ShowStatusMessage("タブを閉じました。");
-        }
-        return true;
+            Scope = CommandScope.Browser,
+            Source = "BrowserTab.Close",
+            ContextTabIndex = tabIndex,
+            ContextBrowserTabId = target.Id
+        });
+        return closed;
     }
     private void CloseCurrentBrowserTab()
     {
         TryCloseBrowserTab(_browserApplicationCoordinator.Workspace.ActiveTabIndex);
     }
-    private bool CloseBrowserTabRange(IReadOnlyList<int> tabIndices, int preferredTabIndex, string successMessage, string nothingToCloseMessage)
+    private bool CloseBrowserTabRange(string commandId, int preferredTabIndex, string nothingToCloseMessage)
     {
         if (GuardClipboardBusy())
         {
@@ -1344,45 +1109,31 @@ private void InitializeBrowserTabControl()
         {
             return false;
         }
-        BrowserTabRangeCloseExecution execution = _browserTabWorkflowApplicationCoordinator.ExecuteCloseTabs(
-            tabIndices,
-            preferredTabIndex,
-            _browserApplicationCoordinator.CurrentPath,
-            BuildBrowserTabStateFromCurrentUi(validateMarks: true),
-            CreateDirectoryLoadOptions(),
-            _browserApplicationCoordinator.ColumnCount,
-            CaptureBrowserRefreshShellState());
-        if (execution.ClosableIndices.Count == 0)
+        BrowserTabState target = _browserApplicationCoordinator.Workspace.TabStates[preferredTabIndex];
+        bool closed = ExecuteCommandFromUi(commandId, new CommandExecutionContext
+        {
+            Scope = CommandScope.Browser,
+            Source = "BrowserTab.CloseRange",
+            ContextTabIndex = preferredTabIndex,
+            ContextBrowserTabId = target.Id
+        });
+        if (!closed)
         {
             ShowStatusMessage(nothingToCloseMessage);
-            return false;
         }
-        if (!execution.Closed || execution.Completion is not { } completion)
-        {
-            ShowStatusMessage(nothingToCloseMessage);
-            return false;
-        }
-        RefreshBrowserTabHeaders();
-        ApplyBrowserTabSwitchResult(completion.Switch);
-        ShowStatusMessage(successMessage);
-        return true;
+        return closed;
     }
     private void CloseBrowserTabsToRight(int tabIndex)
     {
-        var tabIndices = Enumerable.Range(tabIndex + 1, Math.Max(0, _browserApplicationCoordinator.Workspace.TabCount - tabIndex - 1)).ToList();
-        CloseBrowserTabRange(tabIndices, tabIndex, "右側のタブを閉じました。", "閉じられる右側タブはありません。");
+        CloseBrowserTabRange(CommandIds.BrowserTabCloseRight, tabIndex, "閉じられる右側タブはありません。");
     }
     private void CloseBrowserTabsToLeft(int tabIndex)
     {
-        var tabIndices = Enumerable.Range(0, Math.Max(0, tabIndex)).ToList();
-        CloseBrowserTabRange(tabIndices, tabIndex, "左側のタブを閉じました。", "閉じられる左側タブはありません。");
+        CloseBrowserTabRange(CommandIds.BrowserTabCloseLeft, tabIndex, "閉じられる左側タブはありません。");
     }
     private void CloseOtherBrowserTabs(int tabIndex)
     {
-        var tabIndices = Enumerable.Range(0, _browserApplicationCoordinator.Workspace.TabCount)
-            .Where(index => index != tabIndex)
-            .ToList();
-        CloseBrowserTabRange(tabIndices, tabIndex, "このタブ以外を閉じました。", "閉じられる他タブはありません。");
+        CloseBrowserTabRange(CommandIds.BrowserTabCloseOther, tabIndex, "閉じられる他のタブはありません。");
     }
     private int CountClosableBrowserTabs(BrowserTabCloseScope scope)
     {
@@ -1461,22 +1212,15 @@ private void InitializeBrowserTabControl()
             return true;
         }
         int previousActiveTabIndex = _browserApplicationCoordinator.Workspace.ActiveTabIndex;
-        Stopwatch captureStopwatch = Stopwatch.StartNew();
-        BrowserTabState currentState = BuildBrowserTabStateFromCurrentUi(validateMarks: true);
-        captureStopwatch.Stop();
-        LogService.Info(
-            $"[BrowserTabSwitchPerf] captureCurrentStateMs={captureStopwatch.ElapsedMilliseconds} " +
-            "validateMarks=requested " +
-            $"markCount={currentState.MarkedPaths.Count}");
-        BrowserTabSwitchWorkflowResult completion = _browserTabWorkflowApplicationCoordinator.ExecuteTabSwitch(
+        bool switched = ExecuteBrowserTabActivation(
+            _browserApplicationCoordinator.Workspace.ActiveCategoryId,
             newIndex,
-            _browserApplicationCoordinator.CurrentPath,
-            currentState,
-            CreateDirectoryLoadOptions(),
-            _browserApplicationCoordinator.ColumnCount,
-            CaptureBrowserRefreshShellState(),
-            recordVisitHistory: true);
-        return ApplyBrowserTabSwitchResult(completion, previousActiveTabIndex, newIndex);
+            "BrowserTab.Switch");
+        if (!switched)
+        {
+            RestoreBrowserTabSelectionAfterFailedSwitch(previousActiveTabIndex);
+        }
+        return switched;
     }
 
     private bool ApplyBrowserTabSwitchResult(
@@ -1596,25 +1340,5 @@ private void InitializeBrowserTabControl()
         {
             _suppressBrowserTabSelectionChanged = false;
         }
-    }
-    private void SelectAdjacentBrowserTab(int delta, bool wrap = true)
-    {
-        if (GuardClipboardBusy())
-        {
-            return;
-        }
-        BrowserTabSwitchWorkflowResult completion = _browserTabWorkflowApplicationCoordinator.ExecuteAdjacentSwitch(
-            delta,
-            wrap,
-            _browserApplicationCoordinator.CurrentPath,
-            BuildBrowserTabStateFromCurrentUi(validateMarks: true),
-            CreateDirectoryLoadOptions(),
-            _browserApplicationCoordinator.ColumnCount,
-            CaptureBrowserRefreshShellState());
-        if (completion.Kind == BrowserTabSwitchWorkflowResultKind.NotAvailable)
-        {
-            return;
-        }
-        ApplyBrowserTabSwitchResult(completion);
     }
 }
